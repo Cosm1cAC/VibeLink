@@ -1,0 +1,7 @@
+.agent-mobile-terminal/
+node_modules/
+npm-debug.log*
+*.log
+Thumbs.db
+.DS_Store
+dist/

@@ -1,0 +1,24 @@
+{
+  "name": "vibelink",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first bridge for continuing Codex and Claude Code agent work from web and mobile clients.",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "web": "vite --host 0.0.0.0",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7",
+    "typescript": "^5.7.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "lucide-react": "^0.468.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

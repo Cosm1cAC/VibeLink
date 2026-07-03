@@ -1,0 +1,9 @@
+{
+  "name": "VibeLink",
+  "short_name": "VibeLink",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f4ef",
+  "theme_color": "#102826",
+  "icons": []
+}

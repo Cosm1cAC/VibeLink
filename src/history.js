@@ -281,6 +281,9 @@ function appendTurnPart(block, part) {
   const text = String(part.text || "").trim();
   if (!text || isNoiseText(text)) return;
 
+  const partId = part.id || part.blockId || "";
+  if (partId && block.parts.some((existing) => existing.id === partId)) return;
+
   const normalized = normalizeComparableText(text);
   const duplicated = block.parts.some((existing) => {
     const current = normalizeComparableText(existing.text);
@@ -291,6 +294,7 @@ function appendTurnPart(block, part) {
   if (duplicated) return;
 
   block.parts.push({
+    id: partId,
     kind: part.kind || "message",
     timestamp: part.timestamp || "",
     text
@@ -333,6 +337,8 @@ function commandFromCall(payload, timestamp) {
     (Object.keys(args).length ? JSON.stringify(args) : name);
   return {
     id: payload.call_id || payload.id || `${name}:${timestamp}`,
+    callId: payload.call_id || "",
+    toolCallId: payload.id || "",
     name,
     namespace: payload.namespace || "",
     command: String(command || name),
@@ -340,16 +346,25 @@ function commandFromCall(payload, timestamp) {
     timeoutMs: args.timeout_ms || args.timeoutMs || null,
     status: "running",
     timestamp,
+    exitCode: null,
     output: ""
   };
+}
+
+function payloadExitCode(payload, output) {
+  const explicit = payload.exit_code ?? payload.exitCode ?? payload.code;
+  if (Number.isFinite(Number(explicit))) return Number(explicit);
+  const match = String(output || "").match(/Exit code:\s*(-?\d+)\b/i);
+  return match ? Number(match[1]) : null;
 }
 
 function updateCommandOutput(command, payload, timestamp) {
   const output = compactToolOutput(payload.output || payload.stdout || payload.stderr || payload.error || "");
   command.output = output;
   command.completedAt = timestamp;
-  if (/Exit code:\s*0\b/i.test(output)) command.status = "done";
-  else if (/Exit code:\s*[1-9]\d*\b/i.test(output) || payload.error) command.status = "failed";
+  command.exitCode = payloadExitCode(payload, output);
+  if (command.exitCode === 0) command.status = "done";
+  else if (Number.isFinite(command.exitCode) || payload.error || payload.success === false || payload.status === "failed") command.status = "failed";
   else command.status = "done";
 }
 
@@ -398,9 +413,15 @@ function transcriptFromTurnBlocks(entries, provider) {
       continue;
     }
 
+    if (item.type === "event_msg" && /patch_apply_end|mcp_tool_call_end/i.test(payloadType)) {
+      const command = commandsByCallId.get(payload.call_id || payload.id || "");
+      if (command) updateCommandOutput(command, payload, timestamp);
+      continue;
+    }
+
     if (item.type !== "response_item") continue;
 
-    if (/function_call$/i.test(payloadType)) {
+    if (/(?:function_call|custom_tool_call)$/i.test(payloadType)) {
       const command = commandFromCall(payload, timestamp);
       if (!command) continue;
       turn.assistant.commands.push(command);
@@ -408,7 +429,7 @@ function transcriptFromTurnBlocks(entries, provider) {
       continue;
     }
 
-    if (/function_call_output$/i.test(payloadType)) {
+    if (/(?:function_call_output|custom_tool_call_output)$/i.test(payloadType)) {
       const command = commandsByCallId.get(payload.call_id || payload.id || "");
       if (command) updateCommandOutput(command, payload, timestamp);
       continue;
@@ -418,6 +439,7 @@ function transcriptFromTurnBlocks(entries, provider) {
       const role = payload.role === "user" ? "user" : payload.role === "assistant" ? "assistant" : "";
       if (!role) continue;
       appendTurnPart(turn[role], {
+        id: payload.id || item.id || "",
         kind: payloadType,
         timestamp,
         text: turnBlockText(payload, item)
@@ -748,9 +770,9 @@ function claudeSessions(home) {
     .slice(0, 300);
 }
 
-export function listHistories() {
+export function listHistories({ fresh = false } = {}) {
   const current = Date.now();
-  if (historyListCache.items && historyListCache.expiresAt > current) {
+  if (!fresh && historyListCache.items && historyListCache.expiresAt > current) {
     return historyListCache.items;
   }
 
@@ -794,8 +816,8 @@ export function listHistories() {
   return items;
 }
 
-export function getHistory(provider, id) {
-  const found = listHistories().find((item) => item.provider === provider && item.id === id);
+export function getHistory(provider, id, { fresh = false } = {}) {
+  const found = listHistories({ fresh }).find((item) => item.provider === provider && item.id === id);
   if (!found) return null;
 
   if (found.filePath && fs.existsSync(found.filePath)) {

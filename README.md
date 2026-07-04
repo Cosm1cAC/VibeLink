@@ -59,3 +59,5 @@ Codex Desktop 本身目前无法被第三方网页端强制回显完整消息状
 - `.agent-mobile-terminal/`：本机运行时数据目录，不提交到 Git。
 
 后续 Android / iOS 建议走 Expo React Native，并复用 Web 端已经沉淀的 API client、会话模型、附件模型和 workspace 模型。
+
+通话实时转写/面试辅助的自用 MVP 路线见 `docs/windows-bluetooth-call-transcription-mvp.md`：一加手机通话音频经蓝牙/Phone Link 进入 Windows，本机通过 WASAPI 数字回环捕获下行音频，并用外接麦克风作为电话上行。

@@ -9,6 +9,7 @@ import { resolveAllowedPath } from "./security.js";
 
 const tasks = new Map();
 const MAX_RESTORED_TASKS = 80;
+let notificationHandler = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -44,6 +45,10 @@ function appendTaskEvent(task, event) {
 
   for (const listener of task.listeners) listener(enriched);
   return enriched;
+}
+
+export function setTaskNotificationHandler(handler) {
+  notificationHandler = typeof handler === "function" ? handler : null;
 }
 
 function eventTitle(events, fallback) {
@@ -580,6 +585,14 @@ export function createTask(payload, settings) {
       appendTaskEvent(task, {
         type: "system",
         text: signal ? `Exited with signal ${signal}` : `Exited with code ${code}`
+      });
+      notificationHandler?.({
+        type: task.status === "done" ? "task.done" : "task.failed",
+        title: task.status === "done" ? "Task completed" : "Task failed",
+        body: task.title || task.commandLabel || task.id,
+        tag: `task:${task.id}`,
+        url: "/",
+        meta: { taskId: task.id, status: task.status, exitCode: code, signal: signal || "" }
       });
     });
   } catch (error) {

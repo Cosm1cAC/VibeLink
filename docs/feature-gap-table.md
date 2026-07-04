@@ -1,8 +1,8 @@
 # VibeLink 与 Codex 功能差异表
 
-最后更新：2026-07-03
+最后更新：2026-07-04
 
-本文档用于跟踪 VibeLink 相对 Codex Desktop / Codex App 的功能差异，以及当前已经抹平的能力。
+本文档只记录 VibeLink 相对 Codex Desktop / Codex App 仍存在的差异、边界和后续增强项；已对齐的能力不再保留在本表。
 
 状态约定：
 
@@ -10,22 +10,11 @@
 - `partial`：已有雏形，但体验或能力仍明显弱于 Codex。
 - `blocked`：受上游能力、系统权限或产品边界影响，不能用同样方式实现。
 - `planned`：已确认要做，但尚未实现。
-- `done`：当前目标下已完成。
 
 ## 当前结论
 
-已经抹平或基本抹平的关键点：
+仍有差异或边界的关键点：
 
-- `done`：会话列表按项目组织，支持“一个项目下多个会话”和“无项目会话”。
-- `done`：Codex JSONL 历史按 `turn_id` 聚合，网页端不再把同一轮 agent 回复切成多个消息块。
-- `done`：agent 消息块显示处理耗时，例如“已处理 1m 40s”。
-- `done`：命令运行摘要显示为“已运行 N 条命令”，可展开查看命令、状态和输出。
-- `done`：图片可通过粘贴或拖拽进入输入框，并作为附件发送。
-- `done`：系统消息默认隐藏，仅错误类系统消息显示。
-- `done`：`Codex Desktop remote` 不再作为假会话污染左侧列表。
-- `done`：SQLite 状态层已落地，覆盖 workspace、device、thread、task、task event、desktop observation。
-- `done`：allowed roots、Host allowlist、设备 token、Cloudflare 公网警告已落地。
-- `done`：Desktop observer 已正式化，支持 cursor、SSE 事件和快照持久化。
 - `partial`：workspace + Git/change card 已有 API 和基础 UI，但还不是 Codex 的完整“变更”体验。
 
 仍未抹平的最高优先级：
@@ -36,6 +25,10 @@
 - `P0`：任务运行中重启恢复仍不能重新绑定已经存在的 OS 子进程。
 - `P0`：公网安全仍是本机 bridge 原型级别，没有完整账号、审计、限流、设备策略和域名证书流程。
 
+## 非 T0/P0 差异说明
+
+- 用户消息没有额外 `text` 拼接 / 非增量元数据，不再作为 T0/P0 差异记录；除非后续影响上下文恢复或交互一致性。
+
 ## 会话与任务
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
@@ -45,7 +38,6 @@
 | planned | Codex app-server 客户端代理接入 | 已做 spike，app-server 可作为未来路线，但当前主线仍是 CLI resume + Desktop remote；尚未产品化接入。 | P0 |
 | partial | Codex Desktop UI 遥控 | 已有 Windows UIA 探测、窗口恢复、侧栏匹配、focus、发送队列；仍依赖前台 UI、控件定位和 Codex UI 稳定性。 | P0 |
 | partial | Codex thread 管理 | 已支持重命名、置顶、归档/恢复、分组、fork；但管理 UI 仍是 prompt 弹窗，不是 Codex 风格的菜单/批量/跨设备体验。 | P1 |
-| done | 项目下多会话 | 侧栏已按 workspace/project 分组，并支持无项目会话。 | P0 |
 | partial | 历史上下文还原 | Codex 历史已按 `turn_id` 聚合，含耗时和命令摘要；但仍不是完整 Codex App 会话状态，例如计划面板、插件状态、完整 tool card、审批状态还未还原。 | P0 |
 | partial | 搜索 | 目前按标题、provider、cwd、sessionId 过滤；缺少全文搜索、标签、收藏、复杂过滤。 | P2 |
 | missing | 任务队列和并发管理 | 没有优先级、并发上限、失败重试策略、批量取消和后台调度面板。 | P1 |
@@ -56,20 +48,15 @@
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
 | partial | 文件/文件夹选择器 | 已支持手机本地文件上传、文件夹上传，以及 workspace 文件树选择并注入上下文；仍不是 Codex Desktop 原生文件选择器。 | P0 |
-| done | 图片粘贴/拖拽 | 支持 Ctrl+V 和拖拽图片到 composer，上传到 `/api/attachments` 后生成 markdown 图片引用。 | P0 |
 | partial | 附件能力 | 已支持图片、普通文件、文件夹上传、文本预览和本地路径注入；PDF/Office/表格目前作为文件路径交给 agent，尚无富预览。 | P0 |
 | partial | 模型选择 | Composer 已有模型和推理强度选择器，Codex CLI 透传 `-m` 和 `model_reasoning_effort`，Claude 透传 `--model` 和 `--effort`；仍缺动态模型 catalog 和 Desktop remote 原生同步。 | P1 |
 | partial | slash commands | 已支持 `/image`、`/file`、`/folder`、`/workspace`、`/permissions`、`/model`、`/effort`、`/agent`、`/history`、`/clear`；尚未覆盖 `/plugins`、`/apps`、`/hooks` 等完整 Codex 命令。 | P1 |
-| done | prompt history | 已支持本地 prompt history、空输入上箭头打开历史、草稿自动保存和发送后清理。 | P2 |
 | partial | 运行中补充输入 | Desktop remote 可继续排队；CLI running task 现在允许尝试补充输入并返回明确失败原因，但 Codex/Claude exec 模式通常仍不接收 live stdin。 | P0 |
 
 ## 输出渲染
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| done | 单轮对话块 | Codex JSONL 已按 `turn_id` 聚合，网页端一轮 agent 回复只渲染一个消息块。 | P0 |
-| done | 处理耗时 | `task_complete.duration_ms` 已显示为“已处理 Xm Ys”。 | P0 |
-| done | 命令运行摘要 | shell/js/apply_patch 等命令类 tool call 已汇总为“已运行 N 条命令”，可展开查看命令、状态、输出。 | P0 |
 | partial | Markdown 渲染 | 支持文本、链接、图片；缺少代码高亮、表格、引用、任务列表、数学公式等完整 Markdown 能力。 | P1 |
 | partial | tool call 卡片 | 已有命令摘要卡；其他工具类型仍未结构化，例如文件编辑、浏览器操作、插件调用、审批。 | P0 |
 | partial | diff/change card | 已有 workspace/task Git status/diff 摘要卡；缺少完整 patch 浏览、文件定位、接受/拒绝变更、未跟踪文件预览。 | P0 |
@@ -81,9 +68,6 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| done | allowed roots | `/api/files`、任务 cwd、workspace path 均经过 allowed roots 校验。 | P0 |
-| done | Host allowlist / 公网警告 | 支持 Host 校验，Cloudflare Tunnel 和 `0.0.0.0` 监听会返回安全警告。 | P0 |
-| done | 设备 token | pairing token 只用于首次配对，登录后发放设备 token；支持设备列表和 revoke。 | P0 |
 | partial | 权限模型 | 只有基础 `permissionMode`；没有完整 sandbox、approval policy、命令级审批、网络权限和 trusted workspace UI。 | P0 |
 | missing | 逐条审批 | 没有 Codex 风格命令级审批、危险操作确认、权限升降级说明。 | P0 |
 | partial | API key 存储 | 勾选记住后仍明文写入 `.agent-mobile-terminal/settings.json`；未接系统凭据库。 | P0 |
@@ -93,8 +77,6 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| done | workspace 数据模型 | SQLite `workspaces` 已落地，项目路径、allowed root、last used 可持久化。 | P0 |
-| done | workspace API | 已有 `/api/workspaces`、`/api/workspaces/:id/git/status`、`/api/workspaces/:id/git/diff`。 | P1 |
 | partial | change card | 前端已有基础变更卡，能显示 workspace/task 变更摘要；缺少完整 diff viewer 和操作按钮。 | P1 |
 | missing | 文件树 | 没有 workspace 文件树和文件打开能力。 | P1 |
 | missing | 文件定位 | 没有点击消息路径跳转到文件和行号。 | P1 |
@@ -106,9 +88,6 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| done | Desktop observer | 已新增 `desktopObserver.js`，约 1.4s 采样 Codex Desktop UI。 | P0 |
-| done | Desktop observer 事件 | 已输出 `desktop.snapshot`、`desktop.visibleTranscript.delta`、`desktop.sidebar.running`、`desktop.selection.changed`，并带 cursor、observedAt、source。 | P0 |
-| done | Desktop observer 订阅 | 前端通过 `/api/desktop-remote/events?after=` SSE 订阅，不再只靠状态轮询。 | P0 |
 | partial | 运行中检测 | 已扫 Codex 左侧最近会话和当前 composer 状态；仍受 UIA 可见性、Codex UI 改版、窗口状态影响。 | P0 |
 | partial | 会话定位 | 可用侧栏标题/项目匹配并 focus；同名会话、折叠列表、滚动不可见时仍可能不准。 | P0 |
 | missing | 手机观看 Desktop 实时画面 | 只能同步结构化状态和可见 transcript 摘要，不能像远程桌面一样观看/操控完整 Codex 窗口。 | P2 |
@@ -139,6 +118,7 @@
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
 | missing | 原生移动端 | 当前是网页端，不是 Android/iOS App。 | P1 |
+| planned | 通话实时转写/面试辅助 | 已确定第一版自用 MVP 先走 Windows 蓝牙/Phone Link 路线：手机系统电话音频进入 Windows 后，用 WASAPI 数字回环捕获下行音频，外接麦克风作为电话上行，再接实时 ASR 和 Agent；详见 `docs/windows-bluetooth-call-transcription-mvp.md`。 | P1 |
 | missing | 推送通知 | 任务完成、失败、需要确认时不会主动推送到手机。 | P0 |
 | partial | 断线恢复 | task events 和 desktop observations 有 SQLite cursor；前端离线恢复、ack、重放边界仍不完整。 | P0 |
 | partial | 公网访问 | Cloudflare Tunnel 可用，安全警告和 device token 已有；还没有产品化公网域名、证书、设备策略和部署向导。 | P0 |
@@ -156,7 +136,6 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| partial | 中文文本 | 主流程大多正常，但仍有少量 mojibake 文案和旧构建资产残留。 | P0 |
 | partial | 动效 | 有基础消息动画、思考状态、平滑滚动；整体还不如 Codex 细腻。 | P1 |
 | partial | Codex 风格布局 | 侧栏、composer、turn block 已接近 Codex；设置页、管理菜单、变更视图仍偏原型。 | P1 |
 | partial | 设置页 | 设置页可用，但缺少配置中心层级、解释、风险提示和导入导出。 | P1 |
@@ -168,7 +147,6 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| done | SQLite 持久化 | `.agent-mobile-terminal/mobile-agent.sqlite` 已作为本产品状态层，保存 workspace、device、thread、fork、task、event、desktop observation。 | P0 |
 | partial | 事件可靠性 | task events 和 desktop observations 有 cursor；还缺 ack、保留策略、压缩、重放边界测试。 | P0 |
 | partial | 进程生命周期 | 服务可恢复历史和事件，但不能重新绑定重启前仍在跑的子进程。 | P0 |
 | partial | 多设备同步 | 多设备可凭 device token 登录；没有冲突处理、在线状态、设备间消息同步策略。 | P1 |

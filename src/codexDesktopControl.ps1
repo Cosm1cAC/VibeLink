@@ -29,10 +29,10 @@ $remoteComposerName = [string]::Concat([char]0x9065, [char]0x63A7, " Codex Deskt
 $desktopRemoteChipName = [string]::Concat("Desktop ", [char]0x9065, [char]0x63A7)
 $stopNameZh = -join @([char]0x505C, [char]0x6B62)
 $sendNameZh = -join @([char]0x53D1, [char]0x9001)
-$fallbackComposerNames = @($composerName, "Ask Codex", "Message Codex", "Send a message to Agent")
-$fallbackSendNames = @($sendNameZh, "Send")
+$fallbackComposerNames = @($composerName, "Ask Codex", "Ask anything", "Message Codex", "Message Agent", "Send a message to Codex", "Send a message to Agent")
+$fallbackSendNames = @($sendNameZh, "Send", "Send message", "Submit", "Submit message")
 $ownRemoteUiNames = @($remoteComposerName, $desktopRemoteChipName)
-$placeholderValues = @($composerName, $remoteComposerName, "Ask Codex", "Message Codex", "Send a message to Codex", "Send a message to Agent")
+$placeholderValues = @($composerName, $remoteComposerName, "Ask Codex", "Ask anything", "Message Codex", "Message Agent", "Send a message to Codex", "Send a message to Agent")
 $remoteHostHints = @("trycloudflare.com", "127.0.0.1:8787", "localhost:8787", "192.168.3.61:8787")
 
 function To-RectObject($rect) {
@@ -141,7 +141,8 @@ function Test-IsOwnRemoteElement($element) {
 }
 
 function Test-IsStopName([string]$name) {
-  return $name -eq $stopNameZh -or $name -eq "Stop"
+  $value = $name.Trim()
+  return $value -eq $stopNameZh -or $value -match "^(Stop|Stop generating|Cancel)$"
 }
 
 function Test-IsComposerSendCandidate($element) {
@@ -995,11 +996,36 @@ try {
     exit 0
   }
 
+  if ($action -eq "restore") {
+    if ($description.found -and [bool]$description.minimized) {
+      Bring-ToForeground $target
+      Start-Sleep -Milliseconds 900
+      $target = Find-CodexDesktop
+      $description = Describe-Target $target
+    }
+    Complete ([ordered]@{
+      ok = [bool]$description.found
+      action = $action
+      target = $description
+    })
+    exit 0
+  }
+
   if ($description.found -and [bool]$description.minimized) {
-    Bring-ToForeground $target
-    Start-Sleep -Milliseconds 900
-    $target = Find-CodexDesktop
-    $description = Describe-Target $target
+    if ($action -eq "focusConversation") {
+      Bring-ToForeground $target
+      Start-Sleep -Milliseconds 900
+      $target = Find-CodexDesktop
+      $description = Describe-Target $target
+    } else {
+      Complete ([ordered]@{
+        ok = $false
+        action = $action
+        error = "Codex Desktop is minimized; restore it and re-run preflight before sending."
+        target = $description
+      })
+      exit 0
+    }
   }
 
   if ($action -eq "focusConversation") {

@@ -1,20 +1,37 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
 import {
   ArrowUp,
   Archive,
   CheckSquare,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Code2,
+  Copy,
+  Download,
+  ExternalLink,
+  File,
   FileText,
   FilePlus2,
   Folder,
   FolderOpen,
   History,
   Image as ImageIcon,
+  ImageOff,
+  LocateFixed,
   Menu,
+  Maximize2,
+  Minimize2,
   Monitor,
   MoreHorizontal,
+  Pencil,
   Plus,
   RotateCcw,
   RefreshCw,
@@ -23,14 +40,21 @@ import {
   Square,
   Target,
   Terminal,
+  Trash2,
   X
 } from "lucide-react";
 import "./styles.css";
 
 const savedToken = localStorage.getItem("mat.token") || "";
+const desktopObserverCursorKey = "mat.stream.desktopObserver.cursor";
+const typedTextAnimationKeys = new Set();
 
 function cx(...parts) {
   return parts.filter(Boolean).join(" ");
+}
+
+function streamCursorKey(kind, id) {
+  return `mat.stream.${kind}.${id}.cursor`;
 }
 
 function bridgeConnectionError() {
@@ -92,6 +116,16 @@ function formatBytes(value) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${Math.round(size / 102.4) / 10} KB`;
   return `${Math.round(size / 1024 / 102.4) / 10} MB`;
+}
+
+function cursorFromEvents(events = []) {
+  return events.reduce((max, event) => Math.max(max, Number(event?.cursor || 0)), 0);
+}
+
+function rememberStreamCursor(key, value) {
+  const cursor = Number(value || 0);
+  if (cursor > 0) localStorage.setItem(key, String(cursor));
+  return cursor;
 }
 
 function attachmentKind(file) {
@@ -163,6 +197,242 @@ function desktopQueueLabel(desktopRemote) {
   return desktopPillLabel(desktop);
 }
 
+function translateDesktopWaitReason(reason = "") {
+  const value = String(reason || "");
+  if (!value) return "";
+  if (/model|permission|reasoning|settings|menus|CLI mode|Desktop settings/i.test(value)) {
+    return "Desktop 遥控使用 Codex Desktop 当前设置；需要精确模型、权限或思考强度时请切到 Agent 模式";
+  }
+  if (/target_missing|bound visible|sidebar conversation|target/i.test(value)) return "未发送：无法确认目标 Codex Desktop 会话";
+  if (/title no longer matches|project no longer matches/i.test(value)) return "未发送：Codex Desktop 侧栏会话或项目已不匹配";
+  if (/post-send verification|cleared input|visible user message|thinking\/running/i.test(value)) return "已发送，但未确认输入框清空、消息可见和 Codex 进入运行状态";
+  if (/remote control page/i.test(value)) return "遥控页开在 Codex 内置浏览器里，已阻止发送";
+  if (/sidebar shows|running conversation/i.test(value)) return "Codex 左侧仍有任务在运行，等待当前回合结束";
+  if (/already contains text|refusing to overwrite/i.test(value)) return "Codex 输入框里已有内容，等待输入框清空";
+  if (/minimized/i.test(value)) return "Codex 已最小化，发送时会自动恢复窗口";
+  if (/not found|window/i.test(value)) return "未找到可遥控的 Codex 窗口";
+  if (/send button/i.test(value)) return "等待 Codex 发送按钮可用";
+  if (/composer/i.test(value)) return "等待 Codex 输入区可用";
+  return value;
+}
+
+function latestDesktopQueueItem(items = []) {
+  return [...items].reverse().find((item) => item && item.status !== "cancelled") || null;
+}
+
+function desktopCommandSummaryFromTranscript(transcript = []) {
+  let commandCount = 0;
+  const commands = [];
+
+  for (const item of transcript || []) {
+    const text = String(item?.text || "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+
+    const countMatch =
+      text.match(/已(?:运行|执行)\s*(\d+)\s*条命令/i) ||
+      text.match(/Ran\s+(\d+)\s+commands?/i) ||
+      text.match(/Executed\s+(\d+)\s+commands?/i);
+    if (countMatch) {
+      commandCount = Math.max(commandCount, Number(countMatch[1]) || 0);
+      continue;
+    }
+
+    const commandMatch =
+      text.match(/^(?:正在运行|Running)\s+(.{3,220})$/i) ||
+      text.match(/^(?:已运行|Ran|Executed)\s+(.{3,220})$/i) ||
+      text.match(/^(?:[$>])\s+(.{3,220})$/) ||
+      text.match(/^`([^`]{3,220})`$/) ||
+      text.match(/^((?:bash|cmd|powershell|pwsh|python|node|npm|pnpm|yarn|git|rg|sed|cat|ls|dir|Get-ChildItem|Select-String)\b.{2,220})$/i);
+    if (commandMatch) {
+      const command = commandMatch[1].trim();
+      if (command && !commands.some((item) => item.command === command)) {
+        const running = text.startsWith("正在运行") || /^Running/i.test(text);
+        commands.push({
+          command,
+          name: running ? "running command" : "command",
+          status: running ? "running" : /failed|error|失败/i.test(text) ? "failed" : "done"
+        });
+      }
+    }
+  }
+
+  return {
+    commandCount: Math.max(commandCount, commands.length),
+    commands: commands.slice(-8),
+    running: commands.some((item) => item.status === "running")
+  };
+}
+
+function desktopTurnStatusMessage(queueItem, desktop) {
+  const transcriptSummary = desktopCommandSummaryFromTranscript(desktop?.visibleTranscript || []);
+  const isRunning = desktopRunningTurn(desktop) || Boolean(desktop?.sidebarHasRunning || desktop?.sidebarRunningCount > 0);
+
+  if (!queueItem && isRunning) {
+    return {
+      role: "assistant",
+      text: transcriptSummary.commandCount ? "Codex 正在处理并运行命令" : "Codex 正在思考",
+      pending: true,
+      ...transcriptSummary
+    };
+  }
+
+  if (!queueItem) return null;
+  const sentAt = new Date(queueItem.sentAt || queueItem.updatedAt || 0).getTime();
+  const sentAge = Number.isFinite(sentAt) ? Date.now() - sentAt : 0;
+  const base = {
+    role: queueItem.status === "failed" ? "error" : "assistant",
+    text: "",
+    pending: true,
+    ...transcriptSummary
+  };
+
+  if (queueItem.status === "queued") return { ...base, text: "已加入 Codex 遥控队列" };
+  if (queueItem.status === "checking") return { ...base, text: "正在检查 Codex Desktop 状态" };
+  if (queueItem.status === "sending") return { ...base, text: "正在发送到 Codex Desktop" };
+  if (queueItem.status === "waiting") {
+    return {
+      ...base,
+      text: translateDesktopWaitReason(queueItem.error) || "等待 Codex 空闲后继续发送"
+    };
+  }
+  if (queueItem.status === "failed") {
+    return {
+      ...base,
+      pending: false,
+      text: queueItem.error || "发送到 Codex Desktop 失败"
+    };
+  }
+  if (queueItem.status === "sent_unverified") {
+    return {
+      ...base,
+      role: "error",
+      pending: false,
+      text: translateDesktopWaitReason(queueItem.error) || queueItem.error || "已发送，但未完成发送后验证"
+    };
+  }
+  if (queueItem.status === "sent") {
+    if (isRunning) {
+      return {
+        ...base,
+        text: transcriptSummary.commandCount ? "Codex 正在处理并运行命令" : "Codex 正在思考"
+      };
+    }
+    if (sentAge < 90000) {
+      return {
+        ...base,
+        text: "已发送到 Codex，等待输出同步"
+      };
+    }
+  }
+
+  return null;
+}
+
+function isDesktopTranscriptNoise(text) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) return true;
+  if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(value)) return true;
+  if (/^(复制|复制消息|编辑消息|编辑|滚动到底部|启用自动换行|打开位置|撤销|审查)$/i.test(value)) return true;
+  if (/^(已处理|正在处理|正在思考|已运行\s*\d+\s*条命令|正在运行\s*\d+\s*条命令)/i.test(value)) return true;
+  if (/^(Codex|Agent|AGENT|SYSTEM|USER|You|系统|用户)$/.test(value)) return true;
+  if (/^(Desktop 遥控|Codex 空闲|等待 Codex|运行中|就绪|ready)$/i.test(value)) return true;
+  return false;
+}
+
+function desktopTranscriptKey(item, index) {
+  return item?.trackId || item?.id || `${item?.role || "system"}:${item?.kind || "text"}:${item?.index ?? index}`;
+}
+
+function isDesktopCommandLine(text) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  return (
+    /^(已运行|正在运行|Ran|Running|Executed)\b/i.test(value) ||
+    /^(?:[$>])\s+\S/.test(value) ||
+    /^(?:bash|cmd|powershell|pwsh|python|node|npm|pnpm|yarn|git|rg|sed|cat|ls|dir|Get-ChildItem|Select-String)\b/i.test(value)
+  );
+}
+
+function compactDesktopTranscriptEntries(items = []) {
+  const byTrack = new Map();
+
+  items.forEach((item, order) => {
+    if (item.role === "user") return;
+    const text = String(item.text || "").trim();
+    const normalized = normalizeMessageText(text);
+    if (!normalized || isDesktopTranscriptNoise(normalized)) return;
+    if (isDesktopCommandLine(normalized) && normalized.length < 260) return;
+
+    const key = desktopTranscriptKey(item, order);
+    const previous = byTrack.get(key);
+    const entry = {
+      key,
+      order,
+      index: Number(item.index ?? order),
+      role: item.role || "assistant",
+      kind: item.kind || "text",
+      text,
+      normalized
+    };
+
+    if (!previous || normalized.length >= previous.normalized.length) byTrack.set(key, entry);
+  });
+
+  const entries = [...byTrack.values()].sort((a, b) => a.order - b.order);
+  return entries.filter((entry, index) => {
+    return !entries.some((other, otherIndex) => {
+      if (index === otherIndex || other.role !== entry.role) return false;
+      if (other.normalized.length <= entry.normalized.length + 40) return false;
+      const sameTrack = other.key === entry.key;
+      const nearby = Math.abs(other.index - entry.index) <= 1;
+      const documentWrap = other.kind === "document" || entry.kind === "document";
+      return (sameTrack || nearby || documentWrap) && other.normalized.includes(entry.normalized);
+    });
+  });
+}
+
+function desktopVisibleTurnFromTranscript(desktop, baseMessages = []) {
+  const transcript = desktop?.visibleTranscript || [];
+  if (!transcript.length) return null;
+
+  const lastUser = [...baseMessages].reverse().find((item) => item.role === "user")?.text || "";
+  const lastUserText = normalizeMessageText(lastUser).slice(0, 160);
+  let startIndex = 0;
+  if (lastUserText) {
+    const matchedIndex = transcript.findLastIndex?.((item) => {
+      if (item.role !== "user") return false;
+      const text = normalizeMessageText(item.text);
+      return text.includes(lastUserText) || lastUserText.includes(text.slice(0, 120));
+    });
+    if (Number.isFinite(matchedIndex) && matchedIndex >= 0) startIndex = matchedIndex + 1;
+  }
+
+  const summary = desktopCommandSummaryFromTranscript(transcript);
+  const existingText = normalizeMessageText(baseMessages.map((item) => item.text).join("\n"));
+  const liveEntries = compactDesktopTranscriptEntries(transcript.slice(startIndex));
+  const chunks = liveEntries.map((item) => item.text);
+
+  const text = chunks.join("\n\n").trim();
+  if (!text) return null;
+  const comparable = normalizeMessageText(text);
+  if (comparable.length > 80 && existingText.includes(comparable.slice(0, 240))) return null;
+  const liveKey = `desktop-live:${liveEntries.map((item) => item.key).join("|") || desktop.visibleTranscriptHash || "current"}`;
+
+  return {
+    role: "assistant",
+    text: text.slice(-16000),
+    typing: false,
+    live: true,
+    sourceKind: "desktop-observer",
+    syncStage: "live",
+    observedAt: desktop.updatedAt || "",
+    liveKey,
+    streaming: desktopRunningTurn(desktop),
+    commandCount: summary.commandCount,
+    commands: summary.commands,
+    commandRunning: summary.running || desktopRunningTurn(desktop)
+  };
+}
+
 function targetLabel({ isDesktop, selected, activeAgent }) {
   if (isDesktop || hasDesktopBinding(selected)) return "遥控 Codex";
   return `发送到 ${providerLabel(activeAgent)}`;
@@ -201,6 +471,23 @@ function desktopListStatus(desktop) {
 
 function hasDesktopBinding(conversation) {
   return conversation?.provider === "codex" && Number.isFinite(Number(conversation.desktopIndex));
+}
+
+function conversationHistoryId(conversation) {
+  return conversation?.sourceId || conversation?.sessionId || conversation?.historyId || conversation?.id || "";
+}
+
+function desktopRemoteNeedsHistoryRefresh(desktopRemote) {
+  const desktop = desktopRemote?.desktop;
+  const latestItem = latestDesktopQueueItem(desktopRemote?.items || []);
+  const latestAt = new Date(latestItem?.sentAt || latestItem?.updatedAt || 0).getTime();
+  const recentlyTouched = ["sent", "sent_unverified", "sending", "checking", "waiting"].includes(latestItem?.status) && Number.isFinite(latestAt) && Date.now() - latestAt < 180000;
+  return (
+    Number(desktopRemote?.pendingCount || 0) > 0 ||
+    Boolean(desktopRemote?.active) ||
+    recentlyTouched ||
+    desktopRunningTurn(desktop)
+  );
 }
 
 function firstTextFromContent(content) {
@@ -274,10 +561,25 @@ function taskEventText(event) {
   return event.text || "";
 }
 
-function messagesFromEvents(events = []) {
+function shouldAnimateLiveAssistant(agent, role) {
+  return String(agent || "").toLowerCase() === "codex" && role === "assistant";
+}
+
+function messagesFromEvents(events = [], options = {}) {
+  const animateAssistant = Boolean(options.animateAssistant && options.realtime);
+  const typingKeyPrefix = options.typingKeyPrefix || "task-event";
   return normalizeDisplayMessages(
     events
-    .map((event) => ({ role: taskEventRole(event), text: taskEventText(event), typing: taskEventRole(event) === "assistant" }))
+      .map((event, index) => {
+        const role = taskEventRole(event);
+        const typing = animateAssistant && role === "assistant";
+        return {
+          role,
+          text: taskEventText(event),
+          typing,
+          typingKey: typing ? `${typingKeyPrefix}:${event.id || event.cursor || index}` : ""
+        };
+      })
       .filter((item) => item.text && item.role !== "debug")
   );
 }
@@ -377,7 +679,6 @@ function messagesFromTranscript(transcript = [], limit = 180) {
     .map((item) => ({
       role: item.role === "user" || item.role === "assistant" || item.role === "error" ? item.role : "system",
       text: item.text || "",
-      typing: item.role === "assistant" && !INTERNAL_HISTORY_KINDS.has(historyEntryKind(item)),
       durationMs: item.durationMs || null,
       completedAt: item.completedAt || "",
       startedAt: item.startedAt || "",
@@ -385,6 +686,9 @@ function messagesFromTranscript(transcript = [], limit = 180) {
       commandCount: item.commandCount || item.commands?.length || 0,
       commands: Array.isArray(item.commands) ? item.commands : [],
       parts: Array.isArray(item.parts) ? item.parts : [],
+      sourceKind: "codex-jsonl",
+      syncStage: "reconciled",
+      reconciled: true,
       source: item
     }))
     .filter((message) => message.text && !isHistoryNoise(message.source, message.text))
@@ -399,8 +703,7 @@ function messagesFromDesktopVisibleTranscript(transcript = [], limit = 40) {
       .slice(-limit)
       .map((item) => ({
         role: item.role === "user" || item.role === "assistant" || item.role === "error" ? item.role : "system",
-        text: item.text || "",
-        typing: item.role === "assistant"
+        text: item.text || ""
       }))
       .filter((item) => item.text)
   );
@@ -440,6 +743,24 @@ function projectNameFromPath(value) {
 function projectKeyFromPath(value) {
   const clean = String(value || "").trim();
   return clean ? `project:${clean.toLowerCase()}` : "project:none";
+}
+
+function normalizePathForMatch(value) {
+  return String(value || "").replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function workspaceMatchesPath(workspace, cwd) {
+  const target = normalizePathForMatch(cwd);
+  const root = normalizePathForMatch(workspace?.allowedRoot || workspace?.path || "");
+  if (!target || !root) return false;
+  return target === root || target.startsWith(`${root}\\`) || target.startsWith(`${root}/`);
+}
+
+function chooseWorkspaceForPath(items = [], cwd = "") {
+  const matches = items
+    .filter((workspace) => workspaceMatchesPath(workspace, cwd))
+    .sort((a, b) => normalizePathForMatch(b.allowedRoot || b.path).length - normalizePathForMatch(a.allowedRoot || a.path).length);
+  return matches[0] || items[0] || null;
 }
 
 function splitDesktopConversationName(value) {
@@ -529,6 +850,23 @@ function conversationSourceSnapshot(source) {
   };
 }
 
+function desktopRemoteTargetSnapshot(source) {
+  if (!hasDesktopBinding(source)) return null;
+  return {
+    key: source.key || "",
+    id: source.id || "",
+    sessionId: source.sessionId || "",
+    historyId: source.historyId || "",
+    sourceId: source.sourceId || "",
+    title: source.title || "",
+    cwd: source.cwd || "",
+    desktopIndex: Number(source.desktopIndex),
+    desktopProjectIndex: Number.isFinite(Number(source.desktopProjectIndex)) ? Number(source.desktopProjectIndex) : null,
+    desktopTitle: source.desktopTitle || source.title || "",
+    desktopProjectTitle: source.desktopProjectTitle || projectNameFromPath(source.cwd || "")
+  };
+}
+
 function buildConversationTree(items, expandedProjects) {
   const projects = new Map();
   const noProject = [];
@@ -608,6 +946,7 @@ function normalizeMessageText(text) {
 }
 
 function messageIdentity(message) {
+  if (message?.liveKey) return `${message.role}\nlive:${message.liveKey}`;
   if (message?.turnId) return `${message.role}\nturn:${message.turnId}`;
   return `${message.role}\n${normalizeMessageText(message.text)}`;
 }
@@ -623,6 +962,63 @@ function mergeHistoryAndTaskMessages(historyMessages, taskMessages) {
     return true;
   });
   return normalizeDisplayMessages([...historyMessages, ...taskOnly]);
+}
+
+function commandDetailScore(commands = []) {
+  return commands.reduce((score, command) => {
+    return score + 1 + String(command.output || "").length + (Number.isFinite(Number(command.exitCode)) ? 20 : 0);
+  }, 0);
+}
+
+function moreDetailedCommands(current = [], incoming = []) {
+  return commandDetailScore(incoming) >= commandDetailScore(current) ? incoming : current;
+}
+
+function mergeMessageDetails(current, incoming) {
+  const commands = moreDetailedCommands(current.commands || [], incoming.commands || []);
+  const isReconciled = Boolean(incoming.completedAt || incoming.reconciled || incoming.syncStage === "reconciled");
+  return {
+    ...current,
+    ...incoming,
+    text: incoming.text || current.text,
+    typing: isReconciled ? false : Boolean(incoming.typing),
+    commandCount: Math.max(Number(current.commandCount || 0), Number(incoming.commandCount || 0), commands.length),
+    commands
+  };
+}
+
+function textOverlapsEnough(left, right, threshold = 80) {
+  const a = normalizeMessageText(left);
+  const b = normalizeMessageText(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = Math.min(a.length, b.length);
+  return shorter > threshold && (a.includes(b) || b.includes(a));
+}
+
+function reconciledMessageCoversLive(liveMessage, reconciledMessage) {
+  if (!liveMessage?.live || reconciledMessage?.role !== liveMessage.role) return false;
+  if (reconciledMessage?.turnId && liveMessage?.turnId && reconciledMessage.turnId === liveMessage.turnId) return true;
+  if (textOverlapsEnough(liveMessage.text, reconciledMessage.text, 60)) return true;
+  return commandDetailScore(reconciledMessage.commands || []) > commandDetailScore(liveMessage.commands || []) && Number(reconciledMessage.commandCount || 0) >= Number(liveMessage.commandCount || 0);
+}
+
+function mergeDisplayMessagesWithUpdates(current = [], incoming = []) {
+  const reconciledIncoming = incoming.filter((message) => message?.reconciled || message?.syncStage === "reconciled" || message?.turnId);
+  const merged = current.filter((message) => !message?.live || !reconciledIncoming.some((incomingMessage) => reconciledMessageCoversLive(message, incomingMessage)));
+
+  for (const message of incoming) {
+    if (!message?.text && !message?.commands?.length) continue;
+    const identity = messageIdentity(message);
+    const index = merged.findIndex((item) => messageIdentity(item) === identity);
+    if (index >= 0) {
+      merged[index] = mergeMessageDetails(merged[index], message);
+      continue;
+    }
+    merged.push(message);
+  }
+
+  return normalizeDisplayMessages(merged);
 }
 
 function isSystemMessage(message) {
@@ -649,7 +1045,7 @@ function normalizeDisplayMessages(items = []) {
     const duplicated = recentMessages.some((recent) => {
       if (recent.role !== item.role) return false;
       if (recent.identity === identity) return true;
-      if (recent.turnId || item.turnId) return false;
+      if ((recent.turnId || item.turnId) && !recent.live && !item.live) return false;
       const shorter = Math.min(recent.text.length, normalizedText.length);
       return shorter > 80 && (recent.text.includes(normalizedText) || normalizedText.includes(recent.text));
     });
@@ -664,7 +1060,7 @@ function normalizeDisplayMessages(items = []) {
     }
 
     normalized.push({ ...item });
-    recentMessages.push({ role: item.role, identity, text: normalizedText, turnId: item.turnId || "" });
+    recentMessages.push({ role: item.role, identity, text: normalizedText, turnId: item.turnId || "", live: Boolean(item.live) });
     if (recentMessages.length > 8) recentMessages.shift();
   }
 
@@ -740,99 +1136,274 @@ function localFileUrl(value, token = localStorage.getItem("mat.token") || savedT
   return raw;
 }
 
-function parseMessageParts(text) {
+function urlBase64ToUint8Array(value = "") {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const base64 = `${value}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((char) => char.charCodeAt(0)));
+}
+
+function pathBaseName(value) {
+  return stripPathWrappers(value).split(/[\\/]/).filter(Boolean).pop() || "file";
+}
+
+function fileExtension(value) {
+  const clean = stripPathWrappers(value).replace(/[?#].*$/, "");
+  const [, ext = ""] = clean.match(/\.([A-Za-z0-9]+)$/) || [];
+  return ext.toLowerCase();
+}
+
+function isArtifactPath(value) {
+  const ext = fileExtension(value);
+  return Boolean(ext && !["png", "jpg", "jpeg", "gif", "webp", "avif"].includes(ext));
+}
+
+function artifactKind(value) {
+  const ext = fileExtension(value);
+  if (["pdf"].includes(ext)) return "PDF";
+  if (["doc", "docx", "odt"].includes(ext)) return "Document";
+  if (["xls", "xlsx", "csv", "tsv"].includes(ext)) return "Spreadsheet";
+  if (["ppt", "pptx", "key"].includes(ext)) return "Presentation";
+  if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) return "Archive";
+  if (["md", "txt", "json", "jsonl", "yaml", "yml", "toml", "xml", "html", "css", "js", "jsx", "ts", "tsx", "py", "ps1", "sh"].includes(ext)) return "Text";
+  return ext ? ext.toUpperCase() : "File";
+}
+
+function normalizeMarkdownText(text) {
+  return String(text || "").replace(/(^|[\s(:：])((?:[A-Za-z]:[\\/]|\/)[^\r\n<>)]*?\.(?:png|jpe?g|gif|webp|avif)(?:[?#][^\s)]*)?)/gi, (full, prefix, imagePath, offset, input) => {
+    if (prefix.includes("(") && input[offset - 1] === "]") return full;
+    return `${prefix}![${pathBaseName(imagePath)}](${imagePath})`;
+  });
+}
+
+function stripUserAttachmentMetadata(text) {
+  return String(text || "")
+    .replace(/<attachment_preview\b[^>]*>[\s\S]*?<\/attachment_preview>/gi, "")
+    .replace(/^\s*(?:Local file|Relative path):[^\r\n]*(?:\r?\n)?/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractArtifactLinks(text, token) {
   const value = String(text || "");
-  const parts = [];
-  const pattern = /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)/g;
-  let lastIndex = 0;
+  const results = [];
+  const seen = new Set();
+  const add = (label, href) => {
+    const raw = stripPathWrappers(href);
+    if (!raw || !isArtifactPath(raw) || seen.has(raw)) return;
+    seen.add(raw);
+    results.push({
+      label: compact(label || pathBaseName(raw), pathBaseName(raw)),
+      href: localFileUrl(raw, token),
+      raw,
+      kind: artifactKind(raw)
+    });
+  };
+
+  const markdownPattern = /!?\[([^\]]*)\]\(([^)]+)\)/g;
   let match;
-
-  while ((match = pattern.exec(value))) {
-    if (match.index > lastIndex) pushTextParts(parts, value.slice(lastIndex, match.index));
-
-    const isImage = match[0].startsWith("!");
-    const label = isImage ? match[1] : match[3];
-    const href = isImage ? match[2] : match[4];
-    parts.push(isImage ? { type: "image", alt: label || "image", src: href } : { type: "link", text: label, href });
-
-    lastIndex = pattern.lastIndex;
+  while ((match = markdownPattern.exec(value))) {
+    if (match[0].startsWith("!")) continue;
+    add(match[1], match[2]);
   }
 
-  if (lastIndex < value.length) pushTextParts(parts, value.slice(lastIndex));
-  return parts.length ? parts : [{ type: "text", text: value }];
-}
-
-function pushTextParts(parts, text) {
-  const pattern = /(^|[\s:])((?:[A-Za-z]:[\\/]|\/)[^\r\n<>]*?\.(?:png|jpe?g|gif|webp|avif))/gi;
-  let lastIndex = 0;
-  let match;
-
-  while ((match = pattern.exec(text))) {
-    const prefix = match[1] || "";
-    const pathText = match[2] || "";
-    const textEnd = match.index + prefix.length;
-    if (textEnd > lastIndex) parts.push({ type: "text", text: text.slice(lastIndex, textEnd) });
-    parts.push({ type: "image", alt: pathText.split(/[\\/]/).pop() || "image", src: pathText });
-    lastIndex = pattern.lastIndex;
+  const localPathPattern = /(^|[\s(:：])((?:[A-Za-z]:[\\/]|\/)[^\r\n<>)]*?\.[A-Za-z0-9]{2,8}(?:[?#][^\s)]*)?)/g;
+  while ((match = localPathPattern.exec(value))) {
+    add(pathBaseName(match[2]), match[2]);
   }
 
-  if (lastIndex < text.length) parts.push({ type: "text", text: text.slice(lastIndex) });
+  return results.slice(0, 8);
 }
 
-function MessageContent({ text, typing, token }) {
-  const parts = parseMessageParts(text);
-  const hasMedia = parts.some((part) => part.type !== "text");
+async function copyText(value) {
+  const text = String(value || "");
+  if (!text) return false;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+  return true;
+}
 
-  if (!hasMedia) return <TypingText text={text} active={Boolean(typing)} />;
+function useTypedText(text, active, animationKey = "") {
+  const fullText = String(text || "");
+  const key = animationKey ? String(animationKey) : "";
+  const alreadyAnimated = Boolean(key && typedTextAnimationKeys.has(key));
+  const [shown, setShown] = useState(active && !alreadyAnimated ? "" : fullText);
+
+  useEffect(() => {
+    if (!active || (key && typedTextAnimationKeys.has(key))) {
+      setShown(fullText);
+      return undefined;
+    }
+
+    const chars = [...fullText];
+    let index = 0;
+    setShown((current) => {
+      const currentText = String(current || "");
+      const prefix = fullText.startsWith(currentText) ? currentText : "";
+      index = [...prefix].length;
+      return prefix;
+    });
+
+    if (index >= chars.length) {
+      if (key) typedTextAnimationKeys.add(key);
+      setShown(fullText);
+      return undefined;
+    }
+
+    const step = Math.max(1, Math.floor(chars.length / 180));
+    const timer = setInterval(() => {
+      index += step;
+      const next = chars.slice(0, index).join("");
+      setShown(next);
+      if (index >= chars.length) {
+        if (key) typedTextAnimationKeys.add(key);
+        clearInterval(timer);
+      }
+    }, 12);
+    return () => clearInterval(timer);
+  }, [fullText, active, key]);
+
+  return shown;
+}
+
+function TypingText({ text, active }) {
+  const shown = useTypedText(text, active);
+  return <span className={active && shown.length < String(text || "").length ? "typing-caret" : ""}>{shown}</span>;
+}
+
+function CodeBlock({ code, language = "" }) {
+  const [copied, setCopied] = useState(false);
+  const label = language || "text";
+
+  async function copyCode() {
+    await copyText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  }
+
+  return (
+    <div className="code-card">
+      <div className="code-card-head">
+        <span><Code2 size={14} /> {label}</span>
+        <button type="button" onClick={copyCode} title="复制代码">
+          {copied ? <CheckSquare size={14} /> : <Copy size={14} />}
+          {copied ? "已复制" : "复制"}
+        </button>
+      </div>
+      <pre className="markdown-pre">
+        <code className={language ? `language-${language}` : ""}>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+function MessageImage({ src, alt, token }) {
+  const [open, setOpen] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const imageUrl = localFileUrl(src, token);
+
+  if (failed) {
+    return (
+      <a className="message-image-fallback" href={imageUrl} target="_blank" rel="noreferrer">
+        <ImageOff size={18} />
+        <span>{alt || pathBaseName(src) || "Image failed to load"}</span>
+      </a>
+    );
+  }
 
   return (
     <>
-      {parts.map((part, index) => {
-        if (part.type === "image") {
-          const src = localFileUrl(part.src, token);
-          return (
-            <a className="message-image-link" href={src} target="_blank" rel="noreferrer" key={`${index}-image`}>
-              <img className="message-image" src={src} alt={part.alt} loading="lazy" />
+      <button className="message-image-link" type="button" onClick={() => setOpen(true)} title="放大图片">
+        <img className="message-image" src={imageUrl} alt={alt || "image"} loading="lazy" onError={() => setFailed(true)} />
+      </button>
+      {open ? (
+        <div className="image-lightbox" role="dialog" aria-modal="true" onClick={() => setOpen(false)}>
+          <div className="image-lightbox-bar" onClick={(event) => event.stopPropagation()}>
+            <span>{alt || pathBaseName(src)}</span>
+            <a href={imageUrl} download={pathBaseName(src)} title="下载图片">
+              <Download size={17} />
             </a>
-          );
-        }
-
-        if (part.type === "link") {
-          const href = localFileUrl(part.href, token);
-          return (
-            <a className="message-link" href={href} target="_blank" rel="noreferrer" key={`${index}-link`}>
-              {part.text}
+            <a href={imageUrl} target="_blank" rel="noreferrer" title="新窗口打开">
+              <ExternalLink size={17} />
             </a>
-          );
-        }
-
-        return <React.Fragment key={`${index}-text`}>{part.text}</React.Fragment>;
-      })}
+            <button type="button" onClick={() => setOpen(false)} title="关闭">
+              <X size={18} />
+            </button>
+          </div>
+          <img src={imageUrl} alt={alt || "image"} onClick={(event) => event.stopPropagation()} />
+        </div>
+      ) : null}
     </>
   );
 }
 
-function TypingText({ text, active }) {
-  const [shown, setShown] = useState(active ? "" : text);
+function MarkdownLink({ href, children, token }) {
+  const url = localFileUrl(href || "", token);
+  return (
+    <a className={cx("message-link", isArtifactPath(href) && "artifact-inline-link")} href={url} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  );
+}
 
-  useEffect(() => {
-    if (!active) {
-      setShown(text);
-      return undefined;
-    }
+function MarkdownCode({ inline, className, children, node, ...props }) {
+  const code = String(children || "").replace(/\n$/, "");
+  const match = /language-([A-Za-z0-9_-]+)/.exec(className || "");
+  if (inline || (!match && !code.includes("\n"))) {
+    return <code className={className} {...props}>{children}</code>;
+  }
+  return <CodeBlock code={code} language={match?.[1] || ""} />;
+}
 
-    let index = 0;
-    setShown("");
-    const chars = [...String(text)];
-    const timer = setInterval(() => {
-      index += Math.max(1, Math.floor(chars.length / 180));
-      setShown(chars.slice(0, index).join(""));
-      if (index >= chars.length) clearInterval(timer);
-    }, 12);
-    return () => clearInterval(timer);
-  }, [text, active]);
+function ArtifactList({ artifacts = [] }) {
+  if (!artifacts.length) return null;
+  return (
+    <div className="artifact-list">
+      {artifacts.map((item) => (
+        <a className="artifact-card" href={item.href} target="_blank" rel="noreferrer" key={item.raw}>
+          <File size={17} />
+          <span>
+            <strong>{item.label}</strong>
+            <small>{item.kind}</small>
+          </span>
+          <ExternalLink size={15} />
+        </a>
+      ))}
+    </div>
+  );
+}
 
-  return <span className={active && shown.length < text.length ? "typing-caret" : ""}>{shown}</span>;
+function MessageContent({ text, typing, token, typingKey = "" }) {
+  const shown = useTypedText(text, Boolean(typing), typingKey);
+  const markdown = normalizeMarkdownText(shown);
+
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex, rehypeHighlight]}
+        components={{
+          a: ({ href, children }) => <MarkdownLink href={href} token={token}>{children}</MarkdownLink>,
+          img: ({ src, alt }) => <MessageImage src={src} alt={alt} token={token} />,
+          pre: ({ children }) => <>{children}</>,
+          code: MarkdownCode,
+          input: ({ checked, node, ...props }) => <input type="checkbox" checked={Boolean(checked)} readOnly {...props} />
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 function ThinkingIndicator({ text = "Thinking" }) {
@@ -855,19 +1426,31 @@ function commandStatusLabel(status) {
   return "done";
 }
 
-function CommandSummary({ commands = [] }) {
+function commandMetaText(command) {
+  return [
+    command.namespace ? `${command.namespace}.${command.name || "tool"}` : command.name || "tool",
+    command.callId ? `call ${command.callId}` : "",
+    command.toolCallId ? `tool ${command.toolCallId}` : "",
+    Number.isFinite(Number(command.exitCode)) ? `exit ${command.exitCode}` : ""
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function CommandSummary({ commands = [], commandCount = 0, running = false }) {
   const [expanded, setExpanded] = useState(false);
   const visibleCommands = commands.filter((item) => item?.command);
-  if (!visibleCommands.length) return null;
+  const count = Math.max(Number(commandCount || 0), visibleCommands.length);
+  if (!count) return null;
 
   return (
     <div className="command-summary">
       <button className="command-toggle" type="button" onClick={() => setExpanded((value) => !value)}>
         <Terminal className="command-icon" size={16} aria-hidden="true" />
-        <span>已运行 {visibleCommands.length} 条命令</span>
-        <ChevronRight className={cx("turn-chevron", expanded && "open")} size={16} aria-hidden="true" />
+        <span>{running ? "正在运行" : "已运行"} {count} 条命令</span>
+        {visibleCommands.length ? <ChevronRight className={cx("turn-chevron", expanded && "open")} size={16} aria-hidden="true" /> : null}
       </button>
-      {expanded ? (
+      {expanded && visibleCommands.length ? (
         <div className="command-list">
           {visibleCommands.map((command, index) => (
             <section className="command-item" key={`${command.id || command.command}-${index}`}>
@@ -875,6 +1458,7 @@ function CommandSummary({ commands = [] }) {
                 <strong>{command.name || "command"}</strong>
                 <span className={cx("command-status", command.status)}>{commandStatusLabel(command.status)}</span>
               </div>
+              {commandMetaText(command) ? <div className="command-meta">{commandMetaText(command)}</div> : null}
               {command.workdir ? <div className="command-workdir">{command.workdir}</div> : null}
               <pre className="command-code">{command.command}</pre>
               {command.output ? <pre className="command-output">{command.output}</pre> : null}
@@ -886,26 +1470,282 @@ function CommandSummary({ commands = [] }) {
   );
 }
 
-function Message({ role, text, typing, pending, token, durationMs, commands = [] }) {
-  if (!text || role === "debug") return null;
+function Message({
+  role,
+  text,
+  typing,
+  typingKey = "",
+  pending,
+  token,
+  durationMs,
+  commands = [],
+  commandCount = 0,
+  commandRunning = false,
+  running: commandsRunning = false,
+  live = false,
+  streaming = false,
+  turnId = "",
+  liveKey = "",
+  messageKey = "",
+  located = false,
+  onEdit,
+  onDelete,
+  onRegenerate,
+  onLocate
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const displayText = role === "user" ? stripUserAttachmentMetadata(text) : text;
   const label = role === "user" ? "You" : role === "assistant" ? "Agent" : role === "error" ? "Error" : "System";
   const durationLabel = role === "assistant" ? formatDurationMs(durationMs) : "";
+  const artifacts = pending ? [] : extractArtifactLinks(displayText, token);
+  const preview = compact(displayText, "").slice(0, 180);
+  const operationMessage = { role, text, turnId, liveKey, pending, live };
+  const canOperate = !pending && !live;
+  const canEdit = canOperate && role === "user" && Boolean(onEdit);
+  const canRegenerate = canOperate && role === "assistant" && Boolean(onRegenerate);
+  const canDelete = canOperate && !isSystemMessage({ role }) && Boolean(onDelete);
+
+  useEffect(() => {
+    if (!editing) setDraft(displayText);
+  }, [displayText, editing]);
+
+  if (!text || role === "debug" || !displayText) return null;
+
+  async function copyMessage() {
+    await copyText(displayText);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  }
+
+  function startEditing() {
+    setDraft(displayText);
+    setCollapsed(false);
+    setEditing(true);
+  }
+
+  function saveEdit() {
+    const nextText = draft.trim();
+    if (!nextText) return;
+    onEdit?.(operationMessage, nextText);
+    setEditing(false);
+  }
+
   return (
-    <article className={cx("message", role === "assistant" ? "assistant" : role, pending && "pending")}>
-      {durationLabel ? <div className="turn-meta">已处理 {durationLabel}⌄</div> : null}
-      <div className="message-role">{label}</div>
-      <div className="message-bubble">
-        {pending ? <ThinkingIndicator text={text} /> : <MessageContent text={text} typing={typing} token={token} />}
+    <article
+      className={cx("message", role === "assistant" ? "assistant" : role, pending && "pending", live && "live", streaming && "streaming", located && "located")}
+      data-message-key={messageKey}
+    >
+      {durationLabel ? (
+        <div className="turn-meta">
+          <span>已处理 {durationLabel}</span>
+          <ChevronDown size={14} aria-hidden="true" />
+        </div>
+      ) : null}
+      <div className="message-topline">
+        <div className="message-role">{live ? `${label} · live` : label}</div>
+        <div className="message-actions">
+          <button type="button" onClick={copyMessage} title="复制消息">
+            {copied ? <CheckSquare size={14} /> : <Copy size={14} />}
+            <span>{copied ? "已复制" : "复制"}</span>
+          </button>
+          <button type="button" onClick={() => onLocate?.(messageKey)} title="定位消息">
+            <LocateFixed size={14} />
+            <span>定位</span>
+          </button>
+          {canEdit ? (
+            <button type="button" onClick={startEditing} title="编辑消息">
+              <Pencil size={14} />
+              <span>编辑</span>
+            </button>
+          ) : null}
+          {canRegenerate ? (
+            <button type="button" onClick={() => onRegenerate?.(operationMessage)} title="重新生成">
+              <RotateCcw size={14} />
+              <span>重试</span>
+            </button>
+          ) : null}
+          {canDelete ? (
+            <button type="button" onClick={() => onDelete?.(operationMessage)} title="删除消息">
+              <Trash2 size={14} />
+              <span>删除</span>
+            </button>
+          ) : null}
+          <button type="button" onClick={() => setCollapsed((value) => !value)} title={collapsed ? "展开消息" : "折叠消息"}>
+            {collapsed ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+            <span>{collapsed ? "展开" : "折叠"}</span>
+          </button>
+        </div>
       </div>
-      {role === "assistant" ? <CommandSummary commands={commands} /> : null}
+      <div className="message-bubble">
+        {collapsed ? (
+          <div className="message-collapsed">{preview || "已折叠"}</div>
+        ) : pending ? (
+          <ThinkingIndicator text={displayText} />
+        ) : editing ? (
+          <div className="message-editor">
+            <textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={Math.min(10, Math.max(3, draft.split(/\r?\n/).length))} />
+            <div className="message-editor-actions">
+              <button type="button" onClick={() => setEditing(false)}>取消</button>
+              <button type="button" onClick={saveEdit} disabled={!draft.trim()}>保存</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <MessageContent text={displayText} typing={typing && !live} typingKey={typingKey || messageKey} token={token} />
+            {live && streaming ? <span className="typing-caret live-stream-caret" aria-hidden="true" /> : null}
+            <ArtifactList artifacts={artifacts} />
+          </>
+        )}
+      </div>
+      {role === "assistant" ? <CommandSummary commands={commands} commandCount={commandCount} running={commandRunning || commandsRunning} /> : null}
     </article>
   );
 }
 
+function parseDiffHeaderPath(value = "") {
+  const clean = String(value || "").trim();
+  if (clean === "/dev/null") return "";
+  return clean.replace(/^(a|b)\//, "").replace(/^"|"$/g, "");
+}
+
+function parseUnifiedDiff(diff = "") {
+  const files = [];
+  let current = null;
+  let currentHunk = null;
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (const rawLine of String(diff || "").split(/\r?\n/)) {
+    const fileMatch = rawLine.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (fileMatch) {
+      current = {
+        oldPath: fileMatch[1],
+        path: fileMatch[2],
+        status: "M",
+        additions: 0,
+        deletions: 0,
+        hunks: []
+      };
+      files.push(current);
+      currentHunk = null;
+      continue;
+    }
+
+    if (!current) continue;
+    if (/^new file mode\b/.test(rawLine)) current.status = "A";
+    if (/^deleted file mode\b/.test(rawLine)) current.status = "D";
+    if (/^rename from\b/.test(rawLine)) current.status = "R";
+    if (rawLine.startsWith("--- ")) {
+      current.oldPath = parseDiffHeaderPath(rawLine.slice(4)) || current.oldPath;
+      continue;
+    }
+    if (rawLine.startsWith("+++ ")) {
+      current.path = parseDiffHeaderPath(rawLine.slice(4)) || current.path;
+      continue;
+    }
+
+    const hunkMatch = rawLine.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@(.*)$/);
+    if (hunkMatch) {
+      oldLine = Number(hunkMatch[1]) || 0;
+      newLine = Number(hunkMatch[2]) || 0;
+      currentHunk = {
+        header: rawLine,
+        lines: []
+      };
+      current.hunks.push(currentHunk);
+      continue;
+    }
+
+    if (!currentHunk) continue;
+    const prefix = rawLine[0] || " ";
+    const body = rawLine.slice(1);
+    if (prefix === "+") {
+      current.additions += 1;
+      currentHunk.lines.push({ type: "add", oldLine: "", newLine: newLine++, text: body });
+    } else if (prefix === "-") {
+      current.deletions += 1;
+      currentHunk.lines.push({ type: "del", oldLine: oldLine++, newLine: "", text: body });
+    } else if (prefix === "\\") {
+      currentHunk.lines.push({ type: "meta", oldLine: "", newLine: "", text: rawLine });
+    } else {
+      currentHunk.lines.push({ type: "ctx", oldLine: oldLine++, newLine: newLine++, text: body });
+    }
+  }
+
+  return files;
+}
+
+function mergeChangeFiles(summaryFiles = [], diffFiles = []) {
+  const byPath = new Map();
+  for (const file of diffFiles) {
+    const key = file.path || file.oldPath;
+    byPath.set(key, { ...file });
+  }
+  for (const file of summaryFiles || []) {
+    const key = file.path || file.oldPath;
+    if (!key) continue;
+    byPath.set(key, {
+      ...(byPath.get(key) || {}),
+      ...file,
+      path: file.path || byPath.get(key)?.path || key,
+      oldPath: file.oldPath || byPath.get(key)?.oldPath || file.path || key
+    });
+  }
+  return [...byPath.values()];
+}
+
+function DiffLine({ line }) {
+  return (
+    <div className={cx("diff-line", line.type)}>
+      <span className="diff-gutter">{line.oldLine}</span>
+      <span className="diff-gutter">{line.newLine}</span>
+      <code>{line.type === "add" ? "+" : line.type === "del" ? "-" : line.type === "meta" ? "\\" : " "}{line.text}</code>
+    </div>
+  );
+}
+
+function DiffViewer({ file }) {
+  if (!file?.hunks?.length) {
+    return <div className="change-empty">这个文件当前没有可显示的 patch，可能是二进制文件或未跟踪文件超过预览限制。</div>;
+  }
+  return (
+    <div className="diff-viewer">
+      {file.hunks.map((hunk, index) => (
+        <section className="diff-hunk" key={`${file.path}-${index}`}>
+          <div className="diff-hunk-head">{hunk.header}</div>
+          <div className="diff-lines">
+            {hunk.lines.slice(0, 480).map((line, lineIndex) => <DiffLine line={line} key={`${index}-${lineIndex}`} />)}
+            {hunk.lines.length > 480 ? <div className="diff-truncated">已截断 {hunk.lines.length - 480} 行，完整 diff 仍保留在 API 响应中。</div> : null}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function ChangeCard({ summary }) {
+  const [expanded, setExpanded] = useState(false);
+  const [activePath, setActivePath] = useState("");
+  const diffFiles = useMemo(() => parseUnifiedDiff(summary?.diff || ""), [summary?.diff]);
+  const files = useMemo(() => mergeChangeFiles(summary?.files || [], diffFiles), [summary?.files, diffFiles]);
+  const activeFile = files.find((file) => (file.path || file.oldPath) === activePath) || files[0] || null;
+  const additions = files.reduce((sum, file) => sum + Number(file.additions || 0), 0);
+  const deletions = files.reduce((sum, file) => sum + Number(file.deletions || 0), 0);
+  const title = summary?.kind === "workspace" ? "Workspace changes" : "Task changes";
+
+  useEffect(() => {
+    if (!files.length) {
+      setActivePath("");
+      return;
+    }
+    if (!files.some((file) => (file.path || file.oldPath) === activePath)) setActivePath(files[0].path || files[0].oldPath);
+  }, [files, activePath]);
+
   if (!summary) return null;
-  const files = summary.files || [];
-  const title = summary.kind === "workspace" ? "Workspace changes" : "Task changes";
+
   return (
     <section className="change-card">
       <div className="change-card-head">
@@ -913,26 +1753,51 @@ function ChangeCard({ summary }) {
           <h3>{title}</h3>
           <p>{summary.workspace?.title || summary.workspace?.path || summary.cwd || ""}</p>
         </div>
-        <span className={cx("change-pill", summary.ok ? "ready" : "waiting")}>{summary.ok ? "Ready" : "Unavailable"}</span>
+        <div className="change-actions">
+          <span className={cx("change-pill", summary.ok ? "ready" : "waiting")}>{summary.ok ? "Ready" : "Unavailable"}</span>
+          {summary.diff ? (
+            <button className="change-expand" type="button" onClick={() => setExpanded((value) => !value)}>
+              {expanded ? "收起 diff" : "查看 diff"}
+              <ChevronRight className={cx("turn-chevron", expanded && "open")} size={15} />
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="change-metrics">
         <span>{summary.changedCount ?? summary.fileCount ?? files.length} files</span>
         <span>{summary.lineCount || 0} diff lines</span>
+        {additions || deletions ? <span className="change-plus-minus">+{additions} -{deletions}</span> : null}
         {summary.branch ? <span>{summary.branch}</span> : null}
       </div>
       {files.length ? (
         <div className="change-files">
-          {files.slice(0, 6).map((file, index) => (
-            <div className="change-file" key={`${file.path || file.oldPath || index}-${index}`}>
-              <span>{file.status || "M"}</span>
-              <strong>{file.path || file.oldPath}</strong>
-            </div>
-          ))}
-          {files.length > 6 ? <div className="change-more">{files.length - 6} more files</div> : null}
+          {files.slice(0, expanded ? files.length : 8).map((file, index) => {
+            const key = file.path || file.oldPath || `${index}`;
+            return (
+              <button className={cx("change-file", activeFile && key === (activeFile.path || activeFile.oldPath) && "active")} type="button" key={`${key}-${index}`} onClick={() => {
+                setActivePath(key);
+                setExpanded(true);
+              }}>
+                <span>{file.status || "M"}</span>
+                <strong>{key}</strong>
+                <small>+{file.additions || 0} -{file.deletions || 0}</small>
+              </button>
+            );
+          })}
+          {!expanded && files.length > 8 ? <div className="change-more">{files.length - 8} more files</div> : null}
         </div>
       ) : (
-        <div className="change-empty">{summary.stderr || "No workspace diff"}</div>
+        <div className="change-empty">{summary.stderr || summary.error || "No workspace diff"}</div>
       )}
+      {expanded && activeFile ? (
+        <div className="change-diff-panel">
+          <div className="change-diff-head">
+            <strong>{activeFile.path || activeFile.oldPath}</strong>
+            <span>+{activeFile.additions || 0} -{activeFile.deletions || 0}</span>
+          </div>
+          <DiffViewer file={activeFile} />
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -943,6 +1808,21 @@ function LoginView({ onLogin, initialError = "" }) {
   const [anthropic, setAnthropic] = useState("");
   const [rememberKeys, setRememberKeys] = useState(false);
   const [error, setError] = useState(initialError);
+  const params = new URLSearchParams(location.search);
+  const [pairingSession, setPairingSession] = useState(() => {
+    const id = params.get("pair") || "";
+    const code = params.get("code") || "";
+    return id ? { id, code, status: "pending" } : null;
+  });
+  const [pairingQrSvg, setPairingQrSvg] = useState("");
+  const [pairingUrl, setPairingUrl] = useState("");
+  const [pairingBusy, setPairingBusy] = useState(false);
+
+  function completeLogin(result) {
+    const nextToken = result.token || pairingToken;
+    localStorage.setItem("mat.token", nextToken);
+    onLogin(nextToken);
+  }
 
   async function submit(event) {
     event.preventDefault();
@@ -962,13 +1842,75 @@ function LoginView({ onLogin, initialError = "" }) {
         },
         ""
       );
-      const nextToken = result.token || pairingToken;
-      localStorage.setItem("mat.token", nextToken);
-      onLogin(nextToken);
+      completeLogin(result);
     } catch (err) {
       setError(err.message);
     }
   }
+
+  async function createPairing() {
+    setPairingBusy(true);
+    setError("");
+    try {
+      const result = await request(
+        "/api/pairing-sessions",
+        {
+          method: "POST",
+          auth: false,
+          body: JSON.stringify({ deviceLabel: navigator.userAgent || "Browser" })
+        },
+        ""
+      );
+      setPairingSession({ ...result.session, code: result.session.code });
+      setPairingQrSvg(result.qrSvg || "");
+      setPairingUrl(result.pairingUrl || "");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
+  async function claimPairing(session = pairingSession) {
+    if (!session?.id || !session?.code) return;
+    try {
+      const result = await request(
+        `/api/pairing-sessions/${encodeURIComponent(session.id)}/claim`,
+        {
+          method: "POST",
+          auth: false,
+          body: JSON.stringify({ code: session.code, deviceLabel: navigator.userAgent || "Browser" })
+        },
+        ""
+      );
+      completeLogin(result);
+    } catch (err) {
+      if (err.status !== 409) setError(err.message);
+    }
+  }
+
+  useEffect(() => {
+    if (!pairingSession?.id) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const result = await request(`/api/pairing-sessions/${encodeURIComponent(pairingSession.id)}`, { auth: false }, "");
+        if (cancelled) return;
+        setPairingSession((current) => ({ ...(current || {}), ...(result.session || {}), code: current?.code || pairingSession.code || "" }));
+        if (result.session?.status === "approved") await claimPairing({ ...result.session, code: pairingSession.code });
+      } catch (err) {
+        if (!cancelled && err.status !== 404) setError(err.message);
+      }
+    };
+    poll().catch(() => {});
+    const timer = setInterval(() => {
+      poll().catch(() => {});
+    }, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [pairingSession?.id, pairingSession?.code]);
 
   return (
     <section className="login-screen">
@@ -980,6 +1922,23 @@ function LoginView({ onLogin, initialError = "" }) {
         </div>
       </div>
       <form className="panel" onSubmit={submit}>
+        <div className="pairing-card">
+          <div>
+            <strong>QR pairing</strong>
+            <small>{pairingSession ? `Status: ${pairingSession.status || "pending"}` : "Create a short-lived pairing session, then approve it from an existing device."}</small>
+          </div>
+          {pairingQrSvg ? <div className="qr-box" dangerouslySetInnerHTML={{ __html: pairingQrSvg }} /> : null}
+          {pairingSession?.code ? <code className="pairing-code">{pairingSession.code}</code> : null}
+          {pairingUrl ? <small className="pairing-url">{pairingUrl}</small> : null}
+          <button className="secondary-button" type="button" onClick={createPairing} disabled={pairingBusy}>
+            {pairingBusy ? "Creating..." : "Create pairing QR"}
+          </button>
+          {pairingSession?.id && pairingSession?.code ? (
+            <button className="secondary-button" type="button" onClick={() => claimPairing()}>
+              Claim after approval
+            </button>
+          ) : null}
+        </div>
         <label>
           <span>Pairing token</span>
           <input value={pairingToken} onChange={(event) => setPairingToken(event.target.value)} autoComplete="one-time-code" />
@@ -1147,30 +2106,40 @@ function Composer({
   const canStop = running && !isDesktop && Boolean(runningTaskId);
   const placeholder = isDesktop ? "向 Codex Desktop 发送消息" : providers.length ? "向 Agent 发送消息" : "先在设置中添加 API key";
   const targetText = targetLabel({ isDesktop, selected, activeAgent });
+  const agentOptions = isDesktop && !providers.includes("codex") ? ["codex", ...providers] : providers;
+  const modelAgent = isDesktop ? "codex" : activeAgent;
 
   useEffect(() => {
     if (text.trim()) localStorage.setItem("mat.composerDraft", text);
     else localStorage.removeItem("mat.composerDraft");
   }, [text]);
 
+  function attachmentPromptText(item, { display = false } = {}) {
+    if (item.kind === "workspace") {
+      return display ? `Attached workspace context: ${item.name}` : item.prompt || "";
+    }
+
+    const fileUrl = item.url || item.path;
+    const markdown = item.kind === "image" ? `![${item.name}](${fileUrl})` : `[${item.name}](${fileUrl})`;
+    if (display) return markdown;
+
+    const localPath = item.path && item.url ? `\nLocal file: ${item.path}` : "";
+    const relativePath = item.relativePath ? `\nRelative path: ${item.relativePath}` : "";
+    const preview = item.preview ? `\n\n<attachment_preview name="${item.name}">\n${item.preview.slice(0, 12000)}\n</attachment_preview>` : "";
+    return `${markdown}${localPath}${relativePath}${preview}`;
+  }
+
   function submit(event) {
     event.preventDefault();
-    const attachmentText = readyAttachments
-      .map((item) => {
-        if (item.kind === "workspace") return item.prompt || "";
-        const fileUrl = item.url || item.path;
-        const localPath = item.path && item.url ? `\nLocal file: ${item.path}` : "";
-        const relativePath = item.relativePath ? `\nRelative path: ${item.relativePath}` : "";
-        const preview = item.preview ? `\n\n<attachment_preview name="${item.name}">\n${item.preview.slice(0, 12000)}\n</attachment_preview>` : "";
-        if (item.kind === "image") return `![${item.name}](${fileUrl})${localPath}${relativePath}${preview}`;
-        return `[${item.name}](${fileUrl})${localPath}${relativePath}${preview}`;
-      })
-      .join("\n\n");
+    const attachmentText = readyAttachments.map((item) => attachmentPromptText(item)).join("\n\n");
+    const displayAttachmentText = readyAttachments.map((item) => attachmentPromptText(item, { display: true })).join("\n\n");
     const value = [text.trim(), attachmentText].filter(Boolean).join("\n\n");
+    const displayValue = [text.trim(), displayAttachmentText].filter(Boolean).join("\n\n") || value;
     if (!value || !canSubmit) return;
     const shouldSendToRunningTask = running && runningTaskId && !isDesktop;
     const existingHistory = promptHistory();
-    const nextHistory = [{ text: text.trim() || value.slice(0, 400), at: new Date().toISOString() }, ...existingHistory.filter((item) => item.text !== (text.trim() || value.slice(0, 400)))].slice(0, 30);
+    const historyText = text.trim() || displayValue.slice(0, 400);
+    const nextHistory = [{ text: historyText, at: new Date().toISOString() }, ...existingHistory.filter((item) => item.text !== historyText)].slice(0, 30);
     localStorage.setItem("mat.promptHistory", JSON.stringify(nextHistory));
     attachments.forEach((item) => {
       if (item.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(item.previewUrl);
@@ -1186,8 +2155,8 @@ function Composer({
     setTargetMenuOpen(false);
     setModelMenuOpen(false);
     setPermissionMenuOpen(false);
-    if (shouldSendToRunningTask) onRunningInput(runningTaskId, value);
-    else onSend(value);
+    if (shouldSendToRunningTask) onRunningInput(runningTaskId, value, displayValue);
+    else onSend(value, displayValue);
   }
 
   function updateText(value) {
@@ -1613,44 +2582,41 @@ function Composer({
             <span className={cx("remote-pill", desktopRemote?.desktop?.ready ? "ready" : "waiting")}>
               {desktopPillLabel(desktopRemote?.desktop)}
             </span>
-          ) : (
-            <>
-              <button
-                className="chip-button mode-chip"
-                type="button"
-                aria-pressed={modelMenuOpen}
-                onClick={() => {
-                  setModelMenuOpen((value) => !value);
-                  setPermissionMenuOpen(false);
-                  setTargetMenuOpen(false);
-                  setMenuOpen(false);
-                  setCommandOpen(false);
-                  setHistoryOpen(false);
-                  setWorkspacePickerOpen(false);
-                }}
-              >
-                <SlidersHorizontal size={14} />
-                {activeModel || "默认模型"} · {effortLabel(reasoningEffort)}
-              </button>
-              <button
-                className="chip-button mode-chip"
-                type="button"
-                aria-pressed={permissionMenuOpen || permissionMode === "plan"}
-                onClick={() => {
-                  setPermissionMenuOpen((value) => !value);
-                  setModelMenuOpen(false);
-                  setTargetMenuOpen(false);
-                  setMenuOpen(false);
-                  setCommandOpen(false);
-                  setHistoryOpen(false);
-                  setWorkspacePickerOpen(false);
-                }}
-              >
-                <CheckSquare size={14} />
-                {permissionLabel(permissionMode)}
-              </button>
-            </>
-          )}
+          ) : null}
+          <button
+            className="chip-button mode-chip"
+            type="button"
+            aria-pressed={modelMenuOpen}
+            onClick={() => {
+              setModelMenuOpen((value) => !value);
+              setPermissionMenuOpen(false);
+              setTargetMenuOpen(false);
+              setMenuOpen(false);
+              setCommandOpen(false);
+              setHistoryOpen(false);
+              setWorkspacePickerOpen(false);
+            }}
+          >
+            <SlidersHorizontal size={14} />
+            {isDesktop ? "Desktop 当前设置" : `${activeModel || "默认模型"} · ${effortLabel(reasoningEffort)}`}
+          </button>
+          <button
+            className="chip-button mode-chip"
+            type="button"
+            aria-pressed={permissionMenuOpen || permissionMode === "plan"}
+            onClick={() => {
+              setPermissionMenuOpen((value) => !value);
+              setModelMenuOpen(false);
+              setTargetMenuOpen(false);
+              setMenuOpen(false);
+              setCommandOpen(false);
+              setHistoryOpen(false);
+              setWorkspacePickerOpen(false);
+            }}
+          >
+            <CheckSquare size={14} />
+            {isDesktop ? "Desktop 当前权限" : permissionLabel(permissionMode)}
+          </button>
         </div>
         <div className={cx("run-state", (running || desktopRemote?.active) && "running")}>
           {isDesktop ? desktopQueueLabel(desktopRemote) : running ? "运行中" : targetText}
@@ -1697,56 +2663,79 @@ function Composer({
         <div className="composer-popover composer-settings-menu">
           <label className="composer-field-row">
             <span>Agent</span>
-            <select value={activeAgent} onChange={(event) => setActiveAgent(event.target.value)} disabled={providers.length <= 1}>
-              {providers.map((provider) => (
+            <select value={isDesktop ? "codex" : activeAgent} onChange={(event) => setActiveAgent(event.target.value)} disabled={isDesktop || agentOptions.length <= 1}>
+              {agentOptions.map((provider) => (
                 <option key={provider} value={provider}>
-                  {providerLabel(provider)}
+                  {provider === "codex" && isDesktop ? "Codex Desktop" : providerLabel(provider)}
                 </option>
               ))}
             </select>
           </label>
           <label className="composer-field-row">
             <span>模型</span>
-            <select value={activeModel} onChange={(event) => setActiveModel(event.target.value)}>
-              <option value="">默认模型</option>
-              {activeAgent === "claude" ? (
-                <>
-                  <option value="opus">opus</option>
-                  <option value="sonnet">sonnet</option>
-                  <option value="fable">fable</option>
-                </>
-              ) : (
-                <>
-                  <option value="gpt-5.5">gpt-5.5</option>
-                  <option value="gpt-5.5[1m]">gpt-5.5[1m]</option>
-                  <option value="gpt-5.4">gpt-5.4</option>
-                </>
-              )}
-            </select>
+            {isDesktop ? (
+              <select value="desktop-current" disabled>
+                <option value="desktop-current">当前 Desktop 设置</option>
+              </select>
+            ) : (
+              <select value={activeModel} onChange={(event) => setActiveModel(event.target.value)}>
+                <option value="">默认模型</option>
+                {modelAgent === "claude" ? (
+                  <>
+                    <option value="opus">opus</option>
+                    <option value="sonnet">sonnet</option>
+                    <option value="fable">fable</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="gpt-5.5">gpt-5.5</option>
+                    <option value="gpt-5.5[1m]">gpt-5.5[1m]</option>
+                    <option value="gpt-5.4">gpt-5.4</option>
+                  </>
+                )}
+              </select>
+            )}
           </label>
           <label className="composer-field-row">
             <span>推理强度</span>
-            <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)}>
-              <option value="">默认</option>
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高</option>
-              <option value="xhigh">超高</option>
-              {activeAgent === "claude" ? <option value="max">最大</option> : null}
-            </select>
+            {isDesktop ? (
+              <select value="desktop-current" disabled>
+                <option value="desktop-current">当前 Desktop 设置</option>
+              </select>
+            ) : (
+              <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)}>
+                <option value="">默认</option>
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
+                <option value="xhigh">超高</option>
+                {modelAgent === "claude" ? <option value="max">最大</option> : null}
+              </select>
+            )}
           </label>
         </div>
       ) : null}
       {permissionMenuOpen ? (
         <div className="composer-popover permission-menu">
-          {[
+          {isDesktop ? (
+            <button className="add-menu-item" type="button" disabled>
+              <span className="menu-icon">
+                <CheckSquare size={17} />
+              </span>
+              <span>
+                <strong>Desktop 当前权限</strong>
+                <small>由 Codex Desktop 当前会话设置决定</small>
+              </span>
+            </button>
+          ) : (
+            [
             ["default", "默认权限", "按当前项目配置执行"],
             ["acceptEdits", "自动接受编辑", "允许直接应用文件编辑"],
             ["auto", "自动模式", "尽量自动执行安全操作"],
             ["dontAsk", "无需确认", "减少交互确认"],
             ["plan", "计划模式", "先规划再执行"],
             ["bypassPermissions", "完全访问", "允许本机完全访问"]
-          ].map(([value, title, detail]) => (
+            ].map(([value, title, detail]) => (
             <button
               className="add-menu-item"
               type="button"
@@ -1765,7 +2754,8 @@ function Composer({
                 <small>{detail}</small>
               </span>
             </button>
-          ))}
+            ))
+          )}
         </div>
       ) : null}
       {menuOpen ? (
@@ -1948,19 +2938,154 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
   const [claudeCommand, setClaudeCommand] = useState(settings?.claudeCommand || "claude");
   const [codexCommand, setCodexCommand] = useState(settings?.codexCommand || "auto");
   const [codexTemplate, setCodexTemplate] = useState(settings?.codexTemplate || "");
+  const [hostAllowlist, setHostAllowlist] = useState((settings?.hostAllowlist || []).join("\n"));
+  const [allowTryCloudflare, setAllowTryCloudflare] = useState(Boolean(settings?.allowTryCloudflare));
+  const [allowLegacyPairingTokenLogin, setAllowLegacyPairingTokenLogin] = useState(Boolean(settings?.allowLegacyPairingTokenLogin));
+  const [notificationEmail, setNotificationEmail] = useState("");
   const [probeRunning, setProbeRunning] = useState(false);
   const [probeResult, setProbeResult] = useState(null);
   const [probeError, setProbeError] = useState("");
   const [desktopRunning, setDesktopRunning] = useState("");
   const [desktopResult, setDesktopResult] = useState(null);
   const [desktopError, setDesktopError] = useState("");
+  const [securityBusy, setSecurityBusy] = useState("");
+  const [securityError, setSecurityError] = useState("");
+  const [securityNotice, setSecurityNotice] = useState("");
+  const [devices, setDevices] = useState([]);
+  const [currentDeviceId, setCurrentDeviceId] = useState("");
+  const [pairingSessions, setPairingSessions] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [cloudflare, setCloudflare] = useState(null);
+  const [pushState, setPushState] = useState("");
 
   useEffect(() => {
     setDefaultCwd(settings?.defaultCwd || "");
     setClaudeCommand(settings?.claudeCommand || "claude");
     setCodexCommand(settings?.codexCommand || "auto");
     setCodexTemplate(settings?.codexTemplate || "");
+    setHostAllowlist((settings?.hostAllowlist || []).join("\n"));
+    setAllowTryCloudflare(Boolean(settings?.allowTryCloudflare));
+    setAllowLegacyPairingTokenLogin(Boolean(settings?.allowLegacyPairingTokenLogin));
   }, [settings]);
+
+  async function refreshSecurity() {
+    setSecurityError("");
+    try {
+      const [deviceResult, pairingResult, auditResult, cloudflareResult] = await Promise.all([
+        request("/api/devices", {}, token),
+        request("/api/pairing-sessions", {}, token),
+        request("/api/audit-log?limit=12", {}, token),
+        request("/api/cloudflare/guide", {}, token)
+      ]);
+      setDevices(deviceResult.items || []);
+      setCurrentDeviceId(deviceResult.currentDeviceId || "");
+      setPairingSessions(pairingResult.items || []);
+      setAuditLogs(auditResult.items || []);
+      setCloudflare(cloudflareResult);
+    } catch (err) {
+      setSecurityError(err.message);
+    }
+  }
+
+  useEffect(() => {
+    refreshSecurity().catch((err) => setSecurityError(err.message));
+  }, [token]);
+
+  async function approvePairing(id) {
+    setSecurityBusy(id);
+    setSecurityError("");
+    try {
+      await request(`/api/pairing-sessions/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({}) }, token);
+      setSecurityNotice("Pairing session approved.");
+      await refreshSecurity();
+    } catch (err) {
+      setSecurityError(err.message);
+    } finally {
+      setSecurityBusy("");
+    }
+  }
+
+  async function denyPairing(id) {
+    setSecurityBusy(id);
+    setSecurityError("");
+    try {
+      await request(`/api/pairing-sessions/${encodeURIComponent(id)}/deny`, { method: "POST", body: JSON.stringify({}) }, token);
+      setSecurityNotice("Pairing session denied.");
+      await refreshSecurity();
+    } catch (err) {
+      setSecurityError(err.message);
+    } finally {
+      setSecurityBusy("");
+    }
+  }
+
+  async function revokeDevice(id) {
+    if (!window.confirm("Revoke this device token?")) return;
+    setSecurityBusy(id);
+    setSecurityError("");
+    try {
+      await request(`/api/devices/${encodeURIComponent(id)}/revoke`, { method: "POST", body: JSON.stringify({}) }, token);
+      if (id === currentDeviceId) {
+        localStorage.removeItem("mat.token");
+        location.reload();
+        return;
+      }
+      setSecurityNotice("Device revoked.");
+      await refreshSecurity();
+    } catch (err) {
+      setSecurityError(err.message);
+    } finally {
+      setSecurityBusy("");
+    }
+  }
+
+  async function rotateCurrentDevice() {
+    setSecurityBusy("rotate-current");
+    setSecurityError("");
+    try {
+      const result = await request("/api/devices/current/rotate", { method: "POST", body: JSON.stringify({}) }, token);
+      if (result.token) {
+        localStorage.setItem("mat.token", result.token);
+        setSecurityNotice("This device token was rotated and saved locally.");
+        window.setTimeout(() => location.reload(), 450);
+        return;
+      }
+      await refreshSecurity();
+    } catch (err) {
+      setSecurityError(err.message);
+    } finally {
+      setSecurityBusy("");
+    }
+  }
+
+  async function enablePushNotifications() {
+    setPushState("");
+    setSecurityError("");
+    try {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+        setPushState("This browser does not support Web Push.");
+        return;
+      }
+      const publicKey = settings?.webPush?.publicKey || "";
+      if (!publicKey) {
+        setPushState("Web Push key is not ready. Save settings once and retry.");
+        return;
+      }
+      const registration = await navigator.serviceWorker.ready;
+      const existing = await registration.pushManager.getSubscription();
+      const subscription =
+        existing ||
+        (await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey)
+        }));
+      await request("/api/push/subscriptions", { method: "POST", body: JSON.stringify({ subscription }) }, token);
+      setPushState("Web Push enabled for this device.");
+      await refreshSecurity();
+    } catch (err) {
+      setSecurityError(err.message);
+    }
+  }
 
   async function runAppServerProbe() {
     setProbeRunning(true);
@@ -2019,22 +3144,28 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
     const apiKeys = {};
     if (openai.trim()) apiKeys.openai = openai.trim();
     if (anthropic.trim()) apiKeys.anthropic = anthropic.trim();
+    const settingsPatch = {
+      defaultCwd,
+      claudeCommand,
+      codexCommand,
+      codexTemplate,
+      hostAllowlist: hostAllowlist.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean),
+      allowTryCloudflare,
+      allowLegacyPairingTokenLogin,
+      apiKeys
+    };
+    if (notificationEmail.trim()) settingsPatch.notificationEmail = notificationEmail.trim();
     await request(
       "/api/settings",
       {
         method: "POST",
-        body: JSON.stringify({
-          defaultCwd,
-          claudeCommand,
-          codexCommand,
-          codexTemplate,
-          apiKeys
-        })
+        body: JSON.stringify(settingsPatch)
       },
       token
     );
     setOpenai("");
     setAnthropic("");
+    setNotificationEmail("");
     onSaved();
   }
 
@@ -2074,10 +3205,110 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
           <span>Codex template</span>
           <input value={codexTemplate} onChange={(event) => setCodexTemplate(event.target.value)} />
         </label>
+        <label>
+          <span>Host allowlist</span>
+          <textarea
+            value={hostAllowlist}
+            onChange={(event) => setHostAllowlist(event.target.value)}
+            placeholder={"phone.example.com\n*.trycloudflare.com"}
+          />
+        </label>
+        <label className="check-row">
+          <input type="checkbox" checked={allowTryCloudflare} onChange={(event) => setAllowTryCloudflare(event.target.checked)} />
+          <span>Allow registered Cloudflare Tunnel hosts</span>
+        </label>
+        <label className="check-row">
+          <input type="checkbox" checked={allowLegacyPairingTokenLogin} onChange={(event) => setAllowLegacyPairingTokenLogin(event.target.checked)} />
+          <span>Allow legacy token login</span>
+        </label>
+        <label>
+          <span>Notification email fallback</span>
+          <input value={notificationEmail} onChange={(event) => setNotificationEmail(event.target.value)} placeholder={settings?.notificationEmailConfigured ? "Configured; leave blank to keep" : "name@example.com"} />
+        </label>
         <button className="primary-button" type="submit">
           Save
         </button>
       </form>
+      <section className="security-panel">
+        <div className="security-panel-head">
+          <div>
+            <h3>Public access security</h3>
+            <p>Pair devices, approve access, rotate tokens, and review recent audit events.</p>
+          </div>
+          <button className="secondary-button" type="button" onClick={() => refreshSecurity()} disabled={Boolean(securityBusy)}>
+            Refresh
+          </button>
+        </div>
+        {securityError ? <p className="form-error">{securityError}</p> : null}
+        {securityNotice ? <p className="form-success">{securityNotice}</p> : null}
+        {cloudflare ? (
+          <div className={cx("security-card", cloudflare.registered ? "ok" : cloudflare.publicHost ? "warn" : "")}>
+            <strong>{cloudflare.tunnel ? "Cloudflare Tunnel" : "Host check"}</strong>
+            <small>{cloudflare.host || "local"} · {cloudflare.registered ? "registered" : cloudflare.publicHost ? "not registered" : "local/private"}</small>
+            {cloudflare.warnings?.length ? <p>{cloudflare.warnings.join(" ")}</p> : null}
+            {cloudflare.steps?.length ? (
+              <ol className="security-steps">
+                {cloudflare.steps.slice(0, 4).map((step) => <li key={step}>{step}</li>)}
+              </ol>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="security-actions">
+          <button className="secondary-button" type="button" onClick={rotateCurrentDevice} disabled={securityBusy === "rotate-current"}>
+            {securityBusy === "rotate-current" ? "Rotating..." : "Rotate this device token"}
+          </button>
+          <button className="secondary-button" type="button" onClick={enablePushNotifications}>
+            Enable Web Push
+          </button>
+        </div>
+        {pushState ? <p className="form-success">{pushState}</p> : null}
+        <div className="security-section">
+          <h3>Pending pairing</h3>
+          {pairingSessions.length ? pairingSessions.map((session) => (
+            <div className="security-row" key={session.id}>
+              <div>
+                <strong>{session.label || "New device"}</strong>
+                <small>{session.status} · {session.ip || "unknown IP"} · expires {formatTime(session.expiresAt)}</small>
+              </div>
+              <div className="security-row-actions">
+                <button className="secondary-button" type="button" onClick={() => approvePairing(session.id)} disabled={Boolean(securityBusy)}>
+                  Approve
+                </button>
+                <button className="secondary-button danger" type="button" onClick={() => denyPairing(session.id)} disabled={Boolean(securityBusy)}>
+                  Deny
+                </button>
+              </div>
+            </div>
+          )) : <p>No pending pairing sessions.</p>}
+        </div>
+        <div className="security-section">
+          <h3>Devices</h3>
+          {devices.length ? devices.map((device) => (
+            <div className={cx("security-row", device.revokedAt || device.expired ? "muted" : "")} key={device.id}>
+              <div>
+                <strong>{device.label || device.id}{device.id === currentDeviceId ? " · this device" : ""}</strong>
+                <small>
+                  {device.revokedAt ? `revoked ${formatTime(device.revokedAt)}` : device.expired ? `expired ${formatTime(device.expiresAt)}` : `last seen ${formatTime(device.lastSeenAt || device.createdAt)}`}
+                </small>
+              </div>
+              {!device.revokedAt ? (
+                <button className="secondary-button danger" type="button" onClick={() => revokeDevice(device.id)} disabled={Boolean(securityBusy)}>
+                  Revoke
+                </button>
+              ) : null}
+            </div>
+          )) : <p>No paired devices yet.</p>}
+        </div>
+        <div className="security-section">
+          <h3>Recent audit</h3>
+          {auditLogs.length ? auditLogs.map((item) => (
+            <div className={cx("audit-row", item.success ? "ok" : "failed")} key={item.cursor}>
+              <span>{item.eventType}</span>
+              <small>{formatTime(item.eventAt)} · {item.ip || "local"} · {item.reason || item.path || "-"}</small>
+            </div>
+          )) : <p>No audit events yet.</p>}
+        </div>
+      </section>
       <div className="network-list">
         <section className="probe-panel">
           <div>
@@ -2204,11 +3435,14 @@ function App() {
   const [loading, setLoading] = useState(Boolean(savedToken));
   const [error, setError] = useState("");
   const [loginError, setLoginError] = useState("");
+  const [initialScrollSequence, setInitialScrollSequence] = useState(0);
+  const [locatedMessageKey, setLocatedMessageKey] = useState("");
   const eventSourceRef = useRef(null);
   const pollRef = useRef(null);
   const desktopPollRef = useRef(null);
   const desktopObserverRef = useRef(null);
-  const desktopObserverCursorRef = useRef(0);
+  const desktopObserverCursorRef = useRef(Number(localStorage.getItem(desktopObserverCursorKey) || 0));
+  const conversationLoadRef = useRef(0);
   const listRef = useRef(null);
 
   const providers = useMemo(() => {
@@ -2307,6 +3541,7 @@ function App() {
           desktopIndex: item.index ?? index,
           desktopProjectIndex: item.projectIndex,
           desktopTitle: baseDesktopItem.title,
+          desktopProjectTitle: baseDesktopItem.projectTitle,
           displayTime: parsed.relativeTime,
           desktopRunning: Boolean(item.running)
         });
@@ -2325,6 +3560,7 @@ function App() {
             desktopIndex: desktopMatch.desktopIndex,
             desktopProjectIndex: desktopMatch.desktopProjectIndex,
             desktopTitle: desktopMatch.desktopTitle,
+            desktopProjectTitle: desktopMatch.desktopProjectTitle,
             desktopLinked: true,
             displayTime: desktopMatch.displayTime || item.displayTime
           };
@@ -2371,39 +3607,11 @@ function App() {
 
     items.push({ role: "system", text: statusText });
 
-    const liveMessages = [];
-    if (liveMessages.length) {
-      items.push({
-        role: "system",
-        text: `Codex Desktop live mirror\nVisible items: ${desktop.visibleTranscriptCount || liveMessages.length}\nUpdated: ${formatTime(desktopRemote?.updatedAt || desktop.updatedAt)}`
-      });
-      items.push(...liveMessages);
-    } else if (false && desktop?.found && !desktop?.minimized) {
-      items.push({ role: "assistant", text: "Reading Codex Desktop visible content", pending: true });
-    }
-
     const queueItems = desktopRemote?.items || [];
-    const recentQueue = queueItems.slice(-8);
-    if (recentQueue.length) {
-      items.push({
-        role: "system",
-        text: recentQueue
-          .map((item) => {
-            const label =
-              item.status === "sent"
-                ? "Sent"
-                : item.status === "failed"
-                  ? "Failed"
-                  : item.status === "sending"
-                    ? "Sending"
-                    : item.status === "checking"
-                      ? "Checking"
-                      : "Waiting";
-            return `${label} 路 ${formatTime(item.updatedAt)} 路 ${item.text}${item.error ? `\n  ${item.error}` : ""}`;
-          })
-          .join("\n\n")
-      });
-    }
+    const turnStatus = desktopTurnStatusMessage(latestDesktopQueueItem(queueItems), desktop);
+    const liveTurn = desktopVisibleTurnFromTranscript(desktop, items);
+    if (liveTurn) items.push(liveTurn);
+    else if (turnStatus) items.push(turnStatus);
 
     return messagesForRender(items, false);
   }, [controlMode, desktopRemote, displayMessages, messages]);
@@ -2427,8 +3635,25 @@ function App() {
   }, [reasoningEffort]);
 
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-  }, [desktopMessages]);
+    if (!initialScrollSequence) return undefined;
+    const loadSequence = initialScrollSequence;
+    const frame = window.requestAnimationFrame(() => {
+      if (conversationLoadRef.current !== loadSequence) return;
+      const list = listRef.current;
+      if (list) list.scrollTo({ top: list.scrollHeight, behavior: "auto" });
+      setInitialScrollSequence((current) => (current === loadSequence ? 0 : current));
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [initialScrollSequence]);
+
+  useEffect(() => {
+    if (!token || controlMode !== "desktop") return undefined;
+    if (!desktopRemoteNeedsHistoryRefresh(desktopRemote)) return undefined;
+    const timer = setInterval(() => {
+      refreshDesktopRemote(false).catch((err) => setError(err.message));
+    }, 1800);
+    return () => clearInterval(timer);
+  }, [token, controlMode, desktopRemote?.pendingCount, desktopRemote?.active, desktopRemote?.desktop?.sidebarRunningCount, desktopRemote?.desktop?.reason, desktopRemote?.items]);
 
   async function refresh(options = {}) {
     try {
@@ -2456,13 +3681,26 @@ function App() {
 
   async function refreshDesktopRemote(fresh = false) {
     const state = await request(`/api/desktop-remote/status${fresh ? "?fresh=1" : ""}`, {}, token);
+    if (state?.desktop?.observationCursor) {
+      desktopObserverCursorRef.current = rememberStreamCursor(
+        desktopObserverCursorKey,
+        Math.max(desktopObserverCursorRef.current || 0, Number(state.desktop.observationCursor) || 0)
+      );
+    }
     setDesktopRemote(state);
     return state;
   }
 
   function applyDesktopObserverEvent(event) {
     if (!event?.desktop) return;
-    if (event.cursor) desktopObserverCursorRef.current = Math.max(desktopObserverCursorRef.current || 0, Number(event.cursor) || 0);
+    const cursor = Number(event.cursor || 0);
+    if (cursor && desktopObserverCursorRef.current && cursor < desktopObserverCursorRef.current) return;
+    if (cursor) {
+      desktopObserverCursorRef.current = rememberStreamCursor(
+        desktopObserverCursorKey,
+        Math.max(desktopObserverCursorRef.current || 0, cursor)
+      );
+    }
     setDesktopRemote((current) => ({
       ...(current || {}),
       ok: true,
@@ -2541,8 +3779,154 @@ function App() {
   }, [token, controlMode]);
 
   useEffect(() => {
+    if (!token || controlMode !== "desktop" || selected?.provider !== "codex") return undefined;
+    const historyId = conversationHistoryId(selected);
+    if (!historyId || !desktopRemoteNeedsHistoryRefresh(desktopRemote)) return undefined;
+
+    let cancelled = false;
+    let inFlight = false;
+    const refreshBoundHistory = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const historyMessages = await loadHistoryMessages("codex", historyId, { fresh: true });
+        if (!cancelled && historyMessages.length) {
+          setMessages((items) => mergeDisplayMessagesWithUpdates(items, historyMessages));
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    refreshBoundHistory().catch((err) => setError(err.message));
+    const timer = setInterval(() => {
+      refreshBoundHistory().catch((err) => setError(err.message));
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [
+    token,
+    controlMode,
+    selected?.key,
+    selected?.provider,
+    selected?.id,
+    selected?.sessionId,
+    selected?.sourceId,
+    selected?.historyId,
+    desktopRemote?.pendingCount,
+    desktopRemote?.active,
+    desktopRemote?.desktop?.visibleTranscriptHash,
+    desktopRemote?.desktop?.sidebarRunningCount,
+    desktopRemote?.desktop?.reason,
+    desktopRemote?.items
+  ]);
+
+  useEffect(() => {
+    if (!token || controlMode !== "desktop" || selected?.provider !== "codex" || !selected?.cwd) return undefined;
+    if (!desktopRemoteNeedsHistoryRefresh(desktopRemote)) return undefined;
+
+    let cancelled = false;
+    let inFlight = false;
+    const refreshChanges = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        await loadWorkspaceChanges(selected.cwd || "");
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    refreshChanges().catch(() => {});
+    const timer = setInterval(() => {
+      refreshChanges().catch(() => {});
+    }, 6000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [
+    token,
+    controlMode,
+    selected?.key,
+    selected?.provider,
+    selected?.cwd,
+    desktopRemote?.pendingCount,
+    desktopRemote?.active,
+    desktopRemote?.desktop?.visibleTranscriptHash,
+    desktopRemote?.desktop?.sidebarRunningCount,
+    desktopRemote?.desktop?.reason,
+    desktopRemote?.items
+  ]);
+
+  useEffect(() => {
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   }, []);
+
+  function sameMessageForOperation(item, target) {
+    if (!item || !target || item.role !== target.role) return false;
+    if (target.liveKey && item.liveKey) return target.liveKey === item.liveKey;
+    if (target.turnId && item.turnId) return target.turnId === item.turnId;
+    return normalizeMessageText(item.text) === normalizeMessageText(target.text);
+  }
+
+  function updateFirstMatchingMessage(target, updater) {
+    setMessages((items) => {
+      let updated = false;
+      return items.map((item) => {
+        if (updated || !sameMessageForOperation(item, target)) return item;
+        updated = true;
+        return updater(item);
+      });
+    });
+  }
+
+  function handleEditMessage(target, nextText) {
+    const text = String(nextText || "").trim();
+    if (!text) return;
+    updateFirstMatchingMessage(target, (item) => ({ ...item, text, typing: false }));
+  }
+
+  function handleDeleteMessage(target) {
+    setMessages((items) => {
+      let deleted = false;
+      return items.filter((item) => {
+        if (deleted || !sameMessageForOperation(item, target)) return true;
+        deleted = true;
+        return false;
+      });
+    });
+  }
+
+  async function handleRegenerateMessage(target) {
+    const targetIndex = messages.findIndex((item) => sameMessageForOperation(item, target));
+    const earlierMessages = targetIndex >= 0 ? messages.slice(0, targetIndex) : messages;
+    const previousUser = [...earlierMessages].reverse().find((item) => item.role === "user" && item.text);
+    if (!previousUser) {
+      setError("No earlier user message is available to regenerate from.");
+      return;
+    }
+    handleDeleteMessage(target);
+    const prompt = stripUserAttachmentMetadata(previousUser.text);
+    await sendPrompt(prompt, prompt);
+  }
+
+  function locateMessage(messageKey) {
+    if (!messageKey) return;
+    setLocatedMessageKey(messageKey);
+    requestAnimationFrame(() => {
+      const list = listRef.current;
+      const element = [...(list?.querySelectorAll("[data-message-key]") || [])].find((node) => node.dataset.messageKey === messageKey);
+      element?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    window.setTimeout(() => {
+      setLocatedMessageKey((current) => (current === messageKey ? "" : current));
+    }, 1600);
+  }
 
   function stopTaskStream() {
     eventSourceRef.current?.close();
@@ -2551,7 +3935,7 @@ function App() {
     pollRef.current = null;
   }
 
-  function appendTaskEvents(events, seenCountRef) {
+  function appendTaskEvents(events, seenCountRef, options = {}) {
     const seenIds = seenCountRef.ids || new Set();
     const nextEvents = events.filter((event) => {
       if (event.id && seenIds.has(event.id)) return false;
@@ -2560,16 +3944,26 @@ function App() {
     });
     seenCountRef.ids = seenIds;
     seenCountRef.current = Math.max(seenCountRef.current || 0, events.length);
-    const nextMessages = messagesFromEvents(nextEvents);
+    const nextCursor = cursorFromEvents(events);
+    if (nextCursor) {
+      seenCountRef.cursor = Math.max(Number(seenCountRef.cursor || 0), nextCursor);
+      if (options.cursorKey) rememberStreamCursor(options.cursorKey, seenCountRef.cursor);
+    }
+    const nextMessages = messagesFromEvents(nextEvents, options);
     if (nextMessages.length) setMessages((items) => appendDisplayMessages(items, nextMessages));
   }
 
-  function startTaskPolling(taskId, seenCountRef) {
+  function startTaskPolling(task, seenCountRef) {
+    const taskId = task?.id || task;
+    const eventOptions = {
+      animateAssistant: false,
+      cursorKey: streamCursorKey("task", taskId)
+    };
     if (pollRef.current) clearInterval(pollRef.current);
     const poll = async () => {
       try {
         const latest = await request(`/api/tasks/${taskId}`, {}, token);
-        appendTaskEvents(latest.events || [], seenCountRef);
+        appendTaskEvents(latest.events || [], seenCountRef, eventOptions);
         setRunning(latest.status === "running");
         setSelected((current) => (current?.kind === "task" && current.id === taskId ? { ...current, status: latest.status } : current));
         if (latest.status !== "running") {
@@ -2586,26 +3980,41 @@ function App() {
   }
 
   function followRunningTask(task) {
-    const seenCountRef = { current: (task.events || []).length, ids: new Set((task.events || []).map((event) => event.id).filter(Boolean)) };
-    let opened = false;
+    const cursorKey = streamCursorKey("task", task.id);
+    const savedCursor = Number(localStorage.getItem(cursorKey) || 0);
+    const initialCursor = Math.max(savedCursor, cursorFromEvents(task.events || []));
+    const seenCountRef = {
+      current: (task.events || []).length,
+      cursor: initialCursor,
+      ids: new Set((task.events || []).map((event) => event.id).filter(Boolean))
+    };
+    if (initialCursor) rememberStreamCursor(cursorKey, initialCursor);
     let fallbackTimer = null;
 
     const fallbackToPolling = () => {
       if (pollRef.current) return;
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
-      startTaskPolling(task.id, seenCountRef);
+      startTaskPolling(task, seenCountRef);
     };
 
-    try {
-      const source = new EventSource(`/api/tasks/${task.id}/events?token=${encodeURIComponent(token)}`);
+    const openStream = async () => {
+      const catchUp = await request(
+        `/api/tasks/${task.id}/events/catch-up?after=${Number(seenCountRef.cursor || 0)}`,
+        {},
+        token
+      );
+      appendTaskEvents(catchUp.items || [], seenCountRef, {
+        animateAssistant: false,
+        cursorKey
+      });
+
+      const source = new EventSource(`/api/tasks/${task.id}/events?token=${encodeURIComponent(token)}&after=${Number(seenCountRef.cursor || 0)}`);
       eventSourceRef.current = source;
       fallbackTimer = setTimeout(fallbackToPolling, 6000);
 
       source.onopen = () => {
-        opened = true;
         if (fallbackTimer) clearTimeout(fallbackTimer);
-        if (!pollRef.current) startTaskPolling(task.id, seenCountRef);
       };
 
       source.onerror = () => {
@@ -2618,10 +4027,25 @@ function App() {
         if (event.id && seenCountRef.ids?.has(event.id)) return;
         if (event.id) seenCountRef.ids?.add(event.id);
         seenCountRef.current += 1;
+        const eventCursor = Number(event.cursor || message.lastEventId || 0);
+        if (eventCursor) {
+          seenCountRef.cursor = Math.max(Number(seenCountRef.cursor || 0), eventCursor);
+          rememberStreamCursor(cursorKey, seenCountRef.cursor);
+        }
         const role = taskEventRole(event);
         const text = taskEventText(event);
+        const typing = shouldAnimateLiveAssistant(task.agent || task.provider, role);
         if (text && role !== "debug") {
-          setMessages((items) => appendDisplayMessages(items, [{ role, text, typing: role === "assistant" }]));
+          setMessages((items) =>
+            appendDisplayMessages(items, [
+              {
+                role,
+                text,
+                typing,
+                typingKey: typing ? `task:${task.id}:${event.id || eventCursor || seenCountRef.current}` : ""
+              }
+            ])
+          );
         }
         if (event.type === "system" && /Exited/.test(event.text || "")) {
           const finalStatus = statusFromExitEvent(event);
@@ -2633,15 +4057,17 @@ function App() {
           refresh({ keepSelection: true }).catch(() => {});
         }
       });
-    } catch {
+    };
+
+    openStream().catch(() => {
       fallbackToPolling();
-    }
+    });
   }
 
-  async function loadHistoryMessages(provider, sessionId) {
+  async function loadHistoryMessages(provider, sessionId, { fresh = false } = {}) {
     if (!provider || !sessionId) return [];
     try {
-      const detail = await request(`/api/histories/${provider}/${encodeURIComponent(sessionId)}`, {}, token);
+      const detail = await request(`/api/histories/${provider}/${encodeURIComponent(sessionId)}${fresh ? "?fresh=1" : ""}`, {}, token);
       return detail.transcript?.length ? messagesFromTranscript(detail.transcript) : messagesFromHistoryEntries(detail.entries || []);
     } catch (err) {
       if (err.status !== 404) setError(err.message);
@@ -2659,16 +4085,27 @@ function App() {
     }
   }
 
-  async function loadWorkspaceChanges() {
+  async function loadWorkspaceChanges(cwd = selected?.cwd || "") {
     try {
       const workspaceList = await request("/api/workspaces", {}, token);
-      const workspace = workspaceList.items?.[0];
+      const workspace = chooseWorkspaceForPath(workspaceList.items || [], cwd);
       if (!workspace) {
         setChangeSummary(null);
         return;
       }
-      const status = await request(`/api/workspaces/${workspace.id}/git/status`, {}, token);
-      setChangeSummary({ ...status, kind: "workspace" });
+      const [status, diff] = await Promise.all([
+        request(`/api/workspaces/${workspace.id}/git/status`, {}, token),
+        request(`/api/workspaces/${workspace.id}/git/diff`, {}, token)
+      ]);
+      setChangeSummary({
+        ...diff,
+        branch: status.branch || diff.branch || "",
+        files: diff.files?.length ? diff.files : status.files || [],
+        changedCount: status.changedCount ?? diff.fileCount ?? diff.files?.length ?? 0,
+        statusFiles: status.files || [],
+        kind: "workspace",
+        cwd: workspace.path || cwd
+      });
     } catch {
       setChangeSummary(null);
     }
@@ -2770,7 +4207,7 @@ function App() {
         token
       );
       setDesktopRemote((current) => ({ ...(current || {}), desktop: result.desktop || current?.desktop }));
-      loadWorkspaceChanges().catch(() => {});
+      loadWorkspaceChanges(conversation.cwd || "").catch(() => {});
     } catch (err) {
       setError(err.message || "Failed to focus Codex Desktop chat");
     }
@@ -2778,6 +4215,9 @@ function App() {
 
   async function selectConversation(conversation) {
     stopTaskStream();
+    const loadSequence = conversationLoadRef.current + 1;
+    conversationLoadRef.current = loadSequence;
+    setInitialScrollSequence(0);
     setSelected(conversation);
     setSidebarOpen(false);
     setError("");
@@ -2795,6 +4235,7 @@ function App() {
 
     if (conversation.kind === "task") {
       const task = await request(`/api/tasks/${conversation.id}`, {}, token);
+      if (conversationLoadRef.current !== loadSequence) return;
       loadTaskChanges(conversation.id).catch(() => {});
       setSelected((current) =>
         current?.kind === "task" && current.id === task.id
@@ -2809,10 +4250,12 @@ function App() {
           : current
       );
       const historyMessages = await loadHistoryMessages(task.agent || conversation.provider, task.sessionId || conversation.sessionId);
+      if (conversationLoadRef.current !== loadSequence) return;
       const hasTurnHistory = historyMessages.some((message) => message.turnId);
       const taskMessages = !historyMessages.length || (task.status === "running" && !hasTurnHistory) ? messagesFromEvents(task.events || []) : [];
       const nextMessages = taskMessages.length ? mergeHistoryAndTaskMessages(historyMessages, taskMessages) : historyMessages;
       setMessages(nextMessages.length ? nextMessages : [{ role: "system", text: "Task started. Waiting for output." }]);
+      setInitialScrollSequence(loadSequence);
       setRunning(task.status === "running");
       focusDesktopConversation(conversation);
 
@@ -2823,15 +4266,17 @@ function App() {
     }
 
     if (conversation.preview && !isSyntheticHistoryText(conversation.preview)) {
-      setMessages([{ role: "assistant", text: conversation.preview, typing: true }]);
+      setMessages([{ role: "assistant", text: conversation.preview }]);
     }
     const detail = await request(`/api/histories/${conversation.provider}/${encodeURIComponent(conversation.sourceId || conversation.id)}`, {}, token);
+    if (conversationLoadRef.current !== loadSequence) return;
     const entries = detail.transcript?.length ? messagesFromTranscript(detail.transcript) : messagesFromHistoryEntries(detail.entries || []);
     setMessages(entries.length ? entries : [{ role: "system", text: "This history item only has index metadata; no local preview is available yet." }]);
+    setInitialScrollSequence(loadSequence);
     focusDesktopConversation(conversation);
   }
 
-  async function startTask(prompt) {
+  async function startTask(prompt, displayPrompt = prompt) {
     if (!providers.length) return;
     const canResume =
       selected?.kind === "history" ||
@@ -2853,11 +4298,11 @@ function App() {
       mode: canResume ? "resume" : "new",
       sessionId: canResume ? resumeSessionId : "",
       prompt: finalPrompt,
-      title: selected?.kind === "fork" ? selected.title : prompt,
+      title: selected?.kind === "fork" ? selected.title : displayPrompt,
       model: activeModel || "",
       reasoningEffort: reasoningEffort || ""
     };
-    setMessages((items) => appendDisplayMessages(items, [{ role: "user", text: prompt }]));
+    setMessages((items) => appendDisplayMessages(items, [{ role: "user", text: displayPrompt }]));
     setRunning(true);
     const created = await request(
       "/api/tasks",
@@ -2873,7 +4318,7 @@ function App() {
       kind: "task",
       id: created.id,
       provider: activeAgent,
-      title: canResume ? selected?.title || prompt : prompt,
+      title: canResume ? selected?.title || displayPrompt : displayPrompt,
       cwd: selected?.cwd || "",
       status: "running",
       sessionId: canResume ? resumeSessionId : ""
@@ -2881,9 +4326,10 @@ function App() {
     await selectConversation(task);
   }
 
-  async function sendDesktopRemote(prompt) {
+  async function sendDesktopRemote(prompt, displayPrompt = prompt) {
     stopTaskStream();
-    if (selected && selected.provider === "codex" && !hasDesktopBinding(selected)) {
+    const target = desktopRemoteTargetSnapshot(selected);
+    if (!target) {
       setError("这个会话当前没有在 Codex Desktop 可见侧边栏中定位到。请先在 Codex Desktop 打开该会话，或切到 Agent 模式用 CLI resume。");
       setMessages((items) =>
         appendDisplayMessages(items, [
@@ -2895,22 +4341,66 @@ function App() {
       );
       return;
     }
-    if (selected?.provider === "codex") await focusDesktopConversation(selected);
+
+    const optimisticItem = {
+      id: `local-${Date.now()}`,
+      text: prompt,
+      displayText: displayPrompt,
+      status: "queued",
+      error: "",
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      target,
+      settingsPolicy: "useExisting",
+      settings: {
+        permissionMode: "",
+        model: "",
+        reasoningEffort: ""
+      }
+    };
     setRunning(false);
-    setMessages((items) => appendDisplayMessages(items, [{ role: "user", text: prompt }]));
-    const result = await request(
-      "/api/desktop-remote/messages",
-      {
-        method: "POST",
-        body: JSON.stringify({ text: prompt })
-      },
-      token
-    );
-    setDesktopRemote(result.state);
+    setMessages((items) => appendDisplayMessages(items, [{ role: "user", text: displayPrompt }]));
+    setDesktopRemote((current) => ({
+      ...(current || {}),
+      ok: true,
+      mode: "desktop-remote",
+      active: true,
+      pendingCount: Math.max(1, Number(current?.pendingCount || 0) + 1),
+      items: [...(current?.items || []).filter((item) => !String(item.id || "").startsWith("local-")), optimisticItem],
+      updatedAt: optimisticItem.updatedAt
+    }));
+
+    try {
+      await focusDesktopConversation(selected);
+      const result = await request(
+        "/api/desktop-remote/messages",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            text: prompt,
+            settingsPolicy: "useExisting",
+            target
+          })
+        },
+        token
+      );
+      setDesktopRemote(result.state);
+    } catch (err) {
+      const errorText = err.message || "Failed to send to Codex Desktop.";
+      setError(errorText);
+      setDesktopRemote((current) => ({
+        ...(current || {}),
+        active: false,
+        pendingCount: Math.max(0, Number(current?.pendingCount || 1) - 1),
+        items: (current?.items || []).map((item) => (item.id === optimisticItem.id ? { ...item, status: "failed", error: errorText, updatedAt: new Date().toISOString() } : item))
+      }));
+      setMessages((items) => appendDisplayMessages(items, [{ role: "error", text: errorText }]));
+    }
   }
 
-  async function sendRunningInput(taskId, prompt) {
-    setMessages((items) => appendDisplayMessages(items, [{ role: "user", text: prompt }]));
+  async function sendRunningInput(taskId, prompt, displayPrompt = prompt) {
+    setMessages((items) => appendDisplayMessages(items, [{ role: "user", text: displayPrompt }]));
     const result = await request(
       `/api/tasks/${taskId}/input`,
       {
@@ -2946,12 +4436,12 @@ function App() {
     refresh({ keepSelection: true }).catch((err) => setError(err.message));
   }
 
-  async function sendPrompt(prompt) {
+  async function sendPrompt(prompt, displayPrompt = prompt) {
     if (controlMode === "desktop" || hasDesktopBinding(selected)) {
-      await sendDesktopRemote(prompt);
+      await sendDesktopRemote(prompt, displayPrompt);
       return;
     }
-    await startTask(prompt);
+    await startTask(prompt, displayPrompt);
   }
 
   async function savePermissionMode(value) {
@@ -3016,7 +4506,22 @@ function App() {
         <div className="message-list" ref={listRef} aria-live="polite">
           <ChangeCard summary={changeSummary} />
           {desktopMessages.length ? (
-            desktopMessages.map((message, index) => <Message key={`${index}-${message.role}-${message.pending ? "pending" : "message"}`} token={token} {...message} />)
+            desktopMessages.map((message, index) => {
+              const renderKey = message.liveKey || message.turnId || `${index}-${message.role}-${message.pending ? "pending" : "message"}`;
+              return (
+                <Message
+                  key={renderKey}
+                  messageKey={renderKey}
+                  located={locatedMessageKey === renderKey}
+                  token={token}
+                  onEdit={handleEditMessage}
+                  onDelete={handleDeleteMessage}
+                  onRegenerate={(target) => handleRegenerateMessage(target).catch((err) => setError(err.message))}
+                  onLocate={locateMessage}
+                  {...message}
+                />
+              );
+            })
           ) : (
             <div className="empty-state">
               <h2>{loading ? "Syncing chats" : providers.length ? "Choose an agent" : "Connect an agent"}</h2>
@@ -3045,7 +4550,7 @@ function App() {
           setReasoningEffort={setReasoningEffort}
           selected={selected}
           runningTaskId={running && selected?.kind === "task" ? selected.id : ""}
-          onRunningInput={(taskId, prompt) => sendRunningInput(taskId, prompt).catch((err) => {
+          onRunningInput={(taskId, prompt, displayPrompt) => sendRunningInput(taskId, prompt, displayPrompt).catch((err) => {
             setError(err.message);
             setMessages((items) => appendDisplayMessages(items, [{ role: "error", text: err.message || "Live input failed" }]));
           })}
@@ -3053,7 +4558,7 @@ function App() {
             setError(err.message);
             setMessages((items) => appendDisplayMessages(items, [{ role: "error", text: err.message || "Stop failed" }]));
           })}
-          onSend={(prompt) => sendPrompt(prompt).catch((err) => {
+          onSend={(prompt, displayPrompt) => sendPrompt(prompt, displayPrompt).catch((err) => {
             setRunning(false);
             if (err.status === 401) {
               handleAuthExpired();

@@ -22,7 +22,14 @@ export const defaultSettings = {
   permissionMode: "default",
   allowedRoots: [],
   hostAllowlist: [],
-  allowTryCloudflare: true,
+  allowTryCloudflare: false,
+  allowLegacyPairingTokenLogin: false,
+  notificationEmail: "",
+  webPush: {
+    publicKey: "",
+    privateKey: "",
+    subject: ""
+  },
   apiKeys: {
     openai: "",
     anthropic: ""

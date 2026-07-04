@@ -131,10 +131,14 @@ export function probeCodexDesktopDraft(text = "") {
   return runDesktopControl("draft", { text });
 }
 
-export function sendToCodexDesktop(prompt) {
-  return runDesktopControl("send", { text: prompt });
+export function sendToCodexDesktop(prompt, options = {}) {
+  return runDesktopControl("send", { text: prompt, ...options });
 }
 
 export function focusCodexDesktopConversation(index) {
   return runDesktopControl("focusConversation", { index });
+}
+
+export function restoreCodexDesktopWindow() {
+  return runDesktopControl("restore");
 }

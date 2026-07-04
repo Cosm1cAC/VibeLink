@@ -233,6 +233,117 @@ export async function getWorkspaceContext(id, settings, body = {}) {
   };
 }
 
+function parseStatusFiles(stdout = "") {
+  return String(stdout || "")
+    .split(/\r?\n/)
+    .filter((line) => line && !line.startsWith("##"))
+    .map((line) => ({
+      status: line.slice(0, 2).trim() || "??",
+      path: line.slice(3).trim()
+    }))
+    .filter((file) => file.path);
+}
+
+function parseDiffFiles(diff = "") {
+  const files = [];
+  let current = null;
+  for (const line of String(diff || "").split(/\r?\n/)) {
+    const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (match) {
+      current = { oldPath: match[1], path: match[2], status: "M", additions: 0, deletions: 0 };
+      files.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (/^new file mode\b/.test(line)) current.status = "A";
+    if (/^deleted file mode\b/.test(line)) current.status = "D";
+    if (/^rename from\b/.test(line)) current.status = "R";
+    if (line.startsWith("+") && !line.startsWith("+++")) current.additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) current.deletions += 1;
+  }
+  return files;
+}
+
+function escapeDiffPath(value = "") {
+  return String(value || "").replaceAll("\\", "/");
+}
+
+function pseudoDiffForUntracked(root, relPath) {
+  const target = safeWorkspaceChild(root, relPath);
+  const stat = fs.statSync(target);
+  if (!stat.isFile()) return "";
+  const content = readTextSample(target, stat);
+  if (!content) return "";
+  const lines = content.split(/\r?\n/).slice(0, 420);
+  const pathValue = escapeDiffPath(relPath);
+  return [
+    `diff --git a/${pathValue} b/${pathValue}`,
+    "new file mode 100644",
+    "--- /dev/null",
+    `+++ b/${pathValue}`,
+    `@@ -0,0 +1,${Math.max(lines.length, 1)} @@`,
+    ...lines.map((line) => `+${line}`),
+    content.split(/\r?\n/).length > lines.length ? "+..." : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function gitDiffWithHeadFallback(cwd) {
+  const result = await git(["diff", "HEAD", "--stat", "--patch", "--find-renames"], cwd);
+  if (result.ok || !/bad revision|ambiguous argument|unknown revision/i.test(result.stderr || "")) return result;
+  return git(["diff", "--stat", "--patch", "--find-renames"], cwd);
+}
+
+async function collectGitChangeSummary(cwd) {
+  const [statusResult, diffResult] = await Promise.all([
+    git(["status", "--porcelain=v1", "-b"], cwd),
+    gitDiffWithHeadFallback(cwd)
+  ]);
+  const statusLines = statusResult.stdout.split(/\r?\n/).filter(Boolean);
+  const branchLine = statusLines.find((line) => line.startsWith("##")) || "";
+  const statusFiles = parseStatusFiles(statusResult.stdout);
+  const untrackedFiles = statusFiles.filter((file) => file.status === "??").slice(0, 6);
+  const untrackedDiff = [];
+  const untrackedPreviewErrors = [];
+
+  for (const file of untrackedFiles) {
+    try {
+      const preview = pseudoDiffForUntracked(cwd, file.path);
+      if (preview) untrackedDiff.push(preview);
+    } catch (error) {
+      untrackedPreviewErrors.push({ path: file.path, error: error.message });
+    }
+  }
+
+  const diff = [diffResult.stdout || "", ...untrackedDiff].filter(Boolean).join("\n");
+  const diffFiles = parseDiffFiles(diff);
+  const byPath = new Map(diffFiles.map((file) => [file.path || file.oldPath, file]));
+  for (const file of statusFiles) {
+    const existing = byPath.get(file.path);
+    if (existing) {
+      existing.status = file.status === "??" ? "A" : file.status || existing.status;
+      continue;
+    }
+    byPath.set(file.path, { ...file, oldPath: file.path, additions: 0, deletions: 0 });
+  }
+
+  return {
+    ok: statusResult.ok && diffResult.ok,
+    branch: branchLine.replace(/^##\s*/, ""),
+    files: [...byPath.values()],
+    changedCount: statusFiles.length || byPath.size,
+    fileCount: byPath.size,
+    lineCount: lineCount(diff),
+    diff,
+    statusStdout: statusResult.stdout,
+    stdout: diffResult.stdout,
+    stderr: [statusResult.stderr, diffResult.stderr].filter(Boolean).join("\n"),
+    exitCode: statusResult.exitCode || diffResult.exitCode || 0,
+    untrackedPreviewErrors
+  };
+}
+
 export async function getWorkspaceGitStatus(id, settings) {
   const workspace = workspaceOrThrow(id);
   const cwd = resolveAllowedPath(workspace.path, settings);
@@ -240,12 +351,7 @@ export async function getWorkspaceGitStatus(id, settings) {
   const result = await git(["status", "--porcelain=v1", "-b"], cwd);
   const lines = result.stdout.split(/\r?\n/).filter(Boolean);
   const branchLine = lines.find((line) => line.startsWith("##")) || "";
-  const files = lines
-    .filter((line) => !line.startsWith("##"))
-    .map((line) => ({
-      status: line.slice(0, 2).trim() || "??",
-      path: line.slice(3).trim()
-    }));
+  const files = parseStatusFiles(result.stdout);
 
   return {
     ok: result.ok,
@@ -263,23 +369,74 @@ export async function getWorkspaceGitDiff(id, settings) {
   const workspace = workspaceOrThrow(id);
   const cwd = resolveAllowedPath(workspace.path, settings);
   touchWorkspace(workspace.id);
-  const result = await git(["diff", "--stat", "--patch", "--find-renames"], cwd);
-  const diff = result.stdout || "";
-  const files = [];
-  for (const line of diff.split(/\r?\n/)) {
-    const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
-    if (match) files.push({ oldPath: match[1], path: match[2] });
+  const summary = await collectGitChangeSummary(cwd);
+  return {
+    ...summary,
+    workspace,
+    cwd
+  };
+}
+
+function statusForPath(statusFiles = [], relPath = "") {
+  const normalized = escapeDiffPath(relPath);
+  return statusFiles.find((file) => escapeDiffPath(file.path) === normalized)?.status || "";
+}
+
+export async function applyWorkspaceGitFileAction(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const relPath = relativePath(cwd, body.path || "");
+  if (!relPath || relPath === ".") {
+    const error = new Error("File path is required.");
+    error.status = 400;
+    throw error;
   }
 
+  const target = safeWorkspaceChild(cwd, relPath);
+  const action = String(body.action || "").trim().toLowerCase();
+  touchWorkspace(workspace.id);
+
+  if (action === "stage" || action === "accept") {
+    const result = await git(["add", "--", relPath], cwd);
+    if (!result.ok) {
+      const error = new Error(result.stderr || "Failed to stage file.");
+      error.status = 409;
+      throw error;
+    }
+  } else if (action === "restore" || action === "reject") {
+    const status = await getWorkspaceGitStatus(id, settings);
+    const fileStatus = statusForPath(status.files || [], relPath);
+    if (fileStatus === "??") {
+      if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
+    } else {
+      const result = await git(["restore", "--staged", "--worktree", "--", relPath], cwd);
+      if (!result.ok) {
+        const error = new Error(result.stderr || "Failed to restore file.");
+        error.status = 409;
+        throw error;
+      }
+    }
+  } else if (action === "unstage") {
+    const result = await git(["restore", "--staged", "--", relPath], cwd);
+    if (!result.ok) {
+      const error = new Error(result.stderr || "Failed to unstage file.");
+      error.status = 409;
+      throw error;
+    }
+  } else {
+    const error = new Error("Unsupported git file action.");
+    error.status = 400;
+    throw error;
+  }
+
+  const summary = await collectGitChangeSummary(cwd);
   return {
-    ok: result.ok,
+    ok: true,
+    action,
+    path: relPath,
     workspace,
-    files,
-    fileCount: files.length,
-    lineCount: lineCount(diff),
-    diff,
-    stderr: result.stderr,
-    exitCode: result.exitCode || 0
+    cwd,
+    summary
   };
 }
 
@@ -290,23 +447,12 @@ export async function getTaskChanges(task, settings) {
 
   const cwd = resolveAllowedPath(task.cwd, settings);
   const workspace = upsertWorkspace({ path: cwd, allowedRoot: cwd, title: path.basename(cwd) || cwd });
-  const result = await git(["diff", "--stat", "--patch", "--find-renames"], cwd);
-  const diff = result.stdout || "";
-  const files = [];
-  for (const line of diff.split(/\r?\n/)) {
-    const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
-    if (match) files.push({ oldPath: match[1], path: match[2] });
-  }
+  const summary = await collectGitChangeSummary(cwd);
 
   return {
-    ok: result.ok,
+    ...summary,
     taskId: task.id,
     workspace,
-    files,
-    fileCount: files.length,
-    lineCount: lineCount(diff),
-    diff,
-    stderr: result.stderr,
-    exitCode: result.exitCode || 0
+    cwd
   };
 }

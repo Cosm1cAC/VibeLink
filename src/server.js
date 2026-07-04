@@ -3,23 +3,67 @@ import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { URL } from "node:url";
+import QRCode from "qrcode";
 import { attachmentsDir, getNetworkAddresses, publicDir } from "./config.js";
-import { getDbPath, listDesktopObservations, listDevices, revokeDevice } from "./db.js";
-import { createTask, getTask, getTasks, restoreTasks, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
+import {
+  approvePairingSession,
+  claimPairingSession,
+  createPairingSession,
+  denyPairingSession,
+  getDbPath,
+  getPairingSession,
+  listAuditLogs,
+  listDesktopObservations,
+  listDevices,
+  listPairingSessions,
+  listTaskEvents,
+  recordAuditLog,
+  revokeDevice,
+  revokePushSubscription,
+  rotateDeviceToken,
+  upsertPushSubscription
+} from "./db.js";
+import { createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
 import { startDesktopObserver, subscribeDesktopObserver } from "./desktopObserver.js";
-import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue } from "./desktopRemote.js";
+import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
 import { getHistory, listHistories } from "./history.js";
-import { authenticateRequest, ensureDefaultWorkspaces, isHostAllowed, pairDevice, publicAccessWarnings, resolveAllowedPath } from "./security.js";
+import {
+  authenticateRequest,
+  checkRateLimit,
+  cleanHost,
+  cloudflareGuide,
+  ensureDefaultWorkspaces,
+  isHostAllowed,
+  isPublicHost,
+  pairDevice,
+  publicAccessWarnings,
+  rateLimitKey,
+  requestIp,
+  requestUserAgent,
+  resolveAllowedPath
+} from "./security.js";
+import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
 import { loadSettings, publicSettings, sanitizeSettingsPatch, saveSettings } from "./store.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
 import { createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree } from "./workspaces.js";
 
-let settings = await loadSettings();
+let settings = ensureNotificationSettings(await loadSettings());
+await saveSettings(settings);
 ensureDefaultWorkspaces(settings);
 restoreTasks();
 startDesktopObserver();
+setTaskNotificationHandler((payload) => {
+  sendCriticalNotification(settings, payload).catch((error) => {
+    recordAuditLog({ type: "notification.error", success: false, reason: error.message, meta: payload });
+  });
+});
+setDesktopRemoteNotificationHandler((payload) => {
+  sendCriticalNotification(settings, payload).catch((error) => {
+    recordAuditLog({ type: "notification.error", success: false, reason: error.message, meta: payload });
+  });
+});
 
 const runtimeLogDir = path.join(attachmentsDir, "..", "logs");
 const crashLogPath = path.join(runtimeLogDir, "server-crash.log");
@@ -55,6 +99,12 @@ const mimeTypes = {
   ".md": "text/markdown; charset=utf-8",
   ".csv": "text/csv; charset=utf-8",
   ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -65,6 +115,35 @@ const mimeTypes = {
 };
 
 const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"]);
+const servableFileExtensions = new Set([
+  ...imageExtensions,
+  ".pdf",
+  ".txt",
+  ".md",
+  ".csv",
+  ".json",
+  ".jsonl",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".xml",
+  ".html",
+  ".css",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".py",
+  ".ps1",
+  ".sh",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".ppt",
+  ".pptx",
+  ".zip"
+]);
 const uploadMimeToExt = new Map([
   ["image/png", ".png"],
   ["image/jpeg", ".jpg"],
@@ -126,8 +205,49 @@ async function readRawBody(request, limitBytes = 15 * 1024 * 1024) {
   return Buffer.concat(chunks);
 }
 
-function isAuthed(request, url) {
-  return authenticateRequest(request, url, settings).ok;
+function auditContext(request, url, auth = null) {
+  return {
+    deviceId: auth?.device?.id || "",
+    ip: requestIp(request),
+    userAgent: requestUserAgent(request),
+    method: request.method || "",
+    path: url?.pathname || request.url || ""
+  };
+}
+
+function audit(request, url, auth, event) {
+  return recordAuditLog({
+    ...auditContext(request, url, auth),
+    ...event
+  });
+}
+
+function enforceRateLimit(request, response, url, scope, options = {}, auth = null, extra = "") {
+  const result = checkRateLimit(rateLimitKey(request, scope, extra), options);
+  if (result.ok) return true;
+  response.writeHead(429, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Retry-After": String(Math.ceil(result.retryAfterMs / 1000)),
+    "Cache-Control": "no-store"
+  });
+  response.end(JSON.stringify({ error: "Rate limit exceeded.", retryAfterMs: result.retryAfterMs }));
+  audit(request, url, auth, {
+    type: "rate_limit",
+    success: false,
+    reason: scope,
+    meta: result
+  });
+  return false;
+}
+
+function authForRequest(request, url) {
+  return authenticateRequest(request, url, settings);
+}
+
+function publicUrlFor(request, pathValue) {
+  const host = request.headers.host || `localhost:${settings.port}`;
+  const proto = request.headers["x-forwarded-proto"] || (cleanHost(host).endsWith(".trycloudflare.com") ? "https" : "http");
+  return `${proto}://${host}${pathValue}`;
 }
 
 function serveStatic(request, response, url) {
@@ -160,33 +280,53 @@ function serveStatic(request, response, url) {
   });
 }
 
-function serveLocalFile(response, url) {
+function serveLocalFile(request, response, url, auth) {
   const requestedPath = (url.searchParams.get("path") || "").trim().replace(/^<|>$/g, "");
   let filePath = "";
   try {
     filePath = resolveAllowedPath(requestedPath, settings);
   } catch (error) {
+    audit(request, url, auth, { type: "file.access", success: false, target: requestedPath, reason: error.message });
     sendError(response, error.status || 403, error.message);
     return;
   }
   const extension = path.extname(filePath).toLowerCase();
 
-  if (!path.isAbsolute(requestedPath) || !imageExtensions.has(extension)) {
+  if (!path.isAbsolute(requestedPath) || !servableFileExtensions.has(extension)) {
+    audit(request, url, auth, { type: "file.access", success: false, target: requestedPath, reason: "Unsupported file" });
     sendError(response, 400, "Unsupported file");
     return;
   }
 
-  fs.readFile(filePath, (error, data) => {
-    if (error) {
+  fs.stat(filePath, (statError, stat) => {
+    if (statError || !stat.isFile()) {
+      audit(request, url, auth, { type: "file.access", success: false, target: filePath, reason: "File not found" });
       sendError(response, 404, "File not found");
       return;
     }
+    if (!imageExtensions.has(extension) && stat.size > 25 * 1024 * 1024) {
+      audit(request, url, auth, { type: "file.access", success: false, target: filePath, reason: "File is too large" });
+      sendError(response, 413, "File is too large to serve through the bridge.");
+      return;
+    }
 
-    response.writeHead(200, {
-      "Content-Type": mimeTypes[extension] || "application/octet-stream",
-      "Cache-Control": "private, max-age=60"
+    fs.readFile(filePath, (error, data) => {
+      if (error) {
+        audit(request, url, auth, { type: "file.access", success: false, target: filePath, reason: "File not found" });
+        sendError(response, 404, "File not found");
+        return;
+      }
+
+      audit(request, url, auth, { type: "file.access", success: true, target: filePath, meta: { size: stat.size, extension } });
+      const disposition = imageExtensions.has(extension) || extension === ".pdf" ? "inline" : "attachment";
+      response.writeHead(200, {
+        "Content-Type": mimeTypes[extension] || "application/octet-stream",
+        "Content-Disposition": `${disposition}; filename="${path.basename(filePath).replace(/"/g, "_")}"`,
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=60"
+      });
+      response.end(data);
     });
-    response.end(data);
   });
 }
 
@@ -294,7 +434,21 @@ function serveAttachment(request, response, url) {
 
 async function routeApi(request, response, url) {
   if (url.pathname === "/api/login" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "login", { limit: 8, windowMs: 10 * 60 * 1000 })) return;
     const body = await readBody(request);
+    const activeDevices = listDevices().filter((device) => !device.revokedAt && !device.expired);
+    const legacyAllowed = Boolean(settings.allowLegacyPairingTokenLogin) || (!isPublicHost(request) && activeDevices.length === 0);
+    if (!legacyAllowed) {
+      audit(request, url, null, {
+        type: "login",
+        success: false,
+        reason: isPublicHost(request)
+          ? "Legacy pairing token login is disabled on public hosts."
+          : "Legacy pairing token login is disabled after a device is paired."
+      });
+      sendError(response, 403, "Legacy pairing token login is disabled. Use QR pairing and approve the device from an existing session.");
+      return;
+    }
     let device;
     try {
       device = pairDevice({
@@ -303,6 +457,7 @@ async function routeApi(request, response, url) {
         label: body.deviceLabel || request.headers["user-agent"] || "Browser"
       });
     } catch (error) {
+      audit(request, url, null, { type: "login", success: false, reason: error.message });
       sendError(response, error.status || 401, error.message);
       return;
     }
@@ -317,27 +472,84 @@ async function routeApi(request, response, url) {
     };
 
     if (body.rememberKeys) await saveSettings(settings);
+    audit(request, url, { device }, { type: "login", success: true, target: device.id, meta: { legacyPairingToken: true } });
     sendJson(response, 200, { ok: true, token: device.token, device: { id: device.id, label: device.label }, settings: publicSettings(settings) });
     return;
   }
 
+  if (url.pathname === "/api/pairing-sessions" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "pairing.create", { limit: 6, windowMs: 10 * 60 * 1000 })) return;
+    const body = await readBody(request);
+    const session = createPairingSession({
+      label: body.deviceLabel || requestUserAgent(request) || "New device",
+      ip: requestIp(request),
+      userAgent: requestUserAgent(request),
+      meta: { host: cleanHost(request.headers.host || "") }
+    });
+    const pairingUrl = publicUrlFor(request, `/?pair=${encodeURIComponent(session.id)}&code=${encodeURIComponent(session.code)}`);
+    const qrSvg = await QRCode.toString(pairingUrl, { type: "svg", margin: 1, width: 220 });
+    audit(request, url, null, { type: "pairing.create", success: true, target: session.id, meta: { label: session.label } });
+    sendJson(response, 201, { ok: true, session, pairingUrl, qrSvg });
+    return;
+  }
+
+  const publicPairingStatusMatch = url.pathname.match(/^\/api\/pairing-sessions\/([^/]+)$/);
+  if (publicPairingStatusMatch && request.method === "GET") {
+    if (!enforceRateLimit(request, response, url, "pairing.status", { limit: 60, windowMs: 60 * 1000 }, null, publicPairingStatusMatch[1])) return;
+    const session = getPairingSession(publicPairingStatusMatch[1]);
+    if (!session) {
+      sendError(response, 404, "Pairing session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  const pairingClaimMatch = url.pathname.match(/^\/api\/pairing-sessions\/([^/]+)\/claim$/);
+  if (pairingClaimMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "pairing.claim", { limit: 12, windowMs: 10 * 60 * 1000 }, null, pairingClaimMatch[1])) return;
+    const body = await readBody(request);
+    let result;
+    try {
+      result = claimPairingSession({
+        id: pairingClaimMatch[1],
+        code: body.code || url.searchParams.get("code") || "",
+        label: body.deviceLabel || requestUserAgent(request) || "Browser",
+        meta: { claimedIp: requestIp(request), userAgent: requestUserAgent(request) }
+      });
+    } catch (error) {
+      audit(request, url, null, { type: "pairing.claim", success: false, target: pairingClaimMatch[1], reason: error.message });
+      sendError(response, error.status || 400, error.message);
+      return;
+    }
+    audit(request, url, { device: result.device }, { type: "pairing.claim", success: true, target: result.session.id });
+    sendJson(response, 200, { ok: true, token: result.device.token, device: { id: result.device.id, label: result.device.label }, session: result.session, settings: publicSettings(settings) });
+    return;
+  }
+
   if (!isHostAllowed(request, settings)) {
+    audit(request, url, null, { type: "host.blocked", success: false, reason: "Host is not allowed.", target: cleanHost(request.headers.host || "") });
     sendError(response, 403, "Host is not allowed.");
     return;
   }
 
-  if (!isAuthed(request, url)) {
+  const auth = authForRequest(request, url);
+  if (!auth.ok) {
+    audit(request, url, auth, { type: "auth.failed", success: false, reason: auth.reason || "Unauthorized" });
     sendError(response, 401, "Unauthorized");
     return;
   }
 
   if (url.pathname === "/api/files" && request.method === "GET") {
-    serveLocalFile(response, url);
+    if (!enforceRateLimit(request, response, url, "file.download", { limit: 120, windowMs: 60 * 1000 }, auth)) return;
+    serveLocalFile(request, response, url, auth);
     return;
   }
 
   if (url.pathname === "/api/attachments" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "attachment.upload", { limit: 40, windowMs: 60 * 1000 }, auth)) return;
     await saveAttachment(request, response);
+    audit(request, url, auth, { type: "attachment.upload", success: true });
     return;
   }
 
@@ -355,7 +567,12 @@ async function routeApi(request, response, url) {
       },
       security: {
         warnings: publicAccessWarnings(request, settings),
-        devices: listDevices()
+        devices: listDevices(),
+        cloudflare: cloudflareGuide(request, settings)
+      },
+      notifications: {
+        webPush: publicSettings(settings).webPush,
+        emailFallback: { configured: Boolean(settings.notificationEmail) }
       },
       workspaces: getWorkspaces(settings),
       network: getNetworkAddresses(settings.port),
@@ -375,20 +592,114 @@ async function routeApi(request, response, url) {
         ...(patch.apiKeys || {})
       }
     };
+    settings = ensureNotificationSettings(settings);
     await saveSettings(settings);
     ensureDefaultWorkspaces(settings);
+    audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch) } });
     sendJson(response, 200, { ok: true, settings: publicSettings(settings) });
     return;
   }
 
+  if (url.pathname === "/api/cloudflare/guide" && request.method === "GET") {
+    sendJson(response, 200, cloudflareGuide(request, settings));
+    return;
+  }
+
   if (url.pathname === "/api/devices" && request.method === "GET") {
-    sendJson(response, 200, { items: listDevices() });
+    sendJson(response, 200, { items: listDevices(), currentDeviceId: auth.device?.id || "" });
+    return;
+  }
+
+  if (url.pathname === "/api/devices/current/rotate" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "device.rotate", { limit: 6, windowMs: 10 * 60 * 1000 }, auth, auth.device?.id || "")) return;
+    const result = rotateDeviceToken(auth.device?.id || "");
+    audit(request, url, auth, { type: "device.rotate", success: Boolean(result), target: auth.device?.id || "", reason: result ? "" : "Device not found." });
+    if (!result) {
+      sendError(response, 404, "Device not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, ...result });
     return;
   }
 
   const deviceRevokeMatch = url.pathname.match(/^\/api\/devices\/([^/]+)\/revoke$/);
   if (deviceRevokeMatch && request.method === "POST") {
-    sendJson(response, 200, { ok: revokeDevice(deviceRevokeMatch[1]) });
+    const ok = revokeDevice(deviceRevokeMatch[1]);
+    audit(request, url, auth, { type: "device.revoke", success: ok, target: deviceRevokeMatch[1], reason: ok ? "" : "Device not found or already revoked." });
+    sendJson(response, 200, { ok });
+    return;
+  }
+
+  const deviceRotateMatch = url.pathname.match(/^\/api\/devices\/([^/]+)\/rotate$/);
+  if (deviceRotateMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "device.rotate", { limit: 6, windowMs: 10 * 60 * 1000 }, auth, deviceRotateMatch[1])) return;
+    const result = rotateDeviceToken(deviceRotateMatch[1]);
+    audit(request, url, auth, { type: "device.rotate", success: Boolean(result), target: deviceRotateMatch[1], reason: result ? "" : "Device not found." });
+    if (!result) {
+      sendError(response, 404, "Device not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, ...result });
+    return;
+  }
+
+  if (url.pathname === "/api/pairing-sessions" && request.method === "GET") {
+    sendJson(response, 200, { items: listPairingSessions({ status: url.searchParams.get("status") || "pending" }) });
+    return;
+  }
+
+  const pairingApproveMatch = url.pathname.match(/^\/api\/pairing-sessions\/([^/]+)\/approve$/);
+  if (pairingApproveMatch && request.method === "POST") {
+    const session = approvePairingSession(pairingApproveMatch[1], auth.device?.id || "");
+    audit(request, url, auth, { type: "pairing.approve", success: Boolean(session && session.status === "approved"), target: pairingApproveMatch[1], reason: session ? session.status : "not_found" });
+    if (!session) {
+      sendError(response, 404, "Pairing session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: session.status === "approved", session });
+    return;
+  }
+
+  const pairingDenyMatch = url.pathname.match(/^\/api\/pairing-sessions\/([^/]+)\/deny$/);
+  if (pairingDenyMatch && request.method === "POST") {
+    const session = denyPairingSession(pairingDenyMatch[1], auth.device?.id || "");
+    audit(request, url, auth, { type: "pairing.deny", success: Boolean(session), target: pairingDenyMatch[1] });
+    if (!session) {
+      sendError(response, 404, "Pairing session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  if (url.pathname === "/api/audit-log" && request.method === "GET") {
+    sendJson(response, 200, {
+      items: listAuditLogs({
+        after: Number(url.searchParams.get("after") || 0),
+        limit: Number(url.searchParams.get("limit") || 200)
+      })
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/push/public-key" && request.method === "GET") {
+    sendJson(response, 200, { publicKey: settings.webPush?.publicKey || "" });
+    return;
+  }
+
+  if (url.pathname === "/api/push/subscriptions" && request.method === "POST") {
+    const body = await readBody(request);
+    const subscription = upsertPushSubscription({ deviceId: auth.device?.id || "", subscription: body.subscription || body });
+    audit(request, url, auth, { type: "push.subscribe", success: true, target: subscription.id });
+    sendJson(response, 201, { ok: true, subscription });
+    return;
+  }
+
+  const pushRevokeMatch = url.pathname.match(/^\/api\/push\/subscriptions\/([^/]+)$/);
+  if (pushRevokeMatch && request.method === "DELETE") {
+    const ok = revokePushSubscription(decodeURIComponent(pushRevokeMatch[1]));
+    audit(request, url, auth, { type: "push.unsubscribe", success: ok, target: pushRevokeMatch[1] });
+    sendJson(response, 200, { ok });
     return;
   }
 
@@ -481,14 +792,23 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/desktop-remote/messages" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "desktop.message", { limit: 40, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
     if (!body.text || typeof body.text !== "string") {
+      audit(request, url, auth, { type: "desktop.message", success: false, reason: "Text is required" });
       sendError(response, 400, "Text is required");
       return;
     }
 
-    const item = enqueueDesktopRemoteMessage(body.text);
+    const item = enqueueDesktopRemoteMessage(body.text, {
+      permissionMode: typeof body.permissionMode === "string" ? body.permissionMode : "",
+      model: typeof body.model === "string" ? body.model : "",
+      reasoningEffort: typeof body.reasoningEffort === "string" ? body.reasoningEffort : "",
+      settingsPolicy: typeof body.settingsPolicy === "string" ? body.settingsPolicy : "useExisting",
+      target: body.target && typeof body.target === "object" ? body.target : null
+    });
     const state = await getDesktopRemoteState();
+    audit(request, url, auth, { type: "desktop.message", success: true, target: item.id, meta: { target: body.target || null } });
     sendJson(response, 202, { ok: true, item, state });
     return;
   }
@@ -515,7 +835,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/histories" && request.method === "GET") {
-    sendJson(response, 200, { items: listHistories() });
+    sendJson(response, 200, { items: listHistories({ fresh: url.searchParams.get("fresh") === "1" }) });
     return;
   }
 
@@ -541,7 +861,7 @@ async function routeApi(request, response, url) {
   const historyMatch = url.pathname.match(/^\/api\/histories\/([^/]+)\/([^/]+)$/);
   if (historyMatch && request.method === "GET") {
     const [, provider, id] = historyMatch;
-    const item = getHistory(provider, decodeURIComponent(id));
+    const item = getHistory(provider, decodeURIComponent(id), { fresh: url.searchParams.get("fresh") === "1" });
     if (!item) {
       sendError(response, 404, "History not found");
       return;
@@ -556,13 +876,16 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/tasks" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "task.create", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
     if (!body.prompt || typeof body.prompt !== "string") {
+      audit(request, url, auth, { type: "task.create", success: false, reason: "Prompt is required" });
       sendError(response, 400, "Prompt is required");
       return;
     }
 
     const task = createTask(body, settings);
+    audit(request, url, auth, { type: "task.create", success: true, target: task.id, meta: { agent: task.agent, cwd: task.cwd } });
     sendJson(response, 201, {
       id: task.id,
       status: task.status
@@ -575,6 +898,22 @@ async function routeApi(request, response, url) {
     const after = Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0);
     const ok = subscribeTask(taskEventsMatch[1], response, { after });
     if (!ok) sendError(response, 404, "Task not found");
+    return;
+  }
+
+  const taskEventsCatchUpMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/events\/catch-up$/);
+  if (taskEventsCatchUpMatch && request.method === "GET") {
+    const task = getTask(taskEventsCatchUpMatch[1]);
+    if (!task) {
+      sendError(response, 404, "Task not found");
+      return;
+    }
+    sendJson(response, 200, {
+      items: listTaskEvents(task.id, {
+        after: Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0),
+        limit: Number(url.searchParams.get("limit") || 5000)
+      })
+    });
     return;
   }
 

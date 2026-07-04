@@ -11,6 +11,10 @@ function mergeSettings(base, next) {
   return {
     ...base,
     ...next,
+    webPush: {
+      ...base.webPush,
+      ...(next?.webPush || {})
+    },
     apiKeys: {
       ...base.apiKeys,
       ...(next?.apiKeys || {})
@@ -78,6 +82,12 @@ export function publicSettings(settings) {
     allowedRoots: Array.isArray(settings.allowedRoots) ? settings.allowedRoots : [],
     hostAllowlist: Array.isArray(settings.hostAllowlist) ? settings.hostAllowlist : [],
     allowTryCloudflare: settings.allowTryCloudflare !== false,
+    allowLegacyPairingTokenLogin: Boolean(settings.allowLegacyPairingTokenLogin),
+    notificationEmailConfigured: Boolean(settings.notificationEmail),
+    webPush: {
+      enabled: Boolean(settings.webPush?.publicKey),
+      publicKey: settings.webPush?.publicKey || ""
+    },
     hasOpenAIKey: Boolean(settings.apiKeys.openai),
     hasAnthropicKey: Boolean(settings.apiKeys.anthropic)
   };
@@ -90,7 +100,8 @@ export function sanitizeSettingsPatch(patch = {}) {
     "claudeCommand",
     "codexCommand",
     "codexTemplate",
-    "permissionMode"
+    "permissionMode",
+    "notificationEmail"
   ];
 
   for (const key of allowed) {
@@ -119,6 +130,15 @@ export function sanitizeSettingsPatch(patch = {}) {
 
   if (typeof patch.allowTryCloudflare === "boolean") {
     next.allowTryCloudflare = patch.allowTryCloudflare;
+  }
+
+  if (typeof patch.allowLegacyPairingTokenLogin === "boolean") {
+    next.allowLegacyPairingTokenLogin = patch.allowLegacyPairingTokenLogin;
+  }
+
+  if (patch.webPush && typeof patch.webPush === "object") {
+    next.webPush = {};
+    if (typeof patch.webPush.subject === "string") next.webPush.subject = patch.webPush.subject.trim();
   }
 
   return next;

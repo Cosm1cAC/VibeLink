@@ -103,10 +103,33 @@ class ApiClient(
 
     // ── Tasks ──
 
-    suspend fun listTasks(): List<Map<String, Any?>> {
+    suspend fun listTasks(): List<TaskSummary> {
         val json = get("/api/tasks")
-        @Suppress("UNCHECKED_CAST")
-        return gson.fromJson(json, Map::class.java)["items"] as? List<Map<String, Any?>> ?: emptyList()
+        return gson.fromJson(json, TaskListResponse::class.java).items
+    }
+
+    suspend fun getTask(taskId: String): TaskDetail {
+        val json = get("/api/tasks/$taskId")
+        return gson.fromJson(json, TaskDetail::class.java)
+    }
+
+    // ── Histories (session list + detail) ──
+
+    suspend fun listHistories(): List<HistoryItem> {
+        val json = get("/api/histories")
+        return gson.fromJson(json, HistoryListResponse::class.java).items
+    }
+
+    suspend fun getHistoryDetail(provider: String, id: String): HistoryDetail {
+        val json = get("/api/histories/$provider/${java.net.URLEncoder.encode(id, "UTF-8")}")
+        return gson.fromJson(json, HistoryDetail::class.java)
+    }
+
+    // ── Tool Events ──
+
+    suspend fun fetchToolEvents(taskId: String, after: Int = 0, limit: Int = 500): List<ToolEvent> {
+        val json = get("/api/tool-events?taskId=${java.net.URLEncoder.encode(taskId, "UTF-8")}&after=$after&limit=$limit")
+        return gson.fromJson(json, ToolEventListResponse::class.java).items
     }
 
     // ── SSE (Live Call Events) ──
@@ -117,6 +140,23 @@ class ApiClient(
         listener: EventSourceListener
     ): EventSource {
         val url = "$baseUrl/api/live-calls/$sessionId/events?after=$after" +
+                (if (token.isNotBlank()) "&token=${token}" else "")
+        val req = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+        val factory = EventSources.createFactory(httpClient)
+        return factory.newEventSource(req, listener)
+    }
+
+    // ── SSE (Task Events) ──
+
+    fun subscribeTaskEvents(
+        taskId: String,
+        after: Int = 0,
+        listener: EventSourceListener
+    ): EventSource {
+        val url = "$baseUrl/api/tasks/$taskId/events?after=$after" +
                 (if (token.isNotBlank()) "&token=${token}" else "")
         val req = Request.Builder()
             .url(url)

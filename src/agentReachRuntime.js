@@ -29,11 +29,14 @@ export function agentReachPathEntries(env = process.env) {
   const candidates = process.platform === "win32"
     ? [
         path.join(home, ".agent-reach-venv", "Scripts"),
+        path.join(home, ".local", "bin"),
+        path.join(home, ".agent-reach", "tools", "ffmpeg"),
         path.join(appDataDir(env), "npm")
       ]
     : [
         path.join(home, ".agent-reach-venv", "bin"),
-        path.join(home, ".local", "bin")
+        path.join(home, ".local", "bin"),
+        path.join(home, ".agent-reach", "tools", "ffmpeg")
       ];
   return existingDirs(candidates);
 }

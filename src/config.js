@@ -20,6 +20,14 @@ export const defaultSettings = {
   codexCommand: process.env.CODEX_COMMAND || "auto",
   codexTemplate: process.env.CODEX_TEMPLATE || "",
   permissionMode: "default",
+  security: {
+    sandboxMode: "workspace-write",
+    approvalPolicy: "on-request",
+    networkAccess: true,
+    requireTrustedWorkspace: true,
+    requireDangerousCommandApproval: true,
+    trustedWorkspaces: []
+  },
   allowedRoots: [],
   hostAllowlist: [],
   allowTryCloudflare: false,
@@ -30,9 +38,20 @@ export const defaultSettings = {
     privateKey: "",
     subject: ""
   },
+  toolEvents: {
+    retentionDays: 30,
+    keepLatest: 5000,
+    autoPrune: true,
+    autoPruneIntervalMinutes: 360
+  },
+  mcp: {
+    probeTimeoutMs: 10000,
+    servers: []
+  },
   apiKeys: {
     openai: "",
-    anthropic: ""
+    anthropic: "",
+    zhipu: ""
   }
 };
 

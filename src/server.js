@@ -1,34 +1,65 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { URL } from "node:url";
 import QRCode from "qrcode";
+import { agentReachInstallInfo, withAgentReachPath } from "./agentReachRuntime.js";
 import { attachmentsDir, getNetworkAddresses, publicDir } from "./config.js";
 import {
+  attachToolRunToTask,
   approvePairingSession,
   claimPairingSession,
   createPairingSession,
   denyPairingSession,
   getDbPath,
+  getApprovalRequest,
   getPairingSession,
+  getToolRun,
+  findWorkspaceForPath,
+  listApprovalRequests,
   listAuditLogs,
   listDesktopObservations,
   listDevices,
   listPairingSessions,
   listTaskEvents,
+  listToolEvents,
+  listToolRuns,
+  getToolEventStats,
+  pruneToolEvents,
   recordAuditLog,
   revokeDevice,
   revokePushSubscription,
   rotateDeviceToken,
+  updateToolRun,
   upsertPushSubscription
 } from "./db.js";
-import { createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
+import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
+import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
+import { commandApprovalRequired } from "./commandSafety.js";
 import { startDesktopObserver, subscribeDesktopObserver } from "./desktopObserver.js";
 import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
 import { getHistory, listHistories } from "./history.js";
+import {
+  createLiveCallSession,
+  getLiveCallSession,
+  listLiveCallEvents,
+  listLiveCallSessions,
+  recordLiveCallAnswer,
+  recordLiveCallLevel,
+  recordLiveCallTranscript,
+  restoreLiveCallSessions,
+  setLiveCallQuestionHook,
+  stopLiveCallSession,
+  subscribeLiveCallEvents
+} from "./liveCall.js";
+import { listUnifiedEvents } from "./db.js";
+import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
+import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
   authenticateRequest,
   checkRateLimit,
@@ -45,14 +76,45 @@ import {
   resolveAllowedPath
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
-import { loadSettings, publicSettings, sanitizeSettingsPatch, saveSettings } from "./store.js";
+import { loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings } from "./store.js";
+import { writeApiKeys } from "./credentialStore.js";
+import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
-import { createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree } from "./workspaces.js";
+import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
+import { mcpStatus, probeMcpServers } from "./mcpRuntime.js";
+import {
+  approveToolApproval,
+  createAgentTaskToolRun,
+  createWorkspaceActionToolRun,
+  createWorkspaceCommandToolRun,
+  denyToolApproval,
+  expireToolApproval,
+  emitToolEvent,
+  requestToolApproval,
+  runApprovedWorkspaceCommand,
+  runWorkspaceToolAction,
+  subscribeToolEvents
+} from "./toolRuntime.js";
+import { listToolRegistry } from "./toolRegistry.js";
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
 ensureDefaultWorkspaces(settings);
 restoreTasks();
+const restoredLiveCallSessions = restoreLiveCallSessions();
+for (const sessionId of restoredLiveCallSessions) {
+  setLiveCallQuestionHook(sessionId, (question, sess) => {
+    dispatchLiveCallQuestion({
+      sessionId: sess.id,
+      question,
+      history: collectLiveCallHistory(sess),
+      settings
+    }).catch((error) => console.error("[liveCallAgent] dispatch failed:", error.message));
+  });
+}
+if (restoredLiveCallSessions.length) {
+  console.log(`[liveCall] restored ${restoredLiveCallSessions.length} active sessions from SQLite`);
+}
 startDesktopObserver();
 setTaskNotificationHandler((payload) => {
   sendCriticalNotification(settings, payload).catch((error) => {
@@ -64,6 +126,31 @@ setDesktopRemoteNotificationHandler((payload) => {
     recordAuditLog({ type: "notification.error", success: false, reason: error.message, meta: payload });
   });
 });
+
+let toolEventsPruneTimer = null;
+let toolEventsPruneState = {
+  lastRunAt: "",
+  nextRunAt: "",
+  result: null,
+  error: ""
+};
+const activeWorkspaceCommands = new Map();
+
+function mirrorWorkspaceCommandTaskEvent(toolRunId, type, text, payload = {}, eventId = "", source = "workspace.command") {
+  const run = getToolRun(toolRunId);
+  const taskId = run?.taskId || run?.input?.taskId || "";
+  if (!taskId) return null;
+  return appendExternalTaskEvent(taskId, {
+    id: `workspace-command:${toolRunId}:${eventId || crypto.randomUUID()}`,
+    type,
+    text,
+    payload: {
+      source,
+      toolRunId,
+      ...payload
+    }
+  });
+}
 
 const runtimeLogDir = path.join(attachmentsDir, "..", "logs");
 const crashLogPath = path.join(runtimeLogDir, "server-crash.log");
@@ -248,6 +335,706 @@ function publicUrlFor(request, pathValue) {
   const host = request.headers.host || `localhost:${settings.port}`;
   const proto = request.headers["x-forwarded-proto"] || (cleanHost(host).endsWith(".trycloudflare.com") ? "https" : "http");
   return `${proto}://${host}${pathValue}`;
+}
+
+function toolEventsRetention(settingsValue = settings) {
+  const config = settingsValue.toolEvents || {};
+  const retentionDays = Math.min(3650, Math.max(1, Number(config.retentionDays || 30)));
+  const keepLatest = Math.min(500000, Math.max(0, Number(config.keepLatest ?? 5000)));
+  const autoPruneIntervalMinutes = Math.min(10080, Math.max(15, Number(config.autoPruneIntervalMinutes || 360)));
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  return {
+    retentionDays,
+    keepLatest,
+    autoPrune: config.autoPrune !== false,
+    autoPruneIntervalMinutes,
+    cutoff
+  };
+}
+
+function toolEventStatsPayload() {
+  return {
+    ...getToolEventStats(),
+    retention: toolEventsRetention(settings),
+    autoPrune: toolEventsPruneState
+  };
+}
+
+function runToolEventsPrune({ dryRun = true } = {}) {
+  const retention = toolEventsRetention(settings);
+  return pruneToolEvents({
+    before: retention.cutoff,
+    keepLatest: retention.keepLatest,
+    dryRun
+  });
+}
+
+function collectLiveCallHistory(session, limit = 6) {
+  if (!session?.events) return [];
+  const transcripts = session.events
+    .filter((event) => event.type === "live_call.transcript.final" || event.type === "live_call.transcript.partial")
+    .map((event) => ({
+      speaker: event.speaker || "remote",
+      text: event.text || "",
+      at: event.at,
+      final: event.type === "live_call.transcript.final"
+    }))
+    .filter((entry) => entry.text);
+  if (transcripts.length <= limit) return transcripts;
+  return transcripts.slice(transcripts.length - limit);
+}
+
+function scheduleToolEventsPrune() {
+  if (toolEventsPruneTimer) {
+    clearInterval(toolEventsPruneTimer);
+    toolEventsPruneTimer = null;
+  }
+  const retention = toolEventsRetention(settings);
+  const intervalMs = retention.autoPruneIntervalMinutes * 60 * 1000;
+  toolEventsPruneState = {
+    ...toolEventsPruneState,
+    nextRunAt: retention.autoPrune ? new Date(Date.now() + intervalMs).toISOString() : "",
+    error: ""
+  };
+  if (!retention.autoPrune) return;
+
+  const run = () => {
+    try {
+      const result = runToolEventsPrune({ dryRun: false });
+      toolEventsPruneState = {
+        lastRunAt: new Date().toISOString(),
+        nextRunAt: new Date(Date.now() + intervalMs).toISOString(),
+        result,
+        error: ""
+      };
+      if (result.deleted > 0) {
+        recordAuditLog({
+          type: "tool_events.auto_prune",
+          success: true,
+          target: result.cutoff,
+          meta: { keepLatest: result.keepLatest, deleted: result.deleted, prunable: result.prunable }
+        });
+      }
+    } catch (error) {
+      toolEventsPruneState = {
+        ...toolEventsPruneState,
+        lastRunAt: new Date().toISOString(),
+        nextRunAt: new Date(Date.now() + intervalMs).toISOString(),
+        error: error.message
+      };
+      recordAuditLog({ type: "tool_events.auto_prune", success: false, reason: error.message });
+    }
+  };
+
+  toolEventsPruneTimer = setInterval(run, intervalMs);
+  toolEventsPruneTimer.unref?.();
+}
+
+function taskSecurityPolicy(body = {}) {
+  return {
+    ...(settings.security || {}),
+    ...(body.security || {})
+  };
+}
+
+function normalizedPath(value = "") {
+  return path.resolve(String(value || "")).toLowerCase();
+}
+
+function isTrustedWorkspace(cwd, policy = {}) {
+  if (!policy.requireTrustedWorkspace) return true;
+  const target = normalizedPath(cwd || settings.defaultCwd || process.cwd());
+  const trusted = Array.isArray(policy.trustedWorkspaces) ? policy.trustedWorkspaces : [];
+  return trusted.some((item) => {
+    const root = normalizedPath(item);
+    return root && (target === root || target.startsWith(`${root}${path.sep}`));
+  });
+}
+
+function taskRiskReasons(body = {}, policy = {}) {
+  const reasons = [];
+  if (policy.sandboxMode === "danger-full-access") reasons.push("danger-full-access sandbox");
+  if (policy.approvalPolicy === "never") reasons.push("approval policy never");
+  if (policy.networkAccess) reasons.push("network access enabled");
+  if (!isTrustedWorkspace(body.cwd || settings.defaultCwd || process.cwd(), policy)) reasons.push("workspace is not trusted");
+  return reasons;
+}
+
+function taskApprovalRequired(body = {}, policy = {}) {
+  if (!policy.requireDangerousCommandApproval) return false;
+  return taskRiskReasons(body, policy).length > 0;
+}
+
+function workspaceCommandApprovalRisk(command = "", workspacePath = "", policy = {}) {
+  const risk = commandApprovalRequired(command, policy);
+  const trusted = isTrustedWorkspace(workspacePath || settings.defaultCwd || process.cwd(), policy);
+  const trustedRequired = Boolean(policy.requireTrustedWorkspace !== false && !trusted);
+  const reasons = [
+    ...(risk.reasons || []),
+    ...(trustedRequired ? ["workspace is not trusted"] : [])
+  ];
+  const matches = [
+    ...(risk.matches || []),
+    ...(trustedRequired
+      ? [{ code: "untrusted_workspace", severity: "high", reason: "workspace is not trusted", policy: "requireTrustedWorkspace=true" }]
+      : [])
+  ];
+  return {
+    ...risk,
+    trustedWorkspace: trusted,
+    trustedWorkspaceRequired: trustedRequired,
+    risky: Boolean(risk.risky || trustedRequired),
+    required: Boolean(risk.required || trustedRequired),
+    reasons: [...new Set(reasons)],
+    matches
+  };
+}
+
+function terminalSessionApprovalRisk(workspacePath = "", policy = {}) {
+  const trusted = isTrustedWorkspace(workspacePath || settings.defaultCwd || process.cwd(), policy);
+  const trustedRequired = Boolean(policy.requireTrustedWorkspace !== false && !trusted);
+  const interactiveRequired = policy.requireDangerousCommandApproval !== false;
+  const reasons = [
+    ...(interactiveRequired ? ["interactive terminal session"] : []),
+    ...(trustedRequired ? ["workspace is not trusted"] : [])
+  ];
+  const matches = [
+    ...(interactiveRequired ? [{ code: "interactive_terminal", severity: "high", reason: "interactive terminal session", policy: "requireDangerousCommandApproval=true" }] : []),
+    ...(trustedRequired ? [{ code: "untrusted_workspace", severity: "high", reason: "workspace is not trusted", policy: "requireTrustedWorkspace=true" }] : [])
+  ];
+  return {
+    risky: Boolean(interactiveRequired || trustedRequired),
+    required: Boolean(interactiveRequired || trustedRequired),
+    trustedWorkspace: trusted,
+    trustedWorkspaceRequired: trustedRequired,
+    reasons: [...new Set(reasons)],
+    matches
+  };
+}
+
+async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
+  const run = getToolRun(toolRunId);
+  if (!run) {
+    const error = new Error("Tool run not found.");
+    error.status = 404;
+    throw error;
+  }
+  const input = run.input || {};
+  const cwd = resolveWorkspacePath(input.workspaceId, settingsValue);
+  updateToolRun(toolRunId, { status: "running", startedAt: new Date().toISOString() });
+  emitToolEvent(toolRunId, {
+    type: "tool.started",
+    text: `Terminal session started in ${cwd}`,
+    payload: { input, cwd }
+  });
+  mirrorWorkspaceCommandTaskEvent(toolRunId, "system", `Terminal session started in ${cwd}`, { cwd, workspaceId: input.workspaceId || "" }, "terminal-started", "workspace.terminal_session");
+
+  try {
+    const session = await startTerminalSession({
+      id: toolRunId,
+      cwd,
+      shell: input.shell || "",
+      args: Array.isArray(input.args) ? input.args : [],
+      cols: input.cols || 100,
+      rows: input.rows || 30,
+      mode: input.mode || "auto",
+      onOutput: (chunk) => {
+        const payload = {
+          sessionId: toolRunId,
+          stream: chunk.stream,
+          text: chunk.text,
+          mode: chunk.mode,
+          bytes: Buffer.byteLength(chunk.text || "", "utf8"),
+          cwd
+        };
+        const event = emitToolEvent(toolRunId, {
+          type: "tool.output",
+          text: chunk.text,
+          payload
+        });
+        mirrorWorkspaceCommandTaskEvent(
+          toolRunId,
+          chunk.stream === "stderr" ? "stderr" : "stdout",
+          chunk.text,
+          payload,
+          event?.id || "",
+          "workspace.terminal_session"
+        );
+      },
+      onExit: (sessionResult) => {
+        const ok = Number(sessionResult.exitCode || 0) === 0;
+        updateToolRun(toolRunId, {
+          status: ok ? "completed" : "failed",
+          result: sessionResult,
+          error: ok ? "" : `Terminal exited with code ${sessionResult.exitCode}`,
+          completedAt: new Date().toISOString()
+        });
+        emitToolEvent(toolRunId, {
+          type: ok ? "tool.completed" : "tool.failed",
+          text: sessionResult.signal ? `Terminal exited with signal ${sessionResult.signal}` : `Terminal exited with code ${sessionResult.exitCode}`,
+          payload: { session: sessionResult, ok }
+        });
+        mirrorWorkspaceCommandTaskEvent(
+          toolRunId,
+          "system",
+          ok ? "Terminal session completed." : `Terminal session failed with code ${sessionResult.exitCode}`,
+          { session: sessionResult, ok },
+          "terminal-exited",
+          "workspace.terminal_session"
+        );
+      }
+    });
+    emitToolEvent(toolRunId, {
+      type: "tool.output",
+      text: `terminal mode=${session.mode} shell=${session.shell}`,
+      payload: { session }
+    });
+    return { ok: true, status: "running", session, toolRunId };
+  } catch (error) {
+    updateToolRun(toolRunId, { status: "failed", error: error.message, completedAt: new Date().toISOString() });
+    emitToolEvent(toolRunId, { type: "tool.error", text: error.message, payload: { error: error.message } });
+    mirrorWorkspaceCommandTaskEvent(toolRunId, "error", error.message, { error: error.message }, "terminal-error", "workspace.terminal_session");
+    throw error;
+  }
+}
+
+async function executeWorkspaceCommandToolRun(toolRunId, settingsValue) {
+  return runApprovedWorkspaceCommand({
+    toolRunId,
+    execute: async (input) => {
+      const controller = new AbortController();
+      activeWorkspaceCommands.set(toolRunId, {
+        controller,
+        startedAt: new Date().toISOString(),
+        command: input.command || "",
+        workspaceId: input.workspaceId || ""
+      });
+      try {
+        mirrorWorkspaceCommandTaskEvent(
+          toolRunId,
+          "system",
+          `${input.kind === "test" ? "Running workspace test" : "Running workspace command"}: ${input.command || ""}`,
+          { command: input.command || "", kind: input.kind || "terminal", workspaceId: input.workspaceId || "" },
+          "started"
+        );
+        const result = await runWorkspaceCommand(input.workspaceId, settingsValue, {
+          command: input.command,
+          kind: input.kind,
+          timeoutMs: input.timeoutMs,
+          approved: true,
+          signal: controller.signal,
+          onOutput: (chunk) => {
+            const payload = {
+              stream: chunk.stream,
+              text: chunk.text,
+              bytes: Buffer.byteLength(chunk.text || "", "utf8"),
+              elapsedMs: chunk.elapsedMs,
+              command: chunk.command,
+              cwd: chunk.cwd
+            };
+            const event = emitToolEvent(toolRunId, {
+              type: "tool.output",
+              text: chunk.text,
+              payload
+            });
+            mirrorWorkspaceCommandTaskEvent(
+              toolRunId,
+              chunk.stream === "stderr" ? "stderr" : "stdout",
+              chunk.text,
+              payload,
+              event?.id || ""
+            );
+          }
+        });
+        mirrorWorkspaceCommandTaskEvent(
+          toolRunId,
+          "system",
+          result.ok ? "Workspace command completed." : "Workspace command failed.",
+          { command: input.command || "", kind: input.kind || "terminal", exitCode: result.exitCode ?? null, ok: Boolean(result.ok) },
+          "completed"
+        );
+        return result;
+      } finally {
+        activeWorkspaceCommands.delete(toolRunId);
+      }
+    }
+  });
+}
+
+function stopWorkspaceToolRun(toolRunId, reason = "Stopped by user.") {
+  const active = activeWorkspaceCommands.get(toolRunId);
+  if (!active) {
+    const run = getToolRun(toolRunId);
+    return { ok: false, stopped: false, error: run ? "Tool run is not running." : "Tool run not found.", toolRun: run || null };
+  }
+  emitToolEvent(toolRunId, {
+    type: "tool.cancel_requested",
+    text: reason,
+    payload: {
+      reason,
+      command: active.command,
+      workspaceId: active.workspaceId
+    }
+  });
+  active.controller.abort(reason);
+  return { ok: true, stopped: true, toolRunId };
+}
+
+async function executeAgentTaskToolRun(toolRunId, settingsValue) {
+  return runWorkspaceToolAction({
+    toolRunId,
+    startedText: (input) => input.prompt || input.title || "Agent task",
+    completedText: "Agent task created.",
+    failedText: "Agent task failed to start.",
+    execute: async (input) => {
+      const payload = {
+        ...(input.payload || {}),
+        approved: true
+      };
+      const task = await createTask(payload, settingsValue);
+      const workspace = findWorkspaceForPath(task.cwd || payload.cwd || "");
+      attachToolRunToTask(toolRunId, { taskId: task.id, workspaceId: workspace?.id || "" });
+      return {
+        ok: true,
+        id: task.id,
+        status: task.status,
+        task: {
+          id: task.id,
+          agent: task.agent,
+          title: task.title,
+          cwd: task.cwd,
+          status: task.status,
+          sessionId: task.sessionId || ""
+        }
+      };
+    }
+  });
+}
+
+async function executeBrowserFetchToolRun(toolRunId) {
+  return runWorkspaceToolAction({
+    toolRunId,
+    startedText: (input) => input.url || "Browser fetch",
+    completedText: "Browser fetch completed.",
+    failedText: "Browser fetch failed.",
+    execute: async (input) => fetchBrowserPage(input, {
+      emitProgress: (event) => {
+        emitToolEvent(toolRunId, {
+          type: "tool.output",
+          text: [event.phase, event.status || event.bytes || event.url || ""].filter(Boolean).join(" "),
+          payload: event
+        });
+      }
+    })
+  });
+}
+
+function runnableApprovedToolRun(toolRunId) {
+  const run = getToolRun(toolRunId);
+  if (!run) return false;
+  return ["approved", "pending", "approval_required"].includes(run.status || "");
+}
+
+async function resumeApprovedToolRun(approval, settingsValue, request, url, auth) {
+  if (!approval?.toolRunId) return { ok: true, result: null, runnable: false };
+  const run = getToolRun(approval.toolRunId);
+  if (!run) {
+    const error = new Error("Approved tool run was not found.");
+    error.status = 404;
+    throw error;
+  }
+
+  if (!runnableApprovedToolRun(approval.toolRunId)) {
+    return { ok: run.status === "completed", result: run.result || null, runnable: false, toolRun: run };
+  }
+
+  let result = null;
+  if (approval.kind === "workspace.command" || approval.kind === "workspace.test") {
+    result = await executeWorkspaceCommandToolRun(approval.toolRunId, settingsValue);
+    audit(request, url, auth, {
+      type: approval.kind === "workspace.test" ? "workspace.test" : "workspace.command",
+      success: Boolean(result.ok),
+      target: result.workspace?.path || approval.workspaceId,
+      reason: result.ok ? "" : result.stderr || result.stdout || "Command failed",
+      meta: { approvedByApprovalId: approval.id, toolRunId: approval.toolRunId, resumed: true }
+    });
+  } else if (approval.kind === "agent.task") {
+    result = await executeAgentTaskToolRun(approval.toolRunId, settingsValue);
+    audit(request, url, auth, {
+      type: "task.create",
+      success: Boolean(result.ok),
+      target: result.id || approval.toolRunId,
+      reason: result.ok ? "" : result.error || "Task failed to start",
+      meta: { approvedByApprovalId: approval.id, toolRunId: approval.toolRunId, resumed: true }
+    });
+  } else if (approval.kind === "browser.fetch") {
+    result = await executeBrowserFetchToolRun(approval.toolRunId);
+    audit(request, url, auth, {
+      type: "browser.fetch",
+      success: Boolean(result.ok),
+      target: result.finalUrl || result.url || approval.toolRunId,
+      reason: result.ok ? "" : result.statusText || "Browser fetch failed",
+      meta: { approvedByApprovalId: approval.id, toolRunId: approval.toolRunId, resumed: true }
+    });
+  } else if (approval.kind === "workspace.terminal_session") {
+    result = await startWorkspaceTerminalSessionToolRun(approval.toolRunId, settingsValue);
+    audit(request, url, auth, {
+      type: "workspace.terminal_session",
+      success: Boolean(result.ok),
+      target: result.session?.cwd || approval.workspaceId,
+      reason: result.ok ? "" : result.error || "Terminal session failed to start",
+      meta: { approvedByApprovalId: approval.id, toolRunId: approval.toolRunId, resumed: true }
+    });
+  }
+
+  return { ok: true, result, runnable: true, toolRun: getToolRun(approval.toolRunId) };
+}
+
+async function runSystemTool({ toolName, title, input = {}, execute, request, url, auth }) {
+  const toolRun = createWorkspaceActionToolRun({
+    workspaceId: "",
+    toolName,
+    title,
+    input
+  });
+  try {
+    const result = await runWorkspaceToolAction({
+      toolRunId: toolRun.id,
+      startedText: title,
+      completedText: `${title} completed.`,
+      failedText: `${title} failed.`,
+      execute: () => execute(toolRun)
+    });
+    audit(request, url, auth, {
+      type: toolName,
+      success: Boolean(result.ok),
+      target: toolRun.id,
+      reason: result.ok ? "" : result.error || result.stderr || result.stdout || "Tool failed.",
+      meta: { toolRunId: toolRun.id }
+    });
+    return { ...result, toolRunId: toolRun.id };
+  } catch (error) {
+    audit(request, url, auth, {
+      type: toolName,
+      success: false,
+      target: toolRun.id,
+      reason: error.message,
+      meta: { toolRunId: toolRun.id }
+    });
+    throw error;
+  }
+}
+
+function runProbeCommand(command, args = [], { timeoutMs = 5000 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      env: withAgentReachPath(process.env),
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch {}
+      resolve({ ok: false, stdout, stderr: stderr || "Timed out.", code: -1 });
+    }, timeoutMs);
+
+    child.stdout?.on("data", (data) => {
+      stdout += data.toString();
+    });
+    child.stderr?.on("data", (data) => {
+      stderr += data.toString();
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, stdout, stderr: error.message, code: -1 });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout, stderr, code });
+    });
+  });
+}
+
+function splitProbeCommandLine(input) {
+  const args = [];
+  let current = "";
+  let quote = "";
+  let escape = false;
+
+  for (let index = 0; index < String(input || "").length; index += 1) {
+    const char = input[index];
+    const next = input[index + 1];
+
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+
+    if (char === "\\" && quote && (next === quote || next === "\\")) {
+      escape = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) quote = "";
+      else current += char;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current) args.push(current);
+  return args;
+}
+
+async function commandProbe(commandLine, args = ["--version"]) {
+  const parts = splitProbeCommandLine(commandLine);
+  if (!parts.length) {
+    return { ok: false, command: "", code: -1, version: "", error: "Command is empty." };
+  }
+  const [command, ...baseArgs] = parts;
+  const result = await runProbeCommand(command, [...baseArgs, ...args], { timeoutMs: 5000 });
+  return {
+    ok: result.ok,
+    command: commandLine,
+    code: result.code,
+    version: (result.stdout || result.stderr || "").split(/\r?\n/).find(Boolean)?.slice(0, 240) || "",
+    error: result.ok ? "" : (result.stderr || result.stdout || "Command not available.").slice(0, 500)
+  };
+}
+
+function doctorCheck(id, ok, label, detail, severity = "error") {
+  return { id, ok, label, detail, severity };
+}
+
+function sandboxDoctorStatus(settingsValue = settings) {
+  const security = settingsValue.security || {};
+  const workspaces = getWorkspaces(settingsValue);
+  const allowRoots = [
+    ...(Array.isArray(settingsValue.allowedRoots) ? settingsValue.allowedRoots : []),
+    ...workspaces.map((workspace) => workspace.allowedRoot || workspace.path).filter(Boolean)
+  ];
+  return {
+    mode: security.sandboxMode || "workspace-write",
+    backend: "policy-only",
+    nativeBackendAvailable: false,
+    enabled: true,
+    reason: process.platform === "win32"
+      ? "Windows native process sandbox backend is not wired yet; VibeLink enforces preflight policy, approvals, allowed roots, and network gating."
+      : "Native process sandbox backend is not wired yet; VibeLink enforces preflight policy, approvals, allowed roots, and network gating.",
+    allowRoots: [...new Set(allowRoots)].slice(0, 100),
+    networkAccess: security.networkAccess !== false,
+    approvalPolicy: security.approvalPolicy || "on-request",
+    requireTrustedWorkspace: security.requireTrustedWorkspace !== false,
+    permissionDomains: ["read-only", "workspace-write", "network", "destructive", "privileged"]
+  };
+}
+
+async function buildDoctorReport(request) {
+  const publicSettingsValue = await publicSettings(settings);
+  const [desktop, git, gh, codex, claude, agentReach] = await Promise.all([
+    getCodexDesktopStatus().catch((error) => ({ ok: false, error: error.message })),
+    commandProbe("git"),
+    commandProbe("gh"),
+    settings.codexCommand && settings.codexCommand !== "auto" ? commandProbe(settings.codexCommand) : Promise.resolve({ ok: true, command: settings.codexCommand || "auto", version: "auto" }),
+    commandProbe(settings.claudeCommand || "claude"),
+    commandProbe("agent-reach", ["version"])
+  ]);
+  const toolStats = toolEventStatsPayload();
+  const workspaces = getWorkspaces(settings);
+  const trusted = settings.security?.trustedWorkspaces || [];
+  const mcp = mcpStatus(settings);
+  const sandbox = sandboxDoctorStatus(settings);
+  const terminal = terminalCapabilityReport();
+  const hasAnyModelKey = Boolean(publicSettingsValue.hasOpenAIKey || publicSettingsValue.hasAnthropicKey);
+  const checks = [
+    doctorCheck("node", Number(process.versions.node.split(".")[0]) >= 22, "Node runtime", process.version),
+    doctorCheck("sqlite", Boolean(getDbPath()), "SQLite", getDbPath()),
+    doctorCheck("tool-events", true, "Tool event store", `${toolStats.count} events, cursor ${toolStats.maxCursor || 0}`),
+    doctorCheck("credentials", Boolean(publicSettingsValue.credentials?.available), "Credential backend", publicSettingsValue.credentials?.description || "unknown"),
+    doctorCheck("model-key", hasAnyModelKey, "Model API key", hasAnyModelKey ? "configured" : "missing"),
+    doctorCheck("openai-key", Boolean(publicSettingsValue.hasOpenAIKey), "OpenAI key", publicSettingsValue.hasOpenAIKey ? "configured" : "missing", "warn"),
+    doctorCheck("anthropic-key", Boolean(publicSettingsValue.hasAnthropicKey), "Anthropic key", publicSettingsValue.hasAnthropicKey ? "configured" : "missing", "warn"),
+    doctorCheck("git", git.ok, "Git", git.version || git.error),
+    doctorCheck("gh", gh.ok, "GitHub CLI", gh.version || gh.error, "warn"),
+    doctorCheck("codex", codex.ok, "Codex command", codex.version || codex.error || codex.command, settings.codexCommand && settings.codexCommand !== "auto" ? "error" : "warn"),
+    doctorCheck("claude", claude.ok, "Claude command", claude.version || claude.error, "warn"),
+    doctorCheck("agent-reach", agentReach.ok, "Agent Reach", agentReach.version || agentReach.error, "warn"),
+    doctorCheck("desktop", Boolean(desktop?.ok || desktop?.found), "Codex Desktop", desktop?.target?.windowTitle || desktop?.windowTitle || desktop?.error || "not found", "warn"),
+    doctorCheck("host", isHostAllowed(request, settings), "Host allowlist", request.headers.host || "unknown"),
+    doctorCheck("workspace-command-network", settings.security?.networkAccess !== false, "Workspace command network", settings.security?.networkAccess === false ? "network commands require approval" : "enabled", "warn"),
+    doctorCheck("workspace-command-trust", settings.security?.requireTrustedWorkspace === false || trusted.length > 0, "Workspace command trust", settings.security?.requireTrustedWorkspace === false ? "not required" : trusted.length ? "untrusted workspaces require approval" : "no trusted workspaces configured", "warn"),
+    doctorCheck("sandbox-policy", sandbox.enabled, "Sandbox policy", `${sandbox.backend}, mode=${sandbox.mode}, network=${sandbox.networkAccess ? "enabled" : "approval required"}`, "warn"),
+    doctorCheck("terminal-runtime", terminal.fallbackAvailable, "Terminal runtime", terminal.ptyAvailable ? "PTY backend available" : terminal.reason, terminal.fallbackAvailable ? "warn" : "error"),
+    doctorCheck("mcp-config", true, "MCP servers", `${mcp.enabled}/${mcp.configured} enabled`, "warn"),
+    doctorCheck("trusted-workspaces", !settings.security?.requireTrustedWorkspace || trusted.length > 0, "Trusted workspaces", trusted.length ? `${trusted.length} configured` : "none configured"),
+    doctorCheck("workspace-count", workspaces.length > 0, "Workspaces", `${workspaces.length} known`)
+  ];
+  const failures = checks.filter((item) => !item.ok && item.severity !== "warn");
+  const warnings = [
+    ...checks.filter((item) => !item.ok && item.severity === "warn"),
+    ...publicAccessWarnings(request, settings).map((message, index) => ({
+      id: `public-access-${index + 1}`,
+      ok: false,
+      label: "Public access",
+      detail: message,
+      severity: "warn"
+    }))
+  ];
+  return {
+    ok: failures.length === 0,
+    platform: {
+      os: process.platform,
+      arch: process.arch,
+      release: os.release(),
+      node: process.version
+    },
+    checks,
+    failures,
+    warningChecks: warnings,
+    warnings,
+    security: {
+      sandboxMode: settings.security?.sandboxMode || "",
+      approvalPolicy: settings.security?.approvalPolicy || "",
+      networkAccess: settings.security?.networkAccess !== false,
+      requireTrustedWorkspace: settings.security?.requireTrustedWorkspace !== false,
+      cloudflare: cloudflareGuide(request, settings)
+    },
+    sandbox,
+    terminal,
+    agentReach: {
+      ...agentReach,
+      install: agentReachInstallInfo()
+    },
+    toolEvents: toolStats,
+    mcp,
+    desktop,
+    network: getNetworkAddresses(settings.port),
+    generatedAt: new Date().toISOString()
+  };
 }
 
 function serveStatic(request, response, url) {
@@ -463,17 +1250,21 @@ async function routeApi(request, response, url) {
     }
 
     const patch = sanitizeSettingsPatch({ apiKeys: body.apiKeys || {} });
+    let credentialResult = {};
+    if (body.rememberKeys && patch.apiKeys && Object.keys(patch.apiKeys).length) {
+      credentialResult = await writeApiKeys(patch.apiKeys);
+    }
     settings = {
       ...settings,
       apiKeys: {
         ...settings.apiKeys,
-        ...patch.apiKeys
+        ...(body.rememberKeys ? {} : patch.apiKeys)
       }
     };
 
     if (body.rememberKeys) await saveSettings(settings);
-    audit(request, url, { device }, { type: "login", success: true, target: device.id, meta: { legacyPairingToken: true } });
-    sendJson(response, 200, { ok: true, token: device.token, device: { id: device.id, label: device.label }, settings: publicSettings(settings) });
+    audit(request, url, { device }, { type: "login", success: true, target: device.id, meta: { legacyPairingToken: true, credentials: credentialResult } });
+    sendJson(response, 200, { ok: true, token: device.token, device: { id: device.id, label: device.label }, settings: await publicSettings(settings) });
     return;
   }
 
@@ -523,7 +1314,7 @@ async function routeApi(request, response, url) {
       return;
     }
     audit(request, url, { device: result.device }, { type: "pairing.claim", success: true, target: result.session.id });
-    sendJson(response, 200, { ok: true, token: result.device.token, device: { id: result.device.id, label: result.device.label }, session: result.session, settings: publicSettings(settings) });
+    sendJson(response, 200, { ok: true, token: result.device.token, device: { id: result.device.id, label: result.device.label }, session: result.session, settings: await publicSettings(settings) });
     return;
   }
 
@@ -559,9 +1350,10 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/status" && request.method === "GET") {
+    const publicSettingsValue = await publicSettings(settings);
     sendJson(response, 200, {
       ok: true,
-      settings: publicSettings(settings),
+      settings: publicSettingsValue,
       storage: {
         sqlite: getDbPath()
       },
@@ -571,7 +1363,7 @@ async function routeApi(request, response, url) {
         cloudflare: cloudflareGuide(request, settings)
       },
       notifications: {
-        webPush: publicSettings(settings).webPush,
+        webPush: publicSettingsValue.webPush,
         emailFallback: { configured: Boolean(settings.notificationEmail) }
       },
       workspaces: getWorkspaces(settings),
@@ -581,22 +1373,471 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/approvals" && request.method === "GET") {
+    const approvals = listApprovalRequests({
+      status: url.searchParams.get("status") || "",
+      workspaceId: url.searchParams.get("workspaceId") || "",
+      limit: Number(url.searchParams.get("limit") || 100)
+    }).map((approval) => (approval?.status === "expired" ? expireToolApproval(approval.id) : approval));
+    sendJson(response, 200, {
+      items: approvals
+    });
+    return;
+  }
+
+  const approvalDecisionMatch = url.pathname.match(/^\/api\/approvals\/([^/]+)\/decision$/);
+  if (approvalDecisionMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const approvalBefore = getApprovalRequest(approvalDecisionMatch[1]);
+    if (!approvalBefore) {
+      sendError(response, 404, "Approval request not found.");
+      return;
+    }
+
+    if (approvalBefore.status !== "pending") {
+      if (approvalBefore.status === "expired") {
+        const approval = expireToolApproval(approvalBefore.id);
+        sendJson(response, 409, { ok: false, approval, alreadyDecided: true, error: "Approval request expired." });
+        return;
+      }
+      if (approvalBefore.status === "approved" && runnableApprovedToolRun(approvalBefore.toolRunId)) {
+        const resumed = await resumeApprovedToolRun(approvalBefore, settings, request, url, auth);
+        sendJson(response, 200, { ok: true, approval: approvalBefore, result: resumed.result, resumed: resumed.runnable, alreadyDecided: true });
+        return;
+      }
+      sendJson(response, 200, { ok: approvalBefore.status === "approved", approval: approvalBefore, alreadyDecided: true });
+      return;
+    }
+
+    if (body.decision === "approve" || body.approved === true) {
+      const approval = approveToolApproval(approvalBefore.id, {
+        deviceId: auth.device?.id || "",
+        reason: body.reason || "Approved from VibeLink.",
+        decision: { source: "api", body }
+      });
+      audit(request, url, auth, {
+        type: "approval.approved",
+        success: true,
+        target: approval.id,
+        meta: { toolRunId: approval.toolRunId, kind: approval.kind }
+      });
+
+      const resumed = await resumeApprovedToolRun(approval, settings, request, url, auth);
+      sendJson(response, 200, { ok: true, approval, result: resumed.result, resumed: resumed.runnable });
+      return;
+    }
+
+    const approval = denyToolApproval(approvalBefore.id, {
+      deviceId: auth.device?.id || "",
+      reason: body.reason || "Denied from VibeLink.",
+      decision: { source: "api", body }
+    });
+    audit(request, url, auth, {
+      type: "approval.denied",
+      success: true,
+      target: approval.id,
+      reason: approval.decisionReason,
+      meta: { toolRunId: approval.toolRunId, kind: approval.kind }
+    });
+    sendJson(response, 200, { ok: false, approval });
+    return;
+  }
+
+  if (url.pathname === "/api/tool-runs" && request.method === "GET") {
+    sendJson(response, 200, {
+      items: listToolRuns({
+        workspaceId: url.searchParams.get("workspaceId") || "",
+        taskId: url.searchParams.get("taskId") || "",
+        limit: Number(url.searchParams.get("limit") || 100)
+      })
+    });
+    return;
+  }
+
+  const toolRunDetailMatch = url.pathname.match(/^\/api\/tool-runs\/([^/]+)$/);
+  if (toolRunDetailMatch && request.method === "GET") {
+    const toolRun = getToolRun(toolRunDetailMatch[1]);
+    if (!toolRun) {
+      sendError(response, 404, "Tool run not found.");
+      return;
+    }
+    sendJson(response, 200, {
+      toolRun,
+      events: listToolEvents({
+        toolRunId: toolRun.id,
+        after: Number(url.searchParams.get("after") || 0),
+        limit: Number(url.searchParams.get("limit") || 1000)
+      })
+    });
+    return;
+  }
+
+  const toolRunStopMatch = url.pathname.match(/^\/api\/tool-runs\/([^/]+)\/stop$/);
+  if (toolRunStopMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const toolRunId = toolRunStopMatch[1];
+    let result = stopWorkspaceToolRun(toolRunId, body.reason || "Stopped from VibeLink.");
+    if (!result.ok) {
+      const terminalResult = stopTerminalSession(toolRunId, body.reason || "Stopped from VibeLink.");
+      if (terminalResult.ok) {
+        emitToolEvent(toolRunId, {
+          type: "tool.cancel_requested",
+          text: terminalResult.reason || body.reason || "Stopped from VibeLink.",
+          payload: { session: terminalResult.session }
+        });
+        result = { ...terminalResult, stopped: true, toolRunId };
+      }
+    }
+    audit(request, url, auth, {
+      type: "tool.stop",
+      success: Boolean(result.ok),
+      target: toolRunId,
+      reason: result.ok ? "" : result.error || "Tool run is not running.",
+      meta: { toolRunId }
+    });
+    sendJson(response, result.ok ? 200 : result.toolRun ? 409 : 404, result);
+    return;
+  }
+
+  if (url.pathname === "/api/tool-registry" && request.method === "GET") {
+    sendJson(response, 200, { items: listToolRegistry() });
+    return;
+  }
+
+  if (url.pathname === "/api/tool-events/stats" && request.method === "GET") {
+    sendJson(response, 200, toolEventStatsPayload());
+    return;
+  }
+
+  if (url.pathname === "/api/tool-events/prune" && request.method === "POST") {
+    const body = await readBody(request);
+    const retention = toolEventsRetention(settings);
+    const result = pruneToolEvents({
+      before: body.before || retention.cutoff,
+      keepLatest: body.keepLatest ?? retention.keepLatest,
+      dryRun: body.dryRun !== false
+    });
+    audit(request, url, auth, {
+      type: "tool_events.prune",
+      success: true,
+      target: result.cutoff,
+      meta: { keepLatest: result.keepLatest, deleted: result.deleted, prunable: result.prunable, dryRun: result.dryRun }
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (url.pathname === "/api/doctor" && request.method === "GET") {
+    const result = await runSystemTool({
+      toolName: "system.doctor",
+      title: "Doctor",
+      input: { host: request.headers.host || "", path: url.pathname },
+      request,
+      url,
+      auth,
+      execute: async () => {
+        const report = await buildDoctorReport(request);
+        return { ok: report.ok, result: report, error: report.ok ? "" : `${report.failures.length} check(s) failed.` };
+      }
+    });
+    sendJson(response, 200, { ...result.result, toolRunId: result.toolRunId });
+    return;
+  }
+
+  if (url.pathname === "/api/mcp/status" && request.method === "GET") {
+    const result = await runSystemTool({
+      toolName: "mcp.status",
+      title: "MCP status",
+      input: { configured: settings.mcp?.servers?.length || 0 },
+      request,
+      url,
+      auth,
+      execute: async () => {
+        const status = mcpStatus(settings);
+        return { ok: true, result: status };
+      }
+    });
+    sendJson(response, 200, { ...result.result, toolRunId: result.toolRunId });
+    return;
+  }
+
+  if (url.pathname === "/api/mcp/probe" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "mcp.probe", { limit: 12, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    const result = await runSystemTool({
+      toolName: "mcp.probe",
+      title: body.serverId ? `MCP probe ${body.serverId}` : "MCP probe",
+      input: { serverId: body.serverId || "", configured: settings.mcp?.servers?.length || 0 },
+      request,
+      url,
+      auth,
+      execute: async (toolRun) => {
+        const report = await probeMcpServers(settings, {
+          serverId: body.serverId || "",
+          timeoutMs: Number(body.timeoutMs || 0),
+          emitProgress: (event) => {
+            emitToolEvent(toolRun.id, {
+              type: "tool.output",
+              text: [event.phase, event.name || event.serverId || event.method || "", event.status || ""].filter(Boolean).join(" "),
+              payload: event
+            });
+          }
+        });
+        return { ok: report.ok, result: report, error: report.ok ? "" : "One or more MCP servers failed probe." };
+      }
+    });
+    sendJson(response, 200, { ...result.result, toolRunId: result.toolRunId });
+    return;
+  }
+
+  if (url.pathname === "/api/browser/fetch" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "browser.fetch", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    const targetUrl = String(body.url || "").trim();
+    const risk = browserFetchRisk(targetUrl, settings.security || {});
+    const toolRun = createWorkspaceActionToolRun({
+      toolName: "browser.fetch",
+      title: targetUrl || "Browser fetch",
+      input: {
+        url: targetUrl,
+        timeoutMs: Number(body.timeoutMs || 15000),
+        maxBytes: Number(body.maxBytes || 1024 * 1024),
+        risk
+      }
+    });
+
+    if (risk.required) {
+      const approval = requestToolApproval({
+        toolRunId: toolRun.id,
+        kind: "browser.fetch",
+        title: "Approve browser fetch",
+        reason: risk.reasons.join("; "),
+        request: { url: targetUrl, timeoutMs: Number(body.timeoutMs || 15000), maxBytes: Number(body.maxBytes || 1024 * 1024) },
+        risk
+      });
+      audit(request, url, auth, {
+        type: "browser.fetch_approval_required",
+        success: false,
+        target: targetUrl,
+        reason: risk.reasons.join("; "),
+        meta: { approvalId: approval.id, toolRunId: toolRun.id, risk }
+      });
+      sendJson(response, 428, {
+        error: `Browser fetch requires explicit approval: ${risk.reasons.join(", ")}`,
+        approval,
+        approvalId: approval.id,
+        toolRun,
+        toolRunId: toolRun.id,
+        reasons: risk.reasons,
+        matches: risk.matches,
+        policy: {
+          networkAccess: settings.security?.networkAccess !== false,
+          approvalPolicy: settings.security?.approvalPolicy || ""
+        }
+      });
+      return;
+    }
+
+    try {
+      const result = await executeBrowserFetchToolRun(toolRun.id);
+      audit(request, url, auth, {
+        type: "browser.fetch",
+        success: Boolean(result.ok),
+        target: result.finalUrl || result.url || targetUrl,
+        reason: result.ok ? "" : result.statusText || "Browser fetch failed",
+        meta: { toolRunId: toolRun.id, risk }
+      });
+      sendJson(response, result.ok ? 200 : 502, { ...result, toolRunId: toolRun.id });
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "browser.fetch",
+        success: false,
+        target: targetUrl,
+        reason: error.message,
+        meta: { toolRunId: toolRun.id, risk }
+      });
+      sendError(response, error.status || 500, error.message);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/tool-events" && request.method === "GET") {
+    const filter = {
+      after: Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0),
+      toolRunId: url.searchParams.get("toolRunId") || "",
+      workspaceId: url.searchParams.get("workspaceId") || "",
+      taskId: url.searchParams.get("taskId") || ""
+    };
+    if (url.searchParams.get("stream") === "1") {
+      subscribeToolEvents(response, filter);
+      return;
+    }
+    sendJson(response, 200, {
+      items: listToolEvents({
+        ...filter,
+        limit: Number(url.searchParams.get("limit") || 1000)
+      })
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/live-calls" && request.method === "GET") {
+    sendJson(response, 200, { items: listLiveCallSessions() });
+    return;
+  }
+
+  if (url.pathname === "/api/live-calls" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "live_call.create", { limit: 20, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    const session = createLiveCallSession({ title: body.title, source: body.source });
+    audit(request, url, auth, { type: "live_call.create", success: true, target: session.id, meta: { source: session.source } });
+    if (session?.id) {
+      setLiveCallQuestionHook(session.id, (question, sess) => {
+        dispatchLiveCallQuestion({
+          sessionId: sess.id,
+          question,
+          history: collectLiveCallHistory(sess),
+          settings,
+          agent: body.agent || "claude",
+          model: body.model || ""
+        }).catch((error) => console.error("[liveCallAgent] dispatch failed:", error.message));
+      });
+    }
+    sendJson(response, 201, { ok: true, session });
+    return;
+  }
+
+  const liveCallMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)$/);
+  if (liveCallMatch && request.method === "GET") {
+    const session = getLiveCallSession(liveCallMatch[1]);
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { session });
+    return;
+  }
+
+  const liveCallStopMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/stop$/);
+  if (liveCallStopMatch && request.method === "POST") {
+    const body = await readBody(request);
+    stopLiveCallAgentTask(liveCallStopMatch[1]).catch(() => {});
+    const session = stopLiveCallSession(liveCallStopMatch[1], body.reason || "manual");
+    audit(request, url, auth, { type: "live_call.stop", success: Boolean(session), target: liveCallStopMatch[1] });
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  const liveCallEventsMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/events$/);
+  if (liveCallEventsMatch && request.method === "GET") {
+    const after = Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0);
+    const session = getLiveCallSession(liveCallEventsMatch[1]);
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    subscribeLiveCallEvents(liveCallEventsMatch[1], response, { after });
+    return;
+  }
+
+  const liveCallEventsCatchUpMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/events\/catch-up$/);
+  if (liveCallEventsCatchUpMatch && request.method === "GET") {
+    const items = listLiveCallEvents(liveCallEventsCatchUpMatch[1], {
+      after: Number(url.searchParams.get("after") || 0),
+      limit: Number(url.searchParams.get("limit") || 200)
+    });
+    if (!items) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { items });
+    return;
+  }
+
+  // Unified event log (cross-table).
+  if (url.pathname === "/api/events/unified" && request.method === "GET") {
+    const items = listUnifiedEvents({
+      taskId: url.searchParams.get("taskId") || "",
+      liveCallSessionId: url.searchParams.get("liveCallSessionId") || "",
+      toolRunId: url.searchParams.get("toolRunId") || "",
+      after: Number(url.searchParams.get("after") || 0),
+      limit: Number(url.searchParams.get("limit") || 200)
+    });
+    sendJson(response, 200, { items });
+    return;
+  }
+
+  // Command registry.
+  if (url.pathname === "/api/command-registry" && request.method === "GET") {
+    const filter = url.searchParams.get("filter") || "";
+    const items = getCommands(filter);
+    sendJson(response, 200, { items });
+    return;
+  }
+  if (url.pathname === "/api/command-registry/refresh" && request.method === "POST") {
+    const count = refreshSkills();
+    sendJson(response, 200, { ok: true, skillsLoaded: count });
+    return;
+  }
+
+  const liveCallLevelMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/level$/);
+  if (liveCallLevelMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const session = recordLiveCallLevel(liveCallLevelMatch[1], body);
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  const liveCallTranscriptMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/transcript$/);
+  if (liveCallTranscriptMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const session = recordLiveCallTranscript(liveCallTranscriptMatch[1], body);
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  const liveCallAnswerMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/answer$/);
+  if (liveCallAnswerMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const session = recordLiveCallAnswer(liveCallAnswerMatch[1], body);
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
   if (url.pathname === "/api/settings" && request.method === "POST") {
     const body = await readBody(request);
     const patch = sanitizeSettingsPatch(body);
+    const credentialResult = patch.apiKeys ? await writeApiKeys(patch.apiKeys) : {};
     settings = {
       ...settings,
       ...patch,
+      mcp: patch.mcp ? mergeMcpSettings(settings.mcp || {}, patch.mcp) : settings.mcp,
       apiKeys: {
-        ...settings.apiKeys,
-        ...(patch.apiKeys || {})
+        ...settings.apiKeys
       }
     };
     settings = ensureNotificationSettings(settings);
     await saveSettings(settings);
     ensureDefaultWorkspaces(settings);
-    audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch) } });
-    sendJson(response, 200, { ok: true, settings: publicSettings(settings) });
+    scheduleToolEventsPrune();
+    audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch), credentials: credentialResult } });
+    sendJson(response, 200, { ok: true, settings: await publicSettings(settings) });
     return;
   }
 
@@ -727,6 +1968,12 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  const workspaceFileMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file$/);
+  if (workspaceFileMatch && request.method === "GET") {
+    sendJson(response, 200, await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || ""));
+    return;
+  }
+
   const workspaceGitStatusMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/git\/status$/);
   if (workspaceGitStatusMatch && request.method === "GET") {
     sendJson(response, 200, await getWorkspaceGitStatus(workspaceGitStatusMatch[1], settings));
@@ -739,9 +1986,339 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  const workspaceGitFileActionMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/git\/file-action$/);
+  if (workspaceGitFileActionMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceGitFileActionMatch[1];
+    const action = String(body.action || "").trim().toLowerCase();
+    const targetPath = String(body.path || "");
+    const toolRun = createWorkspaceActionToolRun({
+      workspaceId,
+      toolName: "workspace.git_file_action",
+      title: `${action || "file-action"} ${targetPath}`.trim(),
+      input: { action, path: targetPath }
+    });
+    let result;
+    try {
+      result = await runWorkspaceToolAction({
+        toolRunId: toolRun.id,
+        startedText: `${action || "file-action"} ${targetPath}`.trim(),
+        completedText: "Git file action completed.",
+        failedText: "Git file action failed.",
+        execute: () => applyWorkspaceGitFileAction(workspaceId, settings, body)
+      });
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.git_file_action",
+        success: false,
+        target: targetPath,
+        reason: error.message,
+        meta: { action, toolRunId: toolRun.id }
+      });
+      sendError(response, error.status || 500, error.message);
+      return;
+    }
+    audit(request, url, auth, {
+      type: "workspace.git_file_action",
+      success: true,
+      target: body.path || "",
+      meta: { action: body.action || "", toolRunId: toolRun.id }
+    });
+    sendJson(response, 200, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
+  const workspaceGitActionMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/git\/action$/);
+  if (workspaceGitActionMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceGitActionMatch[1];
+    const action = String(body.action || "").trim().toLowerCase();
+    const toolRun = createWorkspaceActionToolRun({
+      workspaceId,
+      toolName: "workspace.git_action",
+      title: `git ${action || "action"}`,
+      input: {
+        action,
+        message: body.message || "",
+        title: body.title || ""
+      }
+    });
+    let result;
+    try {
+      result = await runWorkspaceToolAction({
+        toolRunId: toolRun.id,
+        startedText: `git ${action || "action"}`,
+        completedText: "Git action completed.",
+        failedText: "Git action failed.",
+        execute: () => applyWorkspaceGitAction(workspaceId, settings, body)
+      });
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.git_action",
+        success: false,
+        target: workspaceId,
+        reason: error.message,
+        meta: { action, toolRunId: toolRun.id }
+      });
+      sendError(response, error.status || 500, error.message);
+      return;
+    }
+    audit(request, url, auth, {
+      type: "workspace.git_action",
+      success: true,
+      target: result.workspace?.path || "",
+      meta: { action: body.action || "", toolRunId: toolRun.id }
+    });
+    sendJson(response, 200, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
+  const workspaceCommandMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/command$/);
+  if (workspaceCommandMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceCommandMatch[1];
+    const kind = body.kind === "test" ? "test" : "terminal";
+    let workspacePath = "";
+    try {
+      workspacePath = resolveWorkspacePath(workspaceId, settings);
+    } catch (error) {
+      sendError(response, error.status || 404, error.message);
+      return;
+    }
+    const commandRisk = workspaceCommandApprovalRisk(body.command || "", workspacePath, settings.security || {});
+    const taskId = typeof body.taskId === "string" && getTask(body.taskId) ? body.taskId : "";
+    const toolRun = createWorkspaceCommandToolRun({
+      workspaceId,
+      taskId,
+      kind,
+      command: body.command || "",
+      timeoutMs: kind === "test" ? body.timeoutMs || 180000 : body.timeoutMs || 120000,
+      risk: commandRisk
+    });
+    if (commandRisk.required) {
+      const approval = requestToolApproval({
+        toolRunId: toolRun.id,
+        workspaceId,
+        taskId,
+        kind: kind === "test" ? "workspace.test" : "workspace.command",
+        title: kind === "test" ? "Approve workspace test command" : "Approve workspace command",
+        reason: commandRisk.reasons.join("; "),
+        request: {
+          command: body.command || "",
+          kind,
+          taskId,
+          cwd: workspacePath,
+          timeoutMs: kind === "test" ? body.timeoutMs || 180000 : body.timeoutMs || 120000
+        },
+        risk: commandRisk
+      });
+      audit(request, url, auth, {
+        type: body.kind === "test" ? "workspace.test_approval_required" : "workspace.command_approval_required",
+        success: false,
+        target: workspaceId,
+        reason: commandRisk.reasons.join("; "),
+        meta: { command: body.command || "", kind, taskId, risk: commandRisk, approvalId: approval.id, toolRunId: toolRun.id }
+      });
+      sendCriticalNotification(settings, {
+        type: "approval.required",
+        title: "Command approval required",
+        body: `${kind === "test" ? "Test" : "Command"} needs approval: ${body.command || ""}`.slice(0, 180),
+        tag: `approval:${approval.id}`,
+        url: "/",
+        meta: { approvalId: approval.id, toolRunId: toolRun.id, workspaceId }
+      }).catch((error) => {
+        recordAuditLog({ type: "notification.error", success: false, reason: error.message, meta: { approvalId: approval.id } });
+      });
+      sendJson(response, 428, {
+        error: `Command requires explicit approval: ${commandRisk.reasons.join(", ")}`,
+        approval,
+        approvalId: approval.id,
+        toolRun,
+        toolRunId: toolRun.id,
+        reasons: commandRisk.reasons,
+        matches: commandRisk.matches,
+        policy: {
+          networkAccess: settings.security?.networkAccess !== false,
+          requireTrustedWorkspace: settings.security?.requireTrustedWorkspace !== false,
+          sandboxMode: settings.security?.sandboxMode || "",
+          approvalPolicy: settings.security?.approvalPolicy || ""
+        }
+      });
+      return;
+    }
+    if (body.background === true) {
+      executeWorkspaceCommandToolRun(toolRun.id, settings)
+        .then((result) => {
+          audit(request, url, auth, {
+            type: body.kind === "test" ? "workspace.test" : "workspace.command",
+            success: Boolean(result.ok),
+            target: result.workspace?.path || "",
+            reason: result.ok ? "" : result.stderr || result.stdout || "Command failed",
+            meta: { command: body.command || "", kind, taskId, background: true, risk: commandRisk, toolRunId: toolRun.id }
+          });
+        })
+        .catch((error) => {
+          audit(request, url, auth, {
+            type: body.kind === "test" ? "workspace.test" : "workspace.command",
+            success: false,
+            target: workspaceId,
+            reason: error.message,
+            meta: { command: body.command || "", kind, taskId, background: true, risk: commandRisk, toolRunId: toolRun.id }
+          });
+        });
+      sendJson(response, 202, { ok: true, status: "running", background: true, toolRun, toolRunId: toolRun.id });
+      return;
+    }
+
+    const result = await executeWorkspaceCommandToolRun(toolRun.id, settings);
+    audit(request, url, auth, {
+      type: body.kind === "test" ? "workspace.test" : "workspace.command",
+      success: Boolean(result.ok),
+      target: result.workspace?.path || "",
+      reason: result.ok ? "" : result.stderr || result.stdout || "Command failed",
+      meta: { command: body.command || "", kind, taskId, risk: commandRisk, toolRunId: toolRun.id }
+    });
+    sendJson(response, 200, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
+  const workspaceTerminalSessionMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/terminal-session$/);
+  if (workspaceTerminalSessionMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceTerminalSessionMatch[1];
+    let workspacePath = "";
+    try {
+      workspacePath = resolveWorkspacePath(workspaceId, settings);
+    } catch (error) {
+      sendError(response, error.status || 404, error.message);
+      return;
+    }
+    const taskId = typeof body.taskId === "string" && getTask(body.taskId) ? body.taskId : "";
+    const risk = terminalSessionApprovalRisk(workspacePath, settings.security || {});
+    const toolRun = createWorkspaceActionToolRun({
+      workspaceId,
+      taskId,
+      toolName: "workspace.terminal_session",
+      title: "Workspace terminal session",
+      input: {
+        workspaceId,
+        taskId,
+        shell: typeof body.shell === "string" ? body.shell.trim() : "",
+        mode: ["auto", "pty", "spawn"].includes(body.mode) ? body.mode : "auto",
+        cols: Number(body.cols || 100),
+        rows: Number(body.rows || 30),
+        risk
+      }
+    });
+    if (risk.required) {
+      const approval = requestToolApproval({
+        toolRunId: toolRun.id,
+        workspaceId,
+        taskId,
+        kind: "workspace.terminal_session",
+        title: "Approve terminal session",
+        reason: risk.reasons.join("; "),
+        request: { workspaceId, taskId, cwd: workspacePath, mode: body.mode || "auto" },
+        risk
+      });
+      audit(request, url, auth, {
+        type: "workspace.terminal_session_approval_required",
+        success: false,
+        target: workspaceId,
+        reason: risk.reasons.join("; "),
+        meta: { taskId, approvalId: approval.id, toolRunId: toolRun.id, risk }
+      });
+      sendJson(response, 428, {
+        error: `Terminal session requires explicit approval: ${risk.reasons.join(", ")}`,
+        approval,
+        approvalId: approval.id,
+        toolRun,
+        toolRunId: toolRun.id,
+        reasons: risk.reasons,
+        matches: risk.matches
+      });
+      return;
+    }
+    const result = await startWorkspaceTerminalSessionToolRun(toolRun.id, settings);
+    audit(request, url, auth, {
+      type: "workspace.terminal_session",
+      success: Boolean(result.ok),
+      target: result.session?.cwd || workspacePath,
+      reason: result.ok ? "" : result.error || "Terminal session failed to start",
+      meta: { taskId, toolRunId: toolRun.id, session: result.session || null }
+    });
+    sendJson(response, 202, { ...result, toolRun, toolRunId: toolRun.id });
+    return;
+  }
+
+  if (url.pathname === "/api/terminal-sessions" && request.method === "GET") {
+    sendJson(response, 200, { items: listTerminalSessions() });
+    return;
+  }
+
+  const terminalSessionMatch = url.pathname.match(/^\/api\/terminal-sessions\/([^/]+)$/);
+  if (terminalSessionMatch && request.method === "GET") {
+    const session = getTerminalSession(terminalSessionMatch[1]);
+    if (!session) {
+      sendError(response, 404, "Terminal session not found.");
+      return;
+    }
+    sendJson(response, 200, { session });
+    return;
+  }
+
+  const terminalSessionInputMatch = url.pathname.match(/^\/api\/terminal-sessions\/([^/]+)\/input$/);
+  if (terminalSessionInputMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const toolRunId = terminalSessionInputMatch[1];
+    const text = String(body.text || "");
+    const result = writeTerminalSession(toolRunId, text);
+    if (result.ok) {
+      emitToolEvent(toolRunId, { type: "tool.input", text, payload: { session: result.session, bytes: Buffer.byteLength(text, "utf8") } });
+      mirrorWorkspaceCommandTaskEvent(toolRunId, "stdin", text, { session: result.session }, `input:${Date.now()}`, "workspace.terminal_session");
+    }
+    audit(request, url, auth, {
+      type: "workspace.terminal_session.input",
+      success: Boolean(result.ok),
+      target: toolRunId,
+      reason: result.ok ? "" : result.error || "Terminal session input failed",
+      meta: { toolRunId, bytes: Buffer.byteLength(text, "utf8") }
+    });
+    sendJson(response, result.ok ? 200 : 409, result);
+    return;
+  }
+
+  const terminalSessionResizeMatch = url.pathname.match(/^\/api\/terminal-sessions\/([^/]+)\/resize$/);
+  if (terminalSessionResizeMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const toolRunId = terminalSessionResizeMatch[1];
+    const result = resizeTerminalSession(toolRunId, body.cols, body.rows);
+    if (result.ok) emitToolEvent(toolRunId, { type: "tool.resize", text: `${result.cols}x${result.rows}`, payload: result });
+    audit(request, url, auth, {
+      type: "workspace.terminal_session.resize",
+      success: Boolean(result.ok),
+      target: toolRunId,
+      reason: result.ok ? "" : result.error || "Terminal session resize failed",
+      meta: { toolRunId, cols: body.cols, rows: body.rows }
+    });
+    sendJson(response, result.ok ? 200 : 409, result);
+    return;
+  }
+
   if (url.pathname === "/api/codex-app-server/probe" && request.method === "POST") {
-    const result = await runCodexAppServerProbe(settings);
-    sendJson(response, 200, result);
+    const result = await runSystemTool({
+      toolName: "system.codex_app_server_probe",
+      title: "Codex app-server probe",
+      input: {},
+      request,
+      url,
+      auth,
+      execute: async () => {
+        const probe = await runCodexAppServerProbe(settings);
+        return { ok: Boolean(probe.ok), result: probe, error: probe.ok ? "" : probe.error || "Codex app-server probe failed." };
+      }
+    });
+    sendJson(response, 200, { ...(result.result || {}), toolRunId: result.toolRunId });
     return;
   }
 
@@ -753,8 +2330,20 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/codex-desktop/draft-probe" && request.method === "POST") {
     const body = await readBody(request);
-    const result = await probeCodexDesktopDraft(typeof body.text === "string" ? body.text : "");
-    sendJson(response, 200, result);
+    const text = typeof body.text === "string" ? body.text : "";
+    const result = await runSystemTool({
+      toolName: "desktop.draft_probe",
+      title: "Desktop draft probe",
+      input: { textLength: text.length },
+      request,
+      url,
+      auth,
+      execute: async () => {
+        const probe = await probeCodexDesktopDraft(text);
+        return { ok: Boolean(probe.ok), result: probe, error: probe.ok ? "" : probe.error || probe.target?.reason || "Desktop draft probe failed." };
+      }
+    });
+    sendJson(response, 200, { ...(result.result || {}), toolRunId: result.toolRunId });
     return;
   }
 
@@ -883,12 +2472,76 @@ async function routeApi(request, response, url) {
       sendError(response, 400, "Prompt is required");
       return;
     }
+    const policy = taskSecurityPolicy(body);
+    const riskReasons = taskRiskReasons(body, policy);
+    const workspace = findWorkspaceForPath(body.cwd || settings.defaultCwd || process.cwd());
+    const taskToolRun = createAgentTaskToolRun({
+      workspaceId: workspace?.id || "",
+      title: body.title || body.prompt || "Agent task",
+      input: {
+        payload: {
+          ...body,
+          security: policy
+        },
+        prompt: body.prompt || "",
+        cwd: body.cwd || settings.defaultCwd || "",
+        agent: body.agent || "codex",
+        mode: body.mode || "new",
+        sessionId: body.sessionId || ""
+      },
+      risk: { required: taskApprovalRequired(body, policy), reasons: riskReasons, policy }
+    });
+    if (taskApprovalRequired(body, policy)) {
+      const approval = requestToolApproval({
+        toolRunId: taskToolRun.id,
+        workspaceId: workspace?.id || "",
+        kind: "agent.task",
+        title: "Approve agent task",
+        reason: riskReasons.join("; "),
+        request: {
+          prompt: body.prompt || "",
+          cwd: body.cwd || settings.defaultCwd || "",
+          agent: body.agent || "codex",
+          mode: body.mode || "new",
+          sessionId: body.sessionId || ""
+        },
+        risk: { required: true, reasons: riskReasons, policy }
+      });
+      audit(request, url, auth, {
+        type: "task.approval_required",
+        success: false,
+        reason: riskReasons.join("; "),
+        meta: { policy, cwd: body.cwd || settings.defaultCwd || "", approvalId: approval.id, toolRunId: taskToolRun.id }
+      });
+      sendCriticalNotification(settings, {
+        type: "approval.required",
+        title: "Task approval required",
+        body: `${body.agent || "Agent"} task needs approval: ${body.prompt || ""}`.slice(0, 180),
+        tag: `approval:${approval.id}`,
+        url: "/",
+        meta: { approvalId: approval.id, toolRunId: taskToolRun.id, workspaceId: workspace?.id || "" }
+      }).catch((error) => {
+        recordAuditLog({ type: "notification.error", success: false, reason: error.message, meta: { approvalId: approval.id } });
+      });
+      sendJson(response, 428, {
+        error: `Task requires explicit approval: ${riskReasons.join(", ")}`,
+        approval,
+        approvalId: approval.id,
+        toolRun: taskToolRun,
+        toolRunId: taskToolRun.id,
+        reasons: riskReasons,
+        policy
+      });
+      return;
+    }
 
-    const task = createTask(body, settings);
-    audit(request, url, auth, { type: "task.create", success: true, target: task.id, meta: { agent: task.agent, cwd: task.cwd } });
+    const result = await executeAgentTaskToolRun(taskToolRun.id, settings);
+    const task = result.task || { id: result.id, status: result.status };
+    audit(request, url, auth, { type: "task.create", success: true, target: task.id, meta: { agent: task.agent, cwd: task.cwd, policy, approved: Boolean(body.approved), riskReasons, toolRunId: taskToolRun.id } });
     sendJson(response, 201, {
       id: task.id,
-      status: task.status
+      status: task.status,
+      toolRunId: taskToolRun.id
     });
     return;
   }
@@ -993,6 +2646,9 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
+import { WebSocketServer } from "ws";
+import { handleLiveCallAudioConnection } from "./liveCallAudio.js";
+
 server.on("clientError", (error, socket) => {
   try {
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
@@ -1004,6 +2660,42 @@ server.on("clientError", (error, socket) => {
 server.on("error", (error) => {
   console.error(error.stack || error.message);
 });
+
+// WebSocket upgrade handler — only used for /api/live-calls/:id/audio today.
+const wss = new WebSocketServer({ noServer: true });
+server.on("upgrade", async (request, socket, head) => {
+  try {
+    const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+    const match = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/audio$/);
+    if (!match) {
+      socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    if (!isHostAllowed(request, settings)) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const auth = authenticateRequest(request, url, settings);
+    if (!auth.ok) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      handleLiveCallAudioConnection(match[1], ws, { auth, url });
+    });
+  } catch (error) {
+    console.error("[ws] upgrade failed:", error.stack || error.message);
+    try {
+      socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
+      socket.destroy();
+    } catch {}
+  }
+});
+
+scheduleToolEventsPrune();
 
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;

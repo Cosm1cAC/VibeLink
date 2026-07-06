@@ -1,21 +1,28 @@
 using System.Diagnostics;
+using System.Net.WebSockets;
+using System.Text;
 using System.Text.Json;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
 const int DefaultProbeSeconds = 30;
+const int DefaultLevelSeconds = 30;
+const int DefaultLevelIntervalMs = 500;
 
 var command = args.ElementAtOrDefault(0)?.Trim().ToLowerInvariant() ?? "help";
 
 try
 {
-    return command switch
+    var result = command switch
     {
         "list" => ListDevices(),
         "probe" => Probe(args.Skip(1).ToArray()),
+        "level" => Level(args.Skip(1).ToArray()),
+        "stream" => StreamAsync(args.Skip(1).ToArray()).GetAwaiter().GetResult(),
         "help" or "--help" or "-h" => Help(),
         _ => Fail($"Unknown command: {command}")
     };
+    return result;
 }
 catch (Exception ex)
 {
@@ -32,6 +39,10 @@ static int Help()
     Console.WriteLine("      List active Windows render/capture audio devices and defaults.");
     Console.WriteLine("  probe [--seconds N] [--out DIR] [--render ID] [--capture ID]");
     Console.WriteLine("      Record render loopback to remote.wav and microphone capture to local.wav.");
+    Console.WriteLine("  level [--seconds N] [--interval-ms N] [--render ID] [--capture ID]");
+    Console.WriteLine("      Emit newline-delimited JSON level events for render loopback and microphone capture.");
+    Console.WriteLine("  stream --session-id SESSION [--url WS_URL] [--channel remote|local] [--level-interval-ms N] [--render ID]");
+    Console.WriteLine("      Stream PCM frames to a VibeLink bridge WebSocket. Default URL: ws://127.0.0.1:8787");
     Console.WriteLine();
     Console.WriteLine("Defaults use Windows communication render/capture devices.");
     return 0;
@@ -160,6 +171,105 @@ static int Probe(string[] args)
     return remoteError is null && localError is null ? 0 : 2;
 }
 
+static int Level(string[] args)
+{
+    var options = ParseLevelOptions(args);
+
+    using var enumerator = new MMDeviceEnumerator();
+    using var renderDevice = ResolveDevice(enumerator, DataFlow.Render, options.RenderId, Role.Communications);
+    using var captureDevice = ResolveDevice(enumerator, DataFlow.Capture, options.CaptureId, Role.Communications);
+    using var loopback = new WasapiLoopbackCapture(renderDevice);
+    using var capture = new WasapiCapture(captureDevice);
+
+    Exception? remoteError = null;
+    Exception? localError = null;
+    var remoteLevels = new ChannelLevelState(loopback.WaveFormat);
+    var localLevels = new ChannelLevelState(capture.WaveFormat);
+
+    loopback.DataAvailable += (_, e) => remoteLevels.Add(e.Buffer, e.BytesRecorded);
+    capture.DataAvailable += (_, e) => localLevels.Add(e.Buffer, e.BytesRecorded);
+    loopback.RecordingStopped += (_, e) => remoteError = e.Exception;
+    capture.RecordingStopped += (_, e) => localError = e.Exception;
+
+    var startedAt = DateTimeOffset.UtcNow;
+    var stopwatch = Stopwatch.StartNew();
+    var cancelled = false;
+    ConsoleCancelEventHandler handler = (_, e) =>
+    {
+        e.Cancel = true;
+        cancelled = true;
+    };
+
+    Console.CancelKeyPress += handler;
+    try
+    {
+        WriteJsonLine(new
+        {
+            ok = true,
+            type = "audio.level.started",
+            at = startedAt,
+            intervalMs = options.IntervalMs,
+            requestedSeconds = options.Seconds,
+            remote = new { channel = "remote", device = DeviceInfo(renderDevice, true), waveFormat = FormatInfo(loopback.WaveFormat) },
+            local = new { channel = "local", device = DeviceInfo(captureDevice, true), waveFormat = FormatInfo(capture.WaveFormat) }
+        });
+
+        loopback.StartRecording();
+        capture.StartRecording();
+
+        while (!cancelled && (options.Seconds <= 0 || stopwatch.Elapsed < TimeSpan.FromSeconds(options.Seconds)))
+        {
+            Thread.Sleep(TimeSpan.FromMilliseconds(options.IntervalMs));
+            var remote = remoteLevels.Snapshot();
+            var local = localLevels.Snapshot();
+            WriteJsonLine(new
+            {
+                ok = remoteError is null && localError is null,
+                type = "audio.level",
+                at = DateTimeOffset.UtcNow,
+                elapsedMs = stopwatch.ElapsedMilliseconds,
+                remote = new
+                {
+                    channel = "remote",
+                    bytes = remote.TotalBytes,
+                    intervalBytes = remote.IntervalBytes,
+                    deviceName = renderDevice.FriendlyName,
+                    levels = remote.Levels,
+                    error = remoteError?.Message ?? ""
+                },
+                local = new
+                {
+                    channel = "local",
+                    bytes = local.TotalBytes,
+                    intervalBytes = local.IntervalBytes,
+                    deviceName = captureDevice.FriendlyName,
+                    levels = local.Levels,
+                    error = localError?.Message ?? ""
+                }
+            });
+        }
+    }
+    finally
+    {
+        Console.CancelKeyPress -= handler;
+        TryStop(loopback);
+        TryStop(capture);
+        stopwatch.Stop();
+    }
+
+    WriteJsonLine(new
+    {
+        ok = remoteError is null && localError is null,
+        type = "audio.level.stopped",
+        at = DateTimeOffset.UtcNow,
+        startedAt,
+        elapsedMs = stopwatch.ElapsedMilliseconds,
+        remote = new { error = remoteError?.Message ?? "" },
+        local = new { error = localError?.Message ?? "" }
+    });
+    return remoteError is null && localError is null ? 0 : 2;
+}
+
 static ProbeOptions ParseProbeOptions(string[] args)
 {
     var options = new ProbeOptions(DefaultProbeSeconds, Path.Combine(".agent-mobile-terminal", "audio-probes", Timestamp()), null, null);
@@ -180,6 +290,167 @@ static ProbeOptions ParseProbeOptions(string[] args)
             "--capture" => options with { CaptureId = Next() },
             _ => throw new ArgumentException($"Unknown probe option: {arg}")
         };
+    }
+    return options;
+}
+
+static LevelOptions ParseLevelOptions(string[] args)
+{
+    var options = new LevelOptions(DefaultLevelSeconds, DefaultLevelIntervalMs, null, null);
+    for (var i = 0; i < args.Length; i++)
+    {
+        var arg = args[i];
+        string Next()
+        {
+            if (i + 1 >= args.Length) throw new ArgumentException($"Missing value for {arg}");
+            return args[++i];
+        }
+
+        options = arg switch
+        {
+            "--seconds" or "-s" => options with { Seconds = Math.Max(0, int.Parse(Next())) },
+            "--interval-ms" or "-i" => options with { IntervalMs = Math.Max(100, int.Parse(Next())) },
+            "--render" => options with { RenderId = Next() },
+            "--capture" => options with { CaptureId = Next() },
+            _ => throw new ArgumentException($"Unknown level option: {arg}")
+        };
+    }
+    return options;
+}
+
+static async Task<int> StreamAsync(string[] args)
+{
+    var options = ParseStreamOptions(args);
+    if (string.IsNullOrWhiteSpace(options.SessionId) || string.IsNullOrWhiteSpace(options.Url))
+    {
+        Console.Error.WriteLine("--session-id and --url are required for stream.");
+        return 1;
+    }
+
+    using var enumerator = new MMDeviceEnumerator();
+    using var device = ResolveDevice(enumerator, options.Channel == "local" ? DataFlow.Capture : DataFlow.Render, options.RenderId, Role.Communications);
+    using var capture = options.Channel == "local" ? new WasapiCapture(device) : new WasapiLoopbackCapture(device);
+    var waveFormat = capture.WaveFormat;
+
+    using var ws = new ClientWebSocket();
+    ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    try
+    {
+        await ws.ConnectAsync(new Uri(options.Url), CancellationToken.None);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"WebSocket connect failed: {ex.Message}");
+        return 3;
+    }
+
+    var header = new
+    {
+        sampleRate = waveFormat.SampleRate,
+        channels = waveFormat.Channels,
+        encoding = "pcm16le",
+        device = options.Channel
+    };
+    var headerBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(header, JsonOptions()));
+    await ws.SendAsync(headerBytes, WebSocketMessageType.Text, true, CancellationToken.None);
+
+    var startedAt = DateTimeOffset.UtcNow;
+    Console.WriteLine($"stream started: {header.sampleRate} Hz, {header.channels} ch, channel={header.device}, target={options.Url}");
+
+    Exception? captureError = null;
+    var levelStats = new LevelStats(waveFormat);
+    long totalBytes = 0;
+    var lastLevelAt = DateTimeOffset.UtcNow;
+    var cts = new CancellationTokenSource();
+    ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; cts.Cancel(); };
+    Console.CancelKeyPress += cancel;
+
+    async Task SendTextAsync(string json)
+    {
+        if (ws.State != WebSocketState.Open) return;
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes(json);
+            await ws.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"ws send failed: {ex.Message}");
+        }
+    }
+
+    capture.DataAvailable += (_, e) =>
+    {
+        try
+        {
+            if (ws.State != WebSocketState.Open) return;
+            levelStats.Add(e.Buffer, e.BytesRecorded);
+            totalBytes += e.BytesRecorded;
+            ws.SendAsync(new ArraySegment<byte>(e.Buffer, 0, e.BytesRecorded), WebSocketMessageType.Binary, true, CancellationToken.None)
+              .GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            captureError = ex;
+        }
+    };
+    capture.RecordingStopped += (_, e) => captureError ??= e.Exception;
+
+    capture.StartRecording();
+
+    // Periodic level reporter — also serves as a heartbeat.
+    while (!cts.IsCancellationRequested && ws.State == WebSocketState.Open)
+    {
+        await Task.Delay(TimeSpan.FromMilliseconds(options.LevelIntervalMs), cts.Token).ContinueWith(_ => { });
+        var summary = levelStats.Summary();
+        await SendTextAsync(JsonSerializer.Serialize(new
+        {
+            type = "level",
+            rms = Math.Round(summary.Rms, 6),
+            peak = Math.Round(summary.Peak, 6)
+        }, JsonOptions()));
+        if (captureError != null) break;
+    }
+
+    try { capture.StopRecording(); } catch { }
+    try
+    {
+        await SendTextAsync(JsonSerializer.Serialize(new { type = "stop" }, JsonOptions()));
+        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "client_stop", CancellationToken.None);
+    }
+    catch { }
+
+    Console.CancelKeyPress -= cancel;
+    Console.WriteLine($"stream stopped: bytes={totalBytes}, duration={DateTimeOffset.UtcNow - startedAt:hh\\:mm\\:ss}");
+    return captureError is null ? 0 : 2;
+}
+
+static StreamOptions ParseStreamOptions(string[] args)
+{
+    var options = new StreamOptions("", "ws://127.0.0.1:8787", "remote", 500, null);
+    for (var i = 0; i < args.Length; i++)
+    {
+        var arg = args[i];
+        string Next()
+        {
+            if (i + 1 >= args.Length) throw new ArgumentException($"Missing value for {arg}");
+            return args[++i];
+        }
+
+        options = arg switch
+        {
+            "--session-id" => options with { SessionId = Next() },
+            "--url" => options with { Url = Next() },
+            "--channel" => options with { Channel = Next() == "local" ? "local" : "remote" },
+            "--level-interval-ms" => options with { LevelIntervalMs = Math.Max(100, int.Parse(Next())) },
+            "--render" => options with { RenderId = Next() },
+            _ => throw new ArgumentException($"Unknown stream option: {arg}")
+        };
+    }
+    if (!string.IsNullOrWhiteSpace(options.SessionId) && !options.Url.Contains("session-id="))
+    {
+        var sep = options.Url.Contains("?") ? "&" : "?";
+        options = options with { Url = $"{options.Url}{sep}session-id={Uri.EscapeDataString(options.SessionId)}" };
     }
     return options;
 }
@@ -263,9 +534,20 @@ static void WriteJson(object payload)
     Console.WriteLine(JsonSerializer.Serialize(payload, JsonOptions()));
 }
 
+static void WriteJsonLine(object payload)
+{
+    Console.WriteLine(JsonSerializer.Serialize(payload, JsonLineOptions()));
+    Console.Out.Flush();
+}
+
 static JsonSerializerOptions JsonOptions()
 {
     return new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+}
+
+static JsonSerializerOptions JsonLineOptions()
+{
+    return new JsonSerializerOptions { WriteIndented = false, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 }
 
 static string Timestamp()
@@ -278,6 +560,11 @@ static void TryDelete(string path)
     if (File.Exists(path)) File.Delete(path);
 }
 
+static void TryStop(IWaveIn capture)
+{
+    try { capture.StopRecording(); } catch { }
+}
+
 static int Fail(string message)
 {
     Console.Error.WriteLine(message);
@@ -286,6 +573,46 @@ static int Fail(string message)
 }
 
 internal sealed record ProbeOptions(int Seconds, string OutputDir, string? RenderId, string? CaptureId);
+internal sealed record LevelOptions(int Seconds, int IntervalMs, string? RenderId, string? CaptureId);
+internal sealed record StreamOptions(string SessionId, string Url, string Channel, int LevelIntervalMs, string? RenderId);
+internal sealed record ChannelLevelSnapshot(long TotalBytes, long IntervalBytes, LevelSummary Levels);
+
+internal sealed class ChannelLevelState
+{
+    private readonly object gate = new();
+    private readonly WaveFormat format;
+    private LevelStats intervalStats;
+    private long totalBytes;
+    private long intervalBytes;
+
+    public ChannelLevelState(WaveFormat format)
+    {
+        this.format = format;
+        intervalStats = new LevelStats(format);
+    }
+
+    public void Add(byte[] buffer, int bytesRecorded)
+    {
+        if (bytesRecorded <= 0) return;
+        lock (gate)
+        {
+            totalBytes += bytesRecorded;
+            intervalBytes += bytesRecorded;
+            intervalStats.Add(buffer, bytesRecorded);
+        }
+    }
+
+    public ChannelLevelSnapshot Snapshot()
+    {
+        lock (gate)
+        {
+            var snapshot = new ChannelLevelSnapshot(totalBytes, intervalBytes, intervalStats.Summary());
+            intervalBytes = 0;
+            intervalStats = new LevelStats(format);
+            return snapshot;
+        }
+    }
+}
 
 internal sealed class LevelStats
 {

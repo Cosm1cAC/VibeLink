@@ -1,0 +1,99 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\ggml-cpu.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\ggml-cpu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\repack.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\hbm.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\quants.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\traits.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\amx\amx.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\amx\mmq.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\binary-ops.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\unary-ops.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\vec.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\ops.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\arch\x86\quants.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\arch\x86\repack.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\repack.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\hbm.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\quants.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\traits.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\amx\amx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\amx\mmq.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\ggml-cpu-impl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\binary-ops.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\unary-ops.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\simd-mappings.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\vec.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-cpu\ops.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{D989F4BA-19F3-3DB7-B5C1-E353BAB49972}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{A983A425-664F-31CC-8343-3138ED29A6F8}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

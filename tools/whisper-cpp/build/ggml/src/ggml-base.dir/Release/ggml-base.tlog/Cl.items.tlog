@@ -1,0 +1,9 @@
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml.c;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml.c.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml.cpp;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml.cpp.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-alloc.c;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml-alloc.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-backend.cpp;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml-backend.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-backend-meta.cpp;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml-backend-meta.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-opt.cpp;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml-opt.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-threading.cpp;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml-threading.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\ggml-quants.c;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\ggml-quants.obj
+C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\source\ggml\src\gguf.cpp;C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\ggml\src\ggml-base.dir\Release\gguf.obj

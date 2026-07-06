@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\22771\Documents\移动版agent终端\tools\whisper-cpp\build\CMakeFiles\554a3124dad31b59374f4e9cc4a402e1\RUN_TESTS_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{C077A0B5-3399-3882-9B4C-5D5B99A6D7BF}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

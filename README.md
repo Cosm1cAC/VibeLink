@@ -1,6 +1,14 @@
 # VibeLink
 
-VibeLink 是一个本机优先的 Agent 远程控制台。电脑运行本地 bridge，网页端或手机端通过局域网、Cloudflare Tunnel 等入口连接，用来查看和接续 Codex / Claude Code 的历史、任务和上下文，并尽量把 Codex Desktop 的遥控体验带到移动端。
+VibeLink 是一个本机优先的 Agent 远程控制台，最终目标是**一个产品、三条路线、多端覆盖**。电脑运行本地 bridge，网页端/手机端通过局域网、Cloudflare Tunnel 等入口连接，共存三种 Agent 工作通道：
+
+- **Route A (Codex Desktop Remote)**：遥控已有 Codex Desktop，强调可见状态同步和人机接管。
+- **Route B (VibeLink CLI Runtime)**：自建可控 Agent 执行层，承载权限、审批、工具事件和沙箱，是主运行时。
+- **Route C (Live Call Assistant)**：实时通话转写 + 问题检测 + Agent 回答，是上层输入场景，下游必须接 Route B。
+
+三条路线最终共享同一套 Web 前端（同时适配桌面浏览器和手机浏览器），后端 bridge 各自负责能力接入且可独立开关。后续 Android/iOS 原生 App 复用前端已经沉淀的 API client、会话模型和业务逻辑层。
+
+当前正在先完善 Web 端，再选型 Android 原生架构。
 
 ## 当前定位
 
@@ -8,6 +16,80 @@ VibeLink 是一个本机优先的 Agent 远程控制台。电脑运行本地 bri
 - Web 端使用 React + Vite，面向桌面浏览器、手机浏览器和后续原生 App 复用的交互模型。
 - 不做账号系统。首次配对使用 pairing token，后续使用设备 token；公网模式需要明确的 Host allowlist 和设备授权。
 - Codex Desktop 遥控走 UI 自动化路线；CLI 接续走 `codex exec/resume` 和 Claude Code 的 continue/resume 能力。
+
+## 产品路线
+
+VibeLink 当前同时推进三条路线。Route A 和 Route B 是两种执行通道；Route C 不是第三种 agent runtime，而是一个实时输入/交互场景：它可以把通话音频转成问题，但问题进入 Agent 后，应由 VibeLink 自己的 runtime 负责工具调用、权限、审批、上下文和结果事件。
+
+```text
+Route A: Codex Desktop Remote
+  独立补充通道，用于遥控已有 Codex Desktop，强调人机接管和可见状态同步。
+
+Route B: VibeLink CLI Runtime
+  主运行时通道，用于自建可控 agent 执行层，承载权限、工具、审批、沙箱和事件归属。
+
+Route C: Live Call Assistant
+  上层实时场景，用于采集通话、转写问题并辅助回答；下游必须接 Route B，不依赖 Route A。
+```
+
+### Route A: Codex Desktop Remote
+
+目标是遥控用户已经安装和登录的 Codex Desktop，把移动端变成 Codex Desktop 的可见状态观察器和远程输入器。
+
+适合场景：
+
+- 用户希望从手机端接管桌面上正在看的 Codex Desktop。
+- 任务更偏“人机协同遥控”，例如查看当前可见 transcript、向 composer 输入、点击发送、观察大致进度。
+- 不要求 VibeLink 精确控制模型、权限、审批、沙箱和 tool 生命周期。
+
+边界：
+
+- 依赖 Windows UIA、前台窗口、控件结构和 Codex Desktop UI 稳定性。
+- 只能读取可见 transcript 和可恢复历史，不能获得 Codex Desktop 未暴露的完整内部 tool 输出、退出码和归属。
+- 模型、权限、推理强度和审批策略默认使用 Codex Desktop 当前设置。
+- 不作为 VibeLink 自建 agent runtime 的替代品。
+
+### Route B: VibeLink CLI Runtime
+
+目标是建设 VibeLink 自己可控、可审计、可恢复的 agent 执行层。
+
+适合场景：
+
+- 需要确定性模型参数、权限模式、网络策略、沙箱策略和审批流。
+- 需要所有 shell、file、git、browser、MCP、approval 等工具进入统一 `tool_runs` / `tool_events` 生命周期。
+- 需要移动端可靠展示任务进度、工具卡片、审计记录、失败恢复和断线 catch-up。
+
+边界：
+
+- 这是 VibeLink 的主线运行时，不等于把第三方 CLI 源码并入项目。
+- 可以调用 Codex CLI / Claude Code 等上游能力，但权限、事件归属、审批和 UI 展示应沉淀到 VibeLink 自己的 runtime 模型。
+- Desktop remote 只能作为补充通道；当能力需要“可控、可审计、可恢复”时，优先走 Route B。
+
+### Route C: Live Call Assistant
+
+目标是采集通话音频，实时转写问题，并在移动端/网页端给出可读的回答草稿或辅助提示。
+
+适合场景：
+
+- Windows 通过蓝牙/Phone Link 接收手机通话下行音频。
+- 本机通过 WASAPI loopback 捕获对方声音，通过外接麦克风承载电话上行。
+- ASR 把对方问题转成 transcript，VibeLink 检测问题并触发 agent 回答。
+
+依赖关系：
+
+- 音频采集、ASR、问题检测属于 Route C 自己的实时输入链路。
+- 问题进入 Agent 后，必须接 Route B 的 VibeLink CLI Runtime。
+- 不应依赖 Route A 的 Codex Desktop Remote 来生成实时通话回答，因为 Route A 无法保证确定性参数、权限、审批、工具事件归属和低延迟恢复。
+
+### 路线选择
+
+| 需求 | 应走路线 |
+| --- | --- |
+| 遥控已有 Codex Desktop、尽量复用桌面 UI | Route A |
+| 自建可控 agent 执行层、统一工具事件和审批 | Route B |
+| 实时通话转写、问题检测、面试辅助回答 | Route C + Route B |
+| 需要确定性模型/权限/沙箱/审批 | Route B |
+| 只需要观察和接管当前 Desktop 可见状态 | Route A |
 
 ## 启动
 
@@ -42,6 +124,70 @@ npm run dev
 - 安全底座：allowed roots、workspace 绑定、设备 token、Host allowlist、公网模式提示。
 - 变更卡片：读取 workspace Git 状态和 diff，为移动端展示文件变更摘要。
 
+## Workspace（工作区）
+
+Workspace 是 VibeLink 把本机项目目录暴露给网页/手机端的中枢。它不是云盘、不是 IDE，也不是远端文件系统协议客户端，而是一个 **绑在本机 bridge 进程上的本地浏览器 + Git + 命令面板**。
+
+### 定位
+
+- **只读语义 + Git 写入**。Workspace 负责浏览本机目录、读取文本文件、把选中的文件作为 LLM 上下文附加到 prompt；同时承担 Git 状态、diff 和 stage / commit / push / PR 操作。
+- **绑定在本机 bridge 进程**。所有文件操作都通过 `node:fs` 直接发生在 bridge 所在的操作系统上。能看到的目录就是 bridge 进程所在机器上已挂载的目录。
+- **不连接云盘 / 远端协议**。没有 S3、Google Drive、OneDrive、Dropbox、SSHFS、SFTP、NFS 客户端等任何集成。但只要操作系统本身已经把某个 SMB / NFS / WSL / 映射网络驱动器挂载到本地路径（例如 `Z:\`、`\\wsl$\Ubuntu\home`、`\\nas\share`），Workspace 就能像普通目录一样浏览它。
+- **绑定到会话/任务**。Workspace 可以独立浏览，也会被会话或任务的 `cwd` 自动选中；任务运行产生的 tool run / tool event / approval 都共享同一个 `workspace_id`，所以同一个工作的所有产物（命令、文件变更、审批）能聚在一起。
+
+### 前端表现
+
+Workspace 在网页端是一个可折叠的面板（默认收起），挂在聊天区上方：
+
+- 头部：workspace 选择下拉、刷新、折叠/展开按钮
+- 四个标签：
+  - **文件树**：单层目录浏览 + 文本文件查看（限制 512KB、文本类型，行号渲染，点击外部 `data-file-line` 跳转高亮）
+  - **Git**：状态、`git diff HEAD` 全文、untracked 文件预览、per-file stage/unstage/accept/restore、commit、push、pull --ff-only、`gh pr create --fill`
+  - **终端**：默认 `git status --short --branch`，可改命令并通过 SSE 流式输出，支持停止
+  - **测试**：默认 `npm test`，粗解析 passed/failed 行，点击失败行跳到对应文件
+
+`/workspace` slash 命令和 Composer 旁的文件选择器也走同一套 Workspace API，可在任意会话里勾选文件作为上下文。
+
+### 后端 API
+
+主要端点（完整列表见 `src/server.js`）：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/workspaces` | 列出所有 workspace |
+| `POST` | `/api/workspaces` | 新建/upsert workspace（body `{ path, title? }`） |
+| `GET` | `/api/workspaces/:id/tree?dir=` | 单层目录列表（最多 240 项） |
+| `POST` | `/api/workspaces/:id/context` | 把选中文件拼成 LLM 上下文（最多 20 个路径，单文件 12KB） |
+| `GET` | `/api/workspaces/:id/file?path=` | 读取文本文件（≤512KB） |
+| `GET` | `/api/workspaces/:id/git/status` | porcelain v1 状态 |
+| `GET` | `/api/workspaces/:id/git/diff` | diff + untracked 文件预览 |
+| `POST` | `/api/workspaces/:id/git/file-action` | 单文件 stage/accept/restore/reject/unstage |
+| `POST` | `/api/workspaces/:id/git/action` | stage-all/unstage-all/commit/push/pull/pr |
+| `POST` | `/api/workspaces/:id/command` | 在 workspace cwd 跑 shell 命令（流式输出、可中止、风险评估） |
+| `POST` | `/api/workspaces/:id/terminal-session` | 起 PTY 终端会话 |
+
+所有写操作都会落进统一的 `tool_runs` / `tool_events` 生命周期，绑定 `workspace_id`、`task_id`，并接受同样的审批与审计。
+
+### 安全约束
+
+- `resolveAllowedPath` 严格校验：所有路径必须落在 `settings.allowedRoots`、已登记 workspace 的 `allowedRoot`、bridge 安装目录或 `defaultCwd` 之一内；越界访问返回 403。
+- 启动时 `ensureDefaultWorkspaces` 会**主动剔除** `$HOME` / `$USERPROFILE`，避免默认暴露用户家目录。
+- 危险命令（递归删除、Git 历史重写、网络下载执行、SSH/SCP/SFTP/RSYNC 等）通过 `commandSafety` 拦截并要求 428 显式审批；所有 workspace 操作都写 `audit_log`。
+- Workspace 路径不暴露给前端明文，只返回 id + title + 相对路径；外链使用 `/api/files?path=...&token=...` 临时 token。
+
+### 与 Routes A / B / C 的关系
+
+- **Route A (Codex Desktop Remote)**：Desktop 自身的工作目录不在 Workspace 范围；如需在 Desktop 侧栏会话和 Workspace 之间联动，使用 `WorkspaceWorkbench` 的 `defaultWorkspace` 自动按 `cwd` 匹配。
+- **Route B (VibeLink CLI Runtime)**：Route B 启动的 CLI 任务 `cwd` 落到哪个 workspace，task / tool run / approval 就会自动挂到那个 workspace 上，变更卡（ChangeCard）会显示对应的 git 摘要。
+- **Route C (Live Call Assistant)**：当 Live Call 推送的 transcript 触发 Agent 时，Agent 的 cwd 即绑定到当时活跃 workspace；路由走 Route B，路由产物（tool run、文件变更、审批）都在 workspace 内可见。
+
+### 边界与下一步
+
+- 没有远端路径协议支持（SSH/SFTP/NFS 客户端都不在路线里）。需要时由 OS 层挂载。
+- 没有"工作区同步"或离线缓存，所有读写都是实时的 bridge-host fs 调用。
+- 文件写入/编辑目前只走 Git 通道；非 Git 文件的写入/重命名/删除暂未提供 API，路线见 `docs/feature-gap-table.md`（P1：`Workspace / Git / 代码工作流` 章节）。
+- 大文件分页、二进制预览、内联编辑器仍是 partial，需要时会补在 feature-gap-table 里跟踪。
+
 ## 现实边界
 
 普通终端里已经启动的任意 CLI 进程，通常无法在事后被另一个程序接管输入输出。VibeLink 当前采用两条路线：
@@ -60,4 +206,4 @@ Codex Desktop 本身目前无法被第三方网页端强制回显完整消息状
 
 后续 Android / iOS 建议走 Expo React Native，并复用 Web 端已经沉淀的 API client、会话模型、附件模型和 workspace 模型。
 
-通话实时转写/面试辅助的自用 MVP 路线见 `docs/windows-bluetooth-call-transcription-mvp.md`：一加手机通话音频经蓝牙/Phone Link 进入 Windows，本机通过 WASAPI 数字回环捕获下行音频，并用外接麦克风作为电话上行。
+通话实时转写/面试辅助的自用 MVP 路线见 `docs/windows-bluetooth-call-transcription-mvp.md`：一加手机通话音频经蓝牙/Phone Link 进入 Windows，本机通过 WASAPI 数字回环捕获下行音频，并用外接麦克风作为电话上行；转写后的问题应进入 VibeLink 自建 CLI Runtime，而不是依赖 Codex Desktop remote。

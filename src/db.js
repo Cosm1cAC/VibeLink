@@ -206,6 +206,85 @@ export function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_task_events_task_cursor ON task_events(task_id, cursor);
 
+    CREATE TABLE IF NOT EXISTS tool_runs (
+      id TEXT PRIMARY KEY,
+      task_id TEXT,
+      workspace_id TEXT,
+      tool_name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      title TEXT,
+      input_json TEXT,
+      result_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tool_runs_updated ON tool_runs(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_tool_runs_workspace ON tool_runs(workspace_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS tool_events (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool_run_id TEXT NOT NULL,
+      task_id TEXT,
+      workspace_id TEXT,
+      event_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      text TEXT,
+      payload_json TEXT,
+      event_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(tool_run_id, event_id),
+      FOREIGN KEY(tool_run_id) REFERENCES tool_runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tool_events_tool_cursor ON tool_events(tool_run_id, cursor);
+    CREATE INDEX IF NOT EXISTS idx_tool_events_workspace_cursor ON tool_events(workspace_id, cursor);
+
+    CREATE TABLE IF NOT EXISTS approval_requests (
+      id TEXT PRIMARY KEY,
+      tool_run_id TEXT,
+      task_id TEXT,
+      workspace_id TEXT,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      title TEXT,
+      reason TEXT,
+      request_json TEXT,
+      risk_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      expires_at TEXT,
+      decided_at TEXT,
+      decided_by_device_id TEXT,
+      decision_reason TEXT,
+      decision_json TEXT,
+      FOREIGN KEY(tool_run_id) REFERENCES tool_runs(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_approval_requests_tool ON approval_requests(tool_run_id);
+
+    CREATE TABLE IF NOT EXISTS approval_decisions (
+      id TEXT PRIMARY KEY,
+      approval_id TEXT NOT NULL,
+      tool_run_id TEXT,
+      task_id TEXT,
+      workspace_id TEXT,
+      decision TEXT NOT NULL,
+      reason TEXT,
+      device_id TEXT,
+      payload_json TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(approval_id) REFERENCES approval_requests(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_approval_decisions_approval ON approval_decisions(approval_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_approval_decisions_workspace ON approval_decisions(workspace_id, created_at);
+
     CREATE TABLE IF NOT EXISTS desktop_observations (
       cursor INTEGER PRIMARY KEY AUTOINCREMENT,
       source TEXT NOT NULL,
@@ -253,6 +332,43 @@ export function initDb() {
       value_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS live_calls (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      title TEXT NOT NULL,
+      source TEXT NOT NULL,
+      workspace_id TEXT,
+      agent_task_id TEXT,
+      asr_provider TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      stopped_at TEXT,
+      last_transcript TEXT,
+      last_question TEXT,
+      last_answer TEXT,
+      meta_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_live_calls_updated ON live_calls(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_live_calls_workspace ON live_calls(workspace_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS live_call_events (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      text TEXT,
+      payload_json TEXT,
+      event_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(session_id, event_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_live_call_events_session_cursor ON live_call_events(session_id, cursor);
+    CREATE INDEX IF NOT EXISTS idx_live_call_events_session_at ON live_call_events(session_id, event_at);
   `);
 
   try { db.exec("ALTER TABLE tasks ADD COLUMN workspace_id TEXT"); } catch {}
@@ -262,6 +378,12 @@ export function initDb() {
   try { db.exec("ALTER TABLE devices ADD COLUMN expires_at TEXT"); } catch {}
   try { db.exec("ALTER TABLE devices ADD COLUMN rotated_at TEXT"); } catch {}
   try { db.exec("ALTER TABLE devices ADD COLUMN meta_json TEXT"); } catch {}
+  try { db.exec("ALTER TABLE tool_runs ADD COLUMN workspace_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE tool_events ADD COLUMN workspace_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE approval_requests ADD COLUMN workspace_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE task_events ADD COLUMN event_kind TEXT"); } catch {}
+  try { db.exec("ALTER TABLE task_events ADD COLUMN turn_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE task_events ADD COLUMN block_id TEXT"); } catch {}
 
   return db;
 }
@@ -276,6 +398,24 @@ export function getDbPath() {
 
 export function hashToken(token) {
   return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+/**
+ * Classify a task event into a unified event kind.
+ * Used by insertTaskEvent to fill the event_kind column.
+ */
+function classifyEventKind(event) {
+  const type = String(event.type || "");
+  if (type === "user_message" || type === "user" || type === "attachment") return "user";
+  if (type === "assistant_message" || type === "assistant") return "assistant";
+  if (type === "system") return "system";
+  if (type === "error") return "error";
+  if (type === "summarization") return "summary";
+  if (type.startsWith("live_call.")) return "live_call";
+  if (type.startsWith("approval.")) return "approval";
+  if (type.startsWith("tool.")) return "tool";
+  if (type === "stderr" || type === "stdout") return "output";
+  return "system";
 }
 
 export function upsertWorkspace(input = {}) {
@@ -685,7 +825,10 @@ export function upsertTask(task) {
       task.sessionId || "",
       task.commandLabel || "",
       task.logPath || "",
-      toJson({ restored: Boolean(task.restored) })
+      toJson({
+        restored: Boolean(task.restored),
+        security: task.security || null
+      })
     );
 }
 
@@ -694,17 +837,24 @@ export function insertTaskEvent(taskId, event) {
   const eventAt = event.at || current;
   const eventId = event.id || `${taskId}:${eventAt}:${Math.random()}`;
   const payload = event.payload === undefined ? null : event.payload;
+  const eventKind = event.kind || classifyEventKind(event);
+  const turnId = event.turnId || "";
+  const blockId = event.blockId || "";
   const eventJson = {
     ...event,
     id: eventId,
-    at: eventAt
+    at: eventAt,
+    kind: eventKind,
+    turnId,
+    blockId
   };
 
   database()
     .prepare(`
       INSERT OR IGNORE INTO task_events (
-        task_id, event_id, event_type, event_at, text, payload_json, event_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        task_id, event_id, event_type, event_at, text, payload_json, event_json,
+        created_at, event_kind, turn_id, block_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       taskId,
@@ -714,7 +864,10 @@ export function insertTaskEvent(taskId, event) {
       typeof event.text === "string" ? event.text : "",
       toJson(payload),
       toJson(eventJson),
-      current
+      current,
+      eventKind,
+      turnId,
+      blockId
     );
 
   const row = database()
@@ -742,6 +895,370 @@ export function listTaskEvents(taskId, { after = 0, limit = 5000 } = {}) {
 export function getTaskEventCount(taskId) {
   const row = database().prepare("SELECT COUNT(*) AS count FROM task_events WHERE task_id = ?").get(taskId);
   return Number(row?.count || 0);
+}
+
+function publicToolRun(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    taskId: row.task_id || "",
+    workspaceId: row.workspace_id || "",
+    toolName: row.tool_name || "",
+    status: row.status || "",
+    title: row.title || "",
+    input: fromJson(row.input_json, null),
+    result: fromJson(row.result_json, null),
+    error: row.error || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at || "",
+    completedAt: row.completed_at || ""
+  };
+}
+
+export function createToolRun(input = {}) {
+  const current = nowIso();
+  const id = input.id || crypto.randomUUID();
+  database()
+    .prepare(`
+      INSERT INTO tool_runs (
+        id, task_id, workspace_id, tool_name, status, title, input_json,
+        result_json, error, created_at, updated_at, started_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      id,
+      cleanString(input.taskId || "", 160),
+      cleanString(input.workspaceId || "", 160),
+      cleanString(input.toolName || "tool", 120),
+      cleanString(input.status || "pending", 40),
+      cleanString(input.title || "", 200),
+      toJson(input.input || null),
+      toJson(input.result || null),
+      cleanString(input.error || "", 2000),
+      input.createdAt || current,
+      input.updatedAt || current,
+      input.startedAt || "",
+      input.completedAt || ""
+    );
+  return getToolRun(id);
+}
+
+export function updateToolRun(id, patch = {}) {
+  const existing = database().prepare("SELECT * FROM tool_runs WHERE id = ?").get(id);
+  if (!existing) return null;
+  const current = nowIso();
+  const next = {
+    status: Object.hasOwn(patch, "status") ? cleanString(patch.status, 40) : existing.status,
+    title: Object.hasOwn(patch, "title") ? cleanString(patch.title || "", 200) : existing.title,
+    input: Object.hasOwn(patch, "input") ? patch.input : fromJson(existing.input_json, null),
+    result: Object.hasOwn(patch, "result") ? patch.result : fromJson(existing.result_json, null),
+    error: Object.hasOwn(patch, "error") ? cleanString(patch.error || "", 2000) : existing.error,
+    startedAt: Object.hasOwn(patch, "startedAt") ? patch.startedAt || "" : existing.started_at || "",
+    completedAt: Object.hasOwn(patch, "completedAt") ? patch.completedAt || "" : existing.completed_at || ""
+  };
+  database()
+    .prepare(`
+      UPDATE tool_runs
+      SET status = ?, title = ?, input_json = ?, result_json = ?, error = ?,
+          updated_at = ?, started_at = ?, completed_at = ?
+      WHERE id = ?
+    `)
+    .run(next.status, next.title, toJson(next.input), toJson(next.result), next.error, current, next.startedAt, next.completedAt, id);
+  return getToolRun(id);
+}
+
+export function getToolRun(id) {
+  const row = database().prepare("SELECT * FROM tool_runs WHERE id = ?").get(id);
+  return publicToolRun(row);
+}
+
+export function attachToolRunToTask(id, { taskId = "", workspaceId = "" } = {}) {
+  const existing = database().prepare("SELECT * FROM tool_runs WHERE id = ?").get(id);
+  if (!existing) return null;
+  const nextTaskId = cleanString(taskId || existing.task_id || "", 160);
+  const nextWorkspaceId = cleanString(workspaceId || existing.workspace_id || "", 160);
+  const current = nowIso();
+  const eventRows = database().prepare("SELECT cursor, event_json FROM tool_events WHERE tool_run_id = ?").all(id);
+  database()
+    .prepare("UPDATE tool_runs SET task_id = ?, workspace_id = ?, updated_at = ? WHERE id = ?")
+    .run(nextTaskId, nextWorkspaceId, current, id);
+  database()
+    .prepare("UPDATE tool_events SET task_id = ?, workspace_id = ? WHERE tool_run_id = ?")
+    .run(nextTaskId, nextWorkspaceId, id);
+  const updateEvent = database().prepare("UPDATE tool_events SET event_json = ? WHERE cursor = ?");
+  for (const row of eventRows) {
+    const event = fromJson(row.event_json, {});
+    updateEvent.run(toJson({ ...event, taskId: nextTaskId, workspaceId: nextWorkspaceId }), row.cursor);
+  }
+  database()
+    .prepare("UPDATE approval_requests SET task_id = ?, workspace_id = ?, updated_at = ? WHERE tool_run_id = ?")
+    .run(nextTaskId, nextWorkspaceId, current, id);
+  database()
+    .prepare("UPDATE approval_decisions SET task_id = ?, workspace_id = ? WHERE tool_run_id = ?")
+    .run(nextTaskId, nextWorkspaceId, id);
+  return getToolRun(id);
+}
+
+export function listToolRuns({ workspaceId = "", taskId = "", limit = 100 } = {}) {
+  const rows = database()
+    .prepare(`
+      SELECT *
+      FROM tool_runs
+      WHERE (? = '' OR workspace_id = ?)
+        AND (? = '' OR task_id = ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `)
+    .all(cleanString(workspaceId, 160), cleanString(workspaceId, 160), cleanString(taskId, 160), cleanString(taskId, 160), Number(limit || 100));
+  return rows.map(publicToolRun);
+}
+
+export function insertToolEvent(toolRunId, event = {}) {
+  const run = database().prepare("SELECT * FROM tool_runs WHERE id = ?").get(toolRunId);
+  if (!run) return null;
+  const current = nowIso();
+  const eventAt = event.at || current;
+  const eventId = event.id || crypto.randomUUID();
+  const payload = event.payload === undefined ? null : event.payload;
+  const eventJson = {
+    ...event,
+    id: eventId,
+    at: eventAt,
+    toolRunId,
+    taskId: event.taskId || run.task_id || "",
+    workspaceId: event.workspaceId || run.workspace_id || ""
+  };
+
+  database()
+    .prepare(`
+      INSERT OR IGNORE INTO tool_events (
+        tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
+        text, payload_json, event_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      toolRunId,
+      run.task_id || "",
+      run.workspace_id || "",
+      eventId,
+      cleanString(event.type || "tool.event", 120),
+      eventAt,
+      typeof event.text === "string" ? event.text : "",
+      toJson(payload),
+      toJson(eventJson),
+      current
+    );
+
+  const row = database()
+    .prepare("SELECT cursor FROM tool_events WHERE tool_run_id = ? AND event_id = ?")
+    .get(toolRunId, eventId);
+  return row?.cursor || null;
+}
+
+export function listToolEvents({ toolRunId = "", workspaceId = "", taskId = "", after = 0, limit = 1000 } = {}) {
+  return database()
+    .prepare(`
+      SELECT cursor, event_json
+      FROM tool_events
+      WHERE cursor > ?
+        AND (? = '' OR tool_run_id = ?)
+        AND (? = '' OR workspace_id = ?)
+        AND (? = '' OR task_id = ?)
+      ORDER BY cursor ASC
+      LIMIT ?
+    `)
+    .all(
+      Number(after || 0),
+      cleanString(toolRunId, 160),
+      cleanString(toolRunId, 160),
+      cleanString(workspaceId, 160),
+      cleanString(workspaceId, 160),
+      cleanString(taskId, 160),
+      cleanString(taskId, 160),
+      Number(limit || 1000)
+    )
+    .map((row) => ({
+      ...fromJson(row.event_json, {}),
+      cursor: row.cursor
+    }));
+}
+
+export function getToolEventStats() {
+  const row = database()
+    .prepare(`
+      SELECT
+        COUNT(*) AS count,
+        MIN(cursor) AS min_cursor,
+        MAX(cursor) AS max_cursor,
+        MIN(event_at) AS oldest_at,
+        MAX(event_at) AS newest_at
+      FROM tool_events
+    `)
+    .get();
+  return {
+    count: Number(row?.count || 0),
+    minCursor: Number(row?.min_cursor || 0),
+    maxCursor: Number(row?.max_cursor || 0),
+    oldestAt: row?.oldest_at || "",
+    newestAt: row?.newest_at || ""
+  };
+}
+
+export function pruneToolEvents({ before = "", keepLatest = 5000, dryRun = true } = {}) {
+  const cutoff = before || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const keep = Math.max(0, Number(keepLatest || 0));
+  const thresholdRow = database()
+    .prepare("SELECT cursor FROM tool_events ORDER BY cursor DESC LIMIT 1 OFFSET ?")
+    .get(keep);
+  const maxPrunableCursor = Number(thresholdRow?.cursor || 0);
+  const countRow = database()
+    .prepare("SELECT COUNT(*) AS count FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)")
+    .get(cutoff, maxPrunableCursor, maxPrunableCursor);
+  const prunable = Number(countRow?.count || 0);
+  if (!dryRun && prunable > 0) {
+    database()
+      .prepare("DELETE FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)")
+      .run(cutoff, maxPrunableCursor, maxPrunableCursor);
+  }
+  return {
+    cutoff,
+    keepLatest: keep,
+    maxPrunableCursor,
+    prunable,
+    deleted: dryRun ? 0 : prunable,
+    dryRun: Boolean(dryRun),
+    stats: getToolEventStats()
+  };
+}
+
+function publicApprovalRequest(row) {
+  if (!row) return null;
+  const expiresAt = row.expires_at || "";
+  return {
+    id: row.id,
+    toolRunId: row.tool_run_id || "",
+    taskId: row.task_id || "",
+    workspaceId: row.workspace_id || "",
+    kind: row.kind || "",
+    status: row.status || "",
+    title: row.title || "",
+    reason: row.reason || "",
+    request: fromJson(row.request_json, null),
+    risk: fromJson(row.risk_json, null),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    expiresAt,
+    expired: Boolean(expiresAt && new Date(expiresAt).getTime() <= Date.now()),
+    decidedAt: row.decided_at || "",
+    decidedByDeviceId: row.decided_by_device_id || "",
+    decisionReason: row.decision_reason || "",
+    decision: fromJson(row.decision_json, null)
+  };
+}
+
+export function createApprovalRequest(input = {}) {
+  const current = nowIso();
+  const id = input.id || crypto.randomUUID();
+  database()
+    .prepare(`
+      INSERT INTO approval_requests (
+        id, tool_run_id, task_id, workspace_id, kind, status, title, reason,
+        request_json, risk_json, created_at, updated_at, expires_at, decided_at,
+        decided_by_device_id, decision_reason, decision_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+    `)
+    .run(
+      id,
+      cleanString(input.toolRunId || "", 160),
+      cleanString(input.taskId || "", 160),
+      cleanString(input.workspaceId || "", 160),
+      cleanString(input.kind || "tool", 120),
+      cleanString(input.status || "pending", 40),
+      cleanString(input.title || "", 200),
+      cleanString(input.reason || "", 2000),
+      toJson(input.request || null),
+      toJson(input.risk || null),
+      input.createdAt || current,
+      input.updatedAt || current,
+      input.expiresAt || ""
+    );
+  return getApprovalRequest(id);
+}
+
+export function getApprovalRequest(id) {
+  const row = database().prepare("SELECT * FROM approval_requests WHERE id = ?").get(id);
+  const approval = publicApprovalRequest(row);
+  if (approval?.status === "pending" && approval.expired) {
+    return updateApprovalRequest(id, { status: "expired", decisionReason: "Approval request expired." });
+  }
+  return approval;
+}
+
+export function listApprovalRequests({ status = "", workspaceId = "", after = 0, limit = 100 } = {}) {
+  return database()
+    .prepare(`
+      SELECT *
+      FROM approval_requests
+      WHERE (? = '' OR status = ?)
+        AND (? = '' OR workspace_id = ?)
+        AND rowid > ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `)
+    .all(cleanString(status, 40), cleanString(status, 40), cleanString(workspaceId, 160), cleanString(workspaceId, 160), Number(after || 0), Number(limit || 100))
+    .map(publicApprovalRequest)
+    .map((approval) => (approval?.status === "pending" && approval.expired ? updateApprovalRequest(approval.id, { status: "expired", decisionReason: "Approval request expired." }) : approval));
+}
+
+export function updateApprovalRequest(id, patch = {}) {
+  const existing = database().prepare("SELECT * FROM approval_requests WHERE id = ?").get(id);
+  if (!existing) return null;
+  const current = nowIso();
+  const status = Object.hasOwn(patch, "status") ? cleanString(patch.status, 40) : existing.status;
+  const decidedAt = ["approved", "denied", "expired"].includes(status) && !existing.decided_at ? current : existing.decided_at || "";
+  database()
+    .prepare(`
+      UPDATE approval_requests
+      SET status = ?,
+          updated_at = ?,
+          decided_at = ?,
+          decided_by_device_id = ?,
+          decision_reason = ?,
+          decision_json = ?
+      WHERE id = ?
+    `)
+    .run(
+      status,
+      current,
+      Object.hasOwn(patch, "decidedAt") ? patch.decidedAt || "" : decidedAt,
+      Object.hasOwn(patch, "decidedByDeviceId") ? cleanString(patch.decidedByDeviceId || "", 160) : existing.decided_by_device_id || "",
+      Object.hasOwn(patch, "decisionReason") ? cleanString(patch.decisionReason || "", 2000) : existing.decision_reason || "",
+      Object.hasOwn(patch, "decision") ? toJson(patch.decision || null) : existing.decision_json,
+      id
+    );
+  if (Object.hasOwn(patch, "status") && status !== existing.status && ["approved", "denied", "expired"].includes(status)) {
+    database()
+      .prepare(`
+        INSERT INTO approval_decisions (
+          id, approval_id, tool_run_id, task_id, workspace_id, decision,
+          reason, device_id, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        crypto.randomUUID(),
+        id,
+        existing.tool_run_id || "",
+        existing.task_id || "",
+        existing.workspace_id || "",
+        status,
+        Object.hasOwn(patch, "decisionReason") ? cleanString(patch.decisionReason || "", 2000) : existing.decision_reason || "",
+        Object.hasOwn(patch, "decidedByDeviceId") ? cleanString(patch.decidedByDeviceId || "", 160) : existing.decided_by_device_id || "",
+        Object.hasOwn(patch, "decision") ? toJson(patch.decision || null) : existing.decision_json,
+        current
+      );
+  }
+  return publicApprovalRequest(database().prepare("SELECT * FROM approval_requests WHERE id = ?").get(id));
 }
 
 function desktopRemoteQueueItem(row) {
@@ -1097,4 +1614,318 @@ export function listDesktopObservations({ after = 0, limit = 100 } = {}) {
         desktop: event?.desktop || desktop
       };
     });
+}
+
+// ───────── Live Call persistence ─────────
+
+export function createLiveCall(input = {}) {
+  const current = nowIso();
+  const id = input.id || crypto.randomUUID();
+  database()
+    .prepare(`
+      INSERT INTO live_calls (
+        id, status, title, source, workspace_id, agent_task_id, asr_provider,
+        created_at, updated_at, started_at, stopped_at,
+        last_transcript, last_question, last_answer, meta_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      id,
+      cleanString(input.status || "ready", 40),
+      cleanString(input.title || "Live Call", 160),
+      cleanString(input.source || "live-call-mvp", 120),
+      cleanString(input.workspaceId || "", 160),
+      cleanString(input.agentTaskId || "", 80),
+      cleanString(input.asrProvider || "", 60),
+      input.createdAt || current,
+      input.updatedAt || current,
+      input.startedAt || current,
+      input.stoppedAt || "",
+      cleanString(input.lastTranscript || "", 4000),
+      cleanString(input.lastQuestion || "", 4000),
+      cleanString(input.lastAnswer || "", 8000),
+      toJson(input.meta || null)
+    );
+  return getLiveCall(id);
+}
+
+export function getLiveCall(id) {
+  const row = database().prepare("SELECT * FROM live_calls WHERE id = ?").get(id);
+  return publicLiveCall(row);
+}
+
+export function listLiveCalls({ workspaceId = "", limit = 200 } = {}) {
+  return database()
+    .prepare(`
+      SELECT * FROM live_calls
+      WHERE (? = '' OR workspace_id = ?)
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `)
+    .all(cleanString(workspaceId, 160), cleanString(workspaceId, 160), Number(limit || 200))
+    .map(publicLiveCall)
+    .filter(Boolean);
+}
+
+export function updateLiveCall(id, patch = {}) {
+  const existing = database().prepare("SELECT * FROM live_calls WHERE id = ?").get(id);
+  if (!existing) return null;
+  const current = nowIso();
+  const next = {
+    status: patch.status ?? existing.status,
+    title: patch.title ?? existing.title,
+    source: patch.source ?? existing.source,
+    workspace_id: patch.workspaceId ?? existing.workspace_id ?? "",
+    agent_task_id: patch.agentTaskId ?? existing.agent_task_id ?? "",
+    asr_provider: patch.asrProvider ?? existing.asr_provider ?? "",
+    updated_at: current,
+    started_at: patch.startedAt ?? existing.started_at ?? "",
+    stopped_at: patch.stoppedAt ?? existing.stopped_at ?? "",
+    last_transcript: patch.lastTranscript ?? existing.last_transcript ?? "",
+    last_question: patch.lastQuestion ?? existing.last_question ?? "",
+    last_answer: patch.lastAnswer ?? existing.last_answer ?? "",
+    meta_json: patch.meta === undefined ? existing.meta_json : toJson(patch.meta || null)
+  };
+  database()
+    .prepare(`
+      UPDATE live_calls SET
+        status = ?, title = ?, source = ?, workspace_id = ?, agent_task_id = ?, asr_provider = ?,
+        updated_at = ?, started_at = ?, stopped_at = ?,
+        last_transcript = ?, last_question = ?, last_answer = ?, meta_json = ?
+      WHERE id = ?
+    `)
+    .run(
+      cleanString(next.status, 40),
+      cleanString(next.title, 160),
+      cleanString(next.source, 120),
+      cleanString(next.workspace_id, 160),
+      cleanString(next.agent_task_id, 80),
+      cleanString(next.asr_provider, 60),
+      next.updated_at,
+      next.started_at,
+      next.stopped_at,
+      cleanString(next.last_transcript, 4000),
+      cleanString(next.last_question, 4000),
+      cleanString(next.last_answer, 8000),
+      next.meta_json,
+      id
+    );
+  return getLiveCall(id);
+}
+
+export function insertLiveCallEvent(sessionId, event = {}) {
+  const session = database().prepare("SELECT id FROM live_calls WHERE id = ?").get(sessionId);
+  if (!session) return null;
+  const current = nowIso();
+  const eventAt = event.at || current;
+  const eventId = event.id || crypto.randomUUID();
+  const payload = event.payload === undefined ? null : event.payload;
+  const eventJson = {
+    ...event,
+    id: eventId,
+    at: eventAt,
+    sessionId
+  };
+
+  database()
+    .prepare(`
+      INSERT OR IGNORE INTO live_call_events (
+        session_id, event_id, event_type, event_at,
+        text, payload_json, event_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      sessionId,
+      eventId,
+      cleanString(event.type || "live_call.event", 120),
+      eventAt,
+      typeof event.text === "string" ? event.text : "",
+      toJson(payload),
+      toJson(eventJson),
+      current
+    );
+
+  const row = database()
+    .prepare("SELECT cursor FROM live_call_events WHERE session_id = ? AND event_id = ?")
+    .get(sessionId, eventId);
+  return row?.cursor || null;
+}
+
+export function listLiveCallEvents({ sessionId = "", after = 0, limit = 500 } = {}) {
+  if (!sessionId) return [];
+  return database()
+    .prepare(`
+      SELECT cursor, event_json
+      FROM live_call_events
+      WHERE session_id = ?
+        AND cursor > ?
+      ORDER BY cursor ASC
+      LIMIT ?
+    `)
+    .all(sessionId, Number(after || 0), Math.max(1, Math.min(Number(limit || 500), 2000)))
+    .map((row) => ({
+      ...fromJson(row.event_json, {}),
+      cursor: row.cursor
+    }));
+}
+
+export function pruneLiveCallEvents({ retentionDays = 30, keepLatest = 5000 } = {}) {
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    database().prepare("DELETE FROM live_call_events WHERE event_at < ? AND cursor NOT IN (SELECT cursor FROM live_call_events WHERE session_id IN (SELECT id FROM live_calls) ORDER BY cursor DESC LIMIT ?)").run(cutoff, Number(keepLatest || 5000));
+  } catch {}
+}
+
+function publicLiveCall(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    status: row.status,
+    title: row.title,
+    source: row.source,
+    workspaceId: row.workspace_id || "",
+    agentTaskId: row.agent_task_id || "",
+    asrProvider: row.asr_provider || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at || "",
+    stoppedAt: row.stopped_at || "",
+    lastTranscript: row.last_transcript || "",
+    lastQuestion: row.last_question || "",
+    lastAnswer: row.last_answer || "",
+    remote: null,
+    local: null
+  };
+}
+
+// ───────── Unified event log ─────────
+
+/**
+ * Query events from all three event tables (task_events, tool_events,
+ * live_call_events) in cursor order, filtered by an optional foreign key.
+ *
+ * Parameters:
+ *   - taskId: filter by task_events.task_id / tool_events.task_id
+ *   - liveCallSessionId: filter by live_call_events.session_id
+ *   - toolRunId: filter by tool_events.tool_run_id
+ *   - after: minimum cursor (numeric)
+ *   - limit: max rows
+ *
+ * Each event is normalized to a uniform shape:
+ *   { cursor, eventId, type, kind, at, text, sessionId, taskId, toolRunId, turnId, blockId }
+ */
+export function listUnifiedEvents({
+  taskId = "",
+  liveCallSessionId = "",
+  toolRunId = "",
+  after = 0,
+  limit = 200
+} = {}) {
+  const LIMIT = Math.max(1, Math.min(Number(limit || 200), 2000));
+  const AFTER = Number(after || 0);
+  const qtaskId = cleanString(taskId, 160);
+  const qsessionId = cleanString(liveCallSessionId, 160);
+  const qtoolRunId = cleanString(toolRunId, 160);
+
+  // We query each table separately (simpler SQLite, avoid UNION overhead on many rows).
+  const results = [];
+
+  // task_events
+  if (!liveCallSessionId && !toolRunId) {
+    const rows = database()
+      .prepare(`
+        SELECT cursor, task_id, event_id, event_type, event_kind, turn_id, block_id,
+               event_at, text, payload_json, event_json
+        FROM task_events
+        WHERE (? = '' OR task_id = ?) AND cursor > ?
+        ORDER BY cursor ASC
+        LIMIT ?
+      `)
+      .all(qtaskId, qtaskId, AFTER, LIMIT);
+    for (const row of rows) {
+      results.push({
+        cursor: row.cursor,
+        eventId: row.event_id,
+        type: row.event_type || "",
+        kind: row.event_kind || "",
+        at: row.event_at,
+        text: row.text || "",
+        sessionId: "",
+        taskId: row.task_id || "",
+        toolRunId: "",
+        turnId: row.turn_id || "",
+        blockId: row.block_id || ""
+      });
+    }
+  }
+
+  // tool_events
+  if (!liveCallSessionId) {
+    const remaining = LIMIT - results.length;
+    if (remaining > 0) {
+      const rows = database()
+        .prepare(`
+          SELECT cursor, task_id, tool_run_id, event_id, event_type, '' as event_kind,
+                 '' as turn_id, '' as block_id,
+                 event_at, text, payload_json, event_json
+          FROM tool_events
+          WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor > ?
+          ORDER BY cursor ASC
+          LIMIT ?
+        `)
+        .all(qtaskId, qtaskId, qtoolRunId, qtoolRunId, AFTER, remaining);
+      for (const row of rows) {
+        results.push({
+          cursor: row.cursor,
+          eventId: row.event_id,
+          type: row.event_type,
+          kind: "tool",
+          at: row.event_at,
+          text: row.text || "",
+          sessionId: "",
+          taskId: row.task_id || "",
+          toolRunId: row.tool_run_id || "",
+          turnId: "",
+          blockId: ""
+        });
+      }
+    }
+  }
+
+  // live_call_events
+  if (!taskId && !toolRunId) {
+    const remaining = LIMIT - results.length;
+    if (remaining > 0) {
+      const rows = database()
+        .prepare(`
+          SELECT cursor, session_id, event_id, event_type, '' as event_kind,
+                 '' as turn_id, '' as block_id,
+                 event_at, text, payload_json, event_json
+          FROM live_call_events
+          WHERE (? = '' OR session_id = ?) AND cursor > ?
+          ORDER BY cursor ASC
+          LIMIT ?
+        `)
+        .all(qsessionId, qsessionId, AFTER, remaining);
+      for (const row of rows) {
+        results.push({
+          cursor: row.cursor,
+          eventId: row.event_id,
+          type: row.event_type,
+          kind: "live_call",
+          at: row.event_at,
+          text: row.text || "",
+          sessionId: row.session_id || "",
+          taskId: "",
+          toolRunId: "",
+          turnId: "",
+          blockId: ""
+        });
+      }
+    }
+  }
+
+  // Sort all by cursor ASC and cap.
+  results.sort((a, b) => a.cursor - b.cursor);
+  return results.slice(0, LIMIT);
 }

@@ -1,0 +1,21 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/ggml/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/ggml/src/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/ggml/src/ggml-cpu/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/src/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/tests/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/cli/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/bench/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/server/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/quantize/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/vad-speech-segments/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/parakeet-cli/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/parakeet-quantize/cmake_install.cmake",
+		"C:/Users/22771/Documents/\u79fb\u52a8\u7248agent\u7ec8\u7aef/tools/whisper-cpp/build/examples/deprecation-warning/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

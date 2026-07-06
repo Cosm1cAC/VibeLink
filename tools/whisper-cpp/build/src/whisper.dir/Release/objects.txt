@@ -1,0 +1,1 @@
+C:/Users/22771/Documents/移动版agent终端/tools/whisper-cpp/build/src/whisper.dir/Release/whisper.obj

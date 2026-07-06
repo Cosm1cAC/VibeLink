@@ -1,34 +1,43 @@
 {
-  "name": "vibelink",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Local-first bridge for continuing Codex and Claude Code agent work from web and mobile clients.",
-  "type": "module",
-  "scripts": {
-    "audio:list": "dotnet run --project tools/windows-audio-probe -- list",
-    "audio:probe": "dotnet run --project tools/windows-audio-probe -- probe",
-    "build": "vite build",
-    "web": "vite --host 0.0.0.0",
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
-  },
-  "dependencies": {
-    "@vitejs/plugin-react": "^4.3.4",
-    "katex": "^0.17.0",
-    "lucide-react": "^0.468.0",
-    "qrcode": "^1.5.4",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "react-markdown": "^10.1.0",
-    "rehype-highlight": "^7.0.2",
-    "rehype-katex": "^7.0.1",
-    "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0",
-    "typescript": "^5.7.2",
-    "vite": "^6.0.7",
-    "web-push": "^3.6.7"
-  },
-  "engines": {
-    "node": ">=22.5.0"
-  }
+    "name": "vibelink",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Local-first bridge for continuing Codex and Claude Code agent work from web and mobile clients.",
+    "type": "module",
+    "scripts": {
+        "audio:list": "dotnet run --project tools/windows-audio-probe -- list",
+        "audio:probe": "dotnet run --project tools/windows-audio-probe -- probe",
+        "audio:level": "dotnet run --project tools/windows-audio-probe -- level",
+        "live-call:push-probe": "node tools/live-call/push-probe.mjs",
+        "live-call:stream-levels": "node tools/live-call/stream-levels.mjs",
+        "whisper:setup": "node tools/whisper-cpp/setup.mjs",
+        "whisper:model": "node tools/whisper-cpp/download-model.mjs",
+        "build": "vite build",
+        "web": "vite --host 0.0.0.0",
+        "start": "node src/server.js",
+        "dev": "node --watch src/server.js",
+        "android:build": "powershell -ExecutionPolicy Bypass -File apps/android/build-debug.ps1",
+        "android:adb": ".agent-mobile-terminal/android-sdk/platform-tools/adb.exe"
+    },
+    "dependencies": {
+        "@vitejs/plugin-react": "^4.3.4",
+        "js-tiktoken": "^1.0.21",
+        "katex": "^0.17.0",
+        "lucide-react": "^0.468.0",
+        "qrcode": "^1.5.4",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
+        "react-markdown": "^10.1.0",
+        "rehype-highlight": "^7.0.2",
+        "rehype-katex": "^7.0.1",
+        "remark-gfm": "^4.0.1",
+        "remark-math": "^6.0.0",
+        "typescript": "^5.7.2",
+        "vite": "^6.0.7",
+        "web-push": "^3.6.7",
+        "ws": "^8.21.0"
+    },
+    "engines": {
+        "node": ">=22.5.0"
+    }
 }

@@ -1,7 +1,8 @@
 import fs from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
+import { withAgentReachPath } from "./agentReachRuntime.js";
 import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
 
@@ -60,6 +61,7 @@ async function git(args, cwd) {
   try {
     const { stdout, stderr } = await execFileAsync("git", args, {
       cwd,
+      env: withAgentReachPath(process.env),
       windowsHide: true,
       maxBuffer: 10 * 1024 * 1024
     });
@@ -230,6 +232,31 @@ export async function getWorkspaceContext(id, settings, body = {}) {
     items,
     errors,
     prompt: items.map((item) => item.text).join("\n\n")
+  };
+}
+
+export async function getWorkspaceFile(id, settings, filePath = "") {
+  const workspace = workspaceOrThrow(id);
+  const root = resolveAllowedPath(workspace.path, settings);
+  const target = safeWorkspaceChild(root, filePath);
+  const stat = fs.statSync(target);
+  if (!stat.isFile()) {
+    const error = new Error("Workspace file path must be a file.");
+    error.status = 400;
+    throw error;
+  }
+  touchWorkspace(workspace.id);
+  const rel = path.relative(root, target).replaceAll("\\", "/");
+  const text = readTextSample(target, stat);
+  return {
+    ok: true,
+    workspace,
+    path: rel,
+    absolutePath: target,
+    size: stat.size,
+    updatedAt: stat.mtime.toISOString(),
+    text,
+    binary: !text
   };
 }
 
@@ -438,6 +465,236 @@ export async function applyWorkspaceGitFileAction(id, settings, body = {}) {
     cwd,
     summary
   };
+}
+
+export async function applyWorkspaceGitAction(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const action = String(body.action || "").trim().toLowerCase();
+  touchWorkspace(workspace.id);
+
+  let result;
+  if (action === "stage-all") {
+    result = await git(["add", "-A"], cwd);
+  } else if (action === "unstage-all") {
+    result = await git(["restore", "--staged", "."], cwd);
+  } else if (action === "commit") {
+    const message = String(body.message || "").trim();
+    if (!message) {
+      const error = new Error("Commit message is required.");
+      error.status = 400;
+      throw error;
+    }
+    result = await git(["commit", "-m", message], cwd);
+  } else if (action === "push") {
+    result = await git(["push"], cwd);
+  } else if (action === "pull") {
+    result = await git(["pull", "--ff-only"], cwd);
+  } else if (action === "pr") {
+    const title = String(body.title || "").trim();
+    const args = ["pr", "create", "--fill"];
+    if (title) args.push("--title", title);
+    try {
+      const { stdout, stderr } = await execFileAsync("gh", args, {
+        cwd,
+        env: withAgentReachPath(process.env),
+        windowsHide: true,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      result = { ok: true, stdout, stderr };
+    } catch (error) {
+      result = { ok: false, stdout: error.stdout || "", stderr: error.stderr || error.message, exitCode: error.code ?? 1 };
+    }
+  } else {
+    const error = new Error("Unsupported git action.");
+    error.status = 400;
+    throw error;
+  }
+
+  if (!result.ok) {
+    const error = new Error(result.stderr || result.stdout || "Git action failed.");
+    error.status = 409;
+    error.result = result;
+    throw error;
+  }
+
+  const summary = await collectGitChangeSummary(cwd);
+  return {
+    ok: true,
+    action,
+    workspace,
+    cwd,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    summary
+  };
+}
+
+function parseTestOutput(stdout = "", stderr = "", exitCode = 0) {
+  const text = [stdout, stderr].filter(Boolean).join("\n");
+  const lines = text.split(/\r?\n/);
+  const failed = [];
+  for (const line of lines) {
+    if (/\b(fail|failed|error|exception)\b/i.test(line)) failed.push(line.trim());
+  }
+  const passedMatch = text.match(/(\d+)\s+(?:passing|passed|tests?\s+passed)/i);
+  const failedMatch = text.match(/(\d+)\s+(?:failing|failed|tests?\s+failed|failures?)/i);
+  return {
+    ok: exitCode === 0,
+    passed: passedMatch ? Number(passedMatch[1]) || 0 : exitCode === 0 ? 1 : 0,
+    failed: failedMatch ? Number(failedMatch[1]) || failed.length : exitCode === 0 ? 0 : Math.max(1, failed.length),
+    failures: failed.slice(0, 30),
+    log: text
+  };
+}
+
+export async function runWorkspaceCommand(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const command = String(body.command || "").trim();
+  if (!command) {
+    const error = new Error("Command is required.");
+    error.status = 400;
+    throw error;
+  }
+  touchWorkspace(workspace.id);
+
+  const shell = process.platform === "win32" ? "powershell.exe" : "sh";
+  const args = process.platform === "win32"
+    ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
+    : ["-lc", command];
+  if (typeof body.onOutput === "function") {
+    const result = await runWorkspaceCommandStream({ shell, args, cwd, command, body });
+    return {
+      ...result,
+      workspace,
+      cwd,
+      command,
+      test: body.kind === "test" ? parseTestOutput(result.stdout, result.stderr, result.exitCode || 0) : null
+    };
+  }
+  let result;
+  try {
+    const { stdout, stderr } = await execFileAsync(shell, args, {
+      cwd,
+      env: withAgentReachPath(process.env),
+      windowsHide: true,
+      timeout: Math.min(Number(body.timeoutMs || 120000), 300000),
+      maxBuffer: 20 * 1024 * 1024
+    });
+    result = { ok: true, stdout, stderr, exitCode: 0 };
+  } catch (error) {
+    result = {
+      ok: false,
+      stdout: error.stdout || "",
+      stderr: error.stderr || error.message,
+      exitCode: error.code ?? 1
+    };
+  }
+
+  return {
+    ...result,
+    workspace,
+    cwd,
+    command,
+    test: body.kind === "test" ? parseTestOutput(result.stdout, result.stderr, result.exitCode || 0) : null
+  };
+}
+
+function runWorkspaceCommandStream({ shell, args, cwd, command, body = {} }) {
+  return new Promise((resolve) => {
+    const timeoutMs = Math.min(Number(body.timeoutMs || 120000), 300000);
+    const signal = body.signal || null;
+    if (signal?.aborted) {
+      resolve({
+        ok: false,
+        stdout: "",
+        stderr: "Command was stopped before it started.",
+        exitCode: -1,
+        cancelled: true
+      });
+      return;
+    }
+    const child = spawn(shell, args, {
+      cwd,
+      env: withAgentReachPath(process.env),
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const startedAt = Date.now();
+    const onOutput = typeof body.onOutput === "function" ? body.onOutput : null;
+    const emit = (stream, data) => {
+      const text = data.toString();
+      if (stream === "stdout") stdout += text;
+      else stderr += text;
+      onOutput?.({
+        stream,
+        text,
+        command,
+        cwd,
+        elapsedMs: Date.now() - startedAt
+      });
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", abortCommand);
+      resolve(result);
+    };
+    const abortCommand = () => {
+      try {
+        child.kill();
+      } catch {
+        // Process may already be gone.
+      }
+      finish({
+        ok: false,
+        stdout,
+        stderr: stderr || "Command stopped by user.",
+        exitCode: -1,
+        cancelled: true
+      });
+    };
+    signal?.addEventListener?.("abort", abortCommand, { once: true });
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // Process may already be gone.
+      }
+      finish({
+        ok: false,
+        stdout,
+        stderr: stderr || `Command timed out after ${timeoutMs}ms.`,
+        exitCode: -1,
+        timedOut: true
+      });
+    }, timeoutMs);
+
+    child.stdout?.on("data", (data) => emit("stdout", data));
+    child.stderr?.on("data", (data) => emit("stderr", data));
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        stdout,
+        stderr: stderr || error.message,
+        exitCode: -1
+      });
+    });
+    child.on("close", (code, signal) => {
+      finish({
+        ok: code === 0,
+        stdout,
+        stderr,
+        exitCode: code ?? (signal ? -1 : 0),
+        signal: signal || ""
+      });
+    });
+  });
 }
 
 export async function getTaskChanges(task, settings) {

@@ -13,6 +13,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Code2,
   Copy,
   Download,
@@ -25,13 +26,17 @@ import {
   History,
   Image as ImageIcon,
   ImageOff,
+  Loader2,
   LocateFixed,
   Menu,
   Maximize2,
+  MessageCircle,
   Minimize2,
   Monitor,
   MoreHorizontal,
   Pencil,
+  Phone,
+  PhoneOff,
   Plus,
   RotateCcw,
   RefreshCw,
@@ -41,6 +46,7 @@ import {
   Target,
   Terminal,
   Trash2,
+  Volume2,
   X
 } from "lucide-react";
 import "./styles.css";
@@ -82,6 +88,7 @@ async function request(path, options = {}, token = savedToken) {
   if (!response.ok) {
     const error = new Error(data.error || `HTTP ${response.status}`);
     error.status = response.status;
+    error.data = data;
     throw error;
   }
   return data;
@@ -137,7 +144,8 @@ function compact(value, fallback = "Untitled") {
 }
 
 function providerLabel(provider) {
-  return provider === "claude" ? "Claude" : "Codex";
+  const labels = { claude: "Claude", codex: "Codex", zhipu: "智谱" };
+  return labels[provider] || provider;
 }
 
 function desktopBlockedByRemotePage(desktop) {
@@ -461,6 +469,16 @@ function effortLabel(value) {
   return labels[value] || "默认";
 }
 
+function taskApprovalText(error) {
+  const message = String(error?.message || "");
+  return message.replace(/^Task requires explicit approval:\s*/i, "").trim();
+}
+
+function commandApprovalText(error) {
+  const message = String(error?.message || "");
+  return message.replace(/^Command requires explicit approval:\s*/i, "").trim();
+}
+
 function desktopListStatus(desktop) {
   if (desktop?.ok === false && desktop.reason) return "failed";
   if (desktop?.ready) return "ready";
@@ -475,6 +493,10 @@ function hasDesktopBinding(conversation) {
 
 function conversationHistoryId(conversation) {
   return conversation?.sourceId || conversation?.sessionId || conversation?.historyId || conversation?.id || "";
+}
+
+function historyToolTaskId(provider, sessionId) {
+  return provider && sessionId ? `history:${provider}:${sessionId}` : "";
 }
 
 function desktopRemoteNeedsHistoryRefresh(desktopRemote) {
@@ -685,13 +707,15 @@ function messagesFromTranscript(transcript = [], limit = 180) {
       turnId: item.turnId || "",
       commandCount: item.commandCount || item.commands?.length || 0,
       commands: Array.isArray(item.commands) ? item.commands : [],
+      toolCallCount: item.toolCallCount || item.toolCalls?.length || 0,
+      toolCalls: Array.isArray(item.toolCalls) ? item.toolCalls : [],
       parts: Array.isArray(item.parts) ? item.parts : [],
       sourceKind: "codex-jsonl",
       syncStage: "reconciled",
       reconciled: true,
       source: item
     }))
-    .filter((message) => message.text && !isHistoryNoise(message.source, message.text))
+    .filter((message) => (message.text || message.commands?.length || message.toolCalls?.length) && (!message.text || !isHistoryNoise(message.source, message.text)))
     .map(({ source, ...message }) => message);
 
   return normalizeDisplayMessages(messages).slice(-limit);
@@ -945,9 +969,26 @@ function normalizeMessageText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
+function parsePathReference(value = "") {
+  const text = String(value || "").trim().replace(/^<|>$/g, "");
+  const match = text.match(/((?:[A-Za-z]:[\\/]|\/)?[^\s"'`<>]+?\.[A-Za-z0-9]{1,12})(?::(\d+))?(?::(\d+))?$/);
+  if (!match) return null;
+  return {
+    path: match[1].replaceAll("\\", "/"),
+    line: Number(match[2] || 0),
+    column: Number(match[3] || 0)
+  };
+}
+
+function fileNameFromWorkspacePath(value = "") {
+  return String(value || "").split(/[\\/]/).filter(Boolean).pop() || value || "file";
+}
+
 function messageIdentity(message) {
   if (message?.liveKey) return `${message.role}\nlive:${message.liveKey}`;
   if (message?.turnId) return `${message.role}\nturn:${message.turnId}`;
+  const toolIds = (message?.toolCalls || []).map((item) => item.id || item.callId || item.toolCallId).filter(Boolean).join(",");
+  if (!message?.text && toolIds) return `${message.role}\ntools:${toolIds}`;
   return `${message.role}\n${normalizeMessageText(message.text)}`;
 }
 
@@ -974,8 +1015,122 @@ function moreDetailedCommands(current = [], incoming = []) {
   return commandDetailScore(incoming) >= commandDetailScore(current) ? incoming : current;
 }
 
+function toolCallDetailScore(toolCalls = []) {
+  return toolCalls.reduce((score, toolCall) => {
+    return score + 1 + String(toolCall.output || "").length + (toolCall.status && toolCall.status !== "running" ? 20 : 0);
+  }, 0);
+}
+
+function moreDetailedToolCalls(current = [], incoming = []) {
+  return toolCallDetailScore(incoming) >= toolCallDetailScore(current) ? incoming : current;
+}
+
+function toolEventStatus(events = []) {
+  const types = events.map((event) => event.type || "");
+  if (types.includes("tool.failed") || types.includes("tool.error") || types.includes("approval.denied")) return "failed";
+  if (types.includes("approval.expired")) return "expired";
+  if (types.includes("tool.cancelled")) return "cancelled";
+  if (types.includes("tool.cancel_requested")) return "cancelling";
+  if (types.includes("tool.completed")) return "done";
+  if (types.includes("approval.required")) return "approval_required";
+  if (types.includes("tool.started") || types.includes("tool.output")) return "running";
+  return "queued";
+}
+
+function toolEventLabel(events = []) {
+  const created = events.find((event) => event.type === "tool.created") || events[0] || {};
+  const payload = created.payload || {};
+  return payload.toolName || created.toolName || "tool";
+}
+
+function registryDefinitionForTool(name = "", registry = {}) {
+  if (!name) return null;
+  if (registry[name]) return registry[name];
+  const patterns = Object.values(registry).filter((item) => item?.name?.includes("*"));
+  return patterns.find((item) => new RegExp(`^${item.name.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i").test(name)) || null;
+}
+
+function toolEventsToMessages(events = [], registry = {}) {
+  const byRun = new Map();
+  for (const event of events) {
+    const runId = event.toolRunId || event.payload?.toolRunId || "";
+    if (!runId) continue;
+    if (!byRun.has(runId)) byRun.set(runId, []);
+    byRun.get(runId).push(event);
+  }
+
+  const toolCalls = [...byRun.entries()].map(([runId, runEvents]) => {
+    const sorted = [...runEvents].sort((a, b) => Number(a.cursor || 0) - Number(b.cursor || 0));
+    const created = sorted.find((event) => event.type === "tool.created") || sorted[0] || {};
+    const started = sorted.find((event) => event.type === "tool.started") || {};
+    const terminal = [...sorted].reverse().find((event) => /^tool\.(completed|failed|error)$/.test(event.type || "")) || {};
+    const approval = sorted.find((event) => event.type === "approval.required") || null;
+    const outputEvents = sorted.filter((event) => event.type === "tool.output");
+    const outputText = outputEvents.map((event) => event.payload?.text || event.text || "").join("");
+    const payload = created.payload || {};
+    const name = toolEventLabel(sorted);
+    const definition = payload.tool || registryDefinitionForTool(name, registry) || {};
+    const createdInput = payload.input || {};
+    const kind = definition.kind || createdInput.kind || payload.kind || (
+      name.includes("git") ? "git" : name.includes("command") || name.includes("test") ? "shell" : "tool"
+    );
+    return {
+      id: runId,
+      name,
+      label: definition.label || name,
+      kind,
+      permission: definition.permission || "",
+      risk: definition.risk || "",
+      description: definition.description || "",
+      status: toolEventStatus(sorted),
+      input: createdInput || started.payload?.input || payload,
+      output: outputText || terminal.payload?.result || terminal.payload || null,
+      outputEvents,
+      approval: approval?.payload || null,
+      cursor: Math.max(...sorted.map((event) => Number(event.cursor || 0))),
+      events: sorted
+    };
+  });
+
+  if (!toolCalls.length) return [];
+  return [
+    {
+      role: "assistant",
+      text: "",
+      toolCalls,
+      toolCallCount: toolCalls.length,
+      syncStage: "tool-events"
+    }
+  ];
+}
+
+function resultFromToolRunEvents(events = [], fallback = {}) {
+  const sorted = [...events].sort((a, b) => Number(a.cursor || 0) - Number(b.cursor || 0));
+  const terminal = [...sorted].reverse().find((event) => /^tool\.(completed|failed|error|cancelled)$/.test(event.type || "")) || null;
+  const outputEvents = sorted.filter((event) => event.type === "tool.output");
+  const stdout = outputEvents.filter((event) => (event.payload?.stream || "stdout") === "stdout").map((event) => event.payload?.text || event.text || "").join("");
+  const stderr = outputEvents.filter((event) => event.payload?.stream === "stderr").map((event) => event.payload?.text || event.text || "").join("");
+  const terminalResult = terminal?.payload?.result || null;
+  if (!terminal && !outputEvents.length) return fallback;
+  return {
+    ...fallback,
+    ...(terminalResult || {}),
+    stdout: terminalResult?.stdout ?? stdout,
+    stderr: terminalResult?.stderr ?? stderr,
+    ok: terminal?.type === "tool.completed" ? true : terminal ? false : fallback.ok ?? null,
+    status: terminal?.type === "tool.completed"
+      ? "completed"
+      : terminal?.type === "tool.cancelled"
+        ? "cancelled"
+        : terminal
+          ? "failed"
+          : "running"
+  };
+}
+
 function mergeMessageDetails(current, incoming) {
   const commands = moreDetailedCommands(current.commands || [], incoming.commands || []);
+  const toolCalls = moreDetailedToolCalls(current.toolCalls || [], incoming.toolCalls || []);
   const isReconciled = Boolean(incoming.completedAt || incoming.reconciled || incoming.syncStage === "reconciled");
   return {
     ...current,
@@ -983,7 +1138,9 @@ function mergeMessageDetails(current, incoming) {
     text: incoming.text || current.text,
     typing: isReconciled ? false : Boolean(incoming.typing),
     commandCount: Math.max(Number(current.commandCount || 0), Number(incoming.commandCount || 0), commands.length),
-    commands
+    commands,
+    toolCallCount: Math.max(Number(current.toolCallCount || 0), Number(incoming.toolCallCount || 0), toolCalls.length),
+    toolCalls
   };
 }
 
@@ -1000,7 +1157,13 @@ function reconciledMessageCoversLive(liveMessage, reconciledMessage) {
   if (!liveMessage?.live || reconciledMessage?.role !== liveMessage.role) return false;
   if (reconciledMessage?.turnId && liveMessage?.turnId && reconciledMessage.turnId === liveMessage.turnId) return true;
   if (textOverlapsEnough(liveMessage.text, reconciledMessage.text, 60)) return true;
-  return commandDetailScore(reconciledMessage.commands || []) > commandDetailScore(liveMessage.commands || []) && Number(reconciledMessage.commandCount || 0) >= Number(liveMessage.commandCount || 0);
+  return (
+    commandDetailScore(reconciledMessage.commands || []) > commandDetailScore(liveMessage.commands || []) &&
+    Number(reconciledMessage.commandCount || 0) >= Number(liveMessage.commandCount || 0)
+  ) || (
+    toolCallDetailScore(reconciledMessage.toolCalls || []) > toolCallDetailScore(liveMessage.toolCalls || []) &&
+    Number(reconciledMessage.toolCallCount || 0) >= Number(liveMessage.toolCallCount || 0)
+  );
 }
 
 function mergeDisplayMessagesWithUpdates(current = [], incoming = []) {
@@ -1008,7 +1171,7 @@ function mergeDisplayMessagesWithUpdates(current = [], incoming = []) {
   const merged = current.filter((message) => !message?.live || !reconciledIncoming.some((incomingMessage) => reconciledMessageCoversLive(message, incomingMessage)));
 
   for (const message of incoming) {
-    if (!message?.text && !message?.commands?.length) continue;
+    if (!message?.text && !message?.commands?.length && !message?.toolCalls?.length) continue;
     const identity = messageIdentity(message);
     const index = merged.findIndex((item) => messageIdentity(item) === identity);
     if (index >= 0) {
@@ -1038,7 +1201,7 @@ function normalizeDisplayMessages(items = []) {
   const recentMessages = [];
 
   for (const item of items) {
-    if (!item?.text || item.role === "debug") continue;
+    if ((!item?.text && !item?.commands?.length && !item?.toolCalls?.length) || item.role === "debug") continue;
 
     const identity = messageIdentity(item);
     const normalizedText = normalizeMessageText(item.text);
@@ -1083,7 +1246,7 @@ function messagesForRender(items, running) {
 }
 
 function shouldRenderMessage(message) {
-  if (!message?.text || message.role === "debug") return false;
+  if ((!message?.text && !message?.commands?.length && !message?.toolCalls?.length) || message.role === "debug") return false;
   if (message.role !== "system" && message.role !== "log") return true;
   return /(\bERROR\b|\berror\b|failed|failure|unauthorized|forbidden|spawn|ENOENT|EPERM|EACCES|permission|not found|refused|timed out|failed to|错误|失败|未找到|拒绝|超时|无权限)/i.test(
     message.text
@@ -1213,6 +1376,31 @@ function extractArtifactLinks(text, token) {
   }
 
   return results.slice(0, 8);
+}
+
+function extractImageLinks(text, token) {
+  const value = String(text || "");
+  const results = [];
+  const seen = new Set();
+  const add = (label, href) => {
+    const raw = stripPathWrappers(href);
+    if (!raw || !isImagePath(raw) || seen.has(raw)) return;
+    seen.add(raw);
+    results.push({
+      label: compact(label || pathBaseName(raw), pathBaseName(raw)),
+      href: localFileUrl(raw, token),
+      raw
+    });
+  };
+
+  const markdownPattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  let match;
+  while ((match = markdownPattern.exec(value))) add(match[1], match[2]);
+
+  const localPathPattern = /(^|[\s(:：])((?:[A-Za-z]:[\\/]|\/)[^\r\n<>)]*?\.(?:png|jpe?g|gif|webp|avif)(?:[?#][^\s)]*)?)/gi;
+  while ((match = localPathPattern.exec(value))) add(pathBaseName(match[2]), match[2]);
+
+  return results.slice(0, 12);
 }
 
 async function copyText(value) {
@@ -1347,8 +1535,51 @@ function MessageImage({ src, alt, token }) {
   );
 }
 
-function MarkdownLink({ href, children, token }) {
+function ImageGallery({ images = [] }) {
+  const [openIndex, setOpenIndex] = useState(-1);
+  if (images.length < 2) return null;
+  const active = images[openIndex] || null;
+  return (
+    <div className="image-gallery">
+      {images.map((image, index) => (
+        <button type="button" key={image.raw} onClick={() => setOpenIndex(index)} title="打开图库">
+          <img src={image.href} alt={image.label || "image"} loading="lazy" />
+        </button>
+      ))}
+      {active ? (
+        <div className="image-lightbox" role="dialog" aria-modal="true" onClick={() => setOpenIndex(-1)}>
+          <div className="image-lightbox-bar" onClick={(event) => event.stopPropagation()}>
+            <button type="button" onClick={() => setOpenIndex((value) => (value <= 0 ? images.length - 1 : value - 1))} title="上一张">
+              <ChevronLeft size={18} />
+            </button>
+            <span>{active.label || pathBaseName(active.raw)}</span>
+            <button type="button" onClick={() => setOpenIndex((value) => (value + 1) % images.length)} title="下一张">
+              <ChevronRight size={18} />
+            </button>
+            <a href={active.href} download={pathBaseName(active.raw)} title="下载图片">
+              <Download size={17} />
+            </a>
+            <button type="button" onClick={() => setOpenIndex(-1)} title="关闭">
+              <X size={18} />
+            </button>
+          </div>
+          <img src={active.href} alt={active.label || "image"} onClick={(event) => event.stopPropagation()} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MarkdownLink({ href, children, token, onOpenFilePath }) {
   const url = localFileUrl(href || "", token);
+  const ref = parsePathReference(href || "");
+  if (ref && onOpenFilePath) {
+    return (
+      <button className="message-path-link" type="button" onClick={() => onOpenFilePath(ref)}>
+        {children}
+      </button>
+    );
+  }
   return (
     <a className={cx("message-link", isArtifactPath(href) && "artifact-inline-link")} href={url} target="_blank" rel="noreferrer">
       {children}
@@ -1365,25 +1596,70 @@ function MarkdownCode({ inline, className, children, node, ...props }) {
   return <CodeBlock code={code} language={match?.[1] || ""} />;
 }
 
-function ArtifactList({ artifacts = [] }) {
-  if (!artifacts.length) return null;
+function ArtifactPreview({ artifact, onClose }) {
+  if (!artifact) return null;
+  const canInline = ["PDF", "Text"].includes(artifact.kind);
   return (
-    <div className="artifact-list">
-      {artifacts.map((item) => (
-        <a className="artifact-card" href={item.href} target="_blank" rel="noreferrer" key={item.raw}>
-          <File size={17} />
+    <div className="artifact-preview-backdrop" role="dialog" aria-modal="true" onClick={onClose}>
+      <section className="artifact-preview" onClick={(event) => event.stopPropagation()}>
+        <div className="artifact-preview-head">
+          <FileText size={17} />
           <span>
-            <strong>{item.label}</strong>
-            <small>{item.kind}</small>
+            <strong>{artifact.label}</strong>
+            <small>{artifact.kind}</small>
           </span>
-          <ExternalLink size={15} />
-        </a>
-      ))}
+          <a href={artifact.href} target="_blank" rel="noreferrer" title="新窗口打开">
+            <ExternalLink size={17} />
+          </a>
+          <a href={artifact.href} download={pathBaseName(artifact.raw)} title="下载文件">
+            <Download size={17} />
+          </a>
+          <button type="button" onClick={onClose} title="关闭">
+            <X size={18} />
+          </button>
+        </div>
+        {canInline ? (
+          <iframe title={artifact.label} src={artifact.href} />
+        ) : (
+          <div className="artifact-preview-empty">
+            <File size={34} />
+            <strong>{artifact.kind} preview</strong>
+            <p>浏览器不能直接预览时，可下载或在新窗口打开。</p>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
 
-function MessageContent({ text, typing, token, typingKey = "" }) {
+function ArtifactList({ artifacts = [] }) {
+  const [preview, setPreview] = useState(null);
+  if (!artifacts.length) return null;
+  return (
+    <>
+      <div className="artifact-list">
+        {artifacts.map((item) => (
+          <div className="artifact-card" key={item.raw}>
+            <File size={17} />
+            <span>
+              <strong>{item.label}</strong>
+              <small>{item.kind}</small>
+            </span>
+            <button type="button" onClick={() => setPreview(item)} title="预览">
+              <Maximize2 size={15} />
+            </button>
+            <a href={item.href} target="_blank" rel="noreferrer" title="新窗口打开">
+              <ExternalLink size={15} />
+            </a>
+          </div>
+        ))}
+      </div>
+      <ArtifactPreview artifact={preview} onClose={() => setPreview(null)} />
+    </>
+  );
+}
+
+function MessageContent({ text, typing, token, typingKey = "", onOpenFilePath }) {
   const shown = useTypedText(text, Boolean(typing), typingKey);
   const markdown = normalizeMarkdownText(shown);
 
@@ -1393,7 +1669,7 @@ function MessageContent({ text, typing, token, typingKey = "" }) {
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
         components={{
-          a: ({ href, children }) => <MarkdownLink href={href} token={token}>{children}</MarkdownLink>,
+          a: ({ href, children }) => <MarkdownLink href={href} token={token} onOpenFilePath={onOpenFilePath}>{children}</MarkdownLink>,
           img: ({ src, alt }) => <MessageImage src={src} alt={alt} token={token} />,
           pre: ({ children }) => <>{children}</>,
           code: MarkdownCode,
@@ -1421,6 +1697,13 @@ function ThinkingIndicator({ text = "Thinking" }) {
 }
 
 function commandStatusLabel(status) {
+  if (status === "queued" || status === "pending") return "queued";
+  if (status === "approval_required") return "needs approval";
+  if (status === "expired") return "expired";
+  if (status === "rejected") return "rejected";
+  if (status === "cancelled") return "cancelled";
+  if (status === "cancelling") return "stopping";
+  if (status === "completed") return "done";
   if (status === "failed") return "failed";
   if (status === "running") return "running";
   return "done";
@@ -1470,6 +1753,143 @@ function CommandSummary({ commands = [], commandCount = 0, running = false }) {
   );
 }
 
+function toolKindLabel(kind) {
+  if (kind === "approval") return "审批";
+  if (kind === "browser") return "浏览器";
+  if (kind === "file") return "文件";
+  if (kind === "git") return "Git";
+  if (kind === "shell") return "命令";
+  if (kind === "plugin") return "插件";
+  return "工具";
+}
+
+function formatToolPayload(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Convert ANSI escape sequences to HTML spans.
+ * Supports basic colors: 30-37 (foreground), 0 (reset), 1 (bold), 2 (dim).
+ * Non-color control sequences stripped.
+ */
+function ansiToHtml(text) {
+  if (!text) return "";
+  const colorMap = { 31: "ansi-red", 32: "ansi-green", 33: "ansi-yellow", 34: "ansi-blue" };
+  let html = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  html = html.replace(/\x1b\[(?:(\d+)(?:;(\d+))?)m/g, (_, code, code2) => {
+    const codes = [code, code2].filter(Boolean).map(Number);
+    const spans = codes.map((c) => {
+      if (c === 0) return "</span>";
+      if (c === 1) return `<span class="ansi-bold">`;
+      if (c === 2) return `<span class="ansi-dim">`;
+      if (colorMap[c]) return `<span class="${colorMap[c]}">`;
+      return "";
+    });
+    return spans.filter(Boolean).join("");
+  }).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ""); // strip remaining CSI sequences
+  // Close unclosed spans
+  const openCount = (html.match(/<span/g) || []).length;
+  const closeCount = (html.match(/<\/span>/g) || []).length;
+  if (openCount > closeCount) html += "</span>".repeat(openCount - closeCount);
+  return html;
+}
+
+function ToolCallCards({ toolCalls = [] }) {
+  const [expanded, setExpanded] = useState({});
+  const outputRefs = useRef({});
+  const visibleTools = toolCalls.filter((item) => item?.name || item?.kind);
+  if (!visibleTools.length) return null;
+
+  // Auto-open running tool calls and scroll output
+  const runningIds = visibleTools
+    .filter((t) => t.status === "started" || t.status === "running")
+    .map((t) => t.id || t.callId || t.toolCallId || `${t.name}-0`)
+    .filter(Boolean);
+
+  useEffect(() => {
+    if (!runningIds.length) return;
+    setExpanded((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const id of runningIds) {
+        if (!next[id]) { next[id] = true; changed = true; }
+      }
+      return changed ? next : current;
+    });
+  }, [runningIds.join(",")]);
+
+  // Auto-scroll output area when new output arrives
+  useEffect(() => {
+    for (const tool of visibleTools) {
+      const key = tool.id || tool.callId || tool.toolCallId || `${tool.name}-0`;
+      const container = outputRefs.current[key];
+      if (container) container.scrollTop = container.scrollHeight;
+    }
+  }, [visibleTools.map((t) => t.cursor).join(",")]);
+
+  return (
+    <div className="tool-call-list">
+      {visibleTools.map((toolCall, index) => {
+        const key = toolCall.id || toolCall.callId || toolCall.toolCallId || `${toolCall.name}-${index}`;
+        const open = Boolean(expanded[key]);
+        const input = formatToolPayload(toolCall.input);
+        const output = formatToolPayload(toolCall.output);
+        const isRunning = toolCall.status === "started" || toolCall.status === "running";
+        const statusLabel = commandStatusLabel(toolCall.status);
+
+        function outputEventsContent(events = []) {
+          if (!events.length) {
+            if (output) return <pre className="tool-call-output-text">{output}</pre>;
+            return null;
+          }
+          return (
+            <div className="tool-call-output" ref={(el) => { if (el) outputRefs.current[key] = el; }}>
+              {events.map((ev, i) => (
+                <div key={ev.cursor || i} className="tool-call-output-stream">
+                  {ev.stream === "stderr" ? <span className="stderr-marker">stderr</span> : null}
+                  <span className="output-text">{ev.payload?.text || ev.text || ""}</span>
+                </div>
+              ))}
+            </div>
+          );
+        }
+
+        return (
+          <section className={cx("tool-call-card", toolCall.status)} key={key}>
+            <button className="tool-call-head" type="button" onClick={() => setExpanded((current) => ({ ...current, [key]: !current[key] }))}>
+              <Square size={13} />
+              <strong>{toolCall.label || (toolCall.namespace ? `${toolCall.namespace}.${toolCall.name}` : toolCall.name || "tool")}</strong>
+              <span>{toolKindLabel(toolCall.kind)}</span>
+              <em className={cx("tool-status", toolCall.status)}>{statusLabel}</em>
+              {isRunning ? <Loader2 size={12} className="spin" /> : null}
+              <ChevronRight className={cx("turn-chevron", open && "open")} size={15} />
+            </button>
+            {open ? (
+              <div className="tool-call-body">
+                {toolCall.name || toolCall.permission || toolCall.risk ? (
+                  <div className="tool-call-meta">
+                    {toolCall.name ? <span>{toolCall.name}</span> : null}
+                    {toolCall.permission ? <span>{toolCall.permission}</span> : null}
+                    {toolCall.risk ? <span>risk: {toolCall.risk}</span> : null}
+                  </div>
+                ) : null}
+                {input ? <pre>{input}</pre> : null}
+                {outputEventsContent(toolCall.outputEvents)}
+              </div>
+            ) : null}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 function Message({
   role,
   text,
@@ -1480,6 +1900,8 @@ function Message({
   durationMs,
   commands = [],
   commandCount = 0,
+  toolCalls = [],
+  toolCallCount = 0,
   commandRunning = false,
   running: commandsRunning = false,
   live = false,
@@ -1491,7 +1913,8 @@ function Message({
   onEdit,
   onDelete,
   onRegenerate,
-  onLocate
+  onLocate,
+  onOpenFilePath
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -1501,6 +1924,7 @@ function Message({
   const label = role === "user" ? "You" : role === "assistant" ? "Agent" : role === "error" ? "Error" : "System";
   const durationLabel = role === "assistant" ? formatDurationMs(durationMs) : "";
   const artifacts = pending ? [] : extractArtifactLinks(displayText, token);
+  const galleryImages = pending ? [] : extractImageLinks(displayText, token);
   const preview = compact(displayText, "").slice(0, 180);
   const operationMessage = { role, text, turnId, liveKey, pending, live };
   const canOperate = !pending && !live;
@@ -1512,7 +1936,7 @@ function Message({
     if (!editing) setDraft(displayText);
   }, [displayText, editing]);
 
-  if (!text || role === "debug" || !displayText) return null;
+  if ((!text && !commands.length && !toolCalls.length) || role === "debug" || (!displayText && !commands.length && !toolCalls.length)) return null;
 
   async function copyMessage() {
     await copyText(displayText);
@@ -1594,13 +2018,15 @@ function Message({
           </div>
         ) : (
           <>
-            <MessageContent text={displayText} typing={typing && !live} typingKey={typingKey || messageKey} token={token} />
+            <MessageContent text={displayText} typing={typing && !live} typingKey={typingKey || messageKey} token={token} onOpenFilePath={onOpenFilePath} />
             {live && streaming ? <span className="typing-caret live-stream-caret" aria-hidden="true" /> : null}
+            <ImageGallery images={galleryImages} />
             <ArtifactList artifacts={artifacts} />
           </>
         )}
       </div>
       {role === "assistant" ? <CommandSummary commands={commands} commandCount={commandCount} running={commandRunning || commandsRunning} /> : null}
+      {role === "assistant" ? <ToolCallCards toolCalls={toolCalls} toolCallCount={toolCallCount} /> : null}
     </article>
   );
 }
@@ -1697,6 +2123,30 @@ function mergeChangeFiles(summaryFiles = [], diffFiles = []) {
   return [...byPath.values()];
 }
 
+function workspaceFilePath(root, relPath) {
+  const base = String(root || "").replace(/[\\/]+$/, "");
+  const rel = String(relPath || "").replace(/^[\\/]+/, "");
+  if (!base) return rel;
+  const separator = base.includes("\\") ? "\\" : "/";
+  return `${base}${separator}${rel.replace(/[\\/]+/g, separator)}`;
+}
+
+function filePatchText(file) {
+  if (!file) return "";
+  const pathLabel = file.path || file.oldPath || "file";
+  const hunks = Array.isArray(file.hunks) ? file.hunks : [];
+  if (!hunks.length) return file.preview || pathLabel;
+  const lines = [`--- ${file.oldPath || pathLabel}`, `+++ ${file.path || pathLabel}`];
+  for (const hunk of hunks) {
+    lines.push(hunk.header || "");
+    for (const line of hunk.lines || []) {
+      const prefix = line.type === "add" ? "+" : line.type === "del" ? "-" : line.type === "meta" ? "\\" : " ";
+      lines.push(`${prefix}${line.text || ""}`);
+    }
+  }
+  return lines.filter((line) => line !== null && line !== undefined).join("\n");
+}
+
 function DiffLine({ line }) {
   return (
     <div className={cx("diff-line", line.type)}>
@@ -1726,15 +2176,22 @@ function DiffViewer({ file }) {
   );
 }
 
-function ChangeCard({ summary }) {
+function ChangeCard({ summary, token, onUpdated, onError }) {
   const [expanded, setExpanded] = useState(false);
   const [activePath, setActivePath] = useState("");
+  const [busyAction, setBusyAction] = useState("");
+  const [notice, setNotice] = useState("");
+  const [copiedPatch, setCopiedPatch] = useState(false);
   const diffFiles = useMemo(() => parseUnifiedDiff(summary?.diff || ""), [summary?.diff]);
   const files = useMemo(() => mergeChangeFiles(summary?.files || [], diffFiles), [summary?.files, diffFiles]);
   const activeFile = files.find((file) => (file.path || file.oldPath) === activePath) || files[0] || null;
   const additions = files.reduce((sum, file) => sum + Number(file.additions || 0), 0);
   const deletions = files.reduce((sum, file) => sum + Number(file.deletions || 0), 0);
   const title = summary?.kind === "workspace" ? "Workspace changes" : "Task changes";
+  const workspaceId = summary?.workspace?.id || "";
+  const activeKey = activeFile?.path || activeFile?.oldPath || "";
+  const activeFullPath = workspaceFilePath(summary?.cwd || summary?.workspace?.path || "", activeKey);
+  const canMutate = Boolean(workspaceId && activeKey && summary?.kind === "workspace");
 
   useEffect(() => {
     if (!files.length) {
@@ -1746,6 +2203,60 @@ function ChangeCard({ summary }) {
 
   if (!summary) return null;
 
+  async function copyActivePatch() {
+    await copyText(filePatchText(activeFile));
+    setCopiedPatch(true);
+    setTimeout(() => setCopiedPatch(false), 1200);
+  }
+
+  async function runFileAction(action) {
+    if (!canMutate) return;
+    if (action === "reject" && !window.confirm(`Reject changes in ${activeKey}?`)) return;
+    const actionKey = `${action}:${activeKey}`;
+    setBusyAction(actionKey);
+    setNotice("");
+    try {
+      const result = await request(
+        `/api/workspaces/${workspaceId}/git/file-action`,
+        {
+          method: "POST",
+          body: JSON.stringify({ path: activeKey, action })
+        },
+        token
+      );
+      setNotice(action === "accept" ? "已接受并暂存该文件" : "已拒绝并还原该文件");
+      onUpdated?.(result);
+    } catch (err) {
+      setNotice(err.message || "文件操作失败");
+      onError?.(err.message || "文件操作失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function stageAll() {
+    if (!workspaceId) return;
+    setBusyAction("stage-all");
+    setNotice("");
+    try {
+      const result = await request(
+        `/api/workspaces/${workspaceId}/git/action`,
+        {
+          method: "POST",
+          body: JSON.stringify({ action: "stage-all" })
+        },
+        token
+      );
+      setNotice("已暂存全部变更");
+      onUpdated?.(result);
+    } catch (err) {
+      setNotice(err.message || "暂存失败");
+      onError?.(err.message || "暂存失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
   return (
     <section className="change-card">
       <div className="change-card-head">
@@ -1755,6 +2266,12 @@ function ChangeCard({ summary }) {
         </div>
         <div className="change-actions">
           <span className={cx("change-pill", summary.ok ? "ready" : "waiting")}>{summary.ok ? "Ready" : "Unavailable"}</span>
+          {canMutate && files.length ? (
+            <button className="change-expand" type="button" disabled={Boolean(busyAction)} onClick={stageAll}>
+              <CheckSquare size={14} />
+              {busyAction === "stage-all" ? "暂存中" : "全部暂存"}
+            </button>
+          ) : null}
           {summary.diff ? (
             <button className="change-expand" type="button" onClick={() => setExpanded((value) => !value)}>
               {expanded ? "收起 diff" : "查看 diff"}
@@ -1793,11 +2310,531 @@ function ChangeCard({ summary }) {
         <div className="change-diff-panel">
           <div className="change-diff-head">
             <strong>{activeFile.path || activeFile.oldPath}</strong>
-            <span>+{activeFile.additions || 0} -{activeFile.deletions || 0}</span>
+            <div className="change-diff-actions">
+              <span>+{activeFile.additions || 0} -{activeFile.deletions || 0}</span>
+              <button type="button" onClick={copyActivePatch} title="复制 patch">
+                {copiedPatch ? <CheckSquare size={14} /> : <Copy size={14} />}
+                {copiedPatch ? "已复制" : "复制"}
+              </button>
+              {activeFullPath ? (
+                <a href={localFileUrl(activeFullPath, token)} target="_blank" rel="noreferrer" title="打开文件">
+                  <ExternalLink size={14} />
+                  打开
+                </a>
+              ) : null}
+              {canMutate ? (
+                <>
+                  <button type="button" disabled={Boolean(busyAction)} onClick={() => runFileAction("accept")} title="接受并暂存该文件">
+                    <CheckSquare size={14} />
+                    {busyAction === `accept:${activeKey}` ? "处理中" : "接受"}
+                  </button>
+                  <button type="button" disabled={Boolean(busyAction)} onClick={() => runFileAction("reject")} title="拒绝并还原该文件">
+                    <X size={14} />
+                    {busyAction === `reject:${activeKey}` ? "处理中" : "拒绝"}
+                  </button>
+                </>
+              ) : null}
+            </div>
           </div>
           <DiffViewer file={activeFile} />
         </div>
       ) : null}
+      {notice ? <div className="change-notice">{notice}</div> : null}
+    </section>
+  );
+}
+
+function WorkspaceWorkbench({
+  workspaces = [],
+  selected,
+  token,
+  toolEvents = [],
+  onError,
+  onSummary,
+  onToolEventsChanged,
+  openRequest,
+  onOpenHandled
+}) {
+  const defaultWorkspace = useMemo(() => chooseWorkspaceForPath(workspaces, selected?.cwd || ""), [workspaces, selected?.cwd]);
+  const [workspaceId, setWorkspaceId] = useState(defaultWorkspace?.id || "");
+  const [tree, setTree] = useState({ dir: "", items: [] });
+  const [file, setFile] = useState(null);
+  const [activeTab, setActiveTab] = useState("files");
+  const [terminalCommand, setTerminalCommand] = useState("git status --short --branch");
+  const [terminalResult, setTerminalResult] = useState(null);
+  const [testCommand, setTestCommand] = useState("npm test");
+  const [testResult, setTestResult] = useState(null);
+  const [commitMessage, setCommitMessage] = useState("Update project files");
+  const [busy, setBusy] = useState("");
+  const [runningCommand, setRunningCommand] = useState(null);
+  const [panelCollapsed, setPanelCollapsed] = useState(() => {
+    if (typeof localStorage === "undefined") return true;
+    const stored = localStorage.getItem("mat.workspace.collapsed");
+    if (stored === "0") return false;
+    return true; // 默认收起
+  });
+
+  function togglePanelCollapsed() {
+    setPanelCollapsed((current) => {
+      const next = !current;
+      try { localStorage.setItem("mat.workspace.collapsed", next ? "1" : "0"); } catch {}
+      return next;
+    });
+  }
+
+  const workspace = workspaces.find((item) => item.id === workspaceId) || defaultWorkspace || workspaces[0] || null;
+  const activeWorkspaceId = workspace?.id || "";
+  const activeTaskId = selected?.kind === "task" ? selected.id : "";
+
+  useEffect(() => {
+    if (!workspaceId && defaultWorkspace?.id) setWorkspaceId(defaultWorkspace.id);
+  }, [workspaceId, defaultWorkspace?.id]);
+
+  useEffect(() => {
+    if (!activeWorkspaceId || activeTab !== "files") return;
+    loadTree(tree.dir || "").catch((err) => onError?.(err.message));
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!openRequest?.path || !activeWorkspaceId) return;
+    openWorkspacePath(openRequest.path, openRequest.line || 0).catch((err) => onError?.(err.message));
+    if (panelCollapsed) {
+      setPanelCollapsed(false);
+      try { localStorage.setItem("mat.workspace.collapsed", "0"); } catch {}
+    }
+    onOpenHandled?.();
+  }, [openRequest?.id, activeWorkspaceId, panelCollapsed]);
+
+  useEffect(() => {
+    if (!runningCommand?.toolRunId) return;
+    const events = toolEvents.filter((event) => event.toolRunId === runningCommand.toolRunId);
+    if (!events.length) return;
+    const current = runningCommand.kind === "test" ? testResult : terminalResult;
+    const next = resultFromToolRunEvents(events, {
+      ...(current || {}),
+      command: runningCommand.command,
+      toolRunId: runningCommand.toolRunId
+    });
+    if (runningCommand.kind === "test") setTestResult(next);
+    else setTerminalResult(next);
+    if (["completed", "failed", "cancelled"].includes(next.status)) {
+      setRunningCommand(null);
+    }
+  }, [toolEvents, runningCommand?.toolRunId]);
+
+  useEffect(() => {
+    if (!runningCommand?.toolRunId) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const result = await request(`/api/tool-runs/${encodeURIComponent(runningCommand.toolRunId)}?limit=1000`, {}, token);
+        if (cancelled) return;
+        const current = runningCommand.kind === "test" ? testResult : terminalResult;
+        const next = resultFromToolRunEvents(result.events || [], {
+          ...(current || {}),
+          ...(result.toolRun?.result || {}),
+          command: runningCommand.command,
+          toolRunId: runningCommand.toolRunId,
+          status: result.toolRun?.status || current?.status || "running"
+        });
+        if (runningCommand.kind === "test") setTestResult(next);
+        else setTerminalResult(next);
+        if (["completed", "failed", "cancelled"].includes(next.status)) {
+          setRunningCommand(null);
+        }
+      } catch (err) {
+        if (!cancelled) onError?.(err.message);
+      }
+    };
+    const timer = setInterval(load, 1200);
+    load();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [runningCommand?.toolRunId]);
+
+  if (!workspaces.length) return null;
+
+  async function loadTree(dir = "") {
+    if (!activeWorkspaceId) return;
+    const result = await request(`/api/workspaces/${activeWorkspaceId}/tree?dir=${encodeURIComponent(dir)}`, {}, token);
+    setTree({ dir: result.dir || "", items: result.items || [] });
+  }
+
+  async function openFile(pathValue, line = 0) {
+    if (!activeWorkspaceId || !pathValue) return;
+    setBusy(`file:${pathValue}`);
+    try {
+      const result = await request(`/api/workspaces/${activeWorkspaceId}/file?path=${encodeURIComponent(pathValue)}`, {}, token);
+      setFile({ ...result, line });
+      setActiveTab("files");
+      window.setTimeout(() => {
+        if (line > 0) {
+          document.querySelector(`[data-file-line="${line}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }, 80);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openWorkspacePath(pathValue, line = 0) {
+    const normalized = String(pathValue || "").replaceAll("\\", "/");
+    const root = String(workspace?.path || "").replaceAll("\\", "/").replace(/\/+$/, "");
+    const rel = root && normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)
+      ? normalized.slice(root.length + 1)
+      : normalized.replace(/^\/+/, "");
+    await openFile(rel, line);
+  }
+
+  async function refreshGitSummary() {
+    if (!activeWorkspaceId) return null;
+    const [status, diff] = await Promise.all([
+      request(`/api/workspaces/${activeWorkspaceId}/git/status`, {}, token),
+      request(`/api/workspaces/${activeWorkspaceId}/git/diff`, {}, token)
+    ]);
+    const summary = {
+      ...diff,
+      branch: status.branch || diff.branch || "",
+      files: diff.files?.length ? diff.files : status.files || [],
+      changedCount: status.changedCount ?? diff.fileCount ?? diff.files?.length ?? 0,
+      statusFiles: status.files || [],
+      kind: "workspace",
+      cwd: workspace?.path || diff.cwd || "",
+      workspace: diff.workspace || status.workspace || workspace
+    };
+    onSummary?.(summary);
+    return summary;
+  }
+
+  async function runGitAction(action) {
+    if (!activeWorkspaceId) return;
+    const payload = { action };
+    if (action === "commit") payload.message = commitMessage;
+    setBusy(action);
+    try {
+      const result = await request(
+        `/api/workspaces/${activeWorkspaceId}/git/action`,
+        { method: "POST", body: JSON.stringify(payload) },
+        token
+      );
+      onSummary?.({
+        ...result.summary,
+        workspace: result.workspace || workspace,
+        cwd: result.cwd || workspace?.path || "",
+        kind: "workspace"
+      });
+      setTerminalResult({
+        ok: true,
+        command: `git ${action}`,
+        stdout: result.stdout || "",
+        stderr: result.stderr || ""
+      });
+      onToolEventsChanged?.();
+    } catch (err) {
+      onError?.(err.message);
+      setTerminalResult({ ok: false, command: `git ${action}`, stderr: err.message });
+      onToolEventsChanged?.();
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runTerminal(kind = "terminal") {
+    if (!activeWorkspaceId) return;
+    const command = kind === "test" ? testCommand : terminalCommand;
+    if (!command.trim()) return;
+    setBusy(kind);
+    const payload = { command, kind, taskId: activeTaskId, timeoutMs: kind === "test" ? 180000 : 120000, background: true };
+    try {
+      const result = await request(
+        `/api/workspaces/${activeWorkspaceId}/command`,
+        { method: "POST", body: JSON.stringify(payload) },
+        token
+      );
+      if (result.background && result.toolRunId) {
+        const pending = { ok: null, command, stdout: "", stderr: "", status: "running", toolRunId: result.toolRunId };
+        setRunningCommand({ kind, toolRunId: result.toolRunId, command });
+        if (kind === "test") setTestResult(pending);
+        else setTerminalResult(pending);
+        onToolEventsChanged?.();
+        return;
+      }
+      if (kind === "test") setTestResult(result);
+      else setTerminalResult(result);
+      onToolEventsChanged?.();
+    } catch (err) {
+      if (err.status === 428) {
+        const approvalId = err.data?.approvalId || err.data?.approval?.id || "";
+        const reason = commandApprovalText(err) || err.data?.approval?.reason || "this command may mutate files, system state, or execute remote code";
+        const approved = window.confirm(`Approve this workspace command?\n\n${command}\n\n${reason}`);
+        if (!approved) {
+          if (approvalId) {
+            try {
+              await request(
+                `/api/approvals/${encodeURIComponent(approvalId)}/decision`,
+                { method: "POST", body: JSON.stringify({ decision: "deny", reason: "Denied in workspace panel." }) },
+                token
+              );
+            } catch {
+              // The visible result below is more important than surfacing a denial sync failure here.
+            }
+          }
+          const result = { ok: false, command, stderr: `Command was not run because approval was denied: ${reason}` };
+          if (kind === "test") setTestResult(result);
+          else setTerminalResult(result);
+          onToolEventsChanged?.();
+          return;
+        }
+        try {
+          if (!approvalId) throw new Error("Approval request was not returned by the server.");
+          const approvedResponse = await request(
+            `/api/approvals/${encodeURIComponent(approvalId)}/decision`,
+            { method: "POST", body: JSON.stringify({ decision: "approve", reason: "Approved in workspace panel." }) },
+            token
+          );
+          const result = approvedResponse.result || approvedResponse;
+          if (approvedResponse.background && approvedResponse.toolRunId) {
+            const pending = { ok: null, command, stdout: "", stderr: "", status: "running", toolRunId: approvedResponse.toolRunId };
+            setRunningCommand({ kind, toolRunId: approvedResponse.toolRunId, command });
+            if (kind === "test") setTestResult(pending);
+            else setTerminalResult(pending);
+            onToolEventsChanged?.();
+            return;
+          }
+          if (kind === "test") setTestResult(result);
+          else setTerminalResult(result);
+          onToolEventsChanged?.();
+          return;
+        } catch (approvedErr) {
+          onError?.(approvedErr.message);
+          const result = { ok: false, command, stderr: approvedErr.message };
+          if (kind === "test") setTestResult(result);
+          else setTerminalResult(result);
+          onToolEventsChanged?.();
+          return;
+        }
+      }
+      onError?.(err.message);
+      const result = { ok: false, command, stderr: err.message };
+      if (kind === "test") setTestResult(result);
+      else setTerminalResult(result);
+      onToolEventsChanged?.();
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function stopWorkspaceCommand() {
+    if (!runningCommand?.toolRunId) return;
+    setBusy(`stop:${runningCommand.kind}`);
+    try {
+      await request(
+        `/api/tool-runs/${encodeURIComponent(runningCommand.toolRunId)}/stop`,
+        { method: "POST", body: JSON.stringify({ reason: "Stopped from workspace panel." }) },
+        token
+      );
+      const stopped = { ok: false, command: runningCommand.command, stderr: "Stop requested.", status: "stopping", toolRunId: runningCommand.toolRunId };
+      if (runningCommand.kind === "test") setTestResult((current) => ({ ...(current || stopped), ...stopped }));
+      else setTerminalResult((current) => ({ ...(current || stopped), ...stopped }));
+      setRunningCommand(null);
+      onToolEventsChanged?.();
+    } catch (err) {
+      onError?.(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const fileLines = file?.text ? file.text.split(/\r?\n/) : [];
+  const pathLabel = file?.path || "";
+  const parentDir = tree.dir ? tree.dir.split("/").slice(0, -1).join("/") : "";
+  const commandOutput = [terminalResult?.stdout, terminalResult?.stderr].filter(Boolean).join("\n");
+  const testOutput = [testResult?.stdout, testResult?.stderr].filter(Boolean).join("\n");
+
+  return (
+    <section className={cx("workspace-panel", panelCollapsed && "collapsed")}>
+      <div className="workspace-panel-head">
+        <div>
+          <h3>Workspace</h3>
+          <p>{workspace?.title || workspace?.path || "Select a workspace"}</p>
+        </div>
+        <div className="workspace-panel-actions">
+          {panelCollapsed ? null : (
+            <select value={activeWorkspaceId} onChange={(event) => {
+              setWorkspaceId(event.target.value);
+              setTree({ dir: "", items: [] });
+              setFile(null);
+            }}>
+              {workspaces.map((item) => <option value={item.id} key={item.id}>{item.title || item.path}</option>)}
+            </select>
+          )}
+          {panelCollapsed ? null : (
+            <button type="button" onClick={() => refreshGitSummary().catch((err) => onError?.(err.message))}>
+              <RefreshCw size={14} />
+              刷新
+            </button>
+          )}
+          <button type="button" className="workspace-collapse-toggle" title={panelCollapsed ? "展开工作区" : "收起工作区"} aria-label={panelCollapsed ? "展开工作区" : "收起工作区"} onClick={togglePanelCollapsed}>
+            {panelCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+          </button>
+        </div>
+      </div>
+      {panelCollapsed ? null : (
+        <>
+          <div className="workspace-tabs">
+            {[
+              ["files", "文件树", FolderOpen],
+              ["git", "Git", CheckSquare],
+              ["terminal", "终端", Terminal],
+              ["tests", "测试", Target]
+            ].map(([key, label, Icon]) => (
+              <button type="button" className={cx(activeTab === key && "active")} onClick={() => setActiveTab(key)} key={key}>
+                <Icon size={14} />
+                {label}
+              </button>
+            ))}
+          </div>
+
+      {activeTab === "files" ? (
+        <div className="workspace-files-layout">
+          <div className="workspace-file-tree">
+            <div className="workspace-path-row">
+              <button type="button" disabled={!tree.dir} onClick={() => loadTree(parentDir).catch((err) => onError?.(err.message))}>
+                <ChevronLeft size={14} />
+              </button>
+              <span>{tree.dir || "."}</span>
+            </div>
+            <div className="workspace-tree-list">
+              {tree.items.map((item) => (
+                <button type="button" className="workspace-tree-item" key={item.path} onClick={() => {
+                  if (item.type === "directory") loadTree(item.path).catch((err) => onError?.(err.message));
+                  else openFile(item.path).catch((err) => onError?.(err.message));
+                }}>
+                  {item.type === "directory" ? <Folder size={15} /> : <FileText size={15} />}
+                  <span>{item.name}</span>
+                  <small>{item.type === "file" ? formatBytes(item.size) : ""}</small>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="workspace-file-viewer">
+            {file ? (
+              <>
+                <div className="workspace-file-head">
+                  <strong>{pathLabel}</strong>
+                  <a href={localFileUrl(file.absolutePath, token)} target="_blank" rel="noreferrer">
+                    <ExternalLink size={14} />
+                    打开
+                  </a>
+                </div>
+                {file.binary ? (
+                  <div className="workspace-empty">二进制或过大的文件暂不内嵌预览。</div>
+                ) : (
+                  <pre className="workspace-code-view">
+                    {fileLines.map((line, index) => {
+                      const number = index + 1;
+                      return (
+                        <div className={cx("workspace-code-line", file.line === number && "located")} data-file-line={number} key={number}>
+                          <span>{number}</span>
+                          <code>{line || " "}</code>
+                        </div>
+                      );
+                    })}
+                  </pre>
+                )}
+              </>
+            ) : (
+              <div className="workspace-empty">选择左侧文件进行预览。</div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === "git" ? (
+        <div className="workspace-git-panel">
+          <div className="workspace-git-actions">
+            <button type="button" disabled={Boolean(busy)} onClick={() => runGitAction("stage-all")}>Stage all</button>
+            <button type="button" disabled={Boolean(busy)} onClick={() => runGitAction("unstage-all")}>Unstage all</button>
+            <button type="button" disabled={Boolean(busy)} onClick={() => runGitAction("pull")}>Pull</button>
+            <button type="button" disabled={Boolean(busy)} onClick={() => runGitAction("push")}>Push</button>
+            <button type="button" disabled={Boolean(busy)} onClick={() => runGitAction("pr")}>PR</button>
+          </div>
+          <div className="workspace-commit-row">
+            <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Commit message" />
+            <button type="button" disabled={Boolean(busy) || !commitMessage.trim()} onClick={() => runGitAction("commit")}>
+              Commit
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === "terminal" ? (
+        <div className="workspace-command-panel">
+          <div className="workspace-command-row">
+            <input value={terminalCommand} onChange={(event) => setTerminalCommand(event.target.value)} />
+            <button type="button" disabled={busy === "terminal"} onClick={() => runTerminal("terminal")}>
+              <Terminal size={14} />
+              运行
+            </button>
+            {runningCommand?.kind === "terminal" ? (
+              <button type="button" className="danger" disabled={busy === "stop:terminal"} onClick={stopWorkspaceCommand}>
+                <Square size={14} />
+                停止
+              </button>
+            ) : null}
+          </div>
+          <pre className={cx("workspace-command-output", terminalResult?.ok === false && "failed")} dangerouslySetInnerHTML={{ __html: ansiToHtml(commandOutput) || "No command output yet." }}></pre>
+          {runningCommand?.kind === "terminal" ? <small className="workspace-command-run workspace-command-running">⏳ running ({runningCommand.command?.slice(0, 40)})</small> : null}
+          {!runningCommand && terminalResult?.toolRunId ? <small className="workspace-command-run">tool run {terminalResult.toolRunId.slice(0, 8)} · output streams through tool events</small> : null}
+        </div>
+      ) : null}
+
+      {activeTab === "tests" ? (
+        <div className="workspace-command-panel">
+          <div className="workspace-command-row">
+            <input value={testCommand} onChange={(event) => setTestCommand(event.target.value)} />
+            <button type="button" disabled={busy === "test"} onClick={() => runTerminal("test")}>
+              <Target size={14} />
+              测试
+            </button>
+            {runningCommand?.kind === "test" ? (
+              <button type="button" className="danger" disabled={busy === "stop:test"} onClick={stopWorkspaceCommand}>
+                <Square size={14} />
+                停止
+              </button>
+            ) : null}
+          </div>
+          {testResult?.test ? (
+            <div className={cx("test-summary", testResult.test.ok ? "ok" : "failed")}>
+              <span>{testResult.test.ok ? "通过" : "失败"}</span>
+              <span>{testResult.test.passed || 0} passed</span>
+              <span>{testResult.test.failed || 0} failed</span>
+            </div>
+          ) : null}
+          {testResult?.test?.failures?.length ? (
+            <details className="test-failures" open>
+              <summary>失败定位</summary>
+              {testResult.test.failures.map((item, index) => {
+                const ref = parsePathReference(item);
+                return (
+                  <button type="button" key={`${item}-${index}`} onClick={() => ref ? openWorkspacePath(ref.path, ref.line).catch((err) => onError?.(err.message)) : null}>
+                    {item}
+                  </button>
+                );
+              })}
+            </details>
+          ) : null}
+          <details className="workspace-log-details" open={!testResult?.test?.ok}>
+            <summary>日志</summary>
+            <pre className={cx("workspace-command-output", testResult?.ok === false && "failed")} dangerouslySetInnerHTML={{ __html: ansiToHtml(testOutput) || "No test output yet." }}></pre>
+          </details>
+          {testResult?.toolRunId ? <small className="workspace-command-run">tool run {testResult.toolRunId.slice(0, 8)} · output streams through tool events</small> : null}
+        </div>
+      ) : null}
+        </>
+      )}
     </section>
   );
 }
@@ -2686,6 +3723,14 @@ function Composer({
                     <option value="sonnet">sonnet</option>
                     <option value="fable">fable</option>
                   </>
+                ) : modelAgent === "zhipu" ? (
+                  <>
+                    <option value="glm-5.2">glm-5.2</option>
+                    <option value="glm-5.1">glm-5.1</option>
+                    <option value="glm-5.0">glm-5.0</option>
+                    <option value="glm-4.7">glm-4.7</option>
+                    <option value="glm-4.6">glm-4.6</option>
+                  </>
                 ) : (
                   <>
                     <option value="gpt-5.5">gpt-5.5</option>
@@ -2934,13 +3979,24 @@ function Composer({
 function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
   const [openai, setOpenai] = useState("");
   const [anthropic, setAnthropic] = useState("");
+  const [zhipu, setZhipu] = useState("");
   const [defaultCwd, setDefaultCwd] = useState(settings?.defaultCwd || "");
   const [claudeCommand, setClaudeCommand] = useState(settings?.claudeCommand || "claude");
   const [codexCommand, setCodexCommand] = useState(settings?.codexCommand || "auto");
   const [codexTemplate, setCodexTemplate] = useState(settings?.codexTemplate || "");
+  const [sandboxMode, setSandboxMode] = useState(settings?.security?.sandboxMode || "workspace-write");
+  const [approvalPolicy, setApprovalPolicy] = useState(settings?.security?.approvalPolicy || "on-request");
+  const [networkAccess, setNetworkAccess] = useState(settings?.security?.networkAccess !== false);
+  const [requireTrustedWorkspace, setRequireTrustedWorkspace] = useState(settings?.security?.requireTrustedWorkspace !== false);
+  const [requireDangerousCommandApproval, setRequireDangerousCommandApproval] = useState(settings?.security?.requireDangerousCommandApproval !== false);
+  const [trustedWorkspaces, setTrustedWorkspaces] = useState((settings?.security?.trustedWorkspaces || []).join("\n"));
   const [hostAllowlist, setHostAllowlist] = useState((settings?.hostAllowlist || []).join("\n"));
   const [allowTryCloudflare, setAllowTryCloudflare] = useState(Boolean(settings?.allowTryCloudflare));
   const [allowLegacyPairingTokenLogin, setAllowLegacyPairingTokenLogin] = useState(Boolean(settings?.allowLegacyPairingTokenLogin));
+  const [toolRetentionDays, setToolRetentionDays] = useState(settings?.toolEvents?.retentionDays || 30);
+  const [toolKeepLatest, setToolKeepLatest] = useState(settings?.toolEvents?.keepLatest ?? 5000);
+  const [toolAutoPrune, setToolAutoPrune] = useState(settings?.toolEvents?.autoPrune !== false);
+  const [toolPruneInterval, setToolPruneInterval] = useState(settings?.toolEvents?.autoPruneIntervalMinutes || 360);
   const [notificationEmail, setNotificationEmail] = useState("");
   const [probeRunning, setProbeRunning] = useState(false);
   const [probeResult, setProbeResult] = useState(null);
@@ -2948,38 +4004,80 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
   const [desktopRunning, setDesktopRunning] = useState("");
   const [desktopResult, setDesktopResult] = useState(null);
   const [desktopError, setDesktopError] = useState("");
+  const [doctorRunning, setDoctorRunning] = useState(false);
+  const [doctorResult, setDoctorResult] = useState(null);
+  const [doctorError, setDoctorError] = useState("");
   const [securityBusy, setSecurityBusy] = useState("");
   const [securityError, setSecurityError] = useState("");
   const [securityNotice, setSecurityNotice] = useState("");
   const [devices, setDevices] = useState([]);
   const [currentDeviceId, setCurrentDeviceId] = useState("");
   const [pairingSessions, setPairingSessions] = useState([]);
+  const [approvals, setApprovals] = useState([]);
   const [auditLogs, setAuditLogs] = useState([]);
   const [cloudflare, setCloudflare] = useState(null);
   const [pushState, setPushState] = useState("");
+  const [toolEventStats, setToolEventStats] = useState(null);
+  const [toolEventBusy, setToolEventBusy] = useState("");
+  const [toolEventError, setToolEventError] = useState("");
+  const [toolEventNotice, setToolEventNotice] = useState("");
+  const [toolEventPreview, setToolEventPreview] = useState(null);
+  const [mcpConfig, setMcpConfig] = useState(JSON.stringify(settings?.mcp?.servers || [], null, 2));
+  const [mcpTimeoutMs, setMcpTimeoutMs] = useState(settings?.mcp?.probeTimeoutMs || 10000);
+  const [mcpBusy, setMcpBusy] = useState("");
+  const [mcpError, setMcpError] = useState("");
+  const [mcpResult, setMcpResult] = useState(null);
+  const [browserFetchUrl, setBrowserFetchUrl] = useState("");
+  const [browserFetchBusy, setBrowserFetchBusy] = useState(false);
+  const [browserFetchError, setBrowserFetchError] = useState("");
+  const [browserFetchResult, setBrowserFetchResult] = useState(null);
 
   useEffect(() => {
     setDefaultCwd(settings?.defaultCwd || "");
     setClaudeCommand(settings?.claudeCommand || "claude");
     setCodexCommand(settings?.codexCommand || "auto");
     setCodexTemplate(settings?.codexTemplate || "");
+    setSandboxMode(settings?.security?.sandboxMode || "workspace-write");
+    setApprovalPolicy(settings?.security?.approvalPolicy || "on-request");
+    setNetworkAccess(settings?.security?.networkAccess !== false);
+    setRequireTrustedWorkspace(settings?.security?.requireTrustedWorkspace !== false);
+    setRequireDangerousCommandApproval(settings?.security?.requireDangerousCommandApproval !== false);
+    setTrustedWorkspaces((settings?.security?.trustedWorkspaces || []).join("\n"));
     setHostAllowlist((settings?.hostAllowlist || []).join("\n"));
     setAllowTryCloudflare(Boolean(settings?.allowTryCloudflare));
     setAllowLegacyPairingTokenLogin(Boolean(settings?.allowLegacyPairingTokenLogin));
+    setToolRetentionDays(settings?.toolEvents?.retentionDays || 30);
+    setToolKeepLatest(settings?.toolEvents?.keepLatest ?? 5000);
+    setToolAutoPrune(settings?.toolEvents?.autoPrune !== false);
+    setToolPruneInterval(settings?.toolEvents?.autoPruneIntervalMinutes || 360);
+    setMcpConfig(JSON.stringify(settings?.mcp?.servers || [], null, 2));
+    setMcpTimeoutMs(settings?.mcp?.probeTimeoutMs || 10000);
   }, [settings]);
+
+  async function refreshToolEventsStats() {
+    setToolEventError("");
+    try {
+      const result = await request("/api/tool-events/stats", {}, token);
+      setToolEventStats(result);
+    } catch (err) {
+      setToolEventError(err.message);
+    }
+  }
 
   async function refreshSecurity() {
     setSecurityError("");
     try {
-      const [deviceResult, pairingResult, auditResult, cloudflareResult] = await Promise.all([
+      const [deviceResult, pairingResult, approvalResult, auditResult, cloudflareResult] = await Promise.all([
         request("/api/devices", {}, token),
         request("/api/pairing-sessions", {}, token),
+        request("/api/approvals?status=pending&limit=20", {}, token),
         request("/api/audit-log?limit=12", {}, token),
         request("/api/cloudflare/guide", {}, token)
       ]);
       setDevices(deviceResult.items || []);
       setCurrentDeviceId(deviceResult.currentDeviceId || "");
       setPairingSessions(pairingResult.items || []);
+      setApprovals(approvalResult.items || []);
       setAuditLogs(auditResult.items || []);
       setCloudflare(cloudflareResult);
     } catch (err) {
@@ -2989,6 +4087,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
 
   useEffect(() => {
     refreshSecurity().catch((err) => setSecurityError(err.message));
+    refreshToolEventsStats().catch((err) => setToolEventError(err.message));
   }, [token]);
 
   async function approvePairing(id) {
@@ -3011,6 +4110,25 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
     try {
       await request(`/api/pairing-sessions/${encodeURIComponent(id)}/deny`, { method: "POST", body: JSON.stringify({}) }, token);
       setSecurityNotice("Pairing session denied.");
+      await refreshSecurity();
+    } catch (err) {
+      setSecurityError(err.message);
+    } finally {
+      setSecurityBusy("");
+    }
+  }
+
+  async function decideApproval(id, decision) {
+    setSecurityBusy(id);
+    setSecurityError("");
+    try {
+      const result = await request(
+        `/api/approvals/${encodeURIComponent(id)}/decision`,
+        { method: "POST", body: JSON.stringify({ decision, reason: `${decision === "approve" ? "Approved" : "Denied"} in security panel.` }) },
+        token
+      );
+      setSecurityNotice(decision === "approve" ? "Approval accepted and command resumed." : "Approval denied.");
+      if (result.result?.ok === false) setSecurityError(result.result.stderr || result.result.stdout || "Approved command failed.");
       await refreshSecurity();
     } catch (err) {
       setSecurityError(err.message);
@@ -3109,6 +4227,47 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
     }
   }
 
+  async function runDoctor() {
+    setDoctorRunning(true);
+    setDoctorError("");
+    setDoctorResult(null);
+    try {
+      const result = await request("/api/doctor", {}, token);
+      setDoctorResult(result);
+    } catch (err) {
+      setDoctorError(err.message);
+    } finally {
+      setDoctorRunning(false);
+    }
+  }
+
+  async function runToolEventsPrune(dryRun = true) {
+    if (!dryRun && !window.confirm("Prune old tool events now?")) return;
+    setToolEventBusy(dryRun ? "preview" : "prune");
+    setToolEventError("");
+    setToolEventNotice("");
+    try {
+      const result = await request(
+        "/api/tool-events/prune",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dryRun,
+            keepLatest: Number(toolKeepLatest || 0)
+          })
+        },
+        token
+      );
+      setToolEventPreview(result);
+      setToolEventNotice(dryRun ? `${result.prunable || 0} event(s) can be pruned.` : `${result.deleted || 0} event(s) pruned.`);
+      await refreshToolEventsStats();
+    } catch (err) {
+      setToolEventError(err.message);
+    } finally {
+      setToolEventBusy("");
+    }
+  }
+
   async function runDesktopAction(action) {
     setDesktopRunning(action);
     setDesktopError("");
@@ -3139,19 +4298,97 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
     }
   }
 
+  function parseMcpConfig() {
+    try {
+      const parsed = JSON.parse(mcpConfig || "[]");
+      if (!Array.isArray(parsed)) throw new Error("MCP config must be a JSON array.");
+      return parsed;
+    } catch (err) {
+      setMcpError(err.message);
+      return null;
+    }
+  }
+
+  async function runMcpAction(action) {
+    setMcpBusy(action);
+    setMcpError("");
+    setMcpResult(null);
+    try {
+      const result = await request(
+        action === "probe" ? "/api/mcp/probe" : "/api/mcp/status",
+        {
+          method: action === "probe" ? "POST" : "GET",
+          body: action === "probe" ? JSON.stringify({ timeoutMs: Number(mcpTimeoutMs || 10000) }) : undefined
+        },
+        token
+      );
+      setMcpResult(result);
+    } catch (err) {
+      setMcpError(err.message);
+    } finally {
+      setMcpBusy("");
+    }
+  }
+
+  async function runBrowserFetch() {
+    const targetUrl = browserFetchUrl.trim();
+    if (!targetUrl) return;
+    setBrowserFetchBusy(true);
+    setBrowserFetchError("");
+    setBrowserFetchResult(null);
+    try {
+      const result = await request(
+        "/api/browser/fetch",
+        { method: "POST", body: JSON.stringify({ url: targetUrl, timeoutMs: 15000 }) },
+        token
+      );
+      setBrowserFetchResult(result);
+    } catch (err) {
+      if (err.status === 428 && err.data?.approvalId) {
+        setBrowserFetchResult(err.data);
+        setBrowserFetchError(err.data.error || err.message);
+      } else {
+        setBrowserFetchError(err.message);
+      }
+    } finally {
+      setBrowserFetchBusy(false);
+    }
+  }
+
   async function submit(event) {
     event.preventDefault();
     const apiKeys = {};
     if (openai.trim()) apiKeys.openai = openai.trim();
     if (anthropic.trim()) apiKeys.anthropic = anthropic.trim();
+    if (zhipu.trim()) apiKeys.zhipu = zhipu.trim();
+    const mcpServers = parseMcpConfig();
+    if (!mcpServers) return;
     const settingsPatch = {
       defaultCwd,
       claudeCommand,
       codexCommand,
       codexTemplate,
+      security: {
+        sandboxMode,
+        approvalPolicy,
+        networkAccess,
+        requireTrustedWorkspace,
+        requireDangerousCommandApproval,
+        trustedWorkspaces: trustedWorkspaces.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
+      },
       hostAllowlist: hostAllowlist.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean),
       allowTryCloudflare,
       allowLegacyPairingTokenLogin,
+      toolEvents: {
+        retentionDays: Number(toolRetentionDays || 30),
+        keepLatest: Number(toolKeepLatest || 0),
+        autoPrune: toolAutoPrune,
+        autoPruneIntervalMinutes: Number(toolPruneInterval || 360)
+      },
+      mcp: {
+        probeTimeoutMs: Number(mcpTimeoutMs || 10000),
+        servers: mcpServers
+      },
       apiKeys
     };
     if (notificationEmail.trim()) settingsPatch.notificationEmail = notificationEmail.trim();
@@ -3165,9 +4402,29 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
     );
     setOpenai("");
     setAnthropic("");
+    setZhipu("");
     setNotificationEmail("");
     onSaved();
   }
+
+  const doctorFailures = doctorResult?.failures || [];
+  const doctorWarnings = (doctorResult?.warningChecks || doctorResult?.warnings || []).map((warning, index) =>
+    typeof warning === "string"
+      ? { id: `warning-${index}`, ok: false, label: "Warning", detail: warning, severity: "warn" }
+      : warning
+  );
+  const doctorAttentionIds = new Set([...doctorFailures, ...doctorWarnings].map((check) => check.id));
+  const doctorVisibleChecks = [
+    ...doctorFailures,
+    ...doctorWarnings,
+    ...(doctorResult?.checks || []).filter((check) => check.ok && !doctorAttentionIds.has(check.id))
+  ].slice(0, 12);
+  const doctorStatusClass = doctorResult?.ok ? (doctorWarnings.length ? "warn" : "ok") : "failed";
+  const doctorStatusText = doctorResult?.ok
+    ? doctorWarnings.length
+      ? `Healthy with ${doctorWarnings.length} warning(s)`
+      : "Healthy"
+    : `${doctorFailures.length} error(s)`;
 
   return (
     <aside className="settings-drawer">
@@ -3190,6 +4447,14 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
           <input value={anthropic} onChange={(event) => setAnthropic(event.target.value)} type="password" placeholder={settings?.hasAnthropicKey ? "Saved; leave blank to keep" : "Not set"} />
         </label>
         <label>
+          <span>智谱 API Key (Zhipu/GLM)</span>
+          <input value={zhipu} onChange={(event) => setZhipu(event.target.value)} type="password" placeholder={settings?.hasZhipuKey ? "Saved; leave blank to keep" : "Not set"} />
+        </label>
+        <div className="credential-status">
+          <strong>Credential storage</strong>
+          <small>{settings?.credentials?.description || "Checking credential backend"} · {settings?.credentials?.persistent ? "protected" : "not persistent"}</small>
+        </div>
+        <label>
           <span>Default cwd</span>
           <input value={defaultCwd} onChange={(event) => setDefaultCwd(event.target.value)} />
         </label>
@@ -3205,6 +4470,50 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
           <span>Codex template</span>
           <input value={codexTemplate} onChange={(event) => setCodexTemplate(event.target.value)} />
         </label>
+        <section className="security-settings-card">
+          <div>
+            <h3>Agent permission model</h3>
+            <p>CLI tasks use these verified settings. Desktop remote keeps using current Codex Desktop settings.</p>
+          </div>
+          <label>
+            <span>Sandbox</span>
+            <select value={sandboxMode} onChange={(event) => setSandboxMode(event.target.value)}>
+              <option value="read-only">Read only</option>
+              <option value="workspace-write">Workspace write</option>
+              <option value="danger-full-access">Danger full access</option>
+            </select>
+          </label>
+          <label>
+            <span>Approval policy</span>
+            <select value={approvalPolicy} onChange={(event) => setApprovalPolicy(event.target.value)}>
+              <option value="on-request">On request</option>
+              <option value="on-failure">On failure</option>
+              <option value="untrusted">Untrusted</option>
+              <option value="strict">Strict</option>
+              <option value="never">Never</option>
+            </select>
+          </label>
+          <label className="check-row">
+            <input type="checkbox" checked={networkAccess} onChange={(event) => setNetworkAccess(event.target.checked)} />
+            <span>Allow network access for CLI tasks</span>
+          </label>
+          <label className="check-row">
+            <input type="checkbox" checked={requireTrustedWorkspace} onChange={(event) => setRequireTrustedWorkspace(event.target.checked)} />
+            <span>Require trusted workspace before running tasks</span>
+          </label>
+          <label className="check-row">
+            <input type="checkbox" checked={requireDangerousCommandApproval} onChange={(event) => setRequireDangerousCommandApproval(event.target.checked)} />
+            <span>Require confirmation for dangerous task settings</span>
+          </label>
+          <label>
+            <span>Trusted workspaces</span>
+            <textarea
+              value={trustedWorkspaces}
+              onChange={(event) => setTrustedWorkspaces(event.target.value)}
+              placeholder={defaultCwd || "C:\\Projects\\my-app"}
+            />
+          </label>
+        </section>
         <label>
           <span>Host allowlist</span>
           <textarea
@@ -3263,6 +4572,29 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
         </div>
         {pushState ? <p className="form-success">{pushState}</p> : null}
         <div className="security-section">
+          <h3>Pending approvals</h3>
+          {approvals.length ? approvals.map((approval) => {
+            const command = approval.request?.command || approval.request?.input?.command || approval.title || approval.kind;
+            return (
+              <div className="security-row approval-row" key={approval.id}>
+                <div>
+                  <strong>{approval.kind || "tool approval"}</strong>
+                  <small>{approval.reason || "Approval required"} · expires {formatTime(approval.expiresAt)}</small>
+                  <code>{command}</code>
+                </div>
+                <div className="security-row-actions">
+                  <button className="secondary-button" type="button" onClick={() => decideApproval(approval.id, "approve")} disabled={Boolean(securityBusy)}>
+                    Approve
+                  </button>
+                  <button className="secondary-button danger" type="button" onClick={() => decideApproval(approval.id, "deny")} disabled={Boolean(securityBusy)}>
+                    Deny
+                  </button>
+                </div>
+              </div>
+            );
+          }) : <p>No pending approvals.</p>}
+        </div>
+        <div className="security-section">
           <h3>Pending pairing</h3>
           {pairingSessions.length ? pairingSessions.map((session) => (
             <div className="security-row" key={session.id}>
@@ -3310,6 +4642,201 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
         </div>
       </section>
       <div className="network-list">
+        <section className="probe-panel">
+          <div>
+            <h3>Tool event storage</h3>
+            <p>Manage persisted tool events used by runtime cards, SSE replay, approvals, and diagnostics.</p>
+          </div>
+          <div className="tool-event-grid">
+            <label>
+              <span>Retention days</span>
+              <input type="number" min="1" max="3650" value={toolRetentionDays} onChange={(event) => setToolRetentionDays(event.target.value)} />
+            </label>
+            <label>
+              <span>Keep latest</span>
+              <input type="number" min="0" max="500000" value={toolKeepLatest} onChange={(event) => setToolKeepLatest(event.target.value)} />
+            </label>
+            <label>
+              <span>Auto prune interval</span>
+              <input type="number" min="15" max="10080" value={toolPruneInterval} onChange={(event) => setToolPruneInterval(event.target.value)} />
+            </label>
+          </div>
+          <label className="check-row">
+            <input type="checkbox" checked={toolAutoPrune} onChange={(event) => setToolAutoPrune(event.target.checked)} />
+            <span>Automatically prune old tool events</span>
+          </label>
+          <div className="tool-event-stats">
+            <div>
+              <strong>{toolEventStats?.count ?? "-"}</strong>
+              <span>events</span>
+            </div>
+            <div>
+              <strong>{toolEventStats?.minCursor || 0}-{toolEventStats?.maxCursor || 0}</strong>
+              <span>cursor range</span>
+            </div>
+            <div>
+              <strong>{toolEventStats?.retention?.retentionDays || toolRetentionDays}d</strong>
+              <span>{toolEventStats?.retention?.keepLatest ?? toolKeepLatest} kept latest</span>
+            </div>
+            <div>
+              <strong>{toolEventStats?.autoPrune?.nextRunAt ? formatTime(toolEventStats.autoPrune.nextRunAt) : "manual"}</strong>
+              <span>next prune</span>
+            </div>
+          </div>
+          {toolEventStats?.oldestAt || toolEventStats?.newestAt ? (
+            <p className="tool-event-range">
+              {formatTime(toolEventStats.oldestAt)} - {formatTime(toolEventStats.newestAt)}
+            </p>
+          ) : null}
+          {toolEventPreview ? (
+            <p className="tool-event-range">
+              cutoff {formatTime(toolEventPreview.cutoff)} · {toolEventPreview.dryRun ? "preview" : "applied"} · {toolEventPreview.prunable || 0} prunable · {toolEventPreview.deleted || 0} deleted
+            </p>
+          ) : null}
+          {toolEventError ? <p className="form-error">{toolEventError}</p> : null}
+          {toolEventNotice ? <p className="form-success">{toolEventNotice}</p> : null}
+          <div className="probe-actions">
+            <button className="secondary-button" type="button" onClick={refreshToolEventsStats} disabled={Boolean(toolEventBusy)}>
+              Refresh
+            </button>
+            <button className="secondary-button" type="button" onClick={() => runToolEventsPrune(true)} disabled={Boolean(toolEventBusy)}>
+              {toolEventBusy === "preview" ? "Checking..." : "Preview prune"}
+            </button>
+            <button className="secondary-button danger" type="button" onClick={() => runToolEventsPrune(false)} disabled={Boolean(toolEventBusy)}>
+              {toolEventBusy === "prune" ? "Pruning..." : "Prune now"}
+            </button>
+          </div>
+        </section>
+        <section className="probe-panel">
+          <div>
+            <h3>Runtime doctor</h3>
+            <p>Checks local runtime, credentials, CLI commands, Git, Desktop, host policy, workspaces, and tool event storage.</p>
+          </div>
+          <button className="primary-button" type="button" onClick={runDoctor} disabled={doctorRunning}>
+            {doctorRunning ? "Checking..." : "Run doctor"}
+          </button>
+          {doctorError ? <p className="form-error">{doctorError}</p> : null}
+          {doctorResult ? (
+            <div className={cx("probe-result", doctorStatusClass)}>
+              <div className="probe-result-title">
+                {doctorStatusText}
+                {doctorResult.toolRunId ? <small> · run {doctorResult.toolRunId.slice(0, 8)}</small> : null}
+              </div>
+              <dl>
+                {doctorVisibleChecks.map((check) => (
+                  <div key={check.id}>
+                    <dt>{check.label}</dt>
+                    <dd>{check.ok ? "ok" : check.severity === "warn" ? "warn" : "error"} · {check.detail || "-"}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ) : null}
+        </section>
+        <section className="probe-panel">
+          <div>
+            <h3>MCP runtime</h3>
+            <p>Manage VibeLink-owned MCP server configuration and probe tools/list through the unified tool runtime.</p>
+          </div>
+          <label>
+            <span>MCP servers JSON</span>
+            <textarea
+              value={mcpConfig}
+              onChange={(event) => setMcpConfig(event.target.value)}
+              placeholder={'[{"id":"filesystem","name":"filesystem","type":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","C:\\\\Projects"]}]'}
+            />
+          </label>
+          <label>
+            <span>Probe timeout</span>
+            <input type="number" min="1000" max="60000" value={mcpTimeoutMs} onChange={(event) => setMcpTimeoutMs(event.target.value)} />
+          </label>
+          <div className="probe-actions">
+            <button className="secondary-button" type="button" onClick={() => runMcpAction("status")} disabled={Boolean(mcpBusy)}>
+              {mcpBusy === "status" ? "Loading..." : "MCP status"}
+            </button>
+            <button className="primary-button" type="button" onClick={() => runMcpAction("probe")} disabled={Boolean(mcpBusy)}>
+              {mcpBusy === "probe" ? "Probing..." : "Probe MCP"}
+            </button>
+          </div>
+          {mcpError ? <p className="form-error">{mcpError}</p> : null}
+          {mcpResult ? (
+            <div className={cx("probe-result", mcpResult.ok ? "ok" : "failed")}>
+              <div className="probe-result-title">
+                {mcpResult.ok ? "Ready" : "Needs attention"}
+                {mcpResult.toolRunId ? <small> · run {mcpResult.toolRunId.slice(0, 8)}</small> : null}
+              </div>
+              <dl>
+                <div>
+                  <dt>Servers</dt>
+                  <dd>{mcpResult.enabled ?? mcpResult.probed ?? 0}/{mcpResult.configured ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>Tools</dt>
+                  <dd>{mcpResult.tools?.length || 0}</dd>
+                </div>
+              </dl>
+              {mcpResult.results?.length ? (
+                <div className="security-section compact">
+                  {mcpResult.results.map((item) => (
+                    <div className={cx("security-row", item.ok ? "ok" : "failed")} key={item.server?.id || item.server?.name}>
+                      <div>
+                        <strong>{item.server?.name || item.server?.id || "MCP server"}</strong>
+                        <small>{item.status} · {item.server?.type || item.transport || "unknown"} · {item.toolCount || 0} tool(s)</small>
+                        {item.error ? <code>{item.error}</code> : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {mcpResult.tools?.length ? (
+                <div className="tool-event-range">
+                  {mcpResult.tools.slice(0, 12).map((tool) => tool.fullName || tool.name).join(", ")}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+        <section className="probe-panel">
+          <div>
+            <h3>Browser runtime</h3>
+            <p>Fetch a page through VibeLink runtime, with network policy, approvals, audit, and tool event replay.</p>
+          </div>
+          <label>
+            <span>URL</span>
+            <input value={browserFetchUrl} onChange={(event) => setBrowserFetchUrl(event.target.value)} placeholder="https://example.com" />
+          </label>
+          <button className="primary-button" type="button" onClick={runBrowserFetch} disabled={browserFetchBusy || !browserFetchUrl.trim()}>
+            {browserFetchBusy ? "Fetching..." : "Fetch page"}
+          </button>
+          {browserFetchError ? <p className="form-error">{browserFetchError}</p> : null}
+          {browserFetchResult ? (
+            <div className={cx("probe-result", browserFetchResult.ok ? "ok" : browserFetchResult.approvalId ? "warn" : "failed")}>
+              <div className="probe-result-title">
+                {browserFetchResult.approvalId ? "Approval required" : browserFetchResult.ok ? "Fetched" : "Failed"}
+                {browserFetchResult.toolRunId ? <small> · run {browserFetchResult.toolRunId.slice(0, 8)}</small> : null}
+              </div>
+              <dl>
+                <div>
+                  <dt>Status</dt>
+                  <dd>{browserFetchResult.status || browserFetchResult.error || "-"}</dd>
+                </div>
+                <div>
+                  <dt>Title</dt>
+                  <dd>{browserFetchResult.title || "-"}</dd>
+                </div>
+                <div>
+                  <dt>Bytes</dt>
+                  <dd>{browserFetchResult.bytes ?? "-"}</dd>
+                </div>
+                <div>
+                  <dt>URL</dt>
+                  <dd>{browserFetchResult.finalUrl || browserFetchResult.url || browserFetchResult.approval?.request?.url || "-"}</dd>
+                </div>
+              </dl>
+              {browserFetchResult.textSample ? <p className="tool-event-range">{browserFetchResult.textSample.slice(0, 500)}</p> : null}
+            </div>
+          ) : null}
+        </section>
         <section className="probe-panel">
           <div>
             <h3>Codex app-server probe</h3>
@@ -3409,6 +4936,265 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
   );
 }
 
+function LiveCallPanel({ onClose, token }) {
+  const [session, setSession] = useState(null);
+  const [status, setStatus] = useState("idle"); // idle | active | stopped
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState("");
+  const [remoteLevel, setRemoteLevel] = useState(0);
+  const [localLevel, setLocalLevel] = useState(0);
+  const [transcripts, setTranscripts] = useState([]);
+  const [qaPairs, setQaPairs] = useState([]);
+  const eventSourceRef = useRef(null);
+
+  // SSE connection — opens when session changes
+  useEffect(() => {
+    if (!session) return;
+
+    const cursorKey = `mat.live-call.${session.id}.cursor`;
+    const cursor = parseInt(localStorage.getItem(cursorKey) || "0", 10);
+    const es = new EventSource(`/api/live-calls/${session.id}/events?after=${cursor}`);
+    eventSourceRef.current = es;
+
+    es.addEventListener("live_call.audio_level", (event) => {
+      const data = JSON.parse(event.data);
+      if (data.channel === "remote") setRemoteLevel(data.level?.rms || 0);
+      if (data.channel === "local") setLocalLevel(data.level?.rms || 0);
+      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+    });
+
+    es.addEventListener("live_call.transcript.partial", (event) => {
+      const data = JSON.parse(event.data);
+      setTranscripts((prev) => [...prev, { ...data, id: data.cursor, at: data.at }]);
+      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+    });
+
+    es.addEventListener("live_call.transcript.final", (event) => {
+      const data = JSON.parse(event.data);
+      setTranscripts((prev) => [...prev, { ...data, id: data.cursor, at: data.at, final: true }]);
+      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+    });
+
+    es.addEventListener("live_call.question.detected", (event) => {
+      const data = JSON.parse(event.data);
+      setQaPairs((prev) => [...prev, { question: data.text, answer: "", id: data.cursor, agentState: "idle" }]);
+      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+    });
+
+    es.addEventListener("live_call.agent.done", (event) => {
+      const data = JSON.parse(event.data);
+      setQaPairs((prev) => {
+        const next = [...prev];
+        if (next.length > 0 && next[next.length - 1].agentState === "idle") {
+          // No thinking/delta happened — patch answer directly
+          next[next.length - 1] = { ...next[next.length - 1], answer: data.text, agentState: "done" };
+        } else if (next.length > 0 && (next[next.length - 1].agentState === "streaming" || next[next.length - 1].agentState === "thinking")) {
+          next[next.length - 1] = { ...next[next.length - 1], answer: data.text, agentState: "done" };
+        } else {
+          next.push({ question: "", answer: data.text, id: data.cursor, agentState: "done" });
+        }
+        return next;
+      });
+      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+    });
+
+    es.addEventListener("live_call.agent.thinking", (event) => {
+      const data = JSON.parse(event.data);
+      setQaPairs((prev) => {
+        const next = [...prev];
+        // Mark the last QA pair (or a new one) as thinking
+        if (next.length > 0 && next[next.length - 1].agentState === "idle") {
+          next[next.length - 1] = { ...next[next.length - 1], agentState: "thinking" };
+        } else if (next.length > 0 && next[next.length - 1].agentState === "done") {
+          next.push({ question: next[next.length - 1].question || "", answer: "", id: data.cursor, agentState: "thinking" });
+        } else if (next.length === 0) {
+          next.push({ question: "", answer: "", id: data.cursor, agentState: "thinking" });
+        }
+        return next;
+      });
+      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+    });
+
+    es.addEventListener("live_call.agent.delta", (event) => {
+      const data = JSON.parse(event.data);
+      setQaPairs((prev) => {
+        const next = [...prev];
+        if (next.length === 0) {
+          next.push({ question: "", answer: data.text, id: data.cursor, agentState: "streaming" });
+        } else {
+          const last = next[next.length - 1];
+          if (last.agentState === "streaming") {
+            next[next.length - 1] = { ...last, answer: (last.answer || "") + data.text, agentState: "streaming" };
+          } else if (last.agentState === "thinking") {
+            next[next.length - 1] = { ...last, answer: data.text, agentState: "streaming" };
+          } else if (last.agentState === "done") {
+            next.push({ question: "", answer: data.text, id: data.cursor, agentState: "streaming" });
+          } else {
+            next.push({ question: "", answer: data.text, id: data.cursor, agentState: "streaming" });
+          }
+        }
+        return next;
+      });
+      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+    });
+
+    es.addEventListener("live_call.agent.error", (event) => {
+      const data = JSON.parse(event.data);
+      setQaPairs((prev) => {
+        const next = [...prev];
+        if (next.length > 0 && (next[next.length - 1].agentState === "thinking" || next[next.length - 1].agentState === "streaming")) {
+          next[next.length - 1] = { ...next[next.length - 1], answer: `[error] ${data.error || "Agent failed"}`, agentState: "done" };
+        }
+        return next;
+      });
+    });
+
+    es.addEventListener("live_call.stopped", () => {
+      setStatus("stopped");
+    });
+
+    es.onerror = () => {
+      // EventSource auto-reconnects with retry
+    };
+
+    return () => {
+      es.close();
+      eventSourceRef.current = null;
+    };
+  }, [session?.id]);
+
+  async function createSession() {
+    setBusy("create");
+    setError("");
+    try {
+      const result = await request("/api/live-calls", {
+        method: "POST",
+        body: JSON.stringify({ title: "Live Call", source: "web-ui" })
+      }, token);
+      setSession(result.session);
+      setStatus("active");
+      setTranscripts([]);
+      setQaPairs([]);
+      setRemoteLevel(0);
+      setLocalLevel(0);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function stopSession() {
+    if (!session) return;
+    setBusy("stop");
+    setError("");
+    try {
+      await request(`/api/live-calls/${session.id}/stop`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "manual" })
+      }, token);
+      setStatus("stopped");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const statusLabel = status === "idle" ? "已就绪" : status === "active" ? "通话中" : "已结束";
+
+  return (
+    <aside className="live-call-panel">
+      <div className="drawer-header">
+        <button className="icon-button" title="Back" aria-label="Back" type="button" onClick={onClose}>
+          <ChevronLeft size={22} />
+        </button>
+        <div>
+          <h2>Live Call</h2>
+          <p>实时通话</p>
+        </div>
+      </div>
+
+      {/* Status + Controls */}
+      <div className="panel">
+        <div className="live-call-status-row">
+          <span className={cx("status-dot", status)} />
+          <span>{statusLabel}</span>
+        </div>
+        {session ? <small className="live-call-id">ID: {session.id?.slice(0, 8)}…</small> : null}
+        <div className="live-call-actions">
+          {status !== "active" ? (
+            <button className="primary-button" disabled={busy === "create"} onClick={createSession}>
+              {busy === "create" ? <Loader2 size={16} className="spin" /> : <Phone size={16} />}
+              创建通话
+            </button>
+          ) : (
+            <button className="secondary-button danger" disabled={busy === "stop"} onClick={stopSession}>
+              {busy === "stop" ? <Loader2 size={16} className="spin" /> : <PhoneOff size={16} />}
+              停止通话
+            </button>
+          )}
+        </div>
+        {error ? <small className="live-call-error">{error}</small> : null}
+      </div>
+
+      {/* Audio levels */}
+      <div className="panel">
+        <div className="section-title"><Volume2 size={14} /> 音频电平</div>
+        <div className="level-channel">
+          <span>远程</span>
+          <div className="level-bar"><div className="level-fill" style={{ width: `${Math.min(remoteLevel * 200, 100)}%` }} /></div>
+          <span className="level-value">{(remoteLevel * 100).toFixed(0)}%</span>
+        </div>
+        <div className="level-channel">
+          <span>本地</span>
+          <div className="level-bar"><div className="level-fill" style={{ width: `${Math.min(localLevel * 200, 100)}%` }} /></div>
+          <span className="level-value">{(localLevel * 100).toFixed(0)}%</span>
+        </div>
+      </div>
+
+      {/* Transcript feed */}
+      {transcripts.length > 0 ? (
+        <div className="panel">
+          <div className="section-title">实时转录</div>
+          <div className="transcript-feed">
+            {transcripts.map((t, i) => (
+              <div key={t.id ?? i} className={cx("transcript-entry", t.final ? "final" : "partial")}>
+                <small>{formatTime(t.at)}</small>
+                <span>{t.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Q&A cards */}
+      {qaPairs.length > 0 ? (
+        <div className="panel">
+          <div className="section-title"><MessageCircle size={14} /> 问答记录</div>
+          {qaPairs.map((pair, i) => (
+            <div key={pair.id ?? i} className="qa-card">
+              {pair.question ? <div className="qa-question">❓ {pair.question}</div> : null}
+              {pair.agentState === "thinking" ? (
+                <div className="qa-answer qa-thinking">
+                  <Loader2 size={14} className="spin" />
+                  <span>思考中…</span>
+                </div>
+              ) : pair.agentState === "streaming" ? (
+                <div className="qa-answer qa-streaming">
+                  💡 {pair.answer}<span className="streaming-cursor" />
+                </div>
+              ) : pair.answer ? (
+                <div className="qa-answer">💡 {pair.answer}</div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
 function App() {
   const [token, setToken] = useState(savedToken);
   const [settings, setSettings] = useState(null);
@@ -3418,6 +5204,8 @@ function App() {
   const [threadState, setThreadState] = useState({ items: {}, forks: [] });
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [toolEvents, setToolEvents] = useState([]);
+  const [toolRegistry, setToolRegistry] = useState({});
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [expandedProjects, setExpandedProjects] = useState({});
@@ -3431,13 +5219,18 @@ function App() {
   const [workspaces, setWorkspaces] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [liveCallOpen, setLiveCallOpen] = useState(false);
+  const [liveCallSession, setLiveCallSession] = useState(null);
+  const [liveCallStatus, setLiveCallStatus] = useState("idle"); // "idle" | "active" | "stopped"
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(Boolean(savedToken));
   const [error, setError] = useState("");
   const [loginError, setLoginError] = useState("");
   const [initialScrollSequence, setInitialScrollSequence] = useState(0);
   const [locatedMessageKey, setLocatedMessageKey] = useState("");
+  const [workspaceOpenRequest, setWorkspaceOpenRequest] = useState(null);
   const eventSourceRef = useRef(null);
+  const toolEventSourceRef = useRef(null);
   const pollRef = useRef(null);
   const desktopPollRef = useRef(null);
   const desktopObserverRef = useRef(null);
@@ -3449,20 +5242,18 @@ function App() {
     const items = [];
     if (settings?.hasOpenAIKey) items.push("codex");
     if (settings?.hasAnthropicKey) items.push("claude");
+    if (settings?.hasZhipuKey) items.push("zhipu");
     return items;
   }, [settings]);
 
   const conversations = useMemo(() => {
-    const providerSet = new Set(providers);
     const historyBySession = new Map(
       histories
-        .filter((item) => providerSet.has(item.provider))
         .map((item) => [sessionKey(item.provider, item.id), item])
     );
     const taskGroups = new Map();
 
     for (const task of tasks) {
-      if (!providerSet.has(task.agent)) continue;
       const key = task.sessionId ? `thread:${sessionKey(task.agent, task.sessionId)}` : `task:${task.id}`;
       const existing = taskGroups.get(key);
       const taskTime = new Date(task.updatedAt || 0).getTime();
@@ -3493,7 +5284,6 @@ function App() {
       };
     });
     const historyItems = histories
-      .filter((item) => providerSet.has(item.provider))
       .filter((item) => !taskSessionIds.has(sessionKey(item.provider, item.id)))
       .map((item) => ({
         key: threadKeyFor(item.provider, item.id),
@@ -3508,7 +5298,6 @@ function App() {
         preview: item.preview || ""
       }));
     const forkItems = (threadState.forks || [])
-      .filter((item) => providerSet.has(item.provider))
       .map((item) => ({
         key: `fork:${item.id}`,
         kind: "fork",
@@ -3565,12 +5354,10 @@ function App() {
             displayTime: desktopMatch.displayTime || item.displayTime
           };
         })
-    ).filter((item) =>
-      showArchived ? item.archived : !item.archived
-    );
+    ).filter((item) => !item.archived);
     const projectNodes = buildConversationTree(localItems, expandedProjects);
     return filterConversationNodes(projectNodes, query);
-  }, [tasks, histories, providers, query, desktopRemote, threadState, showArchived, expandedProjects]);
+  }, [tasks, histories, query, desktopRemote, threadState, showArchived, expandedProjects]);
 
   useEffect(() => {
     if (!selected || selected.kind === "desktop" || query.trim()) return;
@@ -3590,11 +5377,11 @@ function App() {
     setChangeSummary(null);
   }, [conversations, selected, query, controlMode]);
 
-  const displayMessages = useMemo(() => messagesForRender(messages, running), [messages, running]);
+  const toolEventMessages = useMemo(() => toolEventsToMessages(toolEvents, toolRegistry), [toolEvents, toolRegistry]);
 
   const desktopMessages = useMemo(() => {
-    if (controlMode !== "desktop") return displayMessages;
-    const items = [...messages];
+    if (controlMode !== "desktop") return messagesForRender([...messages, ...toolEventMessages], running);
+    const items = [...messages, ...toolEventMessages];
     const desktop = desktopRemote?.desktop;
     const statusText = desktop
       ? [
@@ -3614,7 +5401,7 @@ function App() {
     else if (turnStatus) items.push(turnStatus);
 
     return messagesForRender(items, false);
-  }, [controlMode, desktopRemote, displayMessages, messages]);
+  }, [controlMode, desktopRemote, messages, running, toolEventMessages]);
 
   const networkLine = useMemo(() => {
     const primary = network.find((item) => item.address?.startsWith("192.168.")) || network[0];
@@ -3657,10 +5444,11 @@ function App() {
 
   async function refresh(options = {}) {
     try {
-      const [status, history, thread] = await Promise.all([
+      const [status, history, thread, registry] = await Promise.all([
         request("/api/status", {}, token),
         request("/api/histories", {}, token),
-        request("/api/thread-state", {}, token)
+        request("/api/thread-state", {}, token),
+        request("/api/tool-registry", {}, token)
       ]);
       setSettings(status.settings);
       setNetwork(status.network || []);
@@ -3671,6 +5459,7 @@ function App() {
       setPermissionMode(status.settings.permissionMode || "default");
       setHistories(history.items || []);
       setThreadState(thread);
+      setToolRegistry(Object.fromEntries((registry.items || []).map((item) => [item.name, item])));
       if (options.keepSelection && selected) {
         setSelected((current) => current);
       }
@@ -3928,11 +5717,123 @@ function App() {
     }, 1600);
   }
 
+  function openFileFromMessage(ref) {
+    if (!ref?.path) return;
+    setWorkspaceOpenRequest({
+      id: `${Date.now()}:${ref.path}:${ref.line || 0}`,
+      path: ref.path,
+      line: ref.line || 0,
+      column: ref.column || 0
+    });
+  }
+
   function stopTaskStream() {
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
+  }
+
+  function stopToolEventStream() {
+    toolEventSourceRef.current?.close();
+    toolEventSourceRef.current = null;
+  }
+
+  function toolEventFilterForSelection(conversation = selected) {
+    if (!conversation) return null;
+    if (conversation.kind === "task" && conversation.id) {
+      return { key: `task:${conversation.id}`, query: `taskId=${encodeURIComponent(conversation.id)}` };
+    }
+    if (conversation.kind === "history") {
+      const sessionId = conversation.sourceId || conversation.id || conversation.sessionId || conversation.historyId || "";
+      const taskId = conversation.toolTaskId || historyToolTaskId(conversation.provider, sessionId);
+      if (taskId) return { key: `task:${taskId}`, query: `taskId=${encodeURIComponent(taskId)}` };
+    }
+    const workspace = chooseWorkspaceForPath(workspaces, conversation.cwd || "");
+    if (workspace?.id) {
+      return { key: `workspace:${workspace.id}`, query: `workspaceId=${encodeURIComponent(workspace.id)}` };
+    }
+    return null;
+  }
+
+  function appendToolEvents(events = [], cursorRef = { current: 0, ids: new Set() }) {
+    const next = [];
+    for (const event of events) {
+      const id = event.id || `${event.toolRunId}:${event.cursor || event.at || next.length}`;
+      if (cursorRef.ids?.has(id)) continue;
+      cursorRef.ids?.add(id);
+      next.push(event);
+    }
+    const nextCursor = cursorFromEvents(events);
+    if (nextCursor) cursorRef.current = Math.max(Number(cursorRef.current || 0), nextCursor);
+    if (next.length) {
+      setToolEvents((items) => {
+        const existing = new Set(items.map((event) => event.id || `${event.toolRunId}:${event.cursor || event.at || ""}`));
+        const merged = [...items];
+        for (const event of next) {
+          const id = event.id || `${event.toolRunId}:${event.cursor || event.at || ""}`;
+          if (!existing.has(id)) merged.push(event);
+        }
+        return merged.slice(-500);
+      });
+    }
+  }
+
+  function followToolEvents(conversation = selected) {
+    stopToolEventStream();
+    const filter = toolEventFilterForSelection(conversation);
+    if (!filter) return;
+    const cursorKey = streamCursorKey("tool", filter.key);
+    const cursorRef = {
+      current: Number(localStorage.getItem(cursorKey) || 0),
+      ids: new Set()
+    };
+
+    const openStream = async () => {
+      const catchUp = await request(`/api/tool-events?${filter.query}&after=${Number(cursorRef.current || 0)}&limit=500`, {}, token);
+      appendToolEvents(catchUp.items || [], cursorRef);
+      if (cursorRef.current) rememberStreamCursor(cursorKey, cursorRef.current);
+
+      const source = new EventSource(`/api/tool-events?stream=1&token=${encodeURIComponent(token)}&${filter.query}&after=${Number(cursorRef.current || 0)}`);
+      toolEventSourceRef.current = source;
+      source.onmessage = (message) => {
+        const event = JSON.parse(message.data);
+        appendToolEvents([event], cursorRef);
+        if (cursorRef.current) rememberStreamCursor(cursorKey, cursorRef.current);
+      };
+      const handleNamedEvent = (message) => source.onmessage(message);
+      source.addEventListener("tool.created", handleNamedEvent);
+      source.addEventListener("tool.started", handleNamedEvent);
+      source.addEventListener("tool.output", handleNamedEvent);
+      source.addEventListener("tool.cancel_requested", handleNamedEvent);
+      source.addEventListener("tool.cancelled", handleNamedEvent);
+      source.addEventListener("tool.completed", handleNamedEvent);
+      source.addEventListener("tool.failed", handleNamedEvent);
+      source.addEventListener("tool.error", handleNamedEvent);
+      source.addEventListener("approval.required", handleNamedEvent);
+      source.addEventListener("approval.approved", handleNamedEvent);
+      source.addEventListener("approval.denied", handleNamedEvent);
+      source.addEventListener("approval.expired", handleNamedEvent);
+      source.onerror = () => {
+        source.close();
+        if (toolEventSourceRef.current === source) toolEventSourceRef.current = null;
+      };
+    };
+
+    openStream().catch((err) => setError(err.message));
+  }
+
+  async function refreshSelectedToolEvents(conversation = selected) {
+    const filter = toolEventFilterForSelection(conversation);
+    if (!filter) return;
+    const cursorKey = streamCursorKey("tool", filter.key);
+    const cursorRef = {
+      current: Number(localStorage.getItem(cursorKey) || 0),
+      ids: new Set(toolEvents.map((event) => event.id).filter(Boolean))
+    };
+    const result = await request(`/api/tool-events?${filter.query}&after=${Number(cursorRef.current || 0)}&limit=500`, {}, token);
+    appendToolEvents(result.items || [], cursorRef);
+    if (cursorRef.current) rememberStreamCursor(cursorKey, cursorRef.current);
   }
 
   function appendTaskEvents(events, seenCountRef, options = {}) {
@@ -4215,6 +6116,7 @@ function App() {
 
   async function selectConversation(conversation) {
     stopTaskStream();
+    stopToolEventStream();
     const loadSequence = conversationLoadRef.current + 1;
     conversationLoadRef.current = loadSequence;
     setInitialScrollSequence(0);
@@ -4222,6 +6124,7 @@ function App() {
     setSidebarOpen(false);
     setError("");
     setChangeSummary(null);
+    setToolEvents([]);
 
     if (!conversation) {
       setMessages([]);
@@ -4258,6 +6161,7 @@ function App() {
       setInitialScrollSequence(loadSequence);
       setRunning(task.status === "running");
       focusDesktopConversation(conversation);
+      followToolEvents({ ...conversation, id: task.id, kind: "task", cwd: task.cwd || conversation.cwd });
 
       if (task.status === "running") {
         followRunningTask(task);
@@ -4274,6 +6178,7 @@ function App() {
     setMessages(entries.length ? entries : [{ role: "system", text: "This history item only has index metadata; no local preview is available yet." }]);
     setInitialScrollSequence(loadSequence);
     focusDesktopConversation(conversation);
+    followToolEvents({ ...conversation, toolTaskId: detail.toolTaskId || conversation.toolTaskId || "" });
   }
 
   async function startTask(prompt, displayPrompt = prompt) {
@@ -4300,18 +6205,71 @@ function App() {
       prompt: finalPrompt,
       title: selected?.kind === "fork" ? selected.title : displayPrompt,
       model: activeModel || "",
-      reasoningEffort: reasoningEffort || ""
+      reasoningEffort: reasoningEffort || "",
+      permissionMode,
+      security: settings?.security || {}
     };
     setMessages((items) => appendDisplayMessages(items, [{ role: "user", text: displayPrompt }]));
     setRunning(true);
-    const created = await request(
-      "/api/tasks",
-      {
-        method: "POST",
-        body: JSON.stringify(payload)
-      },
-      token
-    );
+    let created;
+    try {
+      created = await request(
+        "/api/tasks",
+        {
+          method: "POST",
+          body: JSON.stringify(payload)
+        },
+        token
+      );
+    } catch (err) {
+      if (err.status !== 428) {
+        setRunning(false);
+        throw err;
+      }
+      const approvalId = err.data?.approvalId || err.data?.approval?.id || "";
+      const reason = taskApprovalText(err) || "dangerous task settings";
+      setMessages((items) =>
+        appendDisplayMessages(items, [
+          {
+            role: "system",
+            text: `Task paused for approval: ${reason}`
+          }
+        ])
+      );
+      const approved = window.confirm(`Approve this task?\n\n${reason}`);
+      if (!approved) {
+        if (approvalId) {
+          try {
+            await request(
+              `/api/approvals/${encodeURIComponent(approvalId)}/decision`,
+              { method: "POST", body: JSON.stringify({ decision: "deny", reason: "Denied in composer." }) },
+              token
+            );
+          } catch {
+            // Keep the composer flow responsive even if the denial sync fails.
+          }
+          refreshSelectedToolEvents().catch((refreshErr) => setError(refreshErr.message));
+        }
+        setRunning(false);
+        setMessages((items) => appendDisplayMessages(items, [{ role: "system", text: "Task was not sent because approval was denied." }]));
+        return;
+      }
+      if (approvalId) {
+        const approvalResult = await request(
+          `/api/approvals/${encodeURIComponent(approvalId)}/decision`,
+          { method: "POST", body: JSON.stringify({ decision: "approve", reason: "Approved in composer." }) },
+          token
+        );
+        created = approvalResult.result || {};
+        refreshSelectedToolEvents().catch((refreshErr) => setError(refreshErr.message));
+      } else {
+        throw new Error("Approval request was not returned by the server.");
+      }
+    }
+    if (!created?.id) {
+      setRunning(false);
+      throw new Error("Task approval did not return a task id.");
+    }
     await refresh();
     const task = {
       key: canResume && resumeSessionId ? `thread:${activeAgent}:${resumeSessionId}` : `task:${created.id}`,
@@ -4502,9 +6460,37 @@ function App() {
           <button className="icon-button" title="Settings" aria-label="Settings" type="button" onClick={() => setSettingsOpen(true)}>
             <Settings size={20} />
           </button>
+          <button className="icon-button" title="Live Call" aria-label="Live Call" type="button" onClick={() => setLiveCallOpen(true)}>
+            <Phone size={20} />
+          </button>
         </header>
         <div className="message-list" ref={listRef} aria-live="polite">
-          <ChangeCard summary={changeSummary} />
+          <WorkspaceWorkbench
+            workspaces={workspaces}
+            selected={selected}
+            token={token}
+            toolEvents={toolEvents}
+            onError={setError}
+            onSummary={setChangeSummary}
+            onToolEventsChanged={() => refreshSelectedToolEvents().catch((err) => setError(err.message))}
+            openRequest={workspaceOpenRequest}
+            onOpenHandled={() => setWorkspaceOpenRequest(null)}
+          />
+          <ChangeCard
+            summary={changeSummary}
+            token={token}
+            onError={setError}
+            onUpdated={(result) => {
+              if (!result?.summary) return;
+              setChangeSummary((current) => ({
+                ...result.summary,
+                workspace: result.workspace || current?.workspace,
+                cwd: result.cwd || current?.cwd,
+                kind: current?.kind || "workspace"
+              }));
+              refreshSelectedToolEvents().catch((err) => setError(err.message));
+            }}
+          />
           {desktopMessages.length ? (
             desktopMessages.map((message, index) => {
               const renderKey = message.liveKey || message.turnId || `${index}-${message.role}-${message.pending ? "pending" : "message"}`;
@@ -4518,6 +6504,7 @@ function App() {
                   onDelete={handleDeleteMessage}
                   onRegenerate={(target) => handleRegenerateMessage(target).catch((err) => setError(err.message))}
                   onLocate={locateMessage}
+                  onOpenFilePath={openFileFromMessage}
                   {...message}
                 />
               );
@@ -4582,6 +6569,8 @@ function App() {
           }}
         />
       ) : null}
+      {liveCallOpen ? <button className="sidebar-backdrop" aria-label="Close live call" type="button" onClick={() => setLiveCallOpen(false)} /> : null}
+      {liveCallOpen ? <LiveCallPanel token={token} onClose={() => setLiveCallOpen(false)} /> : null}
     </section>
   );
 }

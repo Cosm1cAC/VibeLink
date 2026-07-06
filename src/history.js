@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getHomeDir } from "./config.js";
+import { backfillHistoryToolEvents, historyToolTaskId } from "./historyToolBridge.js";
 import { readJsonLines } from "./store.js";
 
 const MAX_HISTORY_FILES = 600;
@@ -351,6 +352,34 @@ function commandFromCall(payload, timestamp) {
   };
 }
 
+function toolKindFromName(name, namespace = "") {
+  const value = `${namespace}.${name}`.toLowerCase();
+  if (/approval|confirm|permission/.test(value)) return "approval";
+  if (/browser|page|playwright|chrome/.test(value)) return "browser";
+  if (/file|read|write|edit|patch|diff/.test(value)) return "file";
+  if (/plugin|mcp|connector|resource/.test(value)) return "plugin";
+  return "tool";
+}
+
+function genericToolFromCall(payload, timestamp) {
+  const name = payload.name || payload.type || "tool";
+  const namespace = payload.namespace || "";
+  const args = parseCallArguments(payload.arguments || payload.input || {});
+  return {
+    id: payload.call_id || payload.id || `${name}:${timestamp}`,
+    callId: payload.call_id || "",
+    toolCallId: payload.id || "",
+    name,
+    namespace,
+    kind: toolKindFromName(name, namespace),
+    status: "running",
+    input: args,
+    output: "",
+    timestamp,
+    completedAt: ""
+  };
+}
+
 function payloadExitCode(payload, output) {
   const explicit = payload.exit_code ?? payload.exitCode ?? payload.code;
   if (Number.isFinite(Number(explicit))) return Number(explicit);
@@ -368,6 +397,14 @@ function updateCommandOutput(command, payload, timestamp) {
   else command.status = "done";
 }
 
+function updateGenericToolOutput(toolCall, payload, timestamp) {
+  const output = payload.output || payload.stdout || payload.stderr || payload.error || payload.result || "";
+  toolCall.output = typeof output === "string" ? compactToolOutput(output) : compactToolOutput(JSON.stringify(output, null, 2));
+  toolCall.completedAt = timestamp;
+  if (payload.error || payload.success === false || payload.status === "failed") toolCall.status = "failed";
+  else toolCall.status = "done";
+}
+
 function ensureTurn(turnsById, orderedTurns, id) {
   let turn = turnsById.get(id);
   if (turn) return turn;
@@ -379,7 +416,7 @@ function ensureTurn(turnsById, orderedTurns, id) {
     durationMs: null,
     timeToFirstTokenMs: null,
     user: { role: "user", kind: "turn", turnId: id, timestamp: "", text: "", parts: [] },
-    assistant: { role: "assistant", kind: "turn", turnId: id, timestamp: "", text: "", parts: [], commands: [] }
+    assistant: { role: "assistant", kind: "turn", turnId: id, timestamp: "", text: "", parts: [], commands: [], toolCalls: [] }
   };
   turnsById.set(id, turn);
   orderedTurns.push(turn);
@@ -392,6 +429,7 @@ function transcriptFromTurnBlocks(entries, provider) {
   const turnsById = new Map();
   const orderedTurns = [];
   const commandsByCallId = new Map();
+  const toolsByCallId = new Map();
 
   for (const item of entries) {
     const payload = item.payload || {};
@@ -414,8 +452,11 @@ function transcriptFromTurnBlocks(entries, provider) {
     }
 
     if (item.type === "event_msg" && /patch_apply_end|mcp_tool_call_end/i.test(payloadType)) {
-      const command = commandsByCallId.get(payload.call_id || payload.id || "");
+      const callId = payload.call_id || payload.id || "";
+      const command = commandsByCallId.get(callId);
       if (command) updateCommandOutput(command, payload, timestamp);
+      const toolCall = toolsByCallId.get(callId);
+      if (toolCall) updateGenericToolOutput(toolCall, payload, timestamp);
       continue;
     }
 
@@ -423,15 +464,23 @@ function transcriptFromTurnBlocks(entries, provider) {
 
     if (/(?:function_call|custom_tool_call)$/i.test(payloadType)) {
       const command = commandFromCall(payload, timestamp);
-      if (!command) continue;
-      turn.assistant.commands.push(command);
-      if (command.id) commandsByCallId.set(command.id, command);
+      if (command) {
+        turn.assistant.commands.push(command);
+        if (command.id) commandsByCallId.set(command.id, command);
+        continue;
+      }
+      const toolCall = genericToolFromCall(payload, timestamp);
+      turn.assistant.toolCalls.push(toolCall);
+      if (toolCall.id) toolsByCallId.set(toolCall.id, toolCall);
       continue;
     }
 
     if (/(?:function_call_output|custom_tool_call_output)$/i.test(payloadType)) {
-      const command = commandsByCallId.get(payload.call_id || payload.id || "");
+      const callId = payload.call_id || payload.id || "";
+      const command = commandsByCallId.get(callId);
       if (command) updateCommandOutput(command, payload, timestamp);
+      const toolCall = toolsByCallId.get(callId);
+      if (toolCall) updateGenericToolOutput(toolCall, payload, timestamp);
       continue;
     }
 
@@ -458,7 +507,7 @@ function transcriptFromTurnBlocks(entries, provider) {
       });
     }
 
-    if (turn.assistant.text || turn.assistant.commands.length) {
+    if (turn.assistant.text || turn.assistant.commands.length || turn.assistant.toolCalls.length) {
       transcript.push({
         ...turn.assistant,
         timestamp: turn.assistant.timestamp || turn.completedAt || turn.startedAt,
@@ -468,6 +517,8 @@ function transcriptFromTurnBlocks(entries, provider) {
         timeToFirstTokenMs: turn.timeToFirstTokenMs,
         commandCount: turn.assistant.commands.length,
         commands: turn.assistant.commands,
+        toolCallCount: turn.assistant.toolCalls.length,
+        toolCalls: turn.assistant.toolCalls,
         parts: turn.assistant.parts
       });
     }
@@ -823,6 +874,13 @@ export function getHistory(provider, id, { fresh = false } = {}) {
   if (found.filePath && fs.existsSync(found.filePath)) {
     const entries = readJsonLines(found.filePath, HISTORY_DETAIL_LINES);
     const sessionState = buildSessionState(entries, found);
+    const toolBackfill = backfillHistoryToolEvents({
+      provider,
+      sessionId: found.id,
+      filePath: found.filePath,
+      projectPath: found.projectPath,
+      entries
+    });
     const legacyTranscript = transcriptFromEntries(entries, provider);
     const turnTranscript = transcriptFromTurnBlocks(entries, provider);
     const transcript = turnTranscript.length ? trimLeadingOrphanTurn(turnTranscript) : legacyTranscript;
@@ -834,6 +892,7 @@ export function getHistory(provider, id, { fresh = false } = {}) {
       rawTranscriptCount: legacyTranscript.length,
       clientTranscriptCount: clientTranscript.length,
       turnTranscriptCount: turnTranscript.length,
+      toolTaskId: toolBackfill.taskId,
       entryCount: entries.length
     };
   }
@@ -841,6 +900,7 @@ export function getHistory(provider, id, { fresh = false } = {}) {
   return {
     ...found,
     sessionState: buildSessionState([], found),
+    toolTaskId: historyToolTaskId(provider, found.id),
     transcript: []
   };
 }

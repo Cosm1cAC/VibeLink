@@ -3,9 +3,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { withAgentReachPath } from "./agentReachRuntime.js";
+import { bridgeAgentToolEvent } from "./agentToolBridge.js";
 import { tasksDir } from "./config.js";
 import { insertTaskEvent, listTaskEvents, upsertTask } from "./db.js";
 import { resolveAllowedPath } from "./security.js";
+import { settingsWithSecrets } from "./store.js";
 
 const tasks = new Map();
 const MAX_RESTORED_TASKS = 80;
@@ -26,6 +29,19 @@ function appendTaskEvent(task, event) {
     ...event
   };
 
+  // Auto-classify event kind if not explicitly set.
+  if (!enriched.kind) {
+    const type = enriched.type || "";
+    if (type === "user" || type === "user_message") enriched.kind = "user";
+    else if (type === "assistant" || type === "assistant_message") enriched.kind = "assistant";
+    else if (type === "system") enriched.kind = "system";
+    else if (type === "error") enriched.kind = "error";
+    else if (type.startsWith("approval.")) enriched.kind = "approval";
+    else if (type.startsWith("tool.")) enriched.kind = "tool";
+    else if (type === "stderr" || type === "stdout") enriched.kind = "output";
+    else enriched.kind = "system";
+  }
+
   task.events.push(enriched);
   if (task.events.length > 2500) task.events.shift();
 
@@ -44,6 +60,13 @@ function appendTaskEvent(task, event) {
   }
 
   for (const listener of task.listeners) listener(enriched);
+
+  try {
+    bridgeAgentToolEvent(task, enriched);
+  } catch {
+    // Tool-event extraction is best-effort and should not interrupt task output.
+  }
+
   return enriched;
 }
 
@@ -162,6 +185,7 @@ export function restoreTasks() {
           try {
             const cursor = insertTaskEvent(task.id, event);
             if (cursor) event.cursor = cursor;
+            bridgeAgentToolEvent(task, event);
           } catch {
             // A single bad event should not prevent task restore.
           }
@@ -332,8 +356,9 @@ function quotedPromptArgs(template, prompt) {
 function claudeArgs(payload, settings) {
   const args = ["--print", "--output-format", "stream-json", "--include-partial-messages"];
 
-  if (settings.permissionMode && settings.permissionMode !== "default") {
-    args.push("--permission-mode", settings.permissionMode);
+  const permissionMode = payload.permissionMode || settings.permissionMode;
+  if (permissionMode && permissionMode !== "default") {
+    args.push("--permission-mode", permissionMode);
   }
 
   if (payload.mode === "resume" && payload.sessionId) {
@@ -353,6 +378,7 @@ function claudeArgs(payload, settings) {
 function codexArgs(payload, settings) {
   const rawTemplate = payload.template || settings.codexTemplate || "";
   const template = rawTemplate.trim() === "exec {prompt}" ? "" : rawTemplate;
+  const policy = securityPolicy(payload, settings);
 
   if (template) {
     const args = quotedPromptArgs(template, payload.prompt || "");
@@ -367,11 +393,17 @@ function codexArgs(payload, settings) {
   const common = ["-C", payload.cwd || settings.defaultCwd || process.cwd()];
   if (payload.model) common.push("-m", payload.model);
   if (payload.reasoningEffort) common.push("-c", `model_reasoning_effort="${payload.reasoningEffort}"`);
+  if (policy.sandboxMode) common.push("--sandbox", policy.sandboxMode);
+  if (policy.approvalPolicy) common.push("--ask-for-approval", policy.approvalPolicy);
+  common.push("-c", `sandbox_network_access=${policy.networkAccess ? "true" : "false"}`);
 
   if (payload.mode === "resume" && payload.sessionId) {
     const resumeArgs = ["exec", "resume", "--json"];
     if (payload.model) resumeArgs.push("-m", payload.model);
     if (payload.reasoningEffort) resumeArgs.push("-c", `model_reasoning_effort="${payload.reasoningEffort}"`);
+    if (policy.sandboxMode) resumeArgs.push("--sandbox", policy.sandboxMode);
+    if (policy.approvalPolicy) resumeArgs.push("--ask-for-approval", policy.approvalPolicy);
+    resumeArgs.push("-c", `sandbox_network_access=${policy.networkAccess ? "true" : "false"}`);
     resumeArgs.push("--skip-git-repo-check");
     resumeArgs.push(payload.sessionId, payload.prompt || "");
     return resumeArgs;
@@ -380,11 +412,18 @@ function codexArgs(payload, settings) {
   return ["exec", "--json", ...common, payload.prompt || ""];
 }
 
+function securityPolicy(payload, settings) {
+  return {
+    ...settings.security,
+    ...(payload.security || {})
+  };
+}
+
 function buildEnv(agent, settings, extraEnv = {}) {
-  const env = {
+  const env = withAgentReachPath({
     ...process.env,
     ...extraEnv
-  };
+  });
 
   if (agent === "claude" && settings.apiKeys?.anthropic) {
     env.ANTHROPIC_API_KEY = settings.apiKeys.anthropic;
@@ -392,6 +431,10 @@ function buildEnv(agent, settings, extraEnv = {}) {
 
   if (agent === "codex" && settings.apiKeys?.openai) {
     env.OPENAI_API_KEY = settings.apiKeys.openai;
+  }
+
+  if (settings.apiKeys?.zhipu) {
+    env.ZHIPU_API_KEY = settings.apiKeys.zhipu;
   }
 
   return env;
@@ -457,21 +500,45 @@ export function getTask(id) {
   };
 }
 
-export function createTask(payload, settings) {
+export function appendExternalTaskEvent(id, event = {}) {
+  const task = tasks.get(id);
+  if (task) {
+    task.updatedAt = nowIso();
+    return appendTaskEvent(task, event);
+  }
+
+  const enriched = {
+    id: event.id || crypto.randomUUID(),
+    at: event.at || nowIso(),
+    ...event
+  };
+
+  try {
+    const cursor = insertTaskEvent(id, enriched);
+    if (cursor) enriched.cursor = cursor;
+    return enriched;
+  } catch {
+    return null;
+  }
+}
+
+export async function createTask(payload, settings) {
   const agent = payload.agent === "codex" ? "codex" : "claude";
+  const runtimeSettings = await settingsWithSecrets(settings);
+  const policy = securityPolicy(payload, runtimeSettings);
   let cwd = "";
   let requestedCwd = "";
   let usedFallback = false;
   let cwdError = null;
   try {
-    const resolved = resolveWorkingDir(payload, settings);
+    const resolved = resolveWorkingDir(payload, runtimeSettings);
     cwd = resolved.cwd;
     requestedCwd = resolved.requestedCwd;
     usedFallback = resolved.usedFallback;
   } catch (error) {
     cwdError = error;
     requestedCwd = payload.cwd || settings.defaultCwd || process.cwd();
-    cwd = settings.defaultCwd || process.cwd();
+    cwd = runtimeSettings.defaultCwd || process.cwd();
   }
   const id = crypto.randomUUID();
   const logPath = path.join(tasksDir, `${id}.jsonl`);
@@ -479,12 +546,12 @@ export function createTask(payload, settings) {
 
   const base =
     agent === "claude"
-      ? commandParts(settings.claudeCommand || "claude")
-      : resolveCodexCommand(settings.codexCommand || "auto");
+      ? commandParts(runtimeSettings.claudeCommand || "claude")
+      : resolveCodexCommand(runtimeSettings.codexCommand || "auto");
   const args =
     agent === "claude"
-      ? [...base.args, ...claudeArgs(payload, settings)]
-      : [...base.args, ...codexArgs({ ...payload, cwd }, settings)];
+      ? [...base.args, ...claudeArgs(payload, runtimeSettings)]
+      : [...base.args, ...codexArgs({ ...payload, cwd }, runtimeSettings)];
 
   const task = {
     id,
@@ -497,6 +564,7 @@ export function createTask(payload, settings) {
     exitCode: null,
     sessionId: payload.sessionId || "",
     commandLabel: commandLabel(base.command, args),
+    security: policy,
     process: null,
     listeners: new Set(),
     events: [],
@@ -506,6 +574,10 @@ export function createTask(payload, settings) {
   tasks.set(id, task);
   upsertTask(task);
   appendTaskEvent(task, { type: "system", text: `Starting ${agent} in ${cwd}` });
+  appendTaskEvent(task, {
+    type: "security",
+    text: `Security policy: sandbox=${policy.sandboxMode || "default"}, approval=${policy.approvalPolicy || "default"}, network=${policy.networkAccess ? "enabled" : "disabled"}`
+  });
 
   if (cwdError) {
     task.status = "failed";
@@ -548,7 +620,7 @@ export function createTask(payload, settings) {
   try {
     const child = spawn(base.command, args, {
       cwd,
-      env: buildEnv(agent, settings, payload.env),
+      env: buildEnv(agent, runtimeSettings, payload.env),
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
       windowsHide: true

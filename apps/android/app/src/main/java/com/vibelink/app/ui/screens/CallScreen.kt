@@ -15,7 +15,7 @@ import com.vibelink.app.ui.components.QaCard
 import com.vibelink.app.ui.components.TranscriptFeed
 import kotlinx.coroutines.launch
 
-data class QaPair(
+data class LegacyQaPair(
     val question: String = "",
     val answer: String = "",
     val agentState: String = "idle" // idle | thinking | streaming | done
@@ -26,14 +26,14 @@ data class QaPair(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CallScreen(
+fun LegacyCallScreen(
     apiClient: ApiClient,
     onLogout: () -> Unit
 ) {
     var sessionId by remember { mutableStateOf("") }
     var sessionActive by remember { mutableStateOf(false) }
     var events by remember { mutableStateOf<List<LiveCallEvent>>(emptyList()) }
-    var qaPairs by remember { mutableStateOf<List<QaPair>>(emptyList()) }
+    var qaPairs by remember { mutableStateOf<List<LegacyQaPair>>(emptyList()) }
     var remoteLevel by remember { mutableStateOf(0.0) }
     var localLevel by remember { mutableStateOf(0.0) }
     var statusText by remember { mutableStateOf("") }

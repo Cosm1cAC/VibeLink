@@ -27,6 +27,8 @@ fun VibeLinkApp() {
     // Shared ViewModels (scoped to app-level, retained via remember)
     val sessionListViewModel = remember { SessionListViewModel() }
     val messageListViewModel = remember { MessageListViewModel() }
+    val workspaceViewModel = remember { WorkspaceViewModel() }
+    val callViewModel = remember { CallViewModel() }
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
@@ -60,6 +62,9 @@ fun VibeLinkApp() {
                 },
                 onOpenLiveCall = {
                     navController.navigate("call")
+                },
+                onOpenWorkspace = {
+                    navController.navigate("workspace")
                 }
             )
         }
@@ -87,11 +92,17 @@ fun VibeLinkApp() {
         composable("call") {
             CallScreen(
                 apiClient = apiClient,
-                onLogout = {
-                    navController.navigate("login") {
-                        popUpTo("call") { inclusive = true }
-                    }
-                }
+                viewModel = callViewModel,
+                workspaceId = workspaceViewModel.selectedWorkspaceId.collectAsState().value,
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable("workspace") {
+            WorkspaceScreen(
+                apiClient = apiClient,
+                viewModel = workspaceViewModel,
+                onBack = { navController.popBackStack() },
             )
         }
     }

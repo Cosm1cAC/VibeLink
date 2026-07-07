@@ -59,7 +59,9 @@ export function withAgentReachPath(env = process.env) {
   return {
     ...env,
     [key]: mergedPath,
-    PATH: mergedPath
+    PATH: mergedPath,
+    PYTHONIOENCODING: env.PYTHONIOENCODING || "utf-8",
+    PYTHONUTF8: env.PYTHONUTF8 || "1"
   };
 }
 

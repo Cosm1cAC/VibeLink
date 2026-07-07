@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dataDir, defaultSettings, settingsPath, tasksDir } from "./config.js";
+import { codebaseMemoryInstallInfo, codebaseMemoryServerConfig, mergeCodebaseMemoryServer } from "./codebaseMemoryRuntime.js";
 import { credentialBackend, readApiKeys, writeApiKeys } from "./credentialStore.js";
 
 function clone(value) {
@@ -27,6 +28,10 @@ function mergeSettings(base, next) {
     toolEvents: {
       ...base.toolEvents,
       ...(next?.toolEvents || {})
+    },
+    codebaseMemory: {
+      ...base.codebaseMemory,
+      ...(next?.codebaseMemory || {})
     },
     mcp: {
       ...base.mcp,
@@ -128,6 +133,12 @@ function sanitizeMcp(value = {}) {
       })
       .slice(0, 50);
   }
+  return next;
+}
+
+function sanitizeCodebaseMemory(value = {}) {
+  const next = {};
+  if (typeof value.autoMcp === "boolean") next.autoMcp = value.autoMcp;
   return next;
 }
 
@@ -256,6 +267,9 @@ export async function saveSettings(settings) {
 export async function publicSettings(settings) {
   const secrets = await readApiKeys();
   const backend = await credentialBackend();
+  const publicMcpSettings = settings.codebaseMemory?.autoMcp === false
+    ? settings
+    : mergeCodebaseMemoryServer(settings, codebaseMemoryServerConfig());
   return {
     host: settings.host,
     port: settings.port,
@@ -284,8 +298,8 @@ export async function publicSettings(settings) {
     },
     mcp: {
       probeTimeoutMs: settings.mcp?.probeTimeoutMs || defaultSettings.mcp.probeTimeoutMs,
-      servers: Array.isArray(settings.mcp?.servers)
-        ? settings.mcp.servers.map((server) => ({
+      servers: Array.isArray(publicMcpSettings.mcp?.servers)
+        ? publicMcpSettings.mcp.servers.map((server) => ({
             ...server,
             env: undefined,
             headers: undefined,
@@ -293,6 +307,10 @@ export async function publicSettings(settings) {
             headerKeys: server.headers ? Object.keys(server.headers) : []
           }))
         : []
+    },
+    codebaseMemory: {
+      autoMcp: settings.codebaseMemory?.autoMcp !== false,
+      install: codebaseMemoryInstallInfo()
     },
     credentials: backend,
     hasOpenAIKey: Boolean(secrets.openai || settings.apiKeys?.openai),
@@ -363,6 +381,10 @@ export function sanitizeSettingsPatch(patch = {}) {
 
   if (patch.mcp && typeof patch.mcp === "object") {
     next.mcp = sanitizeMcp(patch.mcp);
+  }
+
+  if (patch.codebaseMemory && typeof patch.codebaseMemory === "object") {
+    next.codebaseMemory = sanitizeCodebaseMemory(patch.codebaseMemory);
   }
 
   return next;

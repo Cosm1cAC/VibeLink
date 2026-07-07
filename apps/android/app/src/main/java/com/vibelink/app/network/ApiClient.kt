@@ -10,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 /**
@@ -35,6 +36,8 @@ class ApiClient(
 
     private fun authHeaders() = if (token.isNotBlank())
         mapOf("Authorization" to "Bearer $token") else emptyMap()
+
+    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private suspend fun get(path: String): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
@@ -77,8 +80,20 @@ class ApiClient(
 
     // ── Live Calls ──
 
-    suspend fun createSession(title: String = "Live Call", source: String = "android"): Session? {
-        val json = post("/api/live-calls", mapOf("title" to title, "source" to source))
+    suspend fun createSession(
+        title: String = "Live Call",
+        source: String = "android",
+        workspaceId: String = "",
+        asrProvider: String = "",
+        agent: String = "claude",
+        model: String = "",
+    ): Session? {
+        val body = mutableMapOf<String, String>("title" to title, "source" to source)
+        if (workspaceId.isNotBlank()) body["workspaceId"] = workspaceId
+        if (asrProvider.isNotBlank()) body["asrProvider"] = asrProvider
+        if (agent.isNotBlank()) body["agent"] = agent
+        if (model.isNotBlank()) body["model"] = model
+        val json = post("/api/live-calls", body)
         return gson.fromJson(json, CreateSessionResponse::class.java).session
     }
 
@@ -101,6 +116,18 @@ class ApiClient(
         ))
     }
 
+    fun liveCallAudioRequest(sessionId: String): Request {
+        val wsBase = when {
+            baseUrl.startsWith("https://") -> baseUrl.replaceFirst("https://", "wss://")
+            baseUrl.startsWith("http://") -> baseUrl.replaceFirst("http://", "ws://")
+            else -> baseUrl
+        }.trimEnd('/')
+        return Request.Builder()
+            .url("$wsBase/api/live-calls/${encode(sessionId)}/audio")
+            .apply { authHeaders().forEach { (k, v) -> addHeader(k, v) } }
+            .build()
+    }
+
     // ── Tasks ──
 
     suspend fun listTasks(): List<TaskSummary> {
@@ -121,14 +148,74 @@ class ApiClient(
     }
 
     suspend fun getHistoryDetail(provider: String, id: String): HistoryDetail {
-        val json = get("/api/histories/$provider/${java.net.URLEncoder.encode(id, "UTF-8")}")
+        val json = get("/api/histories/$provider/${encode(id)}")
         return gson.fromJson(json, HistoryDetail::class.java)
     }
 
+    // Workspace / Git
+
+    suspend fun listWorkspaces(): List<WorkspaceItem> {
+        val json = get("/api/workspaces")
+        return gson.fromJson(json, WorkspaceListResponse::class.java).items
+    }
+
+    suspend fun getWorkspaceTree(workspaceId: String, dir: String = ""): WorkspaceTreeResponse {
+        val json = get("/api/workspaces/${encode(workspaceId)}/tree?dir=${encode(dir)}")
+        return gson.fromJson(json, WorkspaceTreeResponse::class.java)
+    }
+
+    suspend fun getWorkspaceFile(workspaceId: String, path: String): WorkspaceFileResponse {
+        val json = get("/api/workspaces/${encode(workspaceId)}/file?path=${encode(path)}")
+        return gson.fromJson(json, WorkspaceFileResponse::class.java)
+    }
+
+    suspend fun getGitStatus(workspaceId: String): GitStatusResponse {
+        val json = get("/api/workspaces/${encode(workspaceId)}/git/status")
+        return gson.fromJson(json, GitStatusResponse::class.java)
+    }
+
+    suspend fun getGitDiff(workspaceId: String): GitDiffResponse {
+        val json = get("/api/workspaces/${encode(workspaceId)}/git/diff")
+        return gson.fromJson(json, GitDiffResponse::class.java)
+    }
+
+    suspend fun applyGitFileAction(workspaceId: String, path: String, action: String): GitActionResponse {
+        val json = post(
+            "/api/workspaces/${encode(workspaceId)}/git/file-action",
+            GitFileActionRequest(action = action, path = path),
+        )
+        return gson.fromJson(json, GitActionResponse::class.java)
+    }
+
+    suspend fun applyGitAction(
+        workspaceId: String,
+        action: String,
+        message: String = "",
+        title: String = "",
+    ): GitActionResponse {
+        val json = post(
+            "/api/workspaces/${encode(workspaceId)}/git/action",
+            GitActionRequest(action = action, message = message, title = title),
+        )
+        return gson.fromJson(json, GitActionResponse::class.java)
+    }
+
+    suspend fun runCommand(
+        workspaceId: String,
+        command: String,
+        kind: String = "command",
+        timeoutMs: Long = 120000,
+    ): CommandResult {
+        val json = post(
+            "/api/workspaces/${encode(workspaceId)}/command",
+            CommandRequest(command = command, kind = kind, timeoutMs = timeoutMs),
+        )
+        return gson.fromJson(json, CommandResult::class.java)
+    }
     // ── Tool Events ──
 
     suspend fun fetchToolEvents(taskId: String, after: Int = 0, limit: Int = 500): List<ToolEvent> {
-        val json = get("/api/tool-events?taskId=${java.net.URLEncoder.encode(taskId, "UTF-8")}&after=$after&limit=$limit")
+        val json = get("/api/tool-events?taskId=${encode(taskId)}&after=$after&limit=$limit")
         return gson.fromJson(json, ToolEventListResponse::class.java).items
     }
 
@@ -175,8 +262,8 @@ class ApiClient(
         listener: EventSourceListener
     ): EventSource {
         val params = mutableListOf("after=$after")
-        taskId?.let { params.add("taskId=$it") }
-        workspaceId?.let { params.add("workspaceId=$it") }
+        taskId?.let { params.add("taskId=${encode(it)}") }
+        workspaceId?.let { params.add("workspaceId=${encode(it)}") }
         val url = "$baseUrl/api/tool-events?stream=1&${params.joinToString("&")}" +
                 (if (token.isNotBlank()) "&token=${token}" else "")
         val req = Request.Builder()

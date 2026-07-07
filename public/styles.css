@@ -1,20 +1,27 @@
 :root {
-  color-scheme: light;
-  --ink: #151716;
-  --ink-soft: #737776;
-  --ink-faint: #a4a7a6;
-  --paper: #faf9f6;
-  --side: #f0ede6;
-  --surface: #ffffff;
-  --surface-soft: #f4f2ee;
-  --line: #e2dfd8;
-  --line-strong: #ccc7bd;
-  --teal: #147f78;
-  --teal-dark: #0f625d;
-  --blue: #3b64a2;
-  --amber: #a86f1b;
-  --coral: #b8483e;
-  --shadow: 0 22px 64px rgba(25, 28, 27, 0.14);
+  color-scheme: light dark;
+  --primary: #1E1B4B;
+  --secondary: #6366F1;
+  --secondary-hover: #4F46E5;
+  --tertiary: #22D3EE;
+  --accent: #F59E0B;
+  --danger: #EF4444;
+  --success: #10B981;
+  --ink: #1E1B4B;
+  --ink-soft: #6366F1;
+  --ink-faint: #A5B4FC;
+  --paper: #F8FAFC;
+  --side: #EEF2FF;
+  --surface: #FFFFFF;
+  --surface-soft: #E0E7FF;
+  --line: #C7D2FE;
+  --line-strong: #A5B4FC;
+  --teal: #6366F1;
+  --teal-dark: #4F46E5;
+  --blue: #22D3EE;
+  --amber: #F59E0B;
+  --coral: #EF4444;
+  --shadow: 0 22px 64px rgba(30, 27, 75, 0.14);
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -189,8 +196,8 @@ textarea {
 input:focus,
 select:focus,
 textarea:focus {
-  border-color: rgba(20, 127, 120, 0.42);
-  box-shadow: 0 0 0 4px rgba(20, 127, 120, 0.1);
+  border-color: rgba(99, 102, 241, 0.42);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
 }
 
 .check-row {
@@ -405,7 +412,7 @@ textarea:focus {
 }
 
 .conversation-item.active {
-  box-shadow: 0 8px 22px rgba(28, 31, 30, 0.08);
+  box-shadow: 0 8px 22px rgba(30, 27, 75, 0.08);
 }
 
 .conversation-item h3 {
@@ -595,7 +602,7 @@ textarea:focus {
 }
 
 .message.live .message-bubble {
-  border-color: rgba(20, 127, 120, 0.22);
+  border-color: rgba(99, 102, 241, 0.22);
   background: #fbfffe;
 }
 
@@ -604,8 +611,8 @@ textarea:focus {
 }
 
 .message.located .message-bubble {
-  border-color: rgba(20, 127, 120, 0.55);
-  box-shadow: 0 0 0 3px rgba(20, 127, 120, 0.12), 0 8px 28px rgba(30, 34, 33, 0.04);
+  border-color: rgba(99, 102, 241, 0.55);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12), 0 8px 28px rgba(30, 27, 75, 0.04);
 }
 
 .live-stream-caret {
@@ -698,8 +705,8 @@ textarea:focus {
 }
 
 .message-editor textarea:focus {
-  border-color: rgba(20, 127, 120, 0.45);
-  box-shadow: 0 0 0 3px rgba(20, 127, 120, 0.12);
+  border-color: rgba(99, 102, 241, 0.45);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
   outline: none;
 }
 
@@ -788,7 +795,7 @@ textarea:focus {
 }
 
 .markdown-body blockquote {
-  border-left: 3px solid rgba(20, 127, 120, 0.24);
+  border-left: 3px solid rgba(99, 102, 241, 0.24);
   color: var(--ink-soft);
   padding-left: 12px;
 }
@@ -1042,7 +1049,7 @@ textarea:focus {
 .message-link {
   color: var(--teal-dark);
   font-weight: 700;
-  text-decoration-color: rgba(20, 127, 120, 0.35);
+  text-decoration-color: rgba(99, 102, 241, 0.35);
   text-underline-offset: 3px;
 }
 
@@ -1191,7 +1198,7 @@ textarea:focus {
 }
 
 .artifact-card:hover {
-  border-color: rgba(20, 127, 120, 0.28);
+  border-color: rgba(99, 102, 241, 0.28);
   background: #f6fbfa;
 }
 
@@ -1677,7 +1684,7 @@ textarea:focus {
 
 .change-diff-actions button:hover,
 .change-diff-actions a:hover {
-  border-color: rgba(20, 127, 120, 0.28);
+  border-color: rgba(99, 102, 241, 0.28);
   color: var(--ink);
 }
 
@@ -1805,7 +1812,7 @@ textarea:focus {
 }
 
 .workspace-tabs button.active {
-  border-color: rgba(20, 127, 120, 0.32);
+  border-color: rgba(99, 102, 241, 0.32);
   background: #e8f3f1;
   color: var(--teal-dark);
 }
@@ -2136,7 +2143,7 @@ textarea:focus {
 .thinking-spinner {
   width: 16px;
   height: 16px;
-  border: 2px solid rgba(20, 127, 120, 0.16);
+  border: 2px solid rgba(99, 102, 241, 0.16);
   border-top-color: var(--teal);
   border-radius: 999px;
   animation: spin 780ms linear infinite;
@@ -2180,7 +2187,7 @@ textarea:focus {
 }
 
 .composer-shell.drag-over {
-  border-color: rgba(20, 127, 120, 0.48);
+  border-color: rgba(99, 102, 241, 0.48);
   background: #f4fbf9;
 }
 
@@ -2328,7 +2335,7 @@ textarea:focus {
 }
 
 .chip-button[aria-pressed="true"] {
-  border-color: rgba(20, 127, 120, 0.28);
+  border-color: rgba(99, 102, 241, 0.28);
   background: #e8f3f1;
   color: var(--teal-dark);
   font-weight: 750;

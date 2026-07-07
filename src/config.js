@@ -44,6 +44,9 @@ export const defaultSettings = {
     autoPrune: true,
     autoPruneIntervalMinutes: 360
   },
+  codebaseMemory: {
+    autoMcp: true
+  },
   mcp: {
     probeTimeoutMs: 10000,
     servers: []

@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.*
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -34,6 +35,7 @@ fun SessionListScreen(
     onSelectConversation: (ConversationItem) -> Unit,
     onLogout: () -> Unit,
     onOpenLiveCall: () -> Unit,
+    onOpenWorkspace: () -> Unit,
 ) {
     val conversations by viewModel.conversations.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -63,6 +65,9 @@ fun SessionListScreen(
                     }
                     IconButton(onClick = onOpenLiveCall) {
                         Icon(Icons.Default.Chat, contentDescription = "Live Call")
+                    }
+                    IconButton(onClick = onOpenWorkspace) {
+                        Icon(Icons.Default.Folder, contentDescription = "Workspace")
                     }
                     IconButton(onClick = onLogout) {
                         Icon(Icons.Default.MoreVert, contentDescription = "断开")

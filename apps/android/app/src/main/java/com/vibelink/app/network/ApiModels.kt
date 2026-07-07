@@ -58,6 +58,8 @@ data class SessionListResponse(
 )
 
 data class LiveCallEvent(
+    val question: String = "",
+    val error: String = "",
     val id: String = "",
     val cursor: Int = 0,
     val type: String = "",
@@ -149,6 +151,123 @@ data class TaskEvent(
     val type: String = "",
     val text: String = "",
     val cursor: Int = 0,
+)
+
+
+// Workspace / Git
+
+data class WorkspaceListResponse(
+    val items: List<WorkspaceItem> = emptyList(),
+)
+
+data class WorkspaceItem(
+    val id: String = "",
+    val title: String = "",
+    val path: String = "",
+    @SerializedName("allowedRoot") val allowedRoot: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+    @SerializedName("lastUsedAt") val lastUsedAt: String = "",
+)
+
+data class WorkspaceTreeResponse(
+    val ok: Boolean = false,
+    val workspace: WorkspaceItem? = null,
+    val dir: String = "",
+    val items: List<WorkspaceFileItem> = emptyList(),
+)
+
+data class WorkspaceFileItem(
+    val name: String = "",
+    val path: String = "",
+    val type: String = "",
+    val size: Long = 0,
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class WorkspaceFileResponse(
+    val ok: Boolean = false,
+    val workspace: WorkspaceItem? = null,
+    val path: String = "",
+    @SerializedName("absolutePath") val absolutePath: String = "",
+    val size: Long = 0,
+    @SerializedName("updatedAt") val updatedAt: String = "",
+    val text: String = "",
+    val binary: Boolean = false,
+)
+
+
+data class GitStatusResponse(
+    val ok: Boolean = false,
+    val workspace: WorkspaceItem? = null,
+    val branch: String = "",
+    val files: List<GitStatusItem> = emptyList(),
+    @SerializedName("changedCount") val changedCount: Int = 0,
+    val stdout: String = "",
+    val stderr: String = "",
+    @SerializedName("exitCode") val exitCode: Int = 0,
+)
+
+data class GitStatusItem(
+    val path: String = "",
+    val status: String = "",
+    @SerializedName("oldPath") val oldPath: String = "",
+    val additions: Int = 0,
+    val deletions: Int = 0,
+)
+
+data class GitDiffResponse(
+    val ok: Boolean = false,
+    val workspace: WorkspaceItem? = null,
+    val cwd: String = "",
+    val branch: String = "",
+    val files: List<GitStatusItem> = emptyList(),
+    @SerializedName("changedCount") val changedCount: Int = 0,
+    @SerializedName("fileCount") val fileCount: Int = 0,
+    @SerializedName("lineCount") val lineCount: Int = 0,
+    val diff: String = "",
+    val stdout: String = "",
+    val stderr: String = "",
+    @SerializedName("exitCode") val exitCode: Int = 0,
+)
+
+data class CommandRequest(
+    val command: String,
+    val kind: String = "command",
+    val timeoutMs: Long = 120000,
+)
+
+data class CommandResult(
+    val ok: Boolean = false,
+    val workspace: WorkspaceItem? = null,
+    val cwd: String = "",
+    val command: String = "",
+    val stdout: String = "",
+    val stderr: String = "",
+    @SerializedName("exitCode") val exitCode: Int = 0,
+)
+
+
+data class GitFileActionRequest(
+    val action: String,
+    val path: String,
+)
+
+data class GitActionRequest(
+    val action: String,
+    val message: String = "",
+    val title: String = "",
+)
+
+data class GitActionResponse(
+    val ok: Boolean = false,
+    val action: String = "",
+    val path: String = "",
+    val workspace: WorkspaceItem? = null,
+    val cwd: String = "",
+    val stdout: String = "",
+    val stderr: String = "",
+    val summary: GitDiffResponse? = null,
+    @SerializedName("toolRunId") val toolRunId: String = "",
 )
 
 // ── Tool Events ──

@@ -16,8 +16,14 @@
         "web": "vite --host 0.0.0.0",
         "start": "node src/server.js",
         "dev": "node --watch src/server.js",
-        "android:build": "powershell -ExecutionPolicy Bypass -File apps/android/build-debug.ps1",
-        "android:adb": ".agent-mobile-terminal/android-sdk/platform-tools/adb.exe"
+        "android:build": "cd apps/android && gradlew.bat assembleDebug",
+        "android:adb": ".agent-mobile-terminal/android-sdk/platform-tools/adb.exe",
+        "design:lint": "designmd lint DESIGN.md",
+        "design:diff": "designmd diff DESIGN.md DESIGN.md",
+        "design:export:tailwind": "designmd export --format css-tailwind DESIGN.md",
+        "design:export:dtcg": "designmd export --format dtcg DESIGN.md",
+        "design:spec": "designmd spec",
+        "openapi:gen": "node tools/gen-openapi.mjs > docs/openapi.json"
     },
     "dependencies": {
         "@vitejs/plugin-react": "^4.3.4",
@@ -35,9 +41,13 @@
         "typescript": "^5.7.2",
         "vite": "^6.0.7",
         "web-push": "^3.6.7",
-        "ws": "^8.21.0"
+        "ws": "^8.21.0",
+        "zod": "^4.4.3"
     },
     "engines": {
         "node": ">=22.5.0"
+    },
+    "devDependencies": {
+        "@google/design.md": "^0.3.0"
     }
 }

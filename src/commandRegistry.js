@@ -234,6 +234,26 @@ export function getCommand(id) {
 }
 
 /**
+ * Get structured help for a command. Returns the same data as
+ * the command definition but formatted for display.
+ * When `json` is true, returns the raw definition object.
+ */
+export function describeCommand(id, { json = false } = {}) {
+  const cmd = getCommand(id);
+  if (!cmd) return null;
+  if (json) return cmd;
+  const argsHelp = (cmd.args || []).map((a) =>
+    `${a.required ? "" : "["}${a.name}:${a.type}${a.values ? "=" + a.values.join("|") : ""}${a.required ? "" : "]"}`).join(" ");
+  return {
+    name: cmd.name,
+    description: cmd.description,
+    usage: cmd.usage,
+    args: argsHelp,
+    permission: cmd.permission
+  };
+}
+
+/**
  * Reload skills from disk (called via /api/command-registry/refresh).
  */
 export function refreshSkills() {

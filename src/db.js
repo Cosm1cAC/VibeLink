@@ -369,6 +369,17 @@ export function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_live_call_events_session_cursor ON live_call_events(session_id, cursor);
     CREATE INDEX IF NOT EXISTS idx_live_call_events_session_at ON live_call_events(session_id, event_at);
+
+    CREATE TABLE IF NOT EXISTS mcp_tools (
+      server_name TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      full_name TEXT NOT NULL PRIMARY KEY,
+      title TEXT,
+      description TEXT,
+      input_schema TEXT,
+      discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   try { db.exec("ALTER TABLE tasks ADD COLUMN workspace_id TEXT"); } catch {}
@@ -1929,3 +1940,50 @@ export function listUnifiedEvents({
   results.sort((a, b) => a.cursor - b.cursor);
   return results.slice(0, LIMIT);
 }
+
+// ── MCP tool cache ──
+
+export function storeMcpTools(serverName, tools = []) {
+  const db = database();
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO mcp_tools (server_name, tool_name, full_name, title, description, input_schema, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+  `);
+  db.exec("BEGIN");
+  try {
+    for (const tool of tools) {
+      insert.run(
+        serverName,
+        tool.name || "",
+        tool.fullName || `${serverName}__${tool.name || "unknown"}`,
+        tool.title || "",
+        tool.description || "",
+        tool.inputSchema ? JSON.stringify(tool.inputSchema) : null
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+  return tools.length;
+}
+
+export function getCachedMcpTools() {
+  const rows = database().prepare(`
+    SELECT server_name, tool_name, full_name, title, description, input_schema, discovered_at, last_seen_at
+    FROM mcp_tools
+    ORDER BY server_name, tool_name
+  `).all();
+  return rows.map((row) => ({
+    ...row,
+    inputSchema: row.input_schema ? JSON.parse(row.input_schema) : null
+  }));
+}
+
+export function clearStaleMcpTools(maxAgeDays = 7) {
+  const result = database().prepare(`
+    DELETE FROM mcp_tools WHERE last_seen_at < datetime('now', '-' || ? || ' days')
+  `).run(String(maxAgeDays));
+  return result.changes;
+} 

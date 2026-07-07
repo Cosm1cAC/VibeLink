@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { withAgentReachPath } from "./agentReachRuntime.js";
 import { bridgeAgentToolEvent } from "./agentToolBridge.js";
+import { withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 import { tasksDir } from "./config.js";
 import { insertTaskEvent, listTaskEvents, upsertTask } from "./db.js";
 import { resolveAllowedPath } from "./security.js";
@@ -420,10 +421,10 @@ function securityPolicy(payload, settings) {
 }
 
 function buildEnv(agent, settings, extraEnv = {}) {
-  const env = withAgentReachPath({
+  const env = withCodebaseMemoryPath(withAgentReachPath({
     ...process.env,
     ...extraEnv
-  });
+  }));
 
   if (agent === "claude" && settings.apiKeys?.anthropic) {
     env.ANTHROPIC_API_KEY = settings.apiKeys.anthropic;

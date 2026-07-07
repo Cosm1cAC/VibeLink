@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { storeMcpTools, getCachedMcpTools } from "./db.js";
+import { codebaseMemoryServerConfig, mergeCodebaseMemoryServer, withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const MAX_TOOL_DESCRIPTION = 2048;
@@ -59,9 +61,12 @@ export function buildMcpToolName(serverName = "", toolName = "") {
   return `mcp__${cleanServerName(serverName) || "server"}__${cleanServerName(toolName) || "tool"}`;
 }
 
-export function configuredMcpServers(settings = {}) {
-  return Array.isArray(settings.mcp?.servers)
-    ? settings.mcp.servers.map((server) => ({
+export function configuredMcpServers(settings = {}, discovery = {}) {
+  const withAutoMemory = settings.codebaseMemory?.autoMcp === false
+    ? settings
+    : mergeCodebaseMemoryServer(settings, codebaseMemoryServerConfig(discovery));
+  return Array.isArray(withAutoMemory.mcp?.servers)
+    ? withAutoMemory.mcp.servers.map((server) => ({
         ...server,
         id: cleanServerName(server.id || server.name),
         name: cleanServerName(server.name || server.id),
@@ -117,6 +122,26 @@ function initializeParams() {
   };
 }
 
+function parseMcpFullName(fullName = "") {
+  const parts = String(fullName || "").split("__");
+  if (parts[0] !== "mcp" || parts.length < 3) return { serverId: "", toolName: "" };
+  return {
+    serverId: parts[1] || "",
+    toolName: parts.slice(2).join("__") || ""
+  };
+}
+
+function selectMcpServer(settings = {}, serverId = "") {
+  const target = cleanServerName(serverId || "");
+  return configuredMcpServers(settings).find((server) => server.id === target || server.name === target) || null;
+}
+
+function mcpTextContent(content = []) {
+  return Array.isArray(content)
+    ? content.map((item) => item?.text || item?.data || "").filter(Boolean).join("\n")
+    : "";
+}
+
 async function probeHttpServer(server, timeoutMs, emitProgress) {
   const url = server.url || "";
   if (!url) throw new Error("MCP HTTP server URL is empty.");
@@ -165,6 +190,46 @@ async function probeHttpServer(server, timeoutMs, emitProgress) {
   };
 }
 
+async function callHttpTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
+  const url = server.url || "";
+  if (!url) throw new Error("MCP HTTP server URL is empty.");
+  const headers = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    ...(server.headers || {})
+  };
+  let nextId = 1;
+
+  async function call(method, params) {
+    const body = JSON.stringify(jsonRpcMessage(nextId++, method, params));
+    emitProgress?.({ phase: "http.request", method, url });
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}: ${compact(text, 500)}`);
+      error.status = response.status;
+      throw error;
+    }
+    const trimmed = text.trim();
+    if (!trimmed) return {};
+    if (trimmed.startsWith("data:")) {
+      const dataLine = trimmed.split(/\r?\n/).find((line) => line.startsWith("data:"));
+      return safeJsonParse(dataLine?.slice(5).trim() || "") || {};
+    }
+    return safeJsonParse(trimmed) || {};
+  }
+
+  await call("initialize", initializeParams());
+  await call("notifications/initialized").catch(() => null);
+  const response = await call("tools/call", { name: toolName, arguments: toolArguments || {} });
+  return response.result || response;
+}
+
 async function probeStdioServer(server, timeoutMs, emitProgress) {
   if (!server.command) throw new Error("MCP stdio server command is empty.");
   let nextId = 1;
@@ -174,7 +239,7 @@ async function probeStdioServer(server, timeoutMs, emitProgress) {
   const pending = new Map();
   const child = spawn(server.command, Array.isArray(server.args) ? server.args : [], {
     cwd: server.cwd || process.cwd(),
-    env: { ...process.env, ...(server.env || {}) },
+    env: withCodebaseMemoryPath({ ...process.env, ...(server.env || {}) }),
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"]
   });
@@ -263,6 +328,95 @@ async function probeStdioServer(server, timeoutMs, emitProgress) {
   });
 }
 
+async function callStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
+  if (!server.command) throw new Error("MCP stdio server command is empty.");
+  let nextId = 1;
+  let stdout = "";
+  let stderr = "";
+  let settled = false;
+  const pending = new Map();
+  const child = spawn(server.command, Array.isArray(server.args) ? server.args : [], {
+    cwd: server.cwd || process.cwd(),
+    env: withCodebaseMemoryPath({ ...process.env, ...(server.env || {}) }),
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+
+  const closeChild = () => {
+    try { child.stdin?.end(); } catch {}
+    try { child.kill(); } catch {}
+  };
+
+  function rejectAll(error) {
+    for (const { reject } of pending.values()) reject(error);
+    pending.clear();
+  }
+
+  function write(message) {
+    emitProgress?.({ phase: "stdio.send", method: message.method, id: message.id });
+    child.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
+  }
+
+  function request(method, params) {
+    const id = nextId++;
+    const message = jsonRpcMessage(id, method, params);
+    const promise = new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject, method });
+    });
+    write(message);
+    return promise;
+  }
+
+  child.stdout?.on("data", (chunk) => {
+    stdout += chunk.toString();
+    if (stdout.length > MAX_STDIO_BUFFER) stdout = stdout.slice(-MAX_STDIO_BUFFER);
+    let newline = stdout.indexOf("\n");
+    while (newline >= 0) {
+      const line = stdout.slice(0, newline).trim();
+      stdout = stdout.slice(newline + 1);
+      const message = safeJsonParse(line);
+      if (message?.id !== undefined && pending.has(message.id)) {
+        const pendingRequest = pending.get(message.id);
+        pending.delete(message.id);
+        emitProgress?.({ phase: "stdio.receive", method: pendingRequest.method, id: message.id });
+        if (message.error) pendingRequest.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        else pendingRequest.resolve(message);
+      }
+      newline = stdout.indexOf("\n");
+    }
+  });
+
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString();
+    if (stderr.length > MAX_STDIO_BUFFER) stderr = stderr.slice(-MAX_STDIO_BUFFER);
+    emitProgress?.({ phase: "stdio.stderr", text: compact(chunk.toString(), 500) });
+  });
+
+  child.on("error", (error) => rejectAll(error));
+  child.on("exit", (code) => {
+    if (settled) return;
+    rejectAll(new Error(`MCP stdio server exited before tool call completed with code ${code ?? "unknown"}.`));
+  });
+
+  return withTimeout(
+    (async () => {
+      await request("initialize", initializeParams());
+      write(jsonRpcMessage(undefined, "notifications/initialized"));
+      const response = await request("tools/call", { name: toolName, arguments: toolArguments || {} });
+      settled = true;
+      closeChild();
+      return { result: response.result || response, stderr: compact(stderr, 4000) };
+    })(),
+    timeoutMs,
+    closeChild
+  ).catch((error) => {
+    settled = true;
+    closeChild();
+    error.stderr = stderr;
+    throw error;
+  });
+}
+
 export async function probeMcpServer(server = {}, { timeoutMs = 10000, emitProgress = null } = {}) {
   const startedAt = nowIso();
   const normalized = {
@@ -320,6 +474,9 @@ export async function probeMcpServers(settings = {}, { serverId = "", timeoutMs 
   for (const server of servers) {
     emitProgress?.({ phase: "server.start", serverId: server.id, name: server.name, type: server.type });
     const result = await probeMcpServer(server, { timeoutMs: effectiveTimeout, emitProgress });
+    if (result.ok && result.tools?.length) {
+      try { storeMcpTools(result.server?.name || server.name, result.tools); } catch {}
+    }
     results.push(result);
     emitProgress?.({ phase: "server.done", serverId: server.id, status: result.status, toolCount: result.toolCount || 0 });
   }
@@ -333,13 +490,102 @@ export async function probeMcpServers(settings = {}, { serverId = "", timeoutMs 
   };
 }
 
+export async function callMcpTool(settings = {}, call = {}, { timeoutMs = 0, emitProgress = null } = {}) {
+  const parsed = parseMcpFullName(call.fullName || call.name || "");
+  const serverId = call.serverId || parsed.serverId;
+  const toolName = call.toolName || parsed.toolName;
+  const server = selectMcpServer(settings, serverId);
+  const effectiveTimeout = timeoutMs || call.timeoutMs || settings.mcp?.callTimeoutMs || settings.mcp?.probeTimeoutMs || 10000;
+  const startedAt = nowIso();
+
+  if (!serverId || !server) {
+    return {
+      ok: false,
+      status: "not-found",
+      error: `MCP server not found: ${serverId || "(empty)"}`,
+      server: null,
+      toolName,
+      content: [],
+      startedAt,
+      completedAt: nowIso()
+    };
+  }
+  if (!toolName) {
+    return {
+      ok: false,
+      status: "invalid-input",
+      error: "MCP tool name is required.",
+      server: publicMcpServers({ mcp: { servers: [server] } })[0],
+      toolName: "",
+      content: [],
+      startedAt,
+      completedAt: nowIso()
+    };
+  }
+  if (server.enabled === false) {
+    return {
+      ok: false,
+      status: "disabled",
+      error: "MCP server is disabled.",
+      server: publicMcpServers({ mcp: { servers: [server] } })[0],
+      toolName,
+      content: [],
+      startedAt,
+      completedAt: nowIso()
+    };
+  }
+
+  try {
+    emitProgress?.({ phase: "tool.call.start", serverId: server.id, name: server.name, toolName });
+    const resultEnvelope = server.type === "stdio"
+      ? await callStdioTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress)
+      : { result: await callHttpTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress) };
+    const result = resultEnvelope.result || {};
+    const content = Array.isArray(result.content) ? result.content : [];
+    const ok = result.isError !== true;
+    return {
+      ok,
+      status: ok ? "completed" : "tool-error",
+      transport: server.type === "stdio" ? "stdio" : "http",
+      server: publicMcpServers({ mcp: { servers: [server] } })[0],
+      toolName,
+      fullName: buildMcpToolName(server.name, toolName),
+      content,
+      result,
+      error: ok ? "" : compact(mcpTextContent(content) || "MCP tool returned an error.", 1000),
+      stderr: resultEnvelope.stderr || "",
+      startedAt,
+      completedAt: nowIso()
+    };
+  } catch (error) {
+    const status = error.status === 401 || error.status === 403 ? "needs-auth" : error.code === "ETIMEDOUT" ? "timeout" : "failed";
+    return {
+      ok: false,
+      status,
+      transport: server.type === "stdio" ? "stdio" : "http",
+      server: publicMcpServers({ mcp: { servers: [server] } })[0],
+      toolName,
+      fullName: buildMcpToolName(server.name, toolName),
+      content: [],
+      result: null,
+      error: error.message,
+      stderr: compact(error.stderr || "", 4000),
+      startedAt,
+      completedAt: nowIso()
+    };
+  }
+}
+
 export function mcpStatus(settings = {}) {
   const servers = publicMcpServers(settings);
+  let cachedCount = 0;
+  try { cachedCount = getCachedMcpTools().length; } catch {}
   return {
     ok: true,
     configured: servers.length,
     enabled: servers.filter((server) => server.enabled).length,
     servers,
+    cachedTools: cachedCount,
     probeTimeoutMs: settings.mcp?.probeTimeoutMs || 10000
   };
 }

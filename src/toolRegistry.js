@@ -16,6 +16,14 @@ const TOOL_DEFINITIONS = [
         reasoningEffort: { type: "string" },
         security: { type: "object" }
       }
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task ID" },
+        sessionId: { type: "string", description: "Session ID for SSE event streaming" },
+        status: { type: "string", enum: ["pending", "running", "done", "failed"], description: "Task lifecycle status" }
+      }
     }
   },
   {
@@ -33,6 +41,16 @@ const TOOL_DEFINITIONS = [
         timeoutMs: { type: "number" }
       },
       required: ["command"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        stdout: { type: "string", description: "Captured standard output" },
+        stderr: { type: "string", description: "Captured standard error" },
+        exitCode: { type: "integer", description: "Process exit code" },
+        timedOut: { type: "boolean", description: "Whether the command timed out" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
     }
   },
   {
@@ -50,6 +68,16 @@ const TOOL_DEFINITIONS = [
         timeoutMs: { type: "number" }
       },
       required: ["command"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        stdout: { type: "string", description: "Captured standard output" },
+        stderr: { type: "string", description: "Captured standard error" },
+        exitCode: { type: "integer", description: "Process exit code" },
+        timedOut: { type: "boolean", description: "Whether the test timed out" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
     }
   },
   {
@@ -70,6 +98,15 @@ const TOOL_DEFINITIONS = [
         rows: { type: "number" }
       },
       required: ["workspaceId"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Terminal session ID" },
+        cols: { type: "integer", description: "Terminal width in columns" },
+        rows: { type: "integer", description: "Terminal height in rows" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
     }
   },
   {
@@ -87,6 +124,14 @@ const TOOL_DEFINITIONS = [
         title: { type: "string" }
       },
       required: ["action"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        stdout: { type: "string", description: "Git command output" },
+        exitCode: { type: "integer", description: "Process exit code" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
     }
   },
   {
@@ -103,6 +148,14 @@ const TOOL_DEFINITIONS = [
         path: { type: "string" }
       },
       required: ["action", "path"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        applied: { type: "boolean", description: "Whether the file operation was applied" },
+        patch: { type: "string", description: "Resulting diff output" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
     }
   },
   {
@@ -111,7 +164,19 @@ const TOOL_DEFINITIONS = [
     label: "Doctor",
     permission: "system.diagnose",
     risk: "low",
-    description: "Run local bridge health checks for runtime, CLI, Git, credentials, network, Desktop remote, and event storage."
+    description: "Run local bridge health checks for runtime, CLI, Git, credentials, network, Desktop remote, and event storage.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        runtime: { type: "object", description: "Node.js version, platform, uptime" },
+        cli: { type: "object", description: "Installed CLI tools and versions" },
+        git: { type: "object", description: "Git configuration status" },
+        credentials: { type: "object", description: "API key availability" },
+        network: { type: "object", description: "Network reachability" },
+        desktop: { type: "object", description: "Desktop remote status" },
+        events: { type: "object", description: "Event storage health" }
+      }
+    }
   },
   {
     name: "system.codex_app_server_probe",
@@ -119,7 +184,14 @@ const TOOL_DEFINITIONS = [
     label: "Codex app-server probe",
     permission: "system.probe",
     risk: "medium",
-    description: "Run the Codex app-server compatibility probe and record structured results."
+    description: "Run the Codex app-server compatibility probe and record structured results.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        result: { type: "object", description: "Probe result with capabilities and compatibility" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
   },
   {
     name: "desktop.draft_probe",
@@ -127,7 +199,14 @@ const TOOL_DEFINITIONS = [
     label: "Desktop draft probe",
     permission: "desktop.probe",
     risk: "medium",
-    description: "Probe Codex Desktop composer access without sending a user task."
+    description: "Probe Codex Desktop composer access without sending a user task.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        result: { type: "object", description: "Probe result with composer state" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
   },
   {
     name: "mcp.status",
@@ -135,7 +214,13 @@ const TOOL_DEFINITIONS = [
     label: "MCP status",
     permission: "plugin.mcp",
     risk: "low",
-    description: "List configured MCP servers known to VibeLink."
+    description: "List configured MCP servers known to VibeLink.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        servers: { type: "array", items: { type: "object" }, description: "Configured MCP server names and status" }
+      }
+    }
   },
   {
     name: "mcp.probe",
@@ -143,7 +228,43 @@ const TOOL_DEFINITIONS = [
     label: "MCP probe",
     permission: "plugin.mcp",
     risk: "medium",
-    description: "Connect to configured MCP servers and read their tools/list metadata through the VibeLink runtime."
+    description: "Connect to configured MCP servers and read their tools/list metadata through the VibeLink runtime.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        results: { type: "array", items: { type: "object" }, description: "Per-server probe results with discovered tools" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "mcp.call",
+    kind: "plugin",
+    label: "MCP tool call",
+    permission: "plugin.mcp",
+    risk: "medium",
+    description: "Call a configured MCP tool through the VibeLink runtime and record the result.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+        toolName: { type: "string" },
+        fullName: { type: "string", description: "Optional full VibeLink MCP tool name, e.g. mcp__server__tool." },
+        arguments: { type: "object" },
+        timeoutMs: { type: "number" }
+      }
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        status: { type: "string" },
+        server: { type: "object" },
+        toolName: { type: "string" },
+        content: { type: "array", items: { type: "object" } },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
   },
   {
     name: "browser.fetch",
@@ -151,7 +272,27 @@ const TOOL_DEFINITIONS = [
     label: "Browser fetch",
     permission: "browser.operate",
     risk: "medium",
-    description: "Fetch an HTTP or HTTPS page, extract metadata and text summary, and record the operation as a runtime tool."
+    description: "Fetch an HTTP or HTTPS page, extract metadata and text summary, and record the operation as a runtime tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        method: { type: "string", enum: ["GET", "POST"] },
+        headers: { type: "object" },
+        body: { type: "string" }
+      },
+      required: ["url"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        html: { type: "string", description: "Raw HTML content" },
+        text: { type: "string", description: "Extracted text summary" },
+        url: { type: "string", description: "Final URL after redirects" },
+        statusCode: { type: "integer", description: "HTTP response status code" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
   },
   {
     name: "shell_command",
@@ -159,7 +300,15 @@ const TOOL_DEFINITIONS = [
     label: "Shell command",
     permission: "agent.tool.shell",
     risk: "high",
-    description: "Observed upstream shell command tool call."
+    description: "Observed upstream shell command tool call.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        stdout: { type: "string", description: "Standard output from the command" },
+        stderr: { type: "string", description: "Standard error from the command" },
+        exitCode: { type: "integer", description: "Command exit code" }
+      }
+    }
   },
   {
     name: "exec_command",
@@ -167,7 +316,15 @@ const TOOL_DEFINITIONS = [
     label: "Exec command",
     permission: "agent.tool.shell",
     risk: "high",
-    description: "Observed upstream command execution tool call."
+    description: "Observed upstream command execution tool call.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        stdout: { type: "string", description: "Standard output from the command" },
+        stderr: { type: "string", description: "Standard error from the command" },
+        exitCode: { type: "integer", description: "Command exit code" }
+      }
+    }
   },
   {
     name: "apply_patch",
@@ -175,7 +332,15 @@ const TOOL_DEFINITIONS = [
     label: "Patch edit",
     permission: "agent.tool.file.write",
     risk: "medium",
-    description: "Observed upstream patch edit tool call."
+    description: "Observed upstream patch edit tool call.",
+    outputSchema: {
+      type: "object",
+      properties: {
+        applied: { type: "boolean", description: "Whether the patch was applied" },
+        path: { type: "string", description: "Target file path" },
+        diff: { type: "string", description: "Resulting diff" }
+      }
+    }
   },
   {
     name: "mcp.*",
@@ -183,7 +348,8 @@ const TOOL_DEFINITIONS = [
     label: "MCP tool",
     permission: "plugin.mcp",
     risk: "medium",
-    description: "Observed MCP or plugin tool call."
+    description: "Observed MCP or plugin tool call.",
+    outputSchema: null
   },
   {
     name: "browser.*",
@@ -191,7 +357,8 @@ const TOOL_DEFINITIONS = [
     label: "Browser tool",
     permission: "browser.operate",
     risk: "medium",
-    description: "Observed browser automation tool call."
+    description: "Observed browser automation tool call.",
+    outputSchema: null
   },
   {
     name: "approval.*",
@@ -199,9 +366,30 @@ const TOOL_DEFINITIONS = [
     label: "Approval",
     permission: "approval.decide",
     risk: "high",
-    description: "Approval request or decision event."
+    description: "Approval request or decision event.",
+    outputSchema: null
   }
 ];
+
+function normalizeCachedMcpTool(tool = {}) {
+  const name = tool.fullName || tool.full_name || "";
+  if (!name) return null;
+  return {
+    name,
+    kind: "plugin",
+    label: tool.title || tool.tool_name || tool.toolName || name,
+    permission: "plugin.mcp",
+    risk: "medium",
+    description: tool.description || "Discovered MCP tool.",
+    inputSchema: tool.inputSchema || tool.input_schema || null,
+    outputSchema: null,
+    source: {
+      type: "mcp",
+      server: tool.server_name || tool.serverName || "",
+      toolName: tool.tool_name || tool.toolName || ""
+    }
+  };
+}
 
 function matchesPattern(name, pattern) {
   if (pattern === name) return true;
@@ -239,8 +427,19 @@ function fallbackDefinition(toolName = "") {
   };
 }
 
-export function listToolRegistry() {
-  return TOOL_DEFINITIONS.map((item) => ({ ...item }));
+export function listToolRegistry({ mcpTools = [] } = {}) {
+  const dynamicMcpTools = Array.isArray(mcpTools)
+    ? mcpTools.map(normalizeCachedMcpTool).filter(Boolean)
+    : [];
+  const seen = new Set(TOOL_DEFINITIONS.map((item) => item.name));
+  return [
+    ...TOOL_DEFINITIONS.map((item) => ({ ...item })),
+    ...dynamicMcpTools.filter((item) => {
+      if (seen.has(item.name)) return false;
+      seen.add(item.name);
+      return true;
+    })
+  ];
 }
 
 export function getToolDefinition(toolName = "") {

@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { URL } from "node:url";
 import QRCode from "qrcode";
 import { agentReachInstallInfo, withAgentReachPath } from "./agentReachRuntime.js";
+import { codebaseMemoryInstallInfo } from "./codebaseMemoryRuntime.js";
 import { attachmentsDir, getNetworkAddresses, publicDir } from "./config.js";
 import {
   attachToolRunToTask,
@@ -16,6 +17,7 @@ import {
   denyPairingSession,
   getDbPath,
   getApprovalRequest,
+  getCachedMcpTools,
   getPairingSession,
   getToolRun,
   findWorkspaceForPath,
@@ -81,7 +83,8 @@ import { writeApiKeys } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
 import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
-import { mcpStatus, probeMcpServers } from "./mcpRuntime.js";
+import { callMcpTool, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
+import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
   approveToolApproval,
   createAgentTaskToolRun,
@@ -96,6 +99,7 @@ import {
   subscribeToolEvents
 } from "./toolRuntime.js";
 import { listToolRegistry } from "./toolRegistry.js";
+import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, BrowserFetchSchema } from "./validation.js";
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
@@ -262,6 +266,53 @@ function sendError(response, status, message) {
   sendJson(response, status, { error: message });
 }
 
+/**
+ * Pick a subset of fields from an object based on a comma-separated list.
+ * Supports dot-notation for nested fields: "id,events.type,events.status"
+ */
+function pickFields(obj, fieldsStr) {
+  if (!fieldsStr || typeof obj !== "object" || obj === null) return obj;
+  const fields = fieldsStr.split(",").map((f) => f.trim()).filter(Boolean);
+  if (!fields.length) return obj;
+  const result = {};
+  for (const field of fields) {
+    const parts = field.split(".");
+    let val = obj;
+    for (const part of parts) {
+      if (val == null || typeof val !== "object") { val = undefined; break; }
+      val = val[part];
+    }
+    if (val !== undefined) {
+      // Build nested structure: "events.status" -> { events: { status } }
+      let target = result;
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!target[parts[i]] || typeof target[parts[i]] !== "object") target[parts[i]] = {};
+        target = target[parts[i]];
+      }
+      target[parts[parts.length - 1]] = val;
+    }
+  }
+  return result;
+}
+
+/**
+ * Apply ?fields= query parameter filtering to an array of items.
+ * If fields is not specified, returns items as-is.
+ */
+function applyFields(items, url) {
+  const fields = url.searchParams.get("fields");
+  if (!fields || !Array.isArray(items)) return items;
+  return items.map((item) => pickFields(item, fields));
+}
+
+/**
+ * Check if a request has ?dryRun=1 or ?dryRun=true.
+ */
+function isDryRun(url) {
+  const v = url.searchParams.get("dryRun");
+  return v === "1" || v === "true";
+}
+
 async function readBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
@@ -311,6 +362,10 @@ function audit(request, url, auth, event) {
 
 function enforceRateLimit(request, response, url, scope, options = {}, auth = null, extra = "") {
   const result = checkRateLimit(rateLimitKey(request, scope, extra), options);
+  // Always set rate limit headers
+  response.setHeader("X-RateLimit-Limit", String(result.limit));
+  response.setHeader("X-RateLimit-Remaining", String(Math.max(0, result.limit - result.count)));
+  response.setHeader("X-RateLimit-Reset", String(new Date(result.resetAt).getTime()));
   if (result.ok) return true;
   response.writeHead(429, {
     "Content-Type": "application/json; charset=utf-8",
@@ -729,6 +784,25 @@ async function executeBrowserFetchToolRun(toolRunId) {
   });
 }
 
+async function executeMcpCallToolRun(toolRunId, settingsValue) {
+  return runWorkspaceToolAction({
+    toolRunId,
+    startedText: (input) => input.fullName || ["mcp", input.serverId || "", input.toolName || ""].join("__"),
+    completedText: "MCP call completed.",
+    failedText: "MCP call failed.",
+    execute: async (input) => callMcpTool(settingsValue, input, {
+      timeoutMs: Number(input.timeoutMs || 0),
+      emitProgress: (event) => {
+        emitToolEvent(toolRunId, {
+          type: "tool.output",
+          text: [event.phase, event.name || event.serverId || event.method || event.toolName || "", event.status || ""].filter(Boolean).join(" "),
+          payload: event
+        });
+      }
+    })
+  });
+}
+
 function runnableApprovedToolRun(toolRunId) {
   const run = getToolRun(toolRunId);
   if (!run) return false;
@@ -774,6 +848,15 @@ async function resumeApprovedToolRun(approval, settingsValue, request, url, auth
       success: Boolean(result.ok),
       target: result.finalUrl || result.url || approval.toolRunId,
       reason: result.ok ? "" : result.statusText || "Browser fetch failed",
+      meta: { approvedByApprovalId: approval.id, toolRunId: approval.toolRunId, resumed: true }
+    });
+  } else if (approval.kind === "mcp.call") {
+    result = await executeMcpCallToolRun(approval.toolRunId, settingsValue);
+    audit(request, url, auth, {
+      type: "mcp.call",
+      success: Boolean(result.ok),
+      target: result.fullName || approval.toolRunId,
+      reason: result.ok ? "" : result.error || "MCP call failed",
       meta: { approvedByApprovalId: approval.id, toolRunId: approval.toolRunId, resumed: true }
     });
   } else if (approval.kind === "workspace.terminal_session") {
@@ -967,6 +1050,7 @@ async function buildDoctorReport(request) {
   const workspaces = getWorkspaces(settings);
   const trusted = settings.security?.trustedWorkspaces || [];
   const mcp = mcpStatus(settings);
+  const codebaseMemory = codebaseMemoryInstallInfo();
   const sandbox = sandboxDoctorStatus(settings);
   const terminal = terminalCapabilityReport();
   const hasAnyModelKey = Boolean(publicSettingsValue.hasOpenAIKey || publicSettingsValue.hasAnthropicKey);
@@ -990,6 +1074,7 @@ async function buildDoctorReport(request) {
     doctorCheck("sandbox-policy", sandbox.enabled, "Sandbox policy", `${sandbox.backend}, mode=${sandbox.mode}, network=${sandbox.networkAccess ? "enabled" : "approval required"}`, "warn"),
     doctorCheck("terminal-runtime", terminal.fallbackAvailable, "Terminal runtime", terminal.ptyAvailable ? "PTY backend available" : terminal.reason, terminal.fallbackAvailable ? "warn" : "error"),
     doctorCheck("mcp-config", true, "MCP servers", `${mcp.enabled}/${mcp.configured} enabled`, "warn"),
+    doctorCheck("codebase-memory-mcp", codebaseMemory.available, "Codebase memory MCP", codebaseMemory.server?.command || "not installed", "warn"),
     doctorCheck("trusted-workspaces", !settings.security?.requireTrustedWorkspace || trusted.length > 0, "Trusted workspaces", trusted.length ? `${trusted.length} configured` : "none configured"),
     doctorCheck("workspace-count", workspaces.length > 0, "Workspaces", `${workspaces.length} known`)
   ];
@@ -1029,6 +1114,7 @@ async function buildDoctorReport(request) {
       ...agentReach,
       install: agentReachInstallInfo()
     },
+    codebaseMemory,
     toolEvents: toolStats,
     mcp,
     desktop,
@@ -1380,7 +1466,7 @@ async function routeApi(request, response, url) {
       limit: Number(url.searchParams.get("limit") || 100)
     }).map((approval) => (approval?.status === "expired" ? expireToolApproval(approval.id) : approval));
     sendJson(response, 200, {
-      items: approvals
+      items: applyFields(approvals, url)
     });
     return;
   }
@@ -1445,11 +1531,11 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/tool-runs" && request.method === "GET") {
     sendJson(response, 200, {
-      items: listToolRuns({
+      items: applyFields(listToolRuns({
         workspaceId: url.searchParams.get("workspaceId") || "",
         taskId: url.searchParams.get("taskId") || "",
         limit: Number(url.searchParams.get("limit") || 100)
-      })
+      }), url)
     });
     return;
   }
@@ -1500,7 +1586,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/tool-registry" && request.method === "GET") {
-    sendJson(response, 200, { items: listToolRegistry() });
+    sendJson(response, 200, { items: applyFields(listToolRegistry({ mcpTools: getCachedMcpTools() }), url) });
     return;
   }
 
@@ -1512,10 +1598,11 @@ async function routeApi(request, response, url) {
   if (url.pathname === "/api/tool-events/prune" && request.method === "POST") {
     const body = await readBody(request);
     const retention = toolEventsRetention(settings);
+    const dryRun = isDryRun(url) || body.dryRun !== false;
     const result = pruneToolEvents({
       before: body.before || retention.cutoff,
       keepLatest: body.keepLatest ?? retention.keepLatest,
-      dryRun: body.dryRun !== false
+      dryRun
     });
     audit(request, url, auth, {
       type: "tool_events.prune",
@@ -1590,11 +1677,99 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/mcp/call" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "mcp.call", { limit: 40, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    const targetName = body.fullName || ["mcp", body.serverId || "", body.toolName || ""].join("__");
+    const risk = mcpCallApprovalRisk(body, settings.security || {});
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        wouldCall: {
+          serverId: body.serverId || "",
+          toolName: body.toolName || "",
+          fullName: body.fullName || "",
+          argumentKeys: body.arguments && typeof body.arguments === "object" ? Object.keys(body.arguments) : []
+        },
+        approvalRequired: risk.required,
+        risk: { reasons: risk.reasons, matches: risk.matches }
+      });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      toolName: "mcp.call",
+      title: `MCP call ${targetName}`,
+      input: {
+        serverId: body.serverId || "",
+        toolName: body.toolName || "",
+        fullName: body.fullName || "",
+        arguments: body.arguments && typeof body.arguments === "object" ? body.arguments : {},
+        argumentKeys: body.arguments && typeof body.arguments === "object" ? Object.keys(body.arguments) : [],
+        timeoutMs: Number(body.timeoutMs || 0),
+        risk
+      }
+    });
+
+    if (risk.required) {
+      const approval = requestToolApproval({
+        toolRunId: toolRun.id,
+        kind: "mcp.call",
+        title: "Approve MCP tool call",
+        reason: risk.reasons.join("; "),
+        request: { serverId: body.serverId || "", toolName: body.toolName || "", fullName: body.fullName || "", argumentKeys: Object.keys(body.arguments || {}) },
+        risk
+      });
+      audit(request, url, auth, {
+        type: "mcp.call_approval_required",
+        success: false,
+        target: targetName,
+        reason: risk.reasons.join("; "),
+        meta: { approvalId: approval.id, toolRunId: toolRun.id, risk }
+      });
+      sendJson(response, 428, {
+        error: `MCP call requires explicit approval: ${risk.reasons.join(", ")}`,
+        approval,
+        approvalId: approval.id,
+        toolRun,
+        toolRunId: toolRun.id,
+        reasons: risk.reasons,
+        matches: risk.matches,
+        policy: { approvalPolicy: settings.security?.approvalPolicy || "" }
+      });
+      return;
+    }
+
+    const result = await executeMcpCallToolRun(toolRun.id, settings);
+    audit(request, url, auth, {
+      type: "mcp.call",
+      success: Boolean(result.ok),
+      target: result.fullName || targetName,
+      reason: result.ok ? "" : result.error || "MCP call failed",
+      meta: { toolRunId: toolRun.id, risk }
+    });
+    sendJson(response, result.ok ? 200 : 409, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
   if (url.pathname === "/api/browser/fetch" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "browser.fetch", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
+    const validation = validate(BrowserFetchSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
     const targetUrl = String(body.url || "").trim();
     const risk = browserFetchRisk(targetUrl, settings.security || {});
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        url: targetUrl,
+        approvalRequired: risk.required,
+        risk: { reasons: risk.reasons, matches: risk.matches }
+      });
+      return;
+    }
     const toolRun = createWorkspaceActionToolRun({
       toolName: "browser.fetch",
       title: targetUrl || "Browser fetch",
@@ -1673,23 +1848,28 @@ async function routeApi(request, response, url) {
       return;
     }
     sendJson(response, 200, {
-      items: listToolEvents({
+      items: applyFields(listToolEvents({
         ...filter,
         limit: Number(url.searchParams.get("limit") || 1000)
-      })
+      }), url)
     });
     return;
   }
 
   if (url.pathname === "/api/live-calls" && request.method === "GET") {
-    sendJson(response, 200, { items: listLiveCallSessions() });
+    sendJson(response, 200, { items: applyFields(listLiveCallSessions(), url) });
     return;
   }
 
   if (url.pathname === "/api/live-calls" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "live_call.create", { limit: 20, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
-    const session = createLiveCallSession({ title: body.title, source: body.source });
+    const session = createLiveCallSession({
+      title: body.title,
+      source: body.source,
+      workspaceId: body.workspaceId,
+      asrProvider: body.asrProvider
+    });
     audit(request, url, auth, { type: "live_call.create", success: true, target: session.id, meta: { source: session.source } });
     if (session?.id) {
       setLiveCallQuestionHook(session.id, (question, sess) => {
@@ -1754,7 +1934,7 @@ async function routeApi(request, response, url) {
       sendError(response, 404, "Live call session not found.");
       return;
     }
-    sendJson(response, 200, { items });
+    sendJson(response, 200, { items: applyFields(items, url) });
     return;
   }
 
@@ -1767,7 +1947,7 @@ async function routeApi(request, response, url) {
       after: Number(url.searchParams.get("after") || 0),
       limit: Number(url.searchParams.get("limit") || 200)
     });
-    sendJson(response, 200, { items });
+    sendJson(response, 200, { items: applyFields(items, url) });
     return;
   }
 
@@ -1775,7 +1955,7 @@ async function routeApi(request, response, url) {
   if (url.pathname === "/api/command-registry" && request.method === "GET") {
     const filter = url.searchParams.get("filter") || "";
     const items = getCommands(filter);
-    sendJson(response, 200, { items });
+    sendJson(response, 200, { items: applyFields(items, url) });
     return;
   }
   if (url.pathname === "/api/command-registry/refresh" && request.method === "POST") {
@@ -1822,7 +2002,21 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/settings" && request.method === "POST") {
     const body = await readBody(request);
+    const validation = validate(SettingsPatchSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
     const patch = sanitizeSettingsPatch(body);
+    if (isDryRun(url)) {
+      const currentPublic = await publicSettings(settings);
+      const diff = {};
+      for (const key of Object.keys(patch)) {
+        diff[key] = { from: currentPublic[key], to: patch[key] };
+      }
+      sendJson(response, 200, { dryRun: true, diff, wouldChange: Object.keys(diff).length > 0 });
+      return;
+    }
     const credentialResult = patch.apiKeys ? await writeApiKeys(patch.apiKeys) : {};
     settings = {
       ...settings,
@@ -1841,13 +2035,24 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/openapi.json" && request.method === "GET") {
+    const openapiPath = path.join(publicDir, "..", "docs", "openapi.json");
+    if (fs.existsSync(openapiPath)) {
+      const content = fs.readFileSync(openapiPath, "utf8");
+      sendJson(response, 200, JSON.parse(content));
+    } else {
+      sendError(response, 404, "OpenAPI spec not found. Run: node tools/gen-openapi.mjs > docs/openapi.json");
+    }
+    return;
+  }
+
   if (url.pathname === "/api/cloudflare/guide" && request.method === "GET") {
     sendJson(response, 200, cloudflareGuide(request, settings));
     return;
   }
 
   if (url.pathname === "/api/devices" && request.method === "GET") {
-    sendJson(response, 200, { items: listDevices(), currentDeviceId: auth.device?.id || "" });
+    sendJson(response, 200, { items: applyFields(listDevices(), url), currentDeviceId: auth.device?.id || "" });
     return;
   }
 
@@ -1885,7 +2090,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/pairing-sessions" && request.method === "GET") {
-    sendJson(response, 200, { items: listPairingSessions({ status: url.searchParams.get("status") || "pending" }) });
+    sendJson(response, 200, { items: applyFields(listPairingSessions({ status: url.searchParams.get("status") || "pending" }), url) });
     return;
   }
 
@@ -1915,10 +2120,10 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/audit-log" && request.method === "GET") {
     sendJson(response, 200, {
-      items: listAuditLogs({
+      items: applyFields(listAuditLogs({
         after: Number(url.searchParams.get("after") || 0),
         limit: Number(url.searchParams.get("limit") || 200)
-      })
+      }), url)
     });
     return;
   }
@@ -1945,12 +2150,17 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/workspaces" && request.method === "GET") {
-    sendJson(response, 200, { items: getWorkspaces(settings) });
+    sendJson(response, 200, { items: applyFields(getWorkspaces(settings), url) });
     return;
   }
 
   if (url.pathname === "/api/workspaces" && request.method === "POST") {
     const body = await readBody(request);
+    if (isDryRun(url)) {
+      const validation = { name: body.name || "", path: body.path || "", allowedRoot: body.allowedRoot || "" };
+      sendJson(response, 200, { dryRun: true, wouldValidate: validation, wouldCreate: !!(body.name && body.path) });
+      return;
+    }
     sendJson(response, 201, { workspace: createWorkspace(body, settings) });
     return;
   }
@@ -2033,6 +2243,16 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     const workspaceId = workspaceGitActionMatch[1];
     const action = String(body.action || "").trim().toLowerCase();
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        workspaceId,
+        action,
+        message: body.message || "",
+        wouldExecute: true
+      });
+      return;
+    }
     const toolRun = createWorkspaceActionToolRun({
       workspaceId,
       toolName: "workspace.git_action",
@@ -2076,6 +2296,11 @@ async function routeApi(request, response, url) {
   const workspaceCommandMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/command$/);
   if (workspaceCommandMatch && request.method === "POST") {
     const body = await readBody(request);
+    const validation = validate(CommandInputSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
     const workspaceId = workspaceCommandMatch[1];
     const kind = body.kind === "test" ? "test" : "terminal";
     let workspacePath = "";
@@ -2086,6 +2311,24 @@ async function routeApi(request, response, url) {
       return;
     }
     const commandRisk = workspaceCommandApprovalRisk(body.command || "", workspacePath, settings.security || {});
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        workspaceId,
+        command: body.command || "",
+        kind,
+        approvalRequired: commandRisk.required,
+        risk: {
+          reasons: commandRisk.reasons,
+          matches: commandRisk.matches,
+          policy: {
+            networkAccess: settings.security?.networkAccess !== false,
+            sandboxMode: settings.security?.sandboxMode || ""
+          }
+        }
+      });
+      return;
+    }
     const taskId = typeof body.taskId === "string" && getTask(body.taskId) ? body.taskId : "";
     const toolRun = createWorkspaceCommandToolRun({
       workspaceId,
@@ -2252,7 +2495,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/terminal-sessions" && request.method === "GET") {
-    sendJson(response, 200, { items: listTerminalSessions() });
+    sendJson(response, 200, { items: applyFields(listTerminalSessions(), url) });
     return;
   }
 
@@ -2370,7 +2613,7 @@ async function routeApi(request, response, url) {
       after: Number(url.searchParams.get("after") || 0),
       limit: Number(url.searchParams.get("limit") || 100)
     });
-    sendJson(response, 200, { items: result });
+    sendJson(response, 200, { items: applyFields(result, url) });
     return;
   }
 
@@ -2424,7 +2667,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/histories" && request.method === "GET") {
-    sendJson(response, 200, { items: listHistories({ fresh: url.searchParams.get("fresh") === "1" }) });
+    sendJson(response, 200, { items: applyFields(listHistories({ fresh: url.searchParams.get("fresh") === "1" }), url) });
     return;
   }
 
@@ -2460,21 +2703,32 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/tasks" && request.method === "GET") {
-    sendJson(response, 200, { items: getTasks() });
+    sendJson(response, 200, { items: applyFields(getTasks(), url) });
     return;
   }
 
   if (url.pathname === "/api/tasks" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "task.create", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
-    if (!body.prompt || typeof body.prompt !== "string") {
-      audit(request, url, auth, { type: "task.create", success: false, reason: "Prompt is required" });
-      sendError(response, 400, "Prompt is required");
+    const validation = validate(TaskInputSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
       return;
     }
     const policy = taskSecurityPolicy(body);
     const riskReasons = taskRiskReasons(body, policy);
     const workspace = findWorkspaceForPath(body.cwd || settings.defaultCwd || process.cwd());
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        prompt: body.prompt,
+        agent: body.agent || "codex",
+        cwd: body.cwd || settings.defaultCwd || "",
+        approvalRequired: taskApprovalRequired(body, policy),
+        risk: { reasons: riskReasons, policy }
+      });
+      return;
+    }
     const taskToolRun = createAgentTaskToolRun({
       workspaceId: workspace?.id || "",
       title: body.title || body.prompt || "Agent task",
@@ -2562,10 +2816,10 @@ async function routeApi(request, response, url) {
       return;
     }
     sendJson(response, 200, {
-      items: listTaskEvents(task.id, {
+      items: applyFields(listTaskEvents(task.id, {
         after: Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0),
         limit: Number(url.searchParams.get("limit") || 5000)
-      })
+      }), url)
     });
     return;
   }

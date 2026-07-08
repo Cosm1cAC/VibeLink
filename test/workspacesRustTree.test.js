@@ -58,7 +58,9 @@ test("getWorkspaceTree falls back to Node scanner when Rust scanner fails", asyn
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-fallback-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
   fs.mkdirSync(path.join(fixture, "src"), { recursive: true });
+  fs.mkdirSync(path.join(fixture, "target"), { recursive: true });
   fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+  fs.writeFileSync(path.join(fixture, "target", "noise.txt"), "ignored", "utf8");
 
   const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-fallback" });
   const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;

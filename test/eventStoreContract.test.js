@@ -141,6 +141,24 @@ test("event store replays unified events with filters", () => {
   assert.deepEqual(store.listUnifiedEvents({ liveCallSessionId: "session-1", limit: 10 }).map((event) => event.kind), ["live_call"]);
 });
 
+test("event store exposes a bounded replay window contract", () => {
+  const { db, store } = createStore();
+  db.prepare("INSERT INTO tool_runs (id, task_id, workspace_id, tool_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run("tool-1", "task-1", "workspace-1", "shell", "running", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+
+  store.insertTaskEvent("task-1", { id: "task-event-1", at: "2026-01-01T00:00:00.000Z", type: "assistant", text: "task" });
+  store.insertToolEvent("tool-1", { id: "tool-event-1", at: "2026-01-01T00:00:01.000Z", type: "tool.stdout", text: "tool" });
+
+  const first = store.replayWindow({ taskId: "task-1", after: 0, limit: 1 });
+  assert.equal(first.items.length, 1);
+  assert.equal(first.hasMore, true);
+  assert.equal(first.nextCursor, first.items[0].cursor);
+
+  const second = store.replayWindow({ taskId: "task-1", after: first.nextCursor, limit: 1 });
+  assert.deepEqual(second.items.map((event) => event.text), ["tool"]);
+  assert.equal(second.hasMore, false);
+});
+
 
 test("event store normalizes replay limits", () => {
   assert.equal(normalizeEventReplayLimit(undefined), 500);

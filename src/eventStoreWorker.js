@@ -16,7 +16,8 @@ const methods = new Set([
   "insertLiveCallEvents",
   "listLiveCallEvents",
   "pruneLiveCallEvents",
-  "listUnifiedEvents"
+  "listUnifiedEvents",
+  "replayWindow"
 ]);
 
 function serializeError(error) {

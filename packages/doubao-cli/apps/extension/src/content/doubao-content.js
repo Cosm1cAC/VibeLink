@@ -1,3 +1,9 @@
+(() => {
+if (globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ >= 2) {
+  return;
+}
+globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ = 2;
+
 const DEFAULT_TIMEOUT_MS = 120000;
 const STABLE_ANSWER_MS = 2500;
 
@@ -19,6 +25,13 @@ function compactText(value, max = 20000) {
     .replace(/\n{3,}/g, "\n\n")
     .trim()
     .slice(-max);
+}
+
+function comparableText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 function findEditor() {
@@ -78,7 +91,7 @@ function clickSend() {
   return { ok: true };
 }
 
-function answerSnapshot(prompt) {
+function answerCandidates(prompt) {
   const selector = [
     "article",
     "[role='article']",
@@ -89,6 +102,7 @@ function answerSnapshot(prompt) {
     "[class*='markdown' i]"
   ].join(",");
   const promptPrefix = String(prompt || "").trim().slice(0, 160);
+  const comparablePrompt = comparableText(promptPrefix);
   const candidates = [...document.querySelectorAll(selector)]
     .filter(visible)
     .map((element) => {
@@ -99,18 +113,29 @@ function answerSnapshot(prompt) {
       if (/assistant|answer|markdown|message/i.test(className)) score += 10000;
       return { text, score };
     })
-    .filter((item) => item.text && (!promptPrefix || !item.text.includes(promptPrefix)))
+    .filter((item) => {
+      if (!item.text) return false;
+      if (promptPrefix && item.text.includes(promptPrefix)) return false;
+      return !comparablePrompt || !comparableText(item.text).includes(comparablePrompt);
+    })
     .sort((a, b) => a.score - b.score);
+
+  return candidates;
+}
+
+function answerSnapshot(prompt, ignoredAnswers = new Set()) {
+  const candidates = answerCandidates(prompt)
+    .filter((item) => !ignoredAnswers.has(item.text));
 
   return candidates.at(-1)?.text || "";
 }
 
-async function waitForAnswer(prompt, timeoutMs) {
+async function waitForAnswer(prompt, timeoutMs, ignoredAnswers = new Set()) {
   const deadline = Date.now() + Math.max(5000, Number(timeoutMs || DEFAULT_TIMEOUT_MS));
   let latest = "";
   let stableSince = 0;
   while (Date.now() < deadline) {
-    const text = answerSnapshot(prompt);
+    const text = answerSnapshot(prompt, ignoredAnswers);
     if (text && text !== latest) {
       latest = text;
       stableSince = Date.now();
@@ -128,13 +153,14 @@ async function askDoubao(params = {}) {
   if (!diagnosis.hasEditor) throw new Error("Could not find the Doubao prompt editor.");
 
   const prompt = String(params.prompt || "");
+  const ignoredAnswers = new Set(answerCandidates(prompt).map((item) => item.text));
   const inserted = insertPrompt(prompt);
   if (!inserted.ok) throw new Error(inserted.reason);
 
   const clicked = clickSend();
   if (!clicked.ok) throw new Error(clicked.reason);
 
-  const text = await waitForAnswer(prompt, params.timeoutMs);
+  const text = await waitForAnswer(prompt, params.timeoutMs, ignoredAnswers);
   return {
     provider: "doubao",
     text,
@@ -143,14 +169,20 @@ async function askDoubao(params = {}) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "doubao.diagnose") {
-    sendResponse(diagnosePage());
+  if (message?.type === "doubao.diagnose.v2") {
+    sendResponse({
+      ...diagnosePage(),
+      scriptVersion: 2
+    });
     return false;
   }
 
-  if (message?.type === "doubao.ask") {
+  if (message?.type === "doubao.ask.v2") {
     askDoubao(message.params || {})
-      .then((result) => sendResponse(result))
+      .then((result) => sendResponse({
+        ...result,
+        scriptVersion: 2
+      }))
       .catch((error) => sendResponse({
         ok: false,
         error: {
@@ -164,3 +196,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return false;
 });
+
+globalThis.__DOUBAO_BRIDGE_CONTENT_INTERNALS__ = {
+  answerCandidates,
+  answerSnapshot,
+  waitForAnswer
+};
+})();

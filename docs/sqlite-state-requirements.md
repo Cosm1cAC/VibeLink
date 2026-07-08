@@ -6,7 +6,7 @@ VibeLink currently keeps important runtime state in memory, JSON files, and JSON
 
 - Task events live in memory and are appended to `.agent-mobile-terminal/tasks/*.jsonl`.
 - Thread metadata lives in `.agent-mobile-terminal/thread-state.json`.
-- Codex Desktop UI observations are exposed only as the latest `/api/desktop-remote/status` response.
+- Codex Desktop UI observations are produced by explicit Desktop Remote sync actions such as `/api/desktop-remote/status?fresh=1`, focus, send, retry, or user refresh.
 - Codex and Claude historical context still comes from their native JSONL stores.
 
 This is enough for a prototype, but it makes reconnect, restart recovery, device/session management, and Desktop UI observation history fragile.
@@ -48,7 +48,7 @@ SQLite is the source of truth for product state and event cursors. Native Codex/
 3. Existing task JSONL logs are imported into SQLite during task restore.
 4. New task events are written to SQLite and keep their current JSONL append behavior as a compatibility log.
 5. Task SSE emits numeric event ids based on SQLite cursors so reconnect can resume with `Last-Event-ID` or `?after=`.
-6. Codex Desktop live status writes change-based observations into `desktop_observations`.
+6. Codex Desktop manual/semi-automatic sync writes change-based observations into `desktop_observations`.
 7. Existing frontend behavior continues to work without a required UI migration.
 
 ## Planned Follow-Ups
@@ -58,7 +58,7 @@ SQLite is the source of truth for product state and event cursors. Native Codex/
 - Added allowed roots and workspace path validation on top of `workspaces`.
 - Added first-pairing device tokens, device listing, and token revocation on top of `devices`.
 - Added Host allowlist checks and public tunnel warnings.
-- Added a durable Desktop observer SSE stream based on `desktop_observations.cursor`.
+- Added durable Desktop observations and an explicit observer SSE endpoint based on `desktop_observations.cursor`; the default web client no longer subscribes continuously.
 - Added workspace Git status/diff endpoints and task change summaries.
 
 ### Remaining P1

@@ -57,6 +57,16 @@ function workspaceOrThrow(id) {
   return workspace;
 }
 
+function cleanPathSegment(value = "", fallback = "worktree") {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/^refs\/heads\//i, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return cleaned || fallback;
+}
+
 async function git(args, cwd) {
   try {
     const { stdout, stderr } = await execFileAsync("git", args, {
@@ -97,6 +107,37 @@ export function createWorkspace(body = {}, settings = {}) {
 export function resolveWorkspacePath(id, settings) {
   const workspace = workspaceOrThrow(id);
   return resolveAllowedPath(workspace.path, settings);
+}
+
+async function gitRequired(args, cwd, message) {
+  const result = await git(args, cwd);
+  if (!result.ok) {
+    const error = new Error(result.stderr || result.stdout || message || "Git command failed.");
+    error.status = 409;
+    error.result = result;
+    throw error;
+  }
+  return result;
+}
+
+async function gitStdout(args, cwd, message) {
+  const result = await gitRequired(args, cwd, message);
+  return String(result.stdout || "").trim();
+}
+
+async function gitBranchExists(cwd, branchName) {
+  const result = await git(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], cwd);
+  return result.ok;
+}
+
+async function assertCleanWorktree(cwd) {
+  const status = await gitStdout(["status", "--porcelain"], cwd, "Failed to inspect git status.");
+  if (status) {
+    const error = new Error("Commit or stash local changes before creating a permanent worktree.");
+    error.status = 409;
+    error.details = status;
+    throw error;
+  }
 }
 
 function relativePath(root, value = "") {
@@ -277,6 +318,63 @@ export async function openWorkspaceInExplorer(id, settings) {
     ok: true,
     workspace,
     path: target
+  };
+}
+
+export async function createPermanentWorktree(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const repoRoot = await gitStdout(["rev-parse", "--show-toplevel"], cwd, "Workspace is not a git repository.");
+  const normalizedRepoRoot = resolveAllowedPath(repoRoot, settings);
+  const repoName = cleanPathSegment(path.basename(normalizedRepoRoot), "repo");
+  const baseRef = String(body.baseRef || "HEAD").trim() || "HEAD";
+  const requestedBranch = String(body.branchName || body.name || "").trim();
+  const currentBranch = await gitStdout(["branch", "--show-current"], normalizedRepoRoot, "Failed to read current branch.");
+  const fallbackBranch = currentBranch ? `${currentBranch}-worktree` : "worktree";
+  const branchName = cleanPathSegment(requestedBranch || fallbackBranch, fallbackBranch);
+  const defaultRoot = path.resolve(path.dirname(normalizedRepoRoot), ".vibelink-worktrees");
+  const worktreeRoot = body.root ? resolveAllowedPath(body.root, settings) : defaultRoot;
+  const targetPath = body.path ? resolveAllowedPath(body.path, settings) : path.resolve(worktreeRoot, repoName, branchName);
+
+  if (targetPath === normalizedRepoRoot || targetPath.toLowerCase().startsWith(`${normalizedRepoRoot.toLowerCase()}${path.sep}`)) {
+    const error = new Error("Worktree path must be outside the source repository.");
+    error.status = 400;
+    throw error;
+  }
+  if (fs.existsSync(targetPath) && fs.readdirSync(targetPath).length > 0) {
+    const error = new Error("Worktree path already exists and is not empty.");
+    error.status = 409;
+    error.path = targetPath;
+    throw error;
+  }
+
+  await assertCleanWorktree(normalizedRepoRoot);
+  const branchExists = await gitBranchExists(normalizedRepoRoot, branchName);
+  const args = branchExists
+    ? ["worktree", "add", targetPath, branchName]
+    : ["worktree", "add", "-b", branchName, targetPath, baseRef];
+  const result = await gitRequired(args, normalizedRepoRoot, "Failed to create git worktree.");
+  const title = String(body.title || `${workspace.title || repoName} · ${branchName}`).trim();
+  const newWorkspace = upsertWorkspace({
+    path: targetPath,
+    allowedRoot: targetPath,
+    title
+  });
+  touchWorkspace(workspace.id);
+  touchWorkspace(newWorkspace.id);
+
+  return {
+    ok: true,
+    action: "create-worktree",
+    sourceWorkspace: workspace,
+    workspace: newWorkspace,
+    cwd: normalizedRepoRoot,
+    path: targetPath,
+    branchName,
+    baseRef,
+    branchExisted: branchExists,
+    stdout: result.stdout,
+    stderr: result.stderr
   };
 }
 

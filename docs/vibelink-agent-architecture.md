@@ -34,6 +34,7 @@
 | 工具事件 | 只能读可见状态和历史近似 | `tool_runs` / `tool_events` 权威归属 |
 | 审批 | 不接管 Desktop 内部审批 | VibeLink 持久审批队列 |
 | 恢复 | 依赖 Desktop 可见状态和 JSONL | SQLite cursor / SSE / REST catch-up |
+| 同步策略 | 手动 + 半自动：刷新、进入会话、发送/聚焦时按需采样 | 任务运行中持续事件流和 catch-up |
 | 适用场景 | 人机接管、观察、远程输入 | 自动化任务、可控执行、多 provider |
 
 ### 1.3 与 Live Call Assistant 的边界
@@ -58,7 +59,7 @@ audio -> ASR -> question detection -> VibeLink Agent task
 | Workspace 命令 | shell/test/git/file action 接入 tool runtime |
 | MCP 管理 | `mcp.status` / `mcp.probe` / `mcp.call` |
 | Browser fetch | `browser.fetch` runtime tool |
-| Desktop probes | Codex app-server probe / desktop draft probe 接入 tool runtime |
+| Desktop probes | Codex app-server probe / desktop draft probe 接入 tool runtime；Codex Desktop Remote 默认按需采样，不常驻监听 |
 | Provider adapter | Codex CLI、Claude CLI、豆包 Web CLI、Zhipu/GLM adapter |
 | Doctor | `/api/doctor` 聚合 runtime、凭据、CLI、workspace、desktop、sandbox |
 | Live Call -> Agent | `liveCallAgent.js` 创建 VibeLink Agent task 并回写 delta |
@@ -83,6 +84,7 @@ audio -> ASR -> question detection -> VibeLink Agent task
 | Zhipu adapter | 当前是最小 JSON adapter | 增加 streaming、错误码、重试、模型 catalog |
 | Claude/Codex adapter | 参数映射散在 `agents.js` | 各 provider 拆成独立 adapter 模块 |
 | Live Call 文案 | 旧注释容易把它误解为独立 runtime | 改为 Live Call -> VibeLink Agent |
+| Desktop Remote 同步 | 旧实现会常驻 SSE/轮询 Desktop UI | 改为手动刷新 + 进入会话半自动同步，平时不监听 Codex Desktop |
 
 ## 3. 目标架构
 
@@ -184,6 +186,7 @@ Web / Mobile
 VibeLink Agent 达到产品化的最低标准：
 
 - 用户能明确看到当前是 Codex Desktop Remote 还是 VibeLink Agent。
+- Codex Desktop Remote 只在刷新、进入绑定会话、发送/聚焦等动作时同步，不在后台持续监听 Desktop UI。
 - VibeLink Agent provider 可选择，模型列表和可用性来自同一个 registry。
 - 每次工具调用都有 `tool_run_id`、生命周期、审批状态和结果事件。
 - 服务重启、浏览器刷新、手机断线后能 replay 任务、工具卡和审批状态。

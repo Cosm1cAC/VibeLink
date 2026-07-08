@@ -52,6 +52,7 @@ import {
   X
 } from "lucide-react";
 import "./styles.css";
+import { remoteTranscriptItems } from "./remoteTranscript.js";
 import { buildConversationTree, filterConversationNodes, projectNameFromPath } from "./sidebarModel.js";
 
 const savedToken = localStorage.getItem("mat.token") || "";
@@ -1935,6 +1936,92 @@ function Message({
   );
 }
 
+function CodexRemoteToolRow({ item }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetail = Boolean(item.detail);
+
+  return (
+    <div className={cx("remote-transcript-tool", item.source)} data-message-key={item.key}>
+      <button className="remote-tool-row" type="button" onClick={() => hasDetail ? setExpanded((value) => !value) : null}>
+        <Terminal size={15} aria-hidden="true" />
+        <span className="remote-tool-status">{item.statusText}</span>
+        <code>{item.label}</code>
+        {hasDetail ? <ChevronRight className={cx("turn-chevron", expanded && "open")} size={15} aria-hidden="true" /> : null}
+      </button>
+      {expanded && hasDetail ? <pre className="remote-tool-detail">{item.detail}</pre> : null}
+    </div>
+  );
+}
+
+function CodexRemoteMessage({ item, token, located, onLocate, onOpenFilePath }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyMessage() {
+    await copyText(item.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  }
+
+  if (item.pending) {
+    return (
+      <div className="remote-transcript-status" data-message-key={item.key}>
+        <ThinkingIndicator text={item.text || "正在思考"} />
+      </div>
+    );
+  }
+
+  if (item.type === "status") {
+    return (
+      <div className="remote-transcript-status" data-message-key={item.key}>
+        {item.text}
+      </div>
+    );
+  }
+
+  return (
+    <article className={cx("remote-transcript-message", item.role, located && "located")} data-message-key={item.key}>
+      <div className="remote-message-actions">
+        <button type="button" onClick={copyMessage} title="复制消息">
+          {copied ? <CheckSquare size={14} /> : <Copy size={14} />}
+        </button>
+        <button type="button" onClick={() => onLocate?.(item.key)} title="定位消息">
+          <LocateFixed size={14} />
+        </button>
+      </div>
+      <MessageContent
+        text={item.role === "user" ? stripUserAttachmentMetadata(item.text) : item.text}
+        typing={item.typing && !item.live}
+        typingKey={item.typingKey || item.key}
+        token={token}
+        onOpenFilePath={onOpenFilePath}
+      />
+      {item.live && item.streaming ? <span className="typing-caret live-stream-caret" aria-hidden="true" /> : null}
+    </article>
+  );
+}
+
+function CodexRemoteTranscriptView({ messages = [], token, locatedMessageKey, onLocate, onOpenFilePath }) {
+  const items = remoteTranscriptItems(messages);
+  if (!items.length) return null;
+
+  return (
+    <div className="remote-transcript">
+      {items.map((item) => item.type === "tool" ? (
+        <CodexRemoteToolRow key={item.key} item={item} />
+      ) : (
+        <CodexRemoteMessage
+          key={item.key}
+          item={item}
+          token={token}
+          located={locatedMessageKey === item.key}
+          onLocate={onLocate}
+          onOpenFilePath={onOpenFilePath}
+        />
+      ))}
+    </div>
+  );
+}
+
 function parseDiffHeaderPath(value = "") {
   const clean = String(value || "").trim();
   if (clean === "/dev/null") return "";
@@ -2971,7 +3058,7 @@ function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, on
                       <FolderOpen size={16} />
                       <span>在资源管理器中打开</span>
                     </button>
-                    <button type="button" role="menuitem" disabled title="后续接入永久工作树能力">
+                    <button type="button" role="menuitem" disabled={!item.workspaceId} title={item.workspaceId ? "创建永久工作树" : "未找到对应工作区"} onClick={() => onManageAction(item, "create-worktree")}>
                       <GitBranch size={16} />
                       <span>创建永久工作树</span>
                     </button>
@@ -5930,6 +6017,27 @@ function App() {
         await request(`/api/workspaces/${item.workspaceId}/open-explorer`, { method: "POST" }, token);
         return;
       }
+      if (action === "create-worktree") {
+        if (!item.workspaceId) {
+          setError("This project is not linked to a workspace.");
+          return;
+        }
+        const branchName = window.prompt("New worktree branch name", `${item.title || "project"}-worktree`);
+        if (!branchName) return;
+        const result = await request(
+          `/api/workspaces/${item.workspaceId}/worktrees`,
+          {
+            method: "POST",
+            body: JSON.stringify({ branchName })
+          },
+          token
+        );
+        await refresh({ keepSelection: true });
+        if (result.workspace) {
+          setError(`Created worktree: ${result.workspace.title || result.branchName}`);
+        }
+        return;
+      }
       if (action === "pin" || action === "unpin") {
         await patchProjectThreads(item, { pinned: action === "pin" });
         return;
@@ -6037,7 +6145,9 @@ function App() {
             }
           : current
       );
-      const historyMessages = await loadHistoryMessages(task.agent || conversation.provider, task.sessionId || conversation.sessionId);
+      const historyMessages = await loadHistoryMessages(task.agent || conversation.provider, task.sessionId || conversation.sessionId, {
+        fresh: hasDesktopBinding(conversation)
+      });
       if (conversationLoadRef.current !== loadSequence) return;
       const hasTurnHistory = historyMessages.some((message) => message.turnId);
       const taskMessages = !historyMessages.length || (task.status === "running" && !hasTurnHistory) ? messagesFromEvents(task.events || []) : [];
@@ -6045,7 +6155,8 @@ function App() {
       setMessages(nextMessages.length ? nextMessages : [{ role: "system", text: "Task started. Waiting for output." }]);
       setInitialScrollSequence(loadSequence);
       setRunning(task.status === "running");
-      focusDesktopConversation(conversation);
+      if (hasDesktopBinding(conversation)) await focusDesktopConversation(conversation);
+      else focusDesktopConversation(conversation);
       followToolEvents({ ...conversation, id: task.id, kind: "task", cwd: task.cwd || conversation.cwd });
 
       if (task.status === "running") {
@@ -6057,12 +6168,18 @@ function App() {
     if (conversation.preview && !isSyntheticHistoryText(conversation.preview)) {
       setMessages([{ role: "assistant", text: conversation.preview }]);
     }
-    const detail = await request(`/api/histories/${conversation.provider}/${encodeURIComponent(conversation.sourceId || conversation.id)}`, {}, token);
+    const historyFresh = hasDesktopBinding(conversation);
+    const detail = await request(
+      `/api/histories/${conversation.provider}/${encodeURIComponent(conversation.sourceId || conversation.id)}${historyFresh ? "?fresh=1" : ""}`,
+      {},
+      token
+    );
     if (conversationLoadRef.current !== loadSequence) return;
     const entries = detail.transcript?.length ? messagesFromTranscript(detail.transcript) : messagesFromHistoryEntries(detail.entries || []);
     setMessages(entries.length ? entries : [{ role: "system", text: "This history item only has index metadata; no local preview is available yet." }]);
     setInitialScrollSequence(loadSequence);
-    focusDesktopConversation(conversation);
+    if (historyFresh) await focusDesktopConversation(conversation);
+    else focusDesktopConversation(conversation);
     followToolEvents({ ...conversation, toolTaskId: detail.toolTaskId || conversation.toolTaskId || "" });
   }
 
@@ -6331,7 +6448,7 @@ function App() {
         setShowArchived={setShowArchived}
         onToggleProject={(key) => setExpandedProjects((current) => ({ ...current, [key]: true }))}
         onNew={() => selectConversation(null)}
-        onRefresh={() => refresh({ keepSelection: true }).catch((err) => setError(err.message))}
+        onRefresh={() => refresh({ keepSelection: true, syncDesktopRemote: true }).catch((err) => setError(err.message))}
         networkLine={networkLine}
         open={sidebarOpen}
         loading={loading}
@@ -6380,7 +6497,15 @@ function App() {
             }}
           />
           {desktopMessages.length ? (
-            desktopMessages.map((message, index) => {
+            controlMode === "desktop" ? (
+              <CodexRemoteTranscriptView
+                messages={desktopMessages}
+                token={token}
+                locatedMessageKey={locatedMessageKey}
+                onLocate={locateMessage}
+                onOpenFilePath={openFileFromMessage}
+              />
+            ) : desktopMessages.map((message, index) => {
               const renderKey = message.liveKey || message.turnId || `${index}-${message.role}-${message.pending ? "pending" : "message"}`;
               return (
                 <Message

@@ -396,6 +396,34 @@ const paths = {
     },
     { type: "object" }
   )),
+  ...path("/api/workspaces/{id}/worktrees", post("Create Git worktree",
+    "Create a permanent Git worktree for a workspace and register it as a new workspace.",
+    {
+      type: "object",
+      properties: {
+        branchName: { type: "string", description: "Branch to create or attach to the worktree" },
+        baseRef: { type: "string", description: "Base ref used when creating a new branch", default: "HEAD" },
+        title: { type: "string", description: "Workspace title for the new worktree" },
+        path: { type: "string", description: "Optional explicit worktree path; must be inside allowed roots" },
+        root: { type: "string", description: "Optional explicit worktree root; must be inside allowed roots" }
+      },
+      required: ["branchName"]
+    },
+    {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        workspace: { type: "object" },
+        sourceWorkspace: { type: "object" },
+        path: { type: "string" },
+        branchName: { type: "string" },
+        baseRef: { type: "string" },
+        branchExisted: { type: "boolean" },
+        toolRunId: { type: "string" }
+      }
+    },
+    { "201": { description: "Created" } }
+  )),
 
   // Tools and events
   ...path("/api/tool-runs", get("List tool runs",

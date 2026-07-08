@@ -83,7 +83,7 @@ import { loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, 
 import { writeApiKeys } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
-import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
+import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
@@ -2396,6 +2396,62 @@ async function routeApi(request, response, url) {
   const workspaceOpenExplorerMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/open-explorer$/);
   if (workspaceOpenExplorerMatch && request.method === "POST") {
     sendJson(response, 200, await openWorkspaceInExplorer(workspaceOpenExplorerMatch[1], settings));
+    return;
+  }
+
+  const workspaceWorktreeMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/worktrees$/);
+  if (workspaceWorktreeMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceWorktreeMatch[1];
+    const branchName = String(body.branchName || body.name || "").trim();
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        workspaceId,
+        branchName,
+        baseRef: body.baseRef || "HEAD",
+        wouldExecute: true
+      });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      workspaceId,
+      toolName: "workspace.git_worktree",
+      title: `create worktree ${branchName || "worktree"}`,
+      input: {
+        branchName,
+        baseRef: body.baseRef || "HEAD",
+        path: body.path || "",
+        root: body.root || ""
+      }
+    });
+    let result;
+    try {
+      result = await runWorkspaceToolAction({
+        toolRunId: toolRun.id,
+        startedText: `create worktree ${branchName || "worktree"}`,
+        completedText: "Git worktree created.",
+        failedText: "Git worktree creation failed.",
+        execute: () => createPermanentWorktree(workspaceId, settings, body)
+      });
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.git_worktree",
+        success: false,
+        target: workspaceId,
+        reason: error.message,
+        meta: { branchName, toolRunId: toolRun.id }
+      });
+      sendError(response, error.status || 500, error.message);
+      return;
+    }
+    audit(request, url, auth, {
+      type: "workspace.git_worktree",
+      success: true,
+      target: result.path || "",
+      meta: { branchName: result.branchName || branchName, toolRunId: toolRun.id }
+    });
+    sendJson(response, 201, { ...result, toolRunId: toolRun.id });
     return;
   }
 

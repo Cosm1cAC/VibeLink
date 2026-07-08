@@ -159,6 +159,34 @@ const TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "workspace.git_worktree",
+    kind: "git",
+    label: "Git worktree",
+    permission: "workspace.git",
+    risk: "medium",
+    description: "Create a permanent Git worktree for a workspace and register it as a new workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: { type: "string" },
+        branchName: { type: "string" },
+        baseRef: { type: "string" },
+        path: { type: "string" },
+        root: { type: "string" }
+      },
+      required: ["workspaceId", "branchName"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "object", description: "Registered workspace for the new worktree" },
+        path: { type: "string", description: "Absolute worktree path" },
+        branchName: { type: "string", description: "Created or checked-out branch name" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
     name: "system.doctor",
     kind: "system",
     label: "Doctor",

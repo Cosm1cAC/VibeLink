@@ -1086,6 +1086,156 @@ textarea:focus {
   max-width: 100%;
 }
 
+.remote-transcript {
+  display: grid;
+  gap: 13px;
+  width: min(100%, 1000px);
+  min-width: 0;
+  margin: 0 auto;
+  padding: 2px 0 10px;
+}
+
+.remote-transcript-message {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  color: #1f2322;
+  font-size: 16px;
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  animation: message-in 180ms var(--ease);
+}
+
+.remote-transcript-message.user {
+  max-width: 78%;
+  justify-self: end;
+  border-radius: 14px;
+  background: rgba(242, 239, 232, 0.76);
+  padding: 10px 13px;
+}
+
+.remote-transcript-message.assistant,
+.remote-transcript-message.error {
+  padding: 0 34px 0 0;
+}
+
+.remote-transcript-message.error {
+  color: var(--coral);
+}
+
+.remote-transcript-message.located {
+  border-radius: 8px;
+  box-shadow: 0 0 0 3px rgba(20, 127, 120, 0.1);
+}
+
+.remote-transcript-message .markdown-body p,
+.remote-transcript-message .markdown-body ul,
+.remote-transcript-message .markdown-body ol,
+.remote-transcript-message .markdown-body blockquote,
+.remote-transcript-message .markdown-body table,
+.remote-transcript-message .markdown-body .code-card {
+  margin-bottom: 14px;
+}
+
+.remote-message-actions {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+
+.remote-transcript-message:hover .remote-message-actions,
+.remote-transcript-message:focus-within .remote-message-actions {
+  opacity: 1;
+}
+
+.remote-message-actions button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: rgba(250, 249, 246, 0.88);
+  color: var(--ink-soft);
+}
+
+.remote-message-actions button:hover {
+  background: var(--surface-soft);
+  color: var(--ink);
+}
+
+.remote-transcript-tool {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 840px);
+  color: #9a9f9d;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.remote-tool-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 24px;
+  color: #9a9f9d;
+  text-align: left;
+}
+
+.remote-tool-row:hover {
+  color: #727876;
+}
+
+.remote-tool-row svg {
+  flex: 0 0 auto;
+  color: #a8adab;
+}
+
+.remote-tool-status {
+  flex: 0 0 auto;
+  color: #a0a6a4;
+}
+
+.remote-tool-row code {
+  overflow: hidden;
+  max-width: min(760px, calc(100vw - 180px));
+  border-radius: 6px;
+  background: rgba(32, 38, 36, 0.07);
+  color: #414645;
+  font:
+    12px/1.45 "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono",
+    monospace;
+  padding: 0.12em 0.42em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-tool-detail {
+  overflow: auto;
+  max-height: 260px;
+  margin: 0 0 0 24px;
+  border-left: 2px solid rgba(154, 159, 157, 0.22);
+  color: #6f7673;
+  font:
+    12px/1.56 "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono",
+    monospace;
+  padding: 4px 0 4px 12px;
+  white-space: pre-wrap;
+}
+
+.remote-transcript-status {
+  width: min(100%, 1000px);
+  color: #a0a6a4;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
 .command-summary {
   display: grid;
   gap: 8px;

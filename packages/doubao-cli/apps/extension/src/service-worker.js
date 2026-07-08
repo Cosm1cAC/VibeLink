@@ -70,15 +70,16 @@ async function findOrCreateDoubaoTab(config) {
 }
 
 async function sendToDoubaoContent(tabId, message) {
+  const manifest = chrome.runtime.getManifest();
+  const declaredScript = manifest.content_scripts?.[0]?.js?.[0] || "src/content/doubao-content.js";
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [declaredScript]
+  });
+
   try {
     return await chrome.tabs.sendMessage(tabId, message);
   } catch {
-    const manifest = chrome.runtime.getManifest();
-    const declaredScript = manifest.content_scripts?.[0]?.js?.[0] || "src/content/doubao-content.js";
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: [declaredScript]
-    });
     return chrome.tabs.sendMessage(tabId, message);
   }
 }
@@ -86,7 +87,7 @@ async function sendToDoubaoContent(tabId, message) {
 async function handleDoubaoRequest(message, config) {
   const tab = await findOrCreateDoubaoTab(config);
   return sendToDoubaoContent(tab.id, {
-    type: message.method,
+    type: `${message.method}.v2`,
     params: message.params || {}
   });
 }

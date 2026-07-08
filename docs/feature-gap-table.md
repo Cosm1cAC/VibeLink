@@ -38,10 +38,10 @@
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
 | blocked | 真正接管电脑上已经在 Codex App / 终端里运行的进程 | 不能夺取已有进程的 stdin/stdout/PTY。当前可选模式是读取 JSONL 历史后由 VibeLink Agent resume，或通过 Codex Desktop UI 遥控继续输入。 | P0 |
-| blocked | Codex Desktop 原生回显 | 已验证网页端继续同一 thread 后，Codex Desktop App 不会自动把网页端消息回显到原生 UI。只能共享 thread 历史、Desktop observer 近似同步，或 UI 遥控输入。 | P0 |
+| blocked | Codex Desktop 原生回显 | 已验证网页端继续同一 thread 后，Codex Desktop App 不会自动把网页端消息回显到原生 UI。只能共享 thread 历史、手动/半自动按需同步，或 UI 遥控输入。 | P0 |
 | planned | Codex app-server 客户端代理接入 | 已做 probe/spike，app-server 可作为未来增强；当前主线仍是 VibeLink Agent resume + Codex Desktop Remote，尚未产品化接入。 | P0 |
 | partial | Codex Desktop UI 遥控 | 已有 Windows UIA 探测、窗口恢复、会话定位、target 校验、草稿检测、发送队列、postflight 验证和 SQLite 队列恢复；仍依赖前台 UI、控件定位和 Codex UI 稳定性。 | P0 |
-| partial | Codex Desktop Remote 输出同步 | live 阶段可读可见 transcript 和状态，event 阶段写入 SQLite cursor；历史可从 JSONL 恢复。仍无法拿到 Codex Desktop 未暴露的完整 tool 输出、退出码和内部 tool 调用归属。 | P0 |
+| partial | Codex Desktop Remote 输出同步 | 不做常驻监听；仅在刷新浏览器/Android、点进绑定会话、发送/重试/聚焦等主动动作时采样可见 transcript 和状态。历史可从 JSONL 恢复，仍无法拿到 Codex Desktop 未暴露的完整 tool 输出、退出码和内部 tool 调用归属。 | P0 |
 | partial | Codex thread 管理 | 已支持重命名、置顶、归档、恢复、分组、fork；但管理 UI 仍偏原型，不是 Codex 风格的批量/跨设备线程管理。 | P1 |
 | partial | 历史上下文还原 | Codex / Claude 历史可扫描并按 turn/block 聚合，含命令摘要、权限模式等信息；仍不是完整 Codex App 状态，例如计划面板、插件状态、完整审批状态不能全量还原。 | P0 |
 | partial | 搜索 | 可按标题、provider、cwd、sessionId 过滤；缺少全文搜索、标签、收藏和复杂过滤。 | P2 |
@@ -88,14 +88,14 @@
 | partial | 文件树 | 已有 workspace 文件树、目录导航、文本文件打开、二进制/过大文件占位；仍缺内联编辑、文件搜索、重命名/删除/新建和大文件分页。 | P1 |
 | partial | 文件定位 | Markdown 链接、本地文件链接和可解析路径可跳到对应 workspace 文件与行号并高亮；仍依赖路径解析和已登记 workspace，裸路径自动识别、编译器/测试框架路径格式覆盖还不完整。 | P1 |
 | partial | 内置终端 | 已有 workspace 命令运行器，可显示 stdout/stderr/退出状态，并接入危险命令逐条确认；仍不是交互式 PTY，没有 shell 会话保持、输入补充、任务树和 ANSI 完整渲染。 | P1 |
-| partial | Git 完整工作流 | 已支持 status/diff、stage/unstage、stage all、commit、push、pull、`gh pr create`；仍缺 branch、stash、worktree 管理、PR review、远端凭据引导和冲突向导。 | P1 |
+| partial | Git 完整工作流 | 已支持 status/diff、stage/unstage、stage all、commit、push、pull、`gh pr create` 和永久 worktree 创建；仍缺 branch 切换/删除、stash 管理、worktree 列表/移除、PR review、远端凭据引导和冲突向导。 | P1 |
 | partial | 测试结果视图 | 已有测试命令入口、结构化 passed/failed 粗解析、失败行提取和日志折叠；仍缺 Jest/Pytest/Vitest 等框架适配、失败跳转、重跑单测和耗时趋势。 | P1 |
 
-## Codex Desktop / UI 监听
+## Codex Desktop / UI 遥控与按需同步
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| partial | 运行中检测 | 已扫描 Codex 侧栏最近会话、composer 状态、运行数量、可见 transcript 和草稿状态；仍受 UIA 可见性、Codex UI 改版、窗口状态影响。 | P0 |
+| partial | 运行中检测 | 刷新、进入会话、发送/聚焦时按需扫描 Codex 侧栏最近会话、composer 状态、运行数量、可见 transcript 和草稿状态；仍受 UIA 可见性、Codex UI 改版、窗口状态影响。 | P0 |
 | partial | 会话定位 | 可用侧栏 index、标题、项目名匹配并 focus，发送前 fail-closed；同名会话、滚动不可见、折叠列表仍可能需要用户重新绑定。 | P0 |
 | missing | 手机观看 Desktop 实时画面 | 只能同步结构化状态和可见 transcript 摘要，不能像远程桌面一样观看/控制完整 Codex 窗口。 | P2 |
 
@@ -127,7 +127,7 @@
 | partial | 原生移动端 | 已有 Android MVP 工程和构建脚本，但当前主体验仍是网页/PWA；没有完整 Android/iOS App、后台任务、原生通知和系统分享入口。 | P1 |
 | partial | 通话实时转写/面试辅助 | Windows audio probe（list/probe/level/stream）、后端 Live Call API + SQLite 持久化、WebSocket PCM 推流（`/api/live-calls/:id/audio`）、Mock ASR pipeline（`liveCallAsr.js`）、VibeLink Agent 自动触发（`liveCallAgent.js`）、前端 Live Call 面板（创建/停止/电平/转录/问答/Agent delta SSE）已完成。**尚未完成**：真实 ASR provider 接入、真实 PCM 端到端 10 分钟 QA、前端暂停/恢复/录制管理。详见 `docs/windows-bluetooth-call-transcription-mvp.md`。 | P1 |
 | partial | 推送通知 | 已有 Web Push 订阅、关键事件通知入口和邮件 fallback 配置；仍缺 iOS/Android 原生 APNs/FCM/Expo Push、通知偏好和投递状态。 | P0 |
-| partial | 断线恢复 | task events、desktop observations、live call events 均已写入 SQLite + SSE cursor，SSE 支持 `after` / `Last-Event-ID`，前端 REST catch-up；live call 会话重启可自动从 SQLite 恢复活跃 session。仍缺 ack、保留策略、压缩和多设备一致性测试。 | P0 |
+| partial | 断线恢复 | task events、按需产生的 desktop observations、live call events 均可写入 SQLite；任务和 live call 仍有 SSE/catch-up，Codex Desktop Remote 前端默认不订阅后台 observer。仍缺 ack、保留策略、压缩和多设备一致性测试。 | P0 |
 | partial | 公网访问 | 已有 QR 配对、设备确认、token hash、revoke/rotate/expiry、Host allowlist、审计、限流和 Cloudflare 向导；仍缺完整账号系统、域名/证书自动化、Cloudflare Access 深度集成和部署体检。 | P1 |
 
 ## Claude Code 支持
@@ -154,7 +154,7 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| partial | 事件可靠性 | task、desktop、live call 事件已有 cursor、catch-up、SSE、去重和本地 cursor；还缺 ack、保留策略、压缩和重放边界测试。 | P0 |
+| partial | 事件可靠性 | task、live call 事件已有 cursor、catch-up、SSE、去重和本地 cursor；desktop observation 改为按需采样记录，默认不常驻推送。还缺 ack、保留策略、压缩和重放边界测试。 | P0 |
 | partial | 进程生命周期 | 服务可恢复历史和事件，但不能重新绑定重启前仍在跑的子进程。 | P0 |
 | partial | 多设备同步 | 多设备可凭 device token 登录并共享事件流；缺少在线状态、冲突处理、消息操作同步和设备间协作策略。 | P1 |
 | partial | 平台定位 | 当前仍是本机 bridge + 手机网页/Android MVP，不是完整公网安全远程 agent 平台。 | P0 |
@@ -162,9 +162,9 @@
 ## 建议下一批优先级
 
 1. `P0`：按 `docs/vibelink-agent-architecture.md` 继续收敛 provider registry、模型 catalog 和统一事件恢复。
-2. `P0`：继续增强 Codex Desktop Remote 输出同步：JSONL reconcile、tool 摘要归属、workspace diff/change card 自动关联和失败边界提示。
+2. `P0`：继续增强 Codex Desktop Remote 输出同步，但保持手动/半自动触发：JSONL reconcile、tool 摘要归属、workspace diff/change card 自动关联和失败边界提示。
 3. `P1`：把内置终端升级为 PTY 会话，支持 ANSI、输入补充、长期任务、停止和日志折叠。
-4. `P1`：完善 Workspace/Git：裸路径自动链接、文件搜索/编辑、per-hunk 操作、branch/stash/worktree、PR review 和冲突向导。
+4. `P1`：完善 Workspace/Git：裸路径自动链接、文件搜索/编辑、per-hunk 操作、branch/stash、worktree 列表/移除、PR review 和冲突向导。
 5. `P1`：增强测试视图：框架适配、失败定位、单测重跑和测试历史。
 6. `P1`：补动态模型 catalog、Desktop 原生菜单验证切换或明确继续保持“Desktop 使用当前设置”的产品边界。
 7. `P1`：补 artifact 富预览：PDF 页级预览、Office/表格/PPT 预览、下载/打开策略和大文件处理。

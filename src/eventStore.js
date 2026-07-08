@@ -46,6 +46,18 @@ export function classifyTaskEventKind(event = {}) {
   return "system";
 }
 
+function encodeReplayCursor(cursor, sourceRank) {
+  return (Number(cursor || 0) * 10) + sourceRank;
+}
+
+function replayCursorParts(value) {
+  const cursor = Math.max(0, Math.floor(Number(value || 0)));
+  return {
+    rawCursor: Math.floor(cursor / 10),
+    sourceRank: cursor % 10
+  };
+}
+
 export function createSqliteEventStore({ database }) {
   if (typeof database !== "function") throw new TypeError("createSqliteEventStore requires a database function.");
 
@@ -399,6 +411,119 @@ export function createSqliteEventStore({ database }) {
     return results.slice(0, queryLimit);
   }
 
+  function replayWindow(options = {}) {
+    const limit = normalizeEventReplayLimit(options.limit, { defaultLimit: 200, maxLimit: 2000 });
+    const queryLimit = limit + 1;
+    const after = replayCursorParts(options.after);
+    const qtaskId = cleanString(options.taskId, 160);
+    const qsessionId = cleanString(options.liveCallSessionId, 160);
+    const qtoolRunId = cleanString(options.toolRunId, 160);
+    const items = [];
+    const db = database();
+
+    function minCursorFor(sourceRank) {
+      return sourceRank > after.sourceRank ? after.rawCursor : after.rawCursor + 1;
+    }
+
+    if (!options.liveCallSessionId && !options.toolRunId) {
+      const sourceRank = 1;
+      const rows = db
+        .prepare(`
+          SELECT cursor, task_id, event_id, event_type, event_kind, turn_id, block_id,
+                 event_at, text
+          FROM task_events
+          WHERE (? = '' OR task_id = ?) AND cursor >= ?
+          ORDER BY cursor ASC
+          LIMIT ?
+        `)
+        .all(qtaskId, qtaskId, minCursorFor(sourceRank), queryLimit);
+      for (const row of rows) {
+        items.push({
+          cursor: encodeReplayCursor(row.cursor, sourceRank),
+          rawCursor: row.cursor,
+          eventId: row.event_id,
+          type: row.event_type || "",
+          kind: row.event_kind || "",
+          at: row.event_at,
+          text: row.text || "",
+          sessionId: "",
+          taskId: row.task_id || "",
+          toolRunId: "",
+          turnId: row.turn_id || "",
+          blockId: ""
+        });
+      }
+    }
+
+    if (!options.liveCallSessionId) {
+      const sourceRank = 2;
+      const rows = db
+        .prepare(`
+          SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
+          FROM tool_events
+          WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor >= ?
+          ORDER BY cursor ASC
+          LIMIT ?
+        `)
+        .all(qtaskId, qtaskId, qtoolRunId, qtoolRunId, minCursorFor(sourceRank), queryLimit);
+      for (const row of rows) {
+        items.push({
+          cursor: encodeReplayCursor(row.cursor, sourceRank),
+          rawCursor: row.cursor,
+          eventId: row.event_id,
+          type: row.event_type,
+          kind: "tool",
+          at: row.event_at,
+          text: row.text || "",
+          sessionId: "",
+          taskId: row.task_id || "",
+          toolRunId: row.tool_run_id || "",
+          turnId: "",
+          blockId: ""
+        });
+      }
+    }
+
+    if (!options.taskId && !options.toolRunId) {
+      const sourceRank = 3;
+      const rows = db
+        .prepare(`
+          SELECT cursor, session_id, event_id, event_type, event_at, text
+          FROM live_call_events
+          WHERE (? = '' OR session_id = ?) AND cursor >= ?
+          ORDER BY cursor ASC
+          LIMIT ?
+        `)
+        .all(qsessionId, qsessionId, minCursorFor(sourceRank), queryLimit);
+      for (const row of rows) {
+        items.push({
+          cursor: encodeReplayCursor(row.cursor, sourceRank),
+          rawCursor: row.cursor,
+          eventId: row.event_id,
+          type: row.event_type,
+          kind: "live_call",
+          at: row.event_at,
+          text: row.text || "",
+          sessionId: row.session_id || "",
+          taskId: "",
+          toolRunId: "",
+          turnId: "",
+          blockId: ""
+        });
+      }
+    }
+
+    items.sort((a, b) => a.cursor - b.cursor);
+    const windowItems = items.slice(0, limit);
+    const nextCursor = windowItems.length ? windowItems[windowItems.length - 1].cursor : Number(options.after || 0);
+    return {
+      items: windowItems,
+      nextCursor,
+      hasMore: items.length > windowItems.length,
+      limit
+    };
+  }
+
   return {
     insertTaskEvent,
     insertTaskEvents,
@@ -413,6 +538,7 @@ export function createSqliteEventStore({ database }) {
     insertLiveCallEvents,
     listLiveCallEvents,
     pruneLiveCallEvents,
-    listUnifiedEvents
+    listUnifiedEvents,
+    replayWindow
   };
 }

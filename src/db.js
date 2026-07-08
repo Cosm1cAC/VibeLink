@@ -1886,6 +1886,16 @@ export function listUnifiedEvents({
   return sqliteEventStore().listUnifiedEvents({ taskId, liveCallSessionId, toolRunId, after, limit });
 }
 
+export function replayEventWindow({
+  taskId = "",
+  liveCallSessionId = "",
+  toolRunId = "",
+  after = 0,
+  limit = 200
+} = {}) {
+  return sqliteEventStore().replayWindow({ taskId, liveCallSessionId, toolRunId, after, limit });
+}
+
 export async function listUnifiedEventsAsync({
   taskId = "",
   liveCallSessionId = "",
@@ -1897,6 +1907,20 @@ export async function listUnifiedEventsAsync({
     "listUnifiedEvents",
     [{ taskId, liveCallSessionId, toolRunId, after, limit }],
     () => listUnifiedEvents({ taskId, liveCallSessionId, toolRunId, after, limit })
+  );
+}
+
+export async function replayEventWindowAsync({
+  taskId = "",
+  liveCallSessionId = "",
+  toolRunId = "",
+  after = 0,
+  limit = 200
+} = {}) {
+  return eventStoreWorkerCall(
+    "replayWindow",
+    [{ taskId, liveCallSessionId, toolRunId, after, limit }],
+    () => replayEventWindow({ taskId, liveCallSessionId, toolRunId, after, limit })
   );
 }
 

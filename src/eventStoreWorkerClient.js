@@ -108,6 +108,7 @@ export function createEventStoreWorkerClient({
     listLiveCallEvents: (options) => request("listLiveCallEvents", [options]),
     pruneLiveCallEvents: (options) => request("pruneLiveCallEvents", [options]),
     listUnifiedEvents: (options) => request("listUnifiedEvents", [options]),
+    replayWindow: (options) => request("replayWindow", [options]),
     close
   };
 }

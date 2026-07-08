@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
@@ -38,6 +40,34 @@ test("MCP session manager reuses one stdio child for repeated requests", async (
     assert.deepEqual(JSON.parse(second.content[0].text), { name: "echo", arguments: { q: "again" } });
   } finally {
     await manager.closeAll();
+  }
+});
+
+test("MCP session caches tools/list results after initialization", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-mcp-session-tools-"));
+  const methodLog = path.join(dir, "methods.log");
+  const manager = createMcpSessionManager();
+  const server = {
+    id: "fake-tools-cache",
+    name: "fake-tools-cache",
+    type: "stdio",
+    command: process.execPath,
+    env: { FAKE_MCP_METHOD_LOG: methodLog },
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const session = await manager.getSession(server, { timeoutMs: 5000 });
+    const first = await session.listTools();
+    const second = await session.listTools();
+    const methods = fs.readFileSync(methodLog, "utf8").trim().split(/\r?\n/);
+
+    assert.deepEqual(first.map((tool) => tool.name), ["echo"]);
+    assert.deepEqual(second.map((tool) => tool.name), ["echo"]);
+    assert.equal(methods.filter((method) => method === "tools/list").length, 1);
+  } finally {
+    await manager.closeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

@@ -8,7 +8,27 @@ function workerError(payload = {}) {
   return error;
 }
 
-export function createEventStoreWorkerClient({ dbPath, timeoutMs = 10000, workerUrl = new URL("./eventStoreWorker.js", import.meta.url) } = {}) {
+function maxPendingRequestsValue(value = process.env.VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS) {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+  return 128;
+}
+
+function backpressureError(method, maxPendingRequests) {
+  const error = new Error(
+    `Event store worker backpressure: ${method} rejected because ${maxPendingRequests} request(s) are already pending.`
+  );
+  error.code = "EEVENTSTOREBACKPRESSURE";
+  error.maxPendingRequests = maxPendingRequests;
+  return error;
+}
+
+export function createEventStoreWorkerClient({
+  dbPath,
+  timeoutMs = 10000,
+  maxPendingRequests = maxPendingRequestsValue(),
+  workerUrl = new URL("./eventStoreWorker.js", import.meta.url)
+} = {}) {
   if (!dbPath) throw new TypeError("createEventStoreWorkerClient requires dbPath.");
 
   const worker = new Worker(workerUrl, { workerData: { dbPath } });
@@ -44,8 +64,11 @@ export function createEventStoreWorkerClient({ dbPath, timeoutMs = 10000, worker
     }
   });
 
-  function request(method, args = [], { timeout = timeoutMs } = {}) {
+  function request(method, args = [], options = {}) {
     if (terminated) return Promise.reject(new Error("Event store worker is closed."));
+    const pendingLimit = maxPendingRequestsValue(options.maxPendingRequests ?? maxPendingRequests);
+    if (pending.size >= pendingLimit) return Promise.reject(backpressureError(method, pendingLimit));
+    const { timeout = timeoutMs } = options;
     const id = nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -70,6 +93,7 @@ export function createEventStoreWorkerClient({ dbPath, timeoutMs = 10000, worker
 
   return {
     request,
+    stats: () => ({ pending: pending.size, maxPendingRequests: maxPendingRequestsValue(maxPendingRequests), terminated }),
     insertTaskEvent: (taskId, event) => request("insertTaskEvent", [taskId, event]),
     insertTaskEvents: (taskId, events) => request("insertTaskEvents", [taskId, events]),
     listTaskEvents: (taskId, options) => request("listTaskEvents", [taskId, options]),

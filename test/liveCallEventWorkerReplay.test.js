@@ -80,3 +80,24 @@ test("live call catch-up replay uses worker query when enabled", async () => {
     restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
   }
 });
+
+test("live call event append uses worker when enabled", async () => {
+  const previousWorkerFlag = process.env.VIBELINK_EVENT_STORE_WORKER;
+  process.env.VIBELINK_EVENT_STORE_WORKER = "1";
+
+  try {
+    const session = createLiveCallSession({ title: "Worker append smoke" });
+    recordLiveCallTranscript(session.id, {
+      text: "worker append transcript",
+      final: true
+    });
+
+    await drainEventStoreRuntime();
+    const stats = getEventStoreRuntimeStats();
+
+    assert.equal(stats.metrics.methods.insertLiveCallEvent.modeCounts.worker >= 1, true);
+  } finally {
+    await drainEventStoreRuntime();
+    restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
+  }
+});

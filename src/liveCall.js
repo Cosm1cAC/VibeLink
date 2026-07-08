@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import {
   createLiveCall as dbCreateLiveCall,
   getLiveCall as dbGetLiveCall,
-  insertLiveCallEvent,
+  insertLiveCallEventAsync,
   listLiveCallEvents as dbListLiveCallEvents,
   listLiveCallEventsAsync as dbListLiveCallEventsAsync,
   listLiveCalls as dbListLiveCalls,
@@ -61,7 +61,9 @@ function pushEvent(session, type, payload = {}) {
 
   // Persist to SQLite (best-effort; in-memory cache remains authoritative for SSE).
   try {
-    insertLiveCallEvent(session.id, event);
+    insertLiveCallEventAsync(session.id, event).catch((error) => {
+      console.error("[liveCall] event persist failed:", error.message);
+    });
     dbUpdateLiveCall(session.id, {
       updatedAt: session.updatedAt,
       lastTranscript: session.lastTranscript || "",

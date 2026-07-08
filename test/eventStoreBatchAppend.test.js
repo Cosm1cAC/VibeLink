@@ -3,11 +3,16 @@ import test from "node:test";
 
 import {
   createToolRun,
+  createLiveCall,
   drainEventStoreRuntime,
+  flushLiveCallEventBatches,
   flushToolEventBatches,
   getEventStoreRuntimeStats,
+  insertLiveCallEventBatchedAsync,
   insertToolEventBatchedAsync,
   isEventStoreBatchAppendEnabled,
+  isLiveCallEventBatchAppendEnabled,
+  listLiveCallEvents,
   listToolEvents
 } from "../src/db.js";
 import { emitToolEventBatched } from "../src/toolRuntime.js";
@@ -150,5 +155,42 @@ test("event store runtime drain flushes pending batched tool events", async () =
   } finally {
     await flushToolEventBatches();
     restoreEnv("VIBELINK_EVENT_STORE_BATCH_APPEND", previousFlag);
+  }
+});
+
+test("live call event batch append queues until explicit flush when enabled", async () => {
+  const previousFlag = process.env.VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND;
+  process.env.VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND = "1";
+  try {
+    const sessionId = `live-batch-enabled-${Date.now()}`;
+    createLiveCall({ id: sessionId, title: "Live batch append smoke" });
+
+    assert.equal(isLiveCallEventBatchAppendEnabled(), true);
+    const first = insertLiveCallEventBatchedAsync(sessionId, {
+      id: `${sessionId}:event-1`,
+      cursor: 1,
+      type: "live_call.transcript.partial",
+      text: "one"
+    });
+    const second = insertLiveCallEventBatchedAsync(sessionId, {
+      id: `${sessionId}:event-2`,
+      cursor: 2,
+      type: "live_call.transcript.final",
+      text: "two"
+    });
+
+    assert.deepEqual(listLiveCallEvents({ sessionId }), []);
+    assert.equal(getEventStoreRuntimeStats().liveCallBatchAppend.pending, 2);
+
+    await flushLiveCallEventBatches();
+
+    const cursors = await Promise.all([first, second]);
+    assert.equal(cursors.length, 2);
+    assert.ok(cursors[0] < cursors[1]);
+    assert.deepEqual(listLiveCallEvents({ sessionId }).map((event) => event.text), ["one", "two"]);
+    assert.equal(getEventStoreRuntimeStats().liveCallBatchAppend.flushes >= 1, true);
+  } finally {
+    await flushLiveCallEventBatches();
+    restoreEnv("VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", previousFlag);
   }
 });

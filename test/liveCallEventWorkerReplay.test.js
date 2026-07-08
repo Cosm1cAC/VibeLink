@@ -2,8 +2,14 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { createLiveCallSession, listLiveCallEventsReplay, recordLiveCallTranscript, subscribeLiveCallEvents } from "../src/liveCall.js";
-import { drainEventStoreRuntime, getEventStoreRuntimeStats } from "../src/db.js";
+import {
+  createLiveCallSession,
+  listLiveCallEvents,
+  listLiveCallEventsReplay,
+  recordLiveCallTranscript,
+  subscribeLiveCallEvents
+} from "../src/liveCall.js";
+import { drainEventStoreRuntime, flushLiveCallEventBatches, getEventStoreRuntimeStats, listLiveCallEvents as listPersistedLiveCallEvents } from "../src/db.js";
 
 class FakeSseResponse extends EventEmitter {
   constructor() {
@@ -99,5 +105,29 @@ test("live call event append uses worker when enabled", async () => {
   } finally {
     await drainEventStoreRuntime();
     restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
+  }
+});
+
+test("live call event append batches persistence while keeping memory events immediate", async () => {
+  const previousBatchFlag = process.env.VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND;
+  process.env.VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND = "1";
+
+  try {
+    const session = createLiveCallSession({ title: "Batched live-call append smoke" });
+    recordLiveCallTranscript(session.id, {
+      text: "batched live transcript",
+      final: true
+    });
+
+    assert.equal(listLiveCallEvents(session.id).some((event) => /batched live transcript/.test(event.text || "")), true);
+    assert.equal(listPersistedLiveCallEvents({ sessionId: session.id }).some((event) => /batched live transcript/.test(event.text || "")), false);
+    assert.equal(getEventStoreRuntimeStats().liveCallBatchAppend.pending >= 2, true);
+
+    await flushLiveCallEventBatches();
+
+    assert.equal(listPersistedLiveCallEvents({ sessionId: session.id }).some((event) => /batched live transcript/.test(event.text || "")), true);
+  } finally {
+    await drainEventStoreRuntime();
+    restoreEnv("VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", previousBatchFlag);
   }
 });

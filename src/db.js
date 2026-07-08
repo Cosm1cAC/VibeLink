@@ -418,6 +418,7 @@ function sqliteEventStore() {
 let eventStoreWorker = null;
 let eventStoreWorkerFailed = false;
 let toolEventAppendBatcher = null;
+let liveCallEventAppendBatcher = null;
 const eventStoreMetrics = createEventStoreMetrics();
 
 export function isEventStoreWorkerEnabled() {
@@ -426,6 +427,10 @@ export function isEventStoreWorkerEnabled() {
 
 export function isEventStoreBatchAppendEnabled() {
   return process.env.VIBELINK_EVENT_STORE_BATCH_APPEND === "1";
+}
+
+export function isLiveCallEventBatchAppendEnabled() {
+  return process.env.VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND === "1";
 }
 
 export function eventStoreMode() {
@@ -457,6 +462,7 @@ export function getEventStoreRuntimeStats() {
     workerFailed: eventStoreWorkerFailed,
     worker: getEventStoreWorkerStats(),
     batchAppend: getToolEventBatchAppendStats(),
+    liveCallBatchAppend: getLiveCallEventBatchAppendStats(),
     metrics: eventStoreMetrics.snapshot()
   };
 }
@@ -482,15 +488,47 @@ function toolEventBatcher() {
   return toolEventAppendBatcher;
 }
 
+function liveCallEventBatcher() {
+  if (!liveCallEventAppendBatcher) {
+    liveCallEventAppendBatcher = createEventStoreBatcher({
+      delayMs: eventStoreBatchDelayMs(),
+      maxBatchSize: eventStoreBatchMaxSize(),
+      flushBatch: (sessionId, events) => insertLiveCallEventsAsync(sessionId, events)
+    });
+  }
+  return liveCallEventAppendBatcher;
+}
+
 function getToolEventBatchAppendStats() {
   const stats = toolEventAppendBatcher?.stats() || {
     pending: 0,
     flushes: 0,
+    totalEvents: 0,
+    avgBatchSize: 0,
     maxBatchSize: 0,
+    lastFlushDurationMs: 0,
+    avgFlushDurationMs: 0,
     lastFlushAt: ""
   };
   return {
     enabled: isEventStoreBatchAppendEnabled(),
+    ...stats
+  };
+}
+
+function getLiveCallEventBatchAppendStats() {
+  const stats = liveCallEventAppendBatcher?.stats() || {
+    pending: 0,
+    flushes: 0,
+    totalEvents: 0,
+    avgBatchSize: 0,
+    maxBatchSize: 0,
+    lastFlushDurationMs: 0,
+    avgFlushDurationMs: 0,
+    lastFlushAt: ""
+  };
+  return {
+    enabled: isLiveCallEventBatchAppendEnabled(),
     ...stats
   };
 }
@@ -561,6 +599,7 @@ export async function closeEventStoreWorker() {
 
 export async function drainEventStoreRuntime() {
   await flushToolEventBatches();
+  await flushLiveCallEventBatches();
   await closeEventStoreWorker();
 }
 
@@ -1820,6 +1859,16 @@ export async function insertLiveCallEventsAsync(sessionId, events = []) {
     [sessionId, events],
     () => sqliteEventStore().insertLiveCallEvents(sessionId, events)
   );
+}
+
+export async function insertLiveCallEventBatchedAsync(sessionId, event = {}) {
+  if (!isLiveCallEventBatchAppendEnabled()) return insertLiveCallEventAsync(sessionId, event);
+  return liveCallEventBatcher().enqueue(cleanString(sessionId, 160), event);
+}
+
+export async function flushLiveCallEventBatches() {
+  if (!liveCallEventAppendBatcher) return [];
+  return liveCallEventAppendBatcher.flushNow();
 }
 
 export function listLiveCallEvents({ sessionId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {

@@ -22,4 +22,6 @@ test("context budget metrics count event token estimation work", () => {
   assert.equal(metrics.eventsEstimated, 2);
   assert.ok(metrics.charsEstimated > 0);
   assert.ok(metrics.totalEstimateMs >= 0);
+  assert.equal(typeof metrics.avgEstimateMs, "number");
+  assert.equal(typeof metrics.maxEstimateMs, "number");
 });

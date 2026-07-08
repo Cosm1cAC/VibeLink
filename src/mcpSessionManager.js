@@ -244,6 +244,23 @@ export function createMcpSessionManager({ spawnFn = spawn } = {}) {
       sessions.clear();
       await Promise.all(active.map((session) => session.close().catch(() => {})));
     },
+    async closeIdleSessions({ maxIdleMs = Number(process.env.VIBELINK_MCP_SESSION_MAX_IDLE_MS || 10 * 60 * 1000) } = {}) {
+      const now = Date.now();
+      const maximumIdleMs = Math.max(0, Number(maxIdleMs || 0));
+      const closing = [];
+      for (const [key, session] of sessions.entries()) {
+        const stats = session.stats();
+        const idleMs = now - Date.parse(stats.lastUsedAt || stats.startedAt || 0);
+        if (!stats.closed && Number(stats.pending || 0) === 0 && idleMs >= maximumIdleMs) {
+          sessions.delete(key);
+          closing.push(session.close().catch(() => {}));
+        } else if (stats.closed) {
+          sessions.delete(key);
+        }
+      }
+      await Promise.all(closing);
+      return { closed: closing.length, remaining: sessions.size };
+    },
     stats() {
       const items = [...sessions.values()].map((session) => session.stats());
       return {

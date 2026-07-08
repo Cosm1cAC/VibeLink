@@ -241,3 +241,36 @@ test("MCP session manager replaces a timed out stdio session", async () => {
     await manager.closeAll();
   }
 });
+
+test("MCP session manager closes idle stdio sessions", async () => {
+  let spawns = 0;
+  const manager = createMcpSessionManager({
+    spawnFn: (...args) => {
+      spawns += 1;
+      return spawn(...args);
+    }
+  });
+  const server = {
+    id: "fake-idle",
+    name: "fake-idle",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const firstSession = await manager.getSession(server, { timeoutMs: 5000 });
+    await firstSession.listTools();
+
+    const pruned = await manager.closeIdleSessions({ maxIdleMs: 0 });
+    const nextSession = await manager.getSession(server, { timeoutMs: 5000 });
+    const result = await nextSession.callTool("echo", { q: "after-idle" });
+
+    assert.equal(pruned.closed, 1);
+    assert.equal(spawns, 2);
+    assert.notEqual(firstSession, nextSession);
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "after-idle" } });
+  } finally {
+    await manager.closeAll();
+  }
+});

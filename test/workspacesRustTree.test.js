@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getWorkspaceTree } from "../src/workspaces.js";
+import { getWorkspaceContext, getWorkspaceTree } from "../src/workspaces.js";
 import { upsertWorkspace } from "../src/db.js";
 
 function restoreEnv(key, previous) {
@@ -18,7 +18,8 @@ function writeRustScannerStub(dir) {
     scanner,
     `const dirIndex = process.argv.indexOf("--dir");\n` +
       `const dir = dirIndex >= 0 ? process.argv[dirIndex + 1] || "" : "";\n` +
-      `process.stdout.write(JSON.stringify({ ok: true, dir, items: [{ name: "from-rust.txt", path: "from-rust.txt", type: "file", size: 9, updatedAt: "2026-01-01T00:00:00.000Z" }] }));\n`,
+      `const itemPath = dir ? dir + "/from-rust.txt" : "from-rust.txt";\n` +
+      `process.stdout.write(JSON.stringify({ ok: true, dir, items: [{ name: "from-rust.txt", path: itemPath, type: "file", size: 9, updatedAt: "2026-01-01T00:00:00.000Z" }] }));\n`,
     "utf8"
   );
   return scanner;
@@ -72,6 +73,34 @@ test("getWorkspaceTree falls back to Node scanner when Rust scanner fails", asyn
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceContext uses Rust scanner for directory samples when enabled", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-context-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "src"), { recursive: true });
+  fs.writeFileSync(path.join(fixture, "src", "local.txt"), "node fallback", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-context" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const scanner = writeRustScannerStub(fixture);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    const result = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["src"] });
+    assert.equal(result.ok, true);
+    assert.match(result.prompt, /file src\/from-rust\.txt/);
+    assert.doesNotMatch(result.prompt, /file src\/local\.txt/);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 });

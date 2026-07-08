@@ -202,3 +202,42 @@ test("MCP session manager replaces a crashed stdio session", async () => {
     await manager.closeAll();
   }
 });
+
+test("MCP session manager replaces a timed out stdio session", async () => {
+  let spawns = 0;
+  let firstSpawn = true;
+  const manager = createMcpSessionManager({
+    spawnFn: (command, args, options = {}) => {
+      spawns += 1;
+      const env = firstSpawn
+        ? { ...(options.env || {}), FAKE_MCP_RESPONSE_DELAY_MS: "200" }
+        : options.env;
+      firstSpawn = false;
+      return spawn(command, args, { ...options, env });
+    }
+  });
+  const server = {
+    id: "fake-timeout",
+    name: "fake-timeout",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const firstSession = await manager.getSession(server, { timeoutMs: 5000 });
+    await assert.rejects(
+      firstSession.callTool("echo", { q: "timeout" }, { timeout: 50 }),
+      (error) => error.code === "ETIMEDOUT"
+    );
+
+    const nextSession = await manager.getSession(server, { timeoutMs: 5000 });
+    const result = await nextSession.callTool("echo", { q: "after-timeout" });
+
+    assert.equal(spawns, 2);
+    assert.notEqual(firstSession, nextSession);
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "after-timeout" } });
+  } finally {
+    await manager.closeAll();
+  }
+});

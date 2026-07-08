@@ -41,7 +41,7 @@ import {
   updateToolRun,
   eventStoreMode,
   getEventStoreRuntimeStats,
-  listUnifiedEventsAsync,
+  replayEventWindowAsync,
   upsertPushSubscription
 } from "./db.js";
 import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
@@ -2273,14 +2273,19 @@ async function routeApi(request, response, url) {
 
   // Unified event log (cross-table).
   if (url.pathname === "/api/events/unified" && request.method === "GET") {
-    const items = await listUnifiedEventsAsync({
+    const window = await replayEventWindowAsync({
       taskId: url.searchParams.get("taskId") || "",
       liveCallSessionId: url.searchParams.get("liveCallSessionId") || "",
       toolRunId: url.searchParams.get("toolRunId") || "",
       after: Number(url.searchParams.get("after") || 0),
       limit: Number(url.searchParams.get("limit") || 200)
     });
-    sendJson(response, 200, { items: applyFields(items, url) });
+    sendJson(response, 200, {
+      items: applyFields(window.items, url),
+      nextCursor: window.nextCursor,
+      hasMore: window.hasMore,
+      limit: window.limit
+    });
     return;
   }
 

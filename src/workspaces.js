@@ -350,13 +350,13 @@ export async function getWorkspaceTree(id, settings, dir = "") {
   };
 }
 
-function contextForPath(root, itemPath) {
+async function contextForPath(root, itemPath) {
   const target = safeWorkspaceChild(root, itemPath);
   const stat = fs.statSync(target);
   const rel = path.relative(root, target).replaceAll("\\", "/") || ".";
 
   if (stat.isDirectory()) {
-    const entries = listDirectory(target, root, 2, 220);
+    const entries = (await listDirectoryRust(target, root, 2, 220)) || listDirectory(target, root, 2, 220);
     return {
       type: "directory",
       path: rel,
@@ -390,7 +390,7 @@ export async function getWorkspaceContext(id, settings, body = {}) {
 
   for (const itemPath of paths) {
     try {
-      items.push(contextForPath(root, itemPath));
+      items.push(await contextForPath(root, itemPath));
     } catch (error) {
       errors.push({ path: String(itemPath || ""), error: error.message });
     }

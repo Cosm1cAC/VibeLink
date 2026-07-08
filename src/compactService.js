@@ -52,8 +52,7 @@ export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPA
   let sourceChars = 0;
   let includedEvents = 0;
   let skippedEvents = 0;
-  let truncated = false;
-  const lines = [];
+  const compactableLines = [];
 
   for (const ev of events) {
     const type = ev.type || "";
@@ -72,16 +71,27 @@ export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPA
     const line = `${role ? role + ": " : ""}${text}`;
     sourceChars += String(text).length;
     includedEvents += 1;
-    if (truncated) continue;
-    const nextText = lines.length ? `${lines.join("\n")}\n${line}` : line;
-    if (nextText.length > maximum) {
-      const current = lines.join("\n");
-      const remaining = Math.max(0, maximum - (current.length ? current.length + 1 : 0));
-      if (remaining > 0) lines.push(line.slice(0, remaining));
+    compactableLines.push(line);
+  }
+
+  const lines = [];
+  let usedChars = 0;
+  let truncated = false;
+  for (let index = compactableLines.length - 1; index >= 0; index -= 1) {
+    const line = compactableLines[index];
+    const separatorChars = lines.length ? 1 : 0;
+    const available = maximum - usedChars - separatorChars;
+    if (available <= 0) {
       truncated = true;
-      continue;
+      break;
     }
-    lines.push(line);
+    if (line.length > available) {
+      lines.unshift(line.slice(-available));
+      truncated = true;
+      break;
+    }
+    lines.unshift(line);
+    usedChars += line.length + separatorChars;
   }
 
   const result = {

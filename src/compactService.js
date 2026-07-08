@@ -23,6 +23,8 @@ import { estimateEventsTokenCount, createTokenBudget, checkBudget } from "./cont
 import { appendExternalTaskEvent } from "./agents.js";
 import { listTaskEvents, resolveEventReplayLimit } from "./db.js";
 
+export const DEFAULT_COMPACT_EVENT_LIMIT = 1000;
+
 const compactServiceMetrics = {
   budgetChecks: 0,
   compactTaskCalls: 0,
@@ -35,6 +37,10 @@ const compactServiceMetrics = {
   lastMs: 0,
   maxMs: 0
 };
+
+export function resolveCompactEventLimit(value, options = {}) {
+  return resolveEventReplayLimit(value, { defaultLimit: DEFAULT_COMPACT_EVENT_LIMIT, ...options });
+}
 
 function observeCompactService(operation, { eventCount = 0, summaryRequest = false, compactedContext = false, nullResult = false, startedAt = 0 } = {}) {
   const elapsedMs = Math.max(0, performance.now() - startedAt);
@@ -100,7 +106,7 @@ export function checkTaskBudget(taskId, model = "", { total, threshold = 0.7, li
   let eventCount = 0;
   try {
     const budget = createTokenBudget(model, { total });
-    const events = listTaskEvents(taskId, { after: 0, limit: resolveEventReplayLimit(limit, { defaultLimit: 5000 }) }) || [];
+    const events = listTaskEvents(taskId, { after: 0, limit: resolveCompactEventLimit(limit) }) || [];
     eventCount = events.length;
     const report = checkBudget(budget, events);
     return {
@@ -131,7 +137,7 @@ export async function compactTask(taskId, model = "", options = {}) {
   let nullResult = false;
   try {
     const budget = createTokenBudget(model, { total: options.total });
-    const events = listTaskEvents(taskId, { after: 0, limit: resolveEventReplayLimit(options.limit, { defaultLimit: 5000 }) }) || [];
+    const events = listTaskEvents(taskId, { after: 0, limit: resolveCompactEventLimit(options.limit) }) || [];
     eventCount = events.length;
 
     if (!events.length) {

@@ -8,7 +8,7 @@ import { bridgeAgentToolEvent } from "./agentToolBridge.js";
 import { withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 import { tasksDir } from "./config.js";
 import { doubaoAgentArgs, doubaoBridgeCliPath, doubaoCliPath } from "./doubaoRuntime.js";
-import { getDefaultEventReplayLimit, insertTaskEvent, listTaskEvents, resolveEventReplayLimit, upsertTask } from "./db.js";
+import { getDefaultEventReplayLimit, insertTaskEvent, listTaskEvents, listTaskEventsAsync, resolveEventReplayLimit, upsertTask } from "./db.js";
 import { resolveAllowedPath } from "./security.js";
 import { settingsWithSecrets } from "./store.js";
 import { zhipuAgentArgs, zhipuCliPath } from "./zhipuRuntime.js";
@@ -746,7 +746,7 @@ export function stopTask(id) {
   return true;
 }
 
-export function subscribeTask(id, response, { after = 0 } = {}) {
+export async function subscribeTask(id, response, { after = 0 } = {}) {
   const task = tasks.get(id);
   if (!task) return false;
 
@@ -763,7 +763,7 @@ export function subscribeTask(id, response, { after = 0 } = {}) {
     response.write(`data: ${JSON.stringify(event)}\n\n`);
   };
 
-  const historical = listTaskEvents(id, { after: Number(after || 0), limit: resolveEventReplayLimit(undefined) });
+  const historical = await listTaskEventsAsync(id, { after: Number(after || 0), limit: resolveEventReplayLimit(undefined) });
   for (const event of historical.length ? historical : task.events.filter((event) => Number(event.cursor || 0) > Number(after || 0))) send(event);
   task.listeners.add(send);
 

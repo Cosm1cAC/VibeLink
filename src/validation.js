@@ -45,7 +45,7 @@ export const SettingsPatchSchema = z.object({
   }).optional(),
   security: z.object({
     sandboxMode: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional(),
-    approvalPolicy: z.enum(["allow-all", "approve-risky", "approve-all"]).optional(),
+    approvalPolicy: z.enum(["never", "on-request", "on-failure", "untrusted", "strict"]).optional(),
     networkAccess: z.boolean().optional(),
     requireTrustedWorkspace: z.boolean().optional()
   }).optional(),

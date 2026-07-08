@@ -1,11 +1,12 @@
 (() => {
-if (globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ >= 6) {
+if (globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ >= 7) {
   return;
 }
-globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ = 6;
+globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ = 7;
 
 const DEFAULT_TIMEOUT_MS = 120000;
 const STABLE_ANSWER_MS = 2500;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -49,7 +50,7 @@ function diagnosePage() {
     url: location.href,
     title: document.title,
     hasEditor: Boolean(editor),
-    loginLikely: /登录|登陆|手机号|验证码|login|sign in/i.test(text) && !editor,
+    loginLikely: /\u767b\u5f55|\u767b\u9678|\u624b\u673a\u53f7|\u9a8c\u8bc1\u7801|login|sign in/i.test(text) && !editor,
     bodyTail: compactText(text, 1000),
     candidateCount: candidates.length,
     candidates
@@ -89,7 +90,7 @@ function clickSend() {
       button.getAttribute("title"),
       button.textContent
     ].filter(Boolean).join(" ");
-    return /发送|提交|send|submit/i.test(label);
+    return /\u53d1\u9001|\u63d0\u4ea4|send|submit/i.test(label);
   }) || buttons.filter((button) => !button.disabled && button.getAttribute("aria-disabled") !== "true").at(-1);
 
   if (!sendButton) return { ok: false, reason: "SEND_BUTTON_NOT_FOUND" };
@@ -136,59 +137,103 @@ function answerSnapshot(prompt, ignoredAnswers = new Set()) {
   return candidates.at(-1)?.text || "";
 }
 
-async function waitForAnswer(prompt, timeoutMs, ignoredAnswers = new Set()) {
+function beginRequestHeartbeat(sendProgress, stage = "waiting") {
+  if (typeof sendProgress !== "function") return () => {};
+  let stopped = false;
+  const send = (nextStage) => {
+    if (stopped) return;
+    try {
+      sendProgress({ type: "progress", stage: nextStage || stage, ts: Date.now() });
+    } catch {
+      // Progress is best effort; final response delivery remains authoritative.
+    }
+  };
+  send(stage);
+  const timer = setInterval(() => send(stage), 10000);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
+async function waitForAnswer(prompt, timeoutMs, ignoredAnswers = new Set(), sendProgress = null) {
   const deadline = Date.now() + Math.max(5000, Number(timeoutMs || DEFAULT_TIMEOUT_MS));
   let latest = "";
   let stableSince = 0;
+  let lastProgressAt = 0;
   while (Date.now() < deadline) {
     const text = answerSnapshot(prompt, ignoredAnswers);
     if (text && text !== latest) {
       latest = text;
       stableSince = Date.now();
+      lastProgressAt = Date.now();
+      if (typeof sendProgress === "function") {
+        sendProgress({ type: "progress", stage: "answer_detected", length: latest.length, ts: lastProgressAt });
+      }
     } else if (latest && Date.now() - stableSince >= STABLE_ANSWER_MS) {
       return latest;
+    } else if (typeof sendProgress === "function" && Date.now() - lastProgressAt >= 10000) {
+      lastProgressAt = Date.now();
+      sendProgress({
+        type: "progress",
+        stage: latest ? "answer_stabilizing" : "waiting_for_answer",
+        length: latest.length,
+        ts: lastProgressAt
+      });
     }
     await sleep(1000);
   }
   throw new Error("Timed out waiting for a stable Doubao answer.");
 }
 
-async function askDoubao(params = {}) {
-  const diagnosis = diagnosePage();
-  if (diagnosis.loginLikely) throw new Error("Doubao page appears to require login.");
-  if (!diagnosis.hasEditor) throw new Error("Could not find the Doubao prompt editor.");
+async function askDoubao(params = {}, sendProgress = null) {
+  const stopHeartbeat = beginRequestHeartbeat(sendProgress, "diagnosing");
+  try {
+    const diagnosis = diagnosePage();
+    if (diagnosis.loginLikely) throw new Error("Doubao page appears to require login.");
+    if (!diagnosis.hasEditor) throw new Error("Could not find the Doubao prompt editor.");
 
-  const prompt = String(params.prompt || "");
-  const ignoredAnswers = new Set(answerCandidates(prompt).map((item) => item.text));
-  const inserted = insertPrompt(prompt);
-  if (!inserted.ok) throw new Error(inserted.reason);
+    const prompt = String(params.prompt || "");
+    const ignoredAnswers = new Set(answerCandidates(prompt).map((item) => item.text));
+    const inserted = insertPrompt(prompt);
+    if (!inserted.ok) throw new Error(inserted.reason);
+    if (typeof sendProgress === "function") sendProgress({ type: "progress", stage: "prompt_inserted", ts: Date.now() });
 
-  const clicked = clickSend();
-  if (!clicked.ok) throw new Error(clicked.reason);
+    const clicked = clickSend();
+    if (!clicked.ok) throw new Error(clicked.reason);
+    if (typeof sendProgress === "function") sendProgress({ type: "progress", stage: "prompt_sent", ts: Date.now() });
 
-  const text = await waitForAnswer(prompt, params.timeoutMs, ignoredAnswers);
-  return {
-    provider: "doubao",
-    text,
-    url: location.href
-  };
+    const text = await waitForAnswer(prompt, params.timeoutMs, ignoredAnswers, sendProgress);
+    return {
+      provider: "doubao",
+      text,
+      url: location.href
+    };
+  } finally {
+    stopHeartbeat();
+  }
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "doubao.diagnose.v6") {
+  if (message?.type === "doubao.diagnose.v7") {
     sendResponse({
       ...diagnosePage(),
-      scriptVersion: 6,
+      scriptVersion: 7,
       bridgeClient: "service_worker"
     });
     return false;
   }
 
-  if (message?.type === "doubao.ask.v6") {
-    askDoubao(message.params || {})
+  if (message?.type === "doubao.ask.v7") {
+    const sendProgress = (payload) => chrome.runtime.sendMessage({
+      type: "doubao.progress.v7",
+      requestId: message.requestId,
+      payload
+    }).catch(() => {});
+    askDoubao(message.params || {}, sendProgress)
       .then((result) => sendResponse({
         ...result,
-        scriptVersion: 6,
+        scriptVersion: 7,
         bridgeClient: "service_worker"
       }))
       .catch((error) => sendResponse({
@@ -208,6 +253,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 globalThis.__DOUBAO_BRIDGE_CONTENT_INTERNALS__ = {
   answerCandidates,
   answerSnapshot,
+  beginRequestHeartbeat,
   diagnosePage,
   waitForAnswer
 };

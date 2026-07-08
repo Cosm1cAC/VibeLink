@@ -1,5 +1,6 @@
 package com.vibelink.app
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,10 +15,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val sharedText = intent?.takeIf { it.action == Intent.ACTION_SEND }?.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
         setContent {
             VibeLinkTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    VibeLinkApp(initialPairingUri = intent?.data?.takeIf { it.scheme == "vibelink" }?.toString())
+                    VibeLinkApp(
+                        initialPairingUri = intent?.data?.takeIf { it.scheme == "vibelink" }?.toString(),
+                        initialSharedText = sharedText,
+                    )
                 }
             }
         }

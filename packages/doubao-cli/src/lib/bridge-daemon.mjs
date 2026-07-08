@@ -178,6 +178,7 @@ export async function startBridgeDaemon(options = {}) {
       }
       const waiter = pending.get(message.id);
       if (!waiter) return;
+      if (message.type === "progress") return;
       pending.delete(message.id);
       waiter.resolve(message);
     });

@@ -921,6 +921,18 @@ export function getHistory(provider, id, { fresh = false } = {}) {
   };
 }
 
+export function isArchivedCodexSessionId(id, home = getHomeDir()) {
+  return Boolean(id && archivedCodexSessionIds(home).has(id));
+}
+
+export function filterArchivedCodexTasks(tasks = [], home = getHomeDir()) {
+  const archivedIds = archivedCodexSessionIds(home);
+  return tasks.filter((task) => {
+    if (task.agent !== "codex" || !task.sessionId) return true;
+    return !archivedIds.has(task.sessionId);
+  });
+}
+
 export const __testInternals = {
   archivedCodexSessionIds
 };

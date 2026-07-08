@@ -22,6 +22,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
+import java.io.File
+import java.io.FileOutputStream
 
 data class AudioLevel(
     val rms: Double = 0.0,
@@ -43,6 +45,9 @@ class LiveCallAudioStreamer(
     private var webSocket: WebSocket? = null
     private var audioRecord: AudioRecord? = null
     private var recordJob: Job? = null
+    private var recordingOutput: FileOutputStream? = null
+    private var recordingFile: File? = null
+    private val paused = AtomicBoolean(false)
 
     val isRunning: Boolean
         get() = running.get()
@@ -53,6 +58,7 @@ class LiveCallAudioStreamer(
         onStatus: (String) -> Unit = {},
         onError: (String) -> Unit = {},
         onLevel: (AudioLevel) -> Unit = {},
+        recordingFile: File? = null,
     ) {
         if (running.get()) return
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -61,6 +67,14 @@ class LiveCallAudioStreamer(
         }
 
         running.set(true)
+        paused.set(false)
+        this.recordingFile = recordingFile
+        recordingOutput = recordingFile?.let {
+            runCatching {
+                it.parentFile?.mkdirs()
+                FileOutputStream(it, true)
+            }.getOrNull()
+        }
         onStatus("Connecting microphone stream")
         val request = apiClient.liveCallAudioRequest(sessionId)
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
@@ -89,6 +103,14 @@ class LiveCallAudioStreamer(
         })
     }
 
+    fun pause() {
+        paused.set(true)
+    }
+
+    fun resume() {
+        paused.set(false)
+    }
+
     fun stop() {
         if (!running.getAndSet(false)) return
         recordJob?.cancel()
@@ -97,6 +119,7 @@ class LiveCallAudioStreamer(
         try { webSocket?.close(1000, "client_stop") } catch (_: Exception) {}
         webSocket = null
         stopRecorder()
+        closeRecording()
     }
 
     private fun pumpAudio(
@@ -157,8 +180,10 @@ class LiveCallAudioStreamer(
             while (running.get() && recordJob?.isActive != false) {
                 val bytesRead = recorder.read(buffer, 0, buffer.size)
                 if (bytesRead <= 0) continue
+                if (paused.get()) continue
                 totalBytes += bytesRead.toLong()
                 val frame = buffer.copyOf(bytesRead)
+                runCatching { recordingOutput?.write(frame) }
                 ws.send(frame.toByteString())
 
                 val now = System.currentTimeMillis()
@@ -173,8 +198,15 @@ class LiveCallAudioStreamer(
             if (running.get()) onError(error.message ?: "Microphone capture failed")
         } finally {
             stopRecorder()
+            closeRecording()
             try { ws.send("""{"type":"flush"}""") } catch (_: Exception) {}
         }
+    }
+
+    private fun closeRecording() {
+        try { recordingOutput?.flush() } catch (_: Exception) {}
+        try { recordingOutput?.close() } catch (_: Exception) {}
+        recordingOutput = null
     }
 
     private fun stopRecorder() {

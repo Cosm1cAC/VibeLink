@@ -10,6 +10,7 @@
         "audio:level": "dotnet run --project tools/windows-audio-probe -- level",
         "live-call:push-probe": "node tools/live-call/push-probe.mjs",
         "live-call:stream-levels": "node tools/live-call/stream-levels.mjs",
+        "live-call:qa-stress": "node tools/live-call/qa-stress.mjs",
         "whisper:setup": "node tools/whisper-cpp/setup.mjs",
         "whisper:model": "node tools/whisper-cpp/download-model.mjs",
         "build": "vite build",

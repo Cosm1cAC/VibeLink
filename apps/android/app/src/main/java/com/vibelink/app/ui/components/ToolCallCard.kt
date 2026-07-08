@@ -55,18 +55,22 @@ fun ToolCallCard(
     var expanded by remember { mutableStateOf(tool.status == "started" || tool.status == "running") }
     val isRunning = tool.status == "started" || tool.status == "running"
     val statusColor = when (tool.status) {
-        "completed" -> MaterialTheme.colorScheme.primary
-        "failed", "error" -> MaterialTheme.colorScheme.error
-        "started", "running" -> MaterialTheme.colorScheme.secondary
+        "completed", "done" -> MaterialTheme.colorScheme.primary
+        "failed", "error", "expired" -> MaterialTheme.colorScheme.error
+        "started", "running", "queued", "cancelling", "approval_required" -> MaterialTheme.colorScheme.secondary
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val statusLabel = when (tool.status) {
-        "completed" -> "completed"
+        "completed", "done" -> "done"
         "failed" -> "failed"
         "error" -> "error"
         "started" -> "started"
         "running" -> "running"
         "cancelled" -> "cancelled"
+        "cancelling" -> "cancelling"
+        "approval_required" -> "approval required"
+        "expired" -> "expired"
+        "queued" -> "queued"
         else -> tool.status.ifBlank { "pending" }
     }
     val toolName = tool.label.ifBlank { tool.name.ifBlank { "tool" } }

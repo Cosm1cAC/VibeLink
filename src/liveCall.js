@@ -202,6 +202,34 @@ export function stopLiveCallSession(id, reason = "") {
   return publicSession(session);
 }
 
+export function pauseLiveCallSession(id, reason = "") {
+  const session = sessions.get(id);
+  if (!session) {
+    dbUpdateLiveCall(id, { status: "paused" });
+    return getLiveCallSession(id);
+  }
+  if (session.status !== "paused") {
+    session.status = "paused";
+    dbUpdateLiveCall(id, { status: "paused" });
+    pushEvent(session, "live_call.paused", { reason: String(reason || "manual") });
+  }
+  return publicSession(session);
+}
+
+export function resumeLiveCallSession(id, reason = "") {
+  const session = sessions.get(id);
+  if (!session) {
+    dbUpdateLiveCall(id, { status: "ready" });
+    return getLiveCallSession(id);
+  }
+  if (session.status !== "ready" && session.status !== "active") {
+    session.status = "ready";
+    dbUpdateLiveCall(id, { status: "ready" });
+    pushEvent(session, "live_call.resumed", { reason: String(reason || "manual") });
+  }
+  return publicSession(session);
+}
+
 export function recordLiveCallLevel(id, body = {}) {
   const session = sessions.get(id);
   if (!session) return null;

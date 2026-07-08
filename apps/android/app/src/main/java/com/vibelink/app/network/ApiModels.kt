@@ -11,6 +11,21 @@ data class PublicSettings(
     @SerializedName("hasAnthropicKey") val hasAnthropicKey: Boolean = false,
     @SerializedName("hasZhipuKey") val hasZhipuKey: Boolean = false,
     @SerializedName("defaultCwd") val defaultCwd: String = "",
+    @SerializedName("permissionMode") val permissionMode: String = "",
+    @SerializedName("codexCommand") val codexCommand: String = "",
+    @SerializedName("claudeCommand") val claudeCommand: String = "",
+    @SerializedName("doubaoCommand") val doubaoCommand: String = "",
+    @SerializedName("doubaoCdpEndpoint") val doubaoCdpEndpoint: String = "",
+    @SerializedName("doubaoUrl") val doubaoUrl: String = "",
+    val security: SecuritySettings = SecuritySettings(),
+)
+
+data class SecuritySettings(
+    @SerializedName("sandboxMode") val sandboxMode: String = "workspace-write",
+    @SerializedName("approvalPolicy") val approvalPolicy: String = "on-request",
+    @SerializedName("networkAccess") val networkAccess: Boolean = true,
+    @SerializedName("requireTrustedWorkspace") val requireTrustedWorkspace: Boolean = true,
+    @SerializedName("requireDangerousCommandApproval") val requireDangerousCommandApproval: Boolean = true,
 )
 
 data class LoginResponse(
@@ -54,10 +69,57 @@ data class ClaimPairingResponse(
 data class StatusResponse(
     val ok: Boolean = false,
     val status: String = "",
+    val settings: PublicSettings? = null,
+    @SerializedName("providerRegistry") val providerRegistry: ProviderRegistryResponse = ProviderRegistryResponse(),
+    val tasks: List<TaskSummary> = emptyList(),
+    val workspaces: List<WorkspaceItem> = emptyList(),
+    val network: List<NetworkAddress> = emptyList(),
+)
+
+data class NetworkAddress(
+    val name: String = "",
+    val address: String = "",
+    val url: String = "",
 )
 
 data class SimpleOk(
     val ok: Boolean = false,
+)
+
+// Provider registry / model catalog
+
+data class ProviderRegistryResponse(
+    val version: Int = 0,
+    @SerializedName("defaultProvider") val defaultProvider: String = "codex",
+    val providers: List<ProviderDefinition> = emptyList(),
+    @SerializedName("generatedAt") val generatedAt: String = "",
+)
+
+data class ProviderDefinition(
+    val id: String = "",
+    val label: String = "",
+    val kind: String = "",
+    val available: Boolean = false,
+    val status: String = "",
+    val reason: String = "",
+    @SerializedName("defaultModel") val defaultModel: String = "",
+    val models: List<ModelDefinition> = emptyList(),
+    @SerializedName("reasoningEfforts") val reasoningEfforts: List<String> = emptyList(),
+    val capabilities: ProviderCapabilities = ProviderCapabilities(),
+)
+
+data class ModelDefinition(
+    val id: String = "",
+    val label: String = "",
+    val default: Boolean = false,
+)
+
+data class ProviderCapabilities(
+    @SerializedName("modelOverride") val modelOverride: Boolean = true,
+    @SerializedName("reasoningEffort") val reasoningEffort: Boolean = true,
+    val resume: Boolean = false,
+    @SerializedName("liveCallAssistant") val liveCallAssistant: Boolean = false,
+    @SerializedName("browserBridge") val browserBridge: Boolean = false,
 )
 
 // ── Live Calls ──
@@ -72,6 +134,14 @@ data class Session(
     @SerializedName("lastTranscript") val lastTranscript: String = "",
     @SerializedName("lastQuestion") val lastQuestion: String = "",
     @SerializedName("lastAnswer") val lastAnswer: String = "",
+    @SerializedName("agentTaskId") val agentTaskId: String = "",
+    @SerializedName("asrProvider") val asrProvider: String = "",
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+    @SerializedName("startedAt") val startedAt: String = "",
+    @SerializedName("stoppedAt") val stoppedAt: String = "",
+    val remote: LevelData? = null,
+    val local: LevelData? = null,
 )
 
 data class CreateSessionResponse(
@@ -81,6 +151,38 @@ data class CreateSessionResponse(
 
 data class SessionListResponse(
     val items: List<Session> = emptyList(),
+)
+
+data class AsrProviderListResponse(
+    val items: List<AsrProviderInfo> = emptyList(),
+)
+
+data class AsrProviderInfo(
+    val id: String = "",
+    val label: String = "",
+    val available: Boolean = false,
+    val active: Boolean = false,
+    val diagnostics: Map<String, Any?>? = null,
+)
+
+data class AsrCheckpointListResponse(
+    val items: List<AsrCheckpointInfo> = emptyList(),
+)
+
+data class AsrCheckpointRecoverResponse(
+    val ok: Boolean = false,
+    val items: List<AsrCheckpointInfo> = emptyList(),
+)
+
+data class AsrCheckpointInfo(
+    val channel: String = "",
+    val path: String = "",
+    val bytes: Long = 0,
+    val provider: String = "",
+    @SerializedName("requestedProvider") val requestedProvider: String = "",
+    @SerializedName("fallbackFromProvider") val fallbackFromProvider: String = "",
+    @SerializedName("segmentCount") val segmentCount: Int = 0,
+    val exists: Boolean = false,
 )
 
 data class LiveCallEvent(
@@ -97,6 +199,18 @@ data class LiveCallEvent(
     val speaker: String = "",
     val final: Boolean = false,
     @SerializedName("taskId") val taskId: String = "",
+    val provider: String = "",
+    @SerializedName("segmentIndex") val segmentIndex: Int = 0,
+    @SerializedName("durationMs") val durationMs: Long = 0,
+    @SerializedName("speechMs") val speechMs: Long = 0,
+    val bytes: Long = 0,
+    val encoding: String = "",
+    @SerializedName("sampleRate") val sampleRate: Int = 0,
+    val channels: Int = 0,
+)
+
+data class LiveCallEventsResponse(
+    val items: List<LiveCallEvent> = emptyList(),
 )
 
 data class LevelData(
@@ -170,6 +284,38 @@ data class TaskDetail(
     val status: String = "",
     @SerializedName("sessionId") val sessionId: String = "",
     val events: List<TaskEvent> = emptyList(),
+)
+
+data class TaskCreateRequest(
+    val prompt: String,
+    val cwd: String = "",
+    val agent: String = "codex",
+    val model: String = "",
+    val title: String = "",
+    val mode: String = "new",
+    val sessionId: String = "",
+    val reasoningEffort: String = "",
+    val security: SecuritySettings? = null,
+)
+
+data class TaskCreateResponse(
+    val id: String = "",
+    val status: String = "",
+    @SerializedName("toolRunId") val toolRunId: String = "",
+    val error: String = "",
+    @SerializedName("approvalId") val approvalId: String = "",
+    val approval: ApprovalRequestItem? = null,
+)
+
+data class TaskInputRequest(val text: String)
+
+data class TaskInputResponse(
+    val ok: Boolean = false,
+    val error: String = "",
+)
+
+data class TaskStopResponse(
+    val ok: Boolean = false,
 )
 
 data class TaskEvent(
@@ -318,15 +464,23 @@ data class ToolEvent(
  */
 data class ConversationItem(
     val key: String = "",
-    val kind: String = "",         // "task" | "history"
+    val kind: String = "",         // "task" | "history" | "fork" | "desktop" | "new"
     val id: String = "",
     val provider: String = "",
     val title: String = "",
     val cwd: String = "",
-    val status: String = "",       // "running" | "completed" | "failed" | "history"
+    val status: String = "",       // "running" | "completed" | "failed" | "history" | "desktop"
     @SerializedName("updatedAt") val updatedAt: String = "",
     @SerializedName("sessionId") val sessionId: String = "",
     val preview: String = "",
+    @SerializedName("sourceKey") val sourceKey: String = "",
+    @SerializedName("sourceId") val sourceId: String = "",
+    val group: String = "",
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    @SerializedName("desktopIndex") val desktopIndex: Int? = null,
+    @SerializedName("desktopTitle") val desktopTitle: String = "",
+    @SerializedName("desktopLinked") val desktopLinked: Boolean = false,
 )
 
 /**
@@ -348,10 +502,214 @@ data class ToolCallSummary(
     val input: Map<String, Any?>? = null,
     val output: String = "",
     @SerializedName("outputEvents") val outputEvents: List<ToolOutputEvent> = emptyList(),
+    val permission: String = "",
+    val risk: String = "",
+    val description: String = "",
+    val cursor: Int = 0,
+    @SerializedName("approvalRequired") val approvalRequired: Boolean = false,
 )
 
 data class ToolOutputEvent(
     val cursor: Int = 0,
     val stream: String = "",
     val text: String = "",
+)
+
+// Thread state / conversation management
+
+data class ThreadStateResponse(
+    val version: Int = 0,
+    val items: Map<String, ThreadMeta> = emptyMap(),
+    val forks: List<ThreadFork> = emptyList(),
+)
+
+data class ThreadMeta(
+    val key: String = "",
+    val title: String = "",
+    val group: String = "",
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class ThreadPatch(
+    val title: String? = null,
+    val group: String? = null,
+    val pinned: Boolean? = null,
+    val archived: Boolean? = null,
+    val provider: String? = null,
+    val sessionId: String? = null,
+    val meta: Map<String, Any?>? = null,
+)
+
+data class ThreadPatchRequest(
+    val key: String,
+    val patch: ThreadPatch,
+)
+
+data class ThreadFork(
+    val id: String = "",
+    @SerializedName("sourceKey") val sourceKey: String = "",
+    @SerializedName("sourceId") val sourceId: String = "",
+    val provider: String = "",
+    val title: String = "",
+    val cwd: String = "",
+    val group: String = "",
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class ThreadForkRequest(
+    @SerializedName("sourceKey") val sourceKey: String,
+    @SerializedName("sourceId") val sourceId: String,
+    val provider: String,
+    val title: String,
+    val cwd: String = "",
+)
+
+data class ThreadForkResponse(
+    val fork: ThreadFork = ThreadFork(),
+    val state: ThreadStateResponse = ThreadStateResponse(),
+)
+
+// Codex Desktop Remote
+
+data class DesktopRemoteState(
+    val ok: Boolean = false,
+    val mode: String = "",
+    val active: Boolean = false,
+    val desktop: DesktopSnapshot? = null,
+    val items: List<DesktopRemoteQueueItem> = emptyList(),
+    @SerializedName("pendingCount") val pendingCount: Int = 0,
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class DesktopSnapshot(
+    val ok: Boolean = false,
+    val found: Boolean = false,
+    val ready: Boolean = false,
+    @SerializedName("composerReady") val composerReady: Boolean = false,
+    @SerializedName("canAttemptSend") val canAttemptSend: Boolean = false,
+    val reason: String = "",
+    val minimized: Boolean = false,
+    @SerializedName("sidebarHasRunning") val sidebarHasRunning: Boolean = false,
+    @SerializedName("sidebarRunningCount") val sidebarRunningCount: Int = 0,
+    @SerializedName("windowTitle") val windowTitle: String = "",
+    @SerializedName("visibleTranscript") val visibleTranscript: List<DesktopTranscriptEntry> = emptyList(),
+    val conversations: List<DesktopConversation> = emptyList(),
+    val projects: List<DesktopProject> = emptyList(),
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class DesktopTranscriptEntry(
+    val role: String = "",
+    val text: String = "",
+)
+
+data class DesktopConversation(
+    val index: Int = 0,
+    val title: String = "",
+    @SerializedName("rawName") val rawName: String = "",
+    @SerializedName("projectTitle") val projectTitle: String = "",
+    val running: Boolean = false,
+)
+
+data class DesktopProject(
+    val index: Int = 0,
+    val title: String = "",
+)
+
+data class DesktopRemoteQueueItem(
+    val id: String = "",
+    val text: String = "",
+    val status: String = "",
+    val error: String = "",
+    val attempts: Int = 0,
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+    @SerializedName("sentAt") val sentAt: String = "",
+)
+
+data class DesktopRemoteTarget(
+    @SerializedName("desktopIndex") val desktopIndex: Int? = null,
+    @SerializedName("desktopTitle") val desktopTitle: String = "",
+    @SerializedName("desktopProjectTitle") val desktopProjectTitle: String = "",
+)
+
+data class DesktopRemoteMessageRequest(
+    val text: String,
+    @SerializedName("settingsPolicy") val settingsPolicy: String = "useExisting",
+    val target: DesktopRemoteTarget? = null,
+)
+
+data class DesktopRemoteMessageResponse(
+    val ok: Boolean = false,
+    val item: DesktopRemoteQueueItem? = null,
+    val state: DesktopRemoteState? = null,
+)
+
+data class DesktopFocusRequest(val index: Int)
+
+data class DesktopFocusResponse(
+    val ok: Boolean = false,
+    val action: String = "",
+    val error: String = "",
+    val index: Int = 0,
+    val desktop: DesktopSnapshot? = null,
+)
+
+// Approvals and tool run detail
+
+data class ApprovalListResponse(
+    val items: List<ApprovalRequestItem> = emptyList(),
+)
+
+data class ApprovalRequestItem(
+    val id: String = "",
+    val kind: String = "",
+    val title: String = "",
+    val reason: String = "",
+    val status: String = "",
+    @SerializedName("toolRunId") val toolRunId: String = "",
+    val request: Map<String, Any?>? = null,
+    val risk: Map<String, Any?>? = null,
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class ApprovalDecisionRequest(
+    val decision: String,
+    val reason: String = "",
+)
+
+data class ApprovalDecisionResponse(
+    val ok: Boolean = false,
+    val approval: ApprovalRequestItem? = null,
+    val resumed: Boolean = false,
+    val result: Map<String, Any?>? = null,
+    val error: String = "",
+)
+
+data class ToolRunDetailResponse(
+    val toolRun: Map<String, Any?>? = null,
+    val events: List<ToolEvent> = emptyList(),
+)
+
+data class SettingsPatchRequest(
+    @SerializedName("defaultCwd") val defaultCwd: String? = null,
+    @SerializedName("claudeCommand") val claudeCommand: String? = null,
+    @SerializedName("codexCommand") val codexCommand: String? = null,
+    @SerializedName("doubaoCommand") val doubaoCommand: String? = null,
+    @SerializedName("doubaoCdpEndpoint") val doubaoCdpEndpoint: String? = null,
+    @SerializedName("doubaoUrl") val doubaoUrl: String? = null,
+    val security: SecuritySettings? = null,
+    val apiKeys: Map<String, String>? = null,
+)
+
+data class SettingsPatchResponse(
+    val ok: Boolean = false,
+    val settings: PublicSettings? = null,
+    val error: String = "",
 )

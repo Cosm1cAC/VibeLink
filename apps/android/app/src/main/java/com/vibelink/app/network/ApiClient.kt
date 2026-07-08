@@ -72,11 +72,23 @@ class ApiClient(
         }
     }
 
+    private suspend fun postRaw(path: String, body: Any? = null): String = post(path, body)
+
     // ── Auth ──
 
     suspend fun checkStatus(): StatusResponse {
         val json = get("/api/status")
         return gson.fromJson(json, StatusResponse::class.java)
+    }
+
+    suspend fun getProviderRegistry(fresh: Boolean = false): ProviderRegistryResponse {
+        val json = get("/api/provider-registry${if (fresh) "?fresh=1" else ""}")
+        return gson.fromJson(json, ProviderRegistryResponse::class.java)
+    }
+
+    suspend fun saveSettings(patch: SettingsPatchRequest): SettingsPatchResponse {
+        val json = post("/api/settings", patch)
+        return gson.fromJson(json, SettingsPatchResponse::class.java)
     }
 
     suspend fun login(pairingToken: String): LoginResponse {
@@ -126,8 +138,38 @@ class ApiClient(
         return gson.fromJson(json, SessionListResponse::class.java).items
     }
 
+    suspend fun listAsrProviders(): List<AsrProviderInfo> {
+        val json = get("/api/live-calls/asr-providers")
+        return gson.fromJson(json, AsrProviderListResponse::class.java).items
+    }
+
+    suspend fun listAsrCheckpoints(sessionId: String): List<AsrCheckpointInfo> {
+        val json = get("/api/live-calls/${encode(sessionId)}/asr-checkpoints")
+        return gson.fromJson(json, AsrCheckpointListResponse::class.java).items
+    }
+
+    suspend fun recoverAsrCheckpoints(sessionId: String): List<AsrCheckpointInfo> {
+        val json = post("/api/live-calls/${encode(sessionId)}/asr-recover", mapOf("reason" to "android"))
+        return gson.fromJson(json, AsrCheckpointRecoverResponse::class.java).items
+    }
+
+    suspend fun fetchLiveCallEvents(sessionId: String, after: Int = 0, limit: Int = 300): List<LiveCallEvent> {
+        val json = get("/api/live-calls/${encode(sessionId)}/events/catch-up?after=$after&limit=$limit")
+        return gson.fromJson(json, LiveCallEventsResponse::class.java).items
+    }
+
     suspend fun stopSession(sessionId: String) {
         post("/api/live-calls/$sessionId/stop", mapOf("reason" to "manual"))
+    }
+
+    suspend fun pauseSession(sessionId: String): Session? {
+        val json = post("/api/live-calls/$sessionId/pause", mapOf("reason" to "android"))
+        return gson.fromJson(json, CreateSessionResponse::class.java).session
+    }
+
+    suspend fun resumeSession(sessionId: String): Session? {
+        val json = post("/api/live-calls/$sessionId/resume", mapOf("reason" to "android"))
+        return gson.fromJson(json, CreateSessionResponse::class.java).session
     }
 
     suspend fun sendTranscript(sessionId: String, text: String, final: Boolean = true, speaker: String = "remote") {
@@ -164,6 +206,44 @@ class ApiClient(
         return gson.fromJson(json, TaskDetail::class.java)
     }
 
+    suspend fun createTask(
+        prompt: String,
+        cwd: String = "",
+        agent: String = "codex",
+        model: String = "",
+        title: String = "",
+        mode: String = "new",
+        sessionId: String = "",
+        reasoningEffort: String = "",
+        security: SecuritySettings? = null,
+    ): TaskCreateResponse {
+        val json = postRaw(
+            "/api/tasks",
+            TaskCreateRequest(
+                prompt = prompt,
+                cwd = cwd,
+                agent = agent,
+                model = model,
+                title = title,
+                mode = mode,
+                sessionId = sessionId,
+                reasoningEffort = reasoningEffort,
+                security = security,
+            ),
+        )
+        return gson.fromJson(json, TaskCreateResponse::class.java)
+    }
+
+    suspend fun sendTaskInput(taskId: String, text: String): TaskInputResponse {
+        val json = post("/api/tasks/${encode(taskId)}/input", TaskInputRequest(text))
+        return gson.fromJson(json, TaskInputResponse::class.java)
+    }
+
+    suspend fun stopTask(taskId: String): TaskStopResponse {
+        val json = post("/api/tasks/${encode(taskId)}/stop", mapOf("reason" to "android"))
+        return gson.fromJson(json, TaskStopResponse::class.java)
+    }
+
     // ── Histories (session list + detail) ──
 
     suspend fun listHistories(): List<HistoryItem> {
@@ -174,6 +254,66 @@ class ApiClient(
     suspend fun getHistoryDetail(provider: String, id: String): HistoryDetail {
         val json = get("/api/histories/$provider/${encode(id)}")
         return gson.fromJson(json, HistoryDetail::class.java)
+    }
+
+    suspend fun getThreadState(): ThreadStateResponse {
+        val json = get("/api/thread-state")
+        return gson.fromJson(json, ThreadStateResponse::class.java)
+    }
+
+    suspend fun patchThread(key: String, patch: ThreadPatch): ThreadStateResponse {
+        val json = post("/api/thread-state", ThreadPatchRequest(key, patch))
+        return gson.fromJson(json, ThreadStateResponse::class.java)
+    }
+
+    suspend fun createThreadFork(
+        sourceKey: String,
+        sourceId: String,
+        provider: String,
+        title: String,
+        cwd: String = "",
+    ): ThreadForkResponse {
+        val json = post(
+            "/api/thread-state/forks",
+            ThreadForkRequest(
+                sourceKey = sourceKey,
+                sourceId = sourceId,
+                provider = provider,
+                title = title,
+                cwd = cwd,
+            ),
+        )
+        return gson.fromJson(json, ThreadForkResponse::class.java)
+    }
+
+    // Codex Desktop Remote
+
+    suspend fun getDesktopRemoteStatus(fresh: Boolean = false): DesktopRemoteState {
+        val json = get("/api/desktop-remote/status${if (fresh) "?fresh=1" else ""}")
+        return gson.fromJson(json, DesktopRemoteState::class.java)
+    }
+
+    suspend fun sendDesktopRemoteMessage(text: String, target: DesktopRemoteTarget? = null): DesktopRemoteMessageResponse {
+        val json = post(
+            "/api/desktop-remote/messages",
+            DesktopRemoteMessageRequest(text = text, target = target),
+        )
+        return gson.fromJson(json, DesktopRemoteMessageResponse::class.java)
+    }
+
+    suspend fun focusDesktopConversation(index: Int): DesktopFocusResponse {
+        val json = post("/api/desktop-remote/focus", DesktopFocusRequest(index))
+        return gson.fromJson(json, DesktopFocusResponse::class.java)
+    }
+
+    suspend fun retryDesktopRemote(): DesktopRemoteState {
+        val json = post("/api/desktop-remote/retry", emptyMap<String, String>())
+        return gson.fromJson(json, DesktopRemoteState::class.java)
+    }
+
+    suspend fun clearDesktopRemote(): DesktopRemoteState {
+        val json = post("/api/desktop-remote/clear", emptyMap<String, String>())
+        return gson.fromJson(json, DesktopRemoteState::class.java)
     }
 
     // Workspace / Git
@@ -241,6 +381,24 @@ class ApiClient(
     suspend fun fetchToolEvents(taskId: String, after: Int = 0, limit: Int = 500): List<ToolEvent> {
         val json = get("/api/tool-events?taskId=${encode(taskId)}&after=$after&limit=$limit")
         return gson.fromJson(json, ToolEventListResponse::class.java).items
+    }
+
+    suspend fun getToolRun(toolRunId: String, after: Int = 0, limit: Int = 1000): ToolRunDetailResponse {
+        val json = get("/api/tool-runs/${encode(toolRunId)}?after=$after&limit=$limit")
+        return gson.fromJson(json, ToolRunDetailResponse::class.java)
+    }
+
+    suspend fun listApprovals(status: String = "pending", limit: Int = 50): List<ApprovalRequestItem> {
+        val json = get("/api/approvals?status=${encode(status)}&limit=$limit")
+        return gson.fromJson(json, ApprovalListResponse::class.java).items
+    }
+
+    suspend fun decideApproval(approvalId: String, approve: Boolean, reason: String = "Decision from Android"): ApprovalDecisionResponse {
+        val json = post(
+            "/api/approvals/${encode(approvalId)}/decision",
+            ApprovalDecisionRequest(decision = if (approve) "approve" else "deny", reason = reason),
+        )
+        return gson.fromJson(json, ApprovalDecisionResponse::class.java)
     }
 
     // ── SSE (Live Call Events) ──

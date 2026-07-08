@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { __testInternals, listHistories } from "../src/history.js";
+import { __testInternals, filterArchivedCodexTasks, listHistories } from "../src/history.js";
 
 function writeJsonl(filePath, entries) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -60,6 +60,17 @@ test("listHistories excludes Codex sessions archived by Codex Desktop", () => {
     const histories = listHistories({ fresh: true });
     assert.equal(histories.some((item) => item.provider === "codex" && item.id === activeId), true);
     assert.equal(histories.some((item) => item.provider === "codex" && item.id === archivedId), false);
+
+    const tasks = filterArchivedCodexTasks(
+      [
+        { id: "task-active", agent: "codex", sessionId: activeId },
+        { id: "task-archived", agent: "codex", sessionId: archivedId },
+        { id: "task-claude", agent: "claude", sessionId: archivedId },
+        { id: "task-new", agent: "codex", sessionId: "" }
+      ],
+      home
+    );
+    assert.deepEqual(tasks.map((item) => item.id), ["task-active", "task-claude", "task-new"]);
   } finally {
     if (originalHome === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalHome;

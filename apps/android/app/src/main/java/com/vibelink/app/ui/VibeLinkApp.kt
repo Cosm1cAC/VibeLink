@@ -21,7 +21,7 @@ import com.vibelink.app.ui.screens.*
  * Navigation: login 鈫?sessionList 鈫?messageList / call
  */
 @Composable
-fun VibeLinkApp(initialPairingUri: String? = null) {
+fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "") {
     val navController = rememberNavController()
     val apiClient = remember { ApiClient() }
 
@@ -32,6 +32,7 @@ fun VibeLinkApp(initialPairingUri: String? = null) {
     val messageListViewModel = remember { MessageListViewModel() }
     val workspaceViewModel = remember { WorkspaceViewModel() }
     val callViewModel = remember { CallViewModel() }
+    val settingsViewModel = remember { SettingsViewModel() }
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
@@ -60,6 +61,17 @@ fun VibeLinkApp(initialPairingUri: String? = null) {
                     pendingConversation = conversation
                     navController.navigate("messageList/${conversation.key.replace("/", "~")}")
                 },
+                onNewConversation = {
+                    val conversation = ConversationItem(
+                        key = "new:${System.currentTimeMillis()}",
+                        kind = "new",
+                        provider = "codex",
+                        title = "New VibeLink Agent task",
+                        status = "new",
+                    )
+                    pendingConversation = conversation
+                    navController.navigate("messageList/${conversation.key}")
+                },
                 onLogout = {
                     navController.navigate("login") {
                         popUpTo("sessionList") { inclusive = true }
@@ -70,7 +82,10 @@ fun VibeLinkApp(initialPairingUri: String? = null) {
                 },
                 onOpenWorkspace = {
                     navController.navigate("workspace")
-                }
+                },
+                onOpenSettings = {
+                    navController.navigate("settings")
+                },
             )
         }
 
@@ -110,5 +125,28 @@ fun VibeLinkApp(initialPairingUri: String? = null) {
                 onBack = { navController.popBackStack() },
             )
         }
+
+        composable("settings") {
+            SettingsScreen(
+                apiClient = apiClient,
+                viewModel = settingsViewModel,
+                onBack = { navController.popBackStack() },
+            )
+        }
+    }
+
+    LaunchedEffect(initialSharedText) {
+        val text = initialSharedText.trim()
+        if (text.isBlank()) return@LaunchedEffect
+        val conversation = ConversationItem(
+            key = "share:${System.currentTimeMillis()}",
+            kind = "new",
+            provider = "codex",
+            title = "Shared to VibeLink",
+            status = "new",
+            preview = text.take(160),
+        )
+        pendingConversation = conversation
+        navController.navigate("messageList/${conversation.key}")
     }
 }

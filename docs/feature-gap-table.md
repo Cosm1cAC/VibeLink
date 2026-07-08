@@ -1,6 +1,6 @@
 # VibeLink 与 Codex 功能差异表
 
-最后更新：2026-07-06
+最后更新：2026-07-08
 
 本文只记录 VibeLink 相对 Codex Desktop / Codex App 仍存在的差异、边界和后续增强项。已经补齐到“可用且差异很小”的能力不再作为缺口保留；如果仍保留在表中，说明还存在产品体验、稳定性或上游能力边界。
 
@@ -16,6 +16,7 @@
 已经从“缺失”或高风险口径中下调的能力：
 
 - Codex Desktop Remote 已有严格 preflight、最小化后恢复并重新校验、postflight 验证、SQLite 持久队列、draft/send probe 和 target fail-closed。
+- Android 原生端已从 MVP 升级为网页端核心能力对齐：会话管理、VibeLink Agent composer、Codex Desktop Remote、Workspace、Settings/Approvals、Tool events 和 Live Call Assistant 均有原生入口并通过 debug 构建。
 - 公网访问已具备 QR pairing session、已登录设备 approve/deny、device token hash、revoke/rotate/expiry、Host allowlist、审计日志、限流和 Cloudflare 向导；公网 Host 下 legacy `/api/login` 默认不能绕过设备确认。
 - Node 运行时约束已提升到 `node >=22.5.0`，匹配 `node:sqlite` / `DatabaseSync`。
 - Task SSE 已支持 cursor、`Last-Event-ID` / `after`、REST catch-up 和错误后 polling fallback，不再在 `onopen` 后立即并行轮询。
@@ -42,7 +43,7 @@
 | planned | Codex app-server 客户端代理接入 | 已做 probe/spike，app-server 可作为未来增强；当前主线仍是 VibeLink Agent resume + Codex Desktop Remote，尚未产品化接入。 | P0 |
 | partial | Codex Desktop UI 遥控 | 已有 Windows UIA 探测、窗口恢复、会话定位、target 校验、草稿检测、发送队列、postflight 验证和 SQLite 队列恢复；仍依赖前台 UI、控件定位和 Codex UI 稳定性。 | P0 |
 | partial | Codex Desktop Remote 输出同步 | 不做常驻监听；仅在刷新浏览器/Android、点进绑定会话、发送/重试/聚焦等主动动作时采样可见 transcript 和状态。历史可从 JSONL 恢复，仍无法拿到 Codex Desktop 未暴露的完整 tool 输出、退出码和内部 tool 调用归属。 | P0 |
-| partial | Codex thread 管理 | 已支持重命名、置顶、归档、恢复、分组、fork；但管理 UI 仍偏原型，不是 Codex 风格的批量/跨设备线程管理。 | P1 |
+| partial | Codex thread 管理 | 已支持重命名、置顶、归档、恢复、分组、fork；Codex Desktop 已归档会话会从 VibeLink 会话管理区过滤，不再通过 histories/tasks 混入列表。但管理 UI 仍偏原型，不是 Codex 风格的批量/跨设备线程管理。 | P1 |
 | partial | 历史上下文还原 | Codex / Claude 历史可扫描并按 turn/block 聚合，含命令摘要、权限模式等信息；仍不是完整 Codex App 状态，例如计划面板、插件状态、完整审批状态不能全量还原。 | P0 |
 | partial | 搜索 | 可按标题、provider、cwd、sessionId 过滤；缺少全文搜索、标签、收藏和复杂过滤。 | P2 |
 | missing | Agent 任务队列和并发管理 | Codex Desktop Remote 队列已持久化，但 VibeLink Agent 任务还没有优先级、并发上限、失败重试、批量取消和后台调度面板。 | P1 |
@@ -125,8 +126,8 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| partial | 原生移动端 | 已有 Android MVP 工程和构建脚本，但当前主体验仍是网页/PWA；没有完整 Android/iOS App、后台任务、原生通知和系统分享入口。 | P1 |
-| partial | 通话实时转写/面试辅助 | Windows audio probe（list/probe/level/stream）、后端 Live Call API + SQLite 持久化、WebSocket PCM 推流（`/api/live-calls/:id/audio`）、Mock ASR pipeline（`liveCallAsr.js`）、VibeLink Agent 自动触发（`liveCallAgent.js`）、前端 Live Call 面板（创建/停止/电平/转录/问答/Agent delta SSE）已完成。**尚未完成**：真实 ASR provider 接入、真实 PCM 端到端 10 分钟 QA、前端暂停/恢复/录制管理。详见 `docs/windows-bluetooth-call-transcription-mvp.md`。 | P1 |
+| partial | 原生移动端 | Android 已有原生登录/配对、会话搜索/归档/置顶/重命名/fork、VibeLink Agent composer、新建/继续/停止任务、Codex Remote 按需同步和发送队列控制、Workspace 文件/Git/命令、Settings/Approvals、Tool events 卡片和 Live Call Assistant。仍缺 iOS App、Android 后台任务、原生通知、系统分享入口和长时间弱网体验打磨。 | P1 |
+| partial | 通话实时转写/面试辅助 | Windows audio probe（list/probe/level/stream）、后端 Live Call API + SQLite 持久化、WebSocket PCM 推流（`/api/live-calls/:id/audio`）、Mock ASR pipeline（`liveCallAsr.js`）、VibeLink Agent 自动触发（`liveCallAgent.js`）、Web Live Call 面板和 Android Live Call Assistant 已完成。Android 支持会话恢复/切换、事件 catch-up、SSE、助手 provider/model 选择、手动转录、麦克风推流、音频电平和问答卡片。**尚未完成**：真实 ASR provider 接入、真实 PCM 端到端 10 分钟 QA、暂停/恢复/录制文件管理。详见 `docs/windows-bluetooth-call-transcription-mvp.md`。 | P1 |
 | partial | 推送通知 | 已有 Web Push 订阅、关键事件通知入口和邮件 fallback 配置；仍缺 iOS/Android 原生 APNs/FCM/Expo Push、通知偏好和投递状态。 | P0 |
 | partial | 断线恢复 | task events、按需产生的 desktop observations、live call events 均可写入 SQLite；任务和 live call 仍有 SSE/catch-up，Codex Desktop Remote 前端默认不订阅后台 observer。仍缺 ack、保留策略、压缩和多设备一致性测试。 | P0 |
 | partial | 公网访问 | 已有 QR 配对、设备确认、token hash、revoke/rotate/expiry、Host allowlist、审计、限流和 Cloudflare 向导；仍缺完整账号系统、域名/证书自动化、Cloudflare Access 深度集成和部署体检。 | P1 |
@@ -146,7 +147,7 @@
 | partial | 动效 | 已限制逐字动画只在实时 agent 输出中触发，历史回看/点击消息不会反复播放；整体动效、转场和微交互仍不如 Codex 细腻。 | P1 |
 | partial | Codex 风格布局 | 侧栏、composer、turn block、变更卡和 workspace 面板已接近 Codex；设置页、管理菜单、权限/审批交互仍偏原型。 | P1 |
 | partial | 设置页 | 设置页可配置模型命令、权限、安全、公网和凭据状态；缺少配置中心层级、风险解释、导入导出和配置验证报告。 | P1 |
-| partial | Live Call 面板 | 已有右侧抽屉面板，含创建/停止通话、SSE 实时转录、音频电平条和问答卡片；仍需 ASR 集成、Agent 流水线和录制文件管理。 | P1 |
+| partial | Live Call 面板 | Web 右侧抽屉和 Android 原生页面均已接入创建/停止、会话恢复、事件回放、SSE 实时转录、音频电平、助手回答 delta 和问答卡片；Android 还支持助手 provider/model 选择、手动 transcript、麦克风推流。仍需真实 ASR 集成、暂停/恢复和录制文件管理。 | P1 |
 | missing | 暗色模式 | 不支持暗色模式。 | P2 |
 | missing | 命令面板/快捷键 | 没有快捷键、命令面板、键盘导航体验。 | P2 |
 | partial | 移动适配 | 基础响应式可用，但长时间手机操作、弱网恢复、触控密度和原生系统集成仍需打磨。 | P1 |
@@ -158,7 +159,7 @@
 | partial | 事件可靠性 | task、live call 事件已有 cursor、catch-up、SSE、去重和本地 cursor；desktop observation 改为按需采样记录，默认不常驻推送。还缺 ack、保留策略、压缩和重放边界测试。 | P0 |
 | partial | 进程生命周期 | 服务可恢复历史和事件，但不能重新绑定重启前仍在跑的子进程。 | P0 |
 | partial | 多设备同步 | 多设备可凭 device token 登录并共享事件流；缺少在线状态、冲突处理、消息操作同步和设备间协作策略。 | P1 |
-| partial | 平台定位 | 当前仍是本机 bridge + 手机网页/Android MVP，不是完整公网安全远程 agent 平台。 | P0 |
+| partial | 平台定位 | 当前仍是本机 bridge + Web/Android 客户端，不是完整公网安全远程 agent 平台；iOS、原生通知、后台任务、部署体检和账号级安全策略仍未产品化。 | P0 |
 
 ## 建议下一批优先级
 

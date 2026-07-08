@@ -1,9 +1,10 @@
-﻿const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:45771/extension";
+const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:45771/extension";
 const DEFAULT_DOUBAO_URL = "https://www.doubao.com/chat/";
 
 let socket = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
+const activeRequests = new Map();
 
 function isOpen(ws) {
   return ws && ws.readyState === WebSocket.OPEN;
@@ -96,6 +97,7 @@ async function connectBridge() {
     }
   };
 }
+
 async function findOrCreateDoubaoTab(config) {
   const tabs = await chrome.tabs.query({ url: "https://www.doubao.com/*" });
   const existing = tabs.find((tab) => /doubao\.com/i.test(tab.url || ""));
@@ -123,12 +125,37 @@ async function sendToDoubaoContent(tabId, message) {
   }
 }
 
+function sendBridgeProgress(requestId, progress = {}) {
+  if (!isOpen(socket)) return;
+  socket.send(JSON.stringify({
+    id: requestId,
+    type: "progress",
+    ok: true,
+    progress
+  }));
+}
+
 async function handleDoubaoRequest(message, config) {
   const tab = await findOrCreateDoubaoTab(config);
-  return sendToDoubaoContent(tab.id, {
-    type: `${message.method}.v6`,
-    params: message.params || {}
-  });
+  const requestId = message.id;
+  const keepAlive = setInterval(() => {
+    sendBridgeProgress(requestId, {
+      stage: "service_worker_waiting",
+      ts: Date.now()
+    });
+  }, 10000);
+
+  activeRequests.set(requestId, { keepAlive });
+  try {
+    return await sendToDoubaoContent(tab.id, {
+      type: `${message.method}.v7`,
+      requestId,
+      params: message.params || {}
+    });
+  } finally {
+    clearInterval(keepAlive);
+    activeRequests.delete(requestId);
+  }
 }
 
 async function handleBridgeMessage(raw, config) {
@@ -178,6 +205,14 @@ async function handleBridgeMessage(raw, config) {
     }));
   }
 }
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "doubao.progress.v7" || !message.requestId) return false;
+  const request = activeRequests.get(message.requestId);
+  if (!request) return false;
+  sendBridgeProgress(message.requestId, message.payload || {});
+  return false;
+});
 
 function startBridgeConnection() {
   connectBridge().catch(() => scheduleReconnect());

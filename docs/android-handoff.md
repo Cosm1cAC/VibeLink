@@ -1,205 +1,132 @@
-# VibeLink Android 开发 — 后续步骤交接
+# VibeLink Android 交接文档
 
-> 当前状态：Phase 4 全部完成（编译通过、APK 生成）
-> 最后 commit: `36d0703` — "Phase 4: Android session list + message list screens"
+最后更新：2026-07-08
 
----
+Android 端不再按 “MVP” 定位推进。当前目标是全面对齐网页端核心设计与功能，并补齐 Live Call Assistant 的移动端能力。本文记录当前已经落地的 Android 能力、仍需打磨的边界和下一轮建议。
 
-## 环境信息
+## 当前结论
 
-| 项目 | 值 |
-|---|---|
-| 项目路径 | `C:\Users\22771\Documents\移动版agent终端` |
-| Android 项目 | `apps/android/` |
-| Git 分支 | `main` |
-| Git 用户 | `Cosm1cAC` |
-| VPN 代理 | 需设置 `git config http.proxy` / `https.proxy` 以匹配 VPN 端口才能 `git push` |
-| 后端服务 | Node.js 22+, 端口 8787, `src/server.js` |
+- Android 已接入 VibeLink bridge 的核心 REST / SSE / WebSocket 能力。
+- Android debug 构建已通过：`apps/android` 下执行 `.\gradlew.bat assembleDebug`。
+- Android 主路径已经覆盖：登录/配对、会话管理、Codex Desktop Remote、VibeLink Agent composer、Workspace、Settings、Approvals、Tool events、Live Call Assistant。
+- Codex Desktop Remote 仍遵循手动 + 半自动同步策略：刷新列表、进入 Remote 会话、发送、重试、清队列或聚焦时采样；不做常驻监听。
+- Codex 已归档会话应被过滤在 VibeLink 会话管理区之外；Android 会通过 `/api/tasks`、`/api/histories`、`/api/thread-state` 和 Desktop Remote 状态组合出会话列表。
 
----
+## 代码位置
 
-## 当前 Android 项目文件结构
+| 区域 | 路径 |
+| --- | --- |
+| Android App | `apps/android/` |
+| 网络层 | `apps/android/app/src/main/java/com/vibelink/app/network/ApiClient.kt` |
+| 数据模型 | `apps/android/app/src/main/java/com/vibelink/app/network/ApiModels.kt` |
+| 根导航 | `apps/android/app/src/main/java/com/vibelink/app/ui/VibeLinkApp.kt` |
+| 会话列表 | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/SessionListScreen.kt` |
+| 会话列表状态 | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/SessionListViewModel.kt` |
+| 聊天详情 / Composer | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/MessageListScreen.kt` |
+| 聊天状态 | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/MessageListViewModel.kt` |
+| Workspace | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/WorkspaceScreen.kt` |
+| Settings / Approvals | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/SettingsScreen.kt` |
+| Live Call Assistant | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/LiveCallScreen.kt` |
+| Live Call 状态 | `apps/android/app/src/main/java/com/vibelink/app/ui/screens/CallViewModel.kt` |
+| 麦克风推流 | `apps/android/app/src/main/java/com/vibelink/app/audio/LiveCallAudioStreamer.kt` |
 
+## 已对齐能力
+
+### 1. 会话管理
+
+- 合并 histories、tasks、thread-state forks 和 Codex Desktop Remote 可见状态。
+- 支持搜索、归档视图切换、置顶、重命名、归档/恢复、fork。
+- 会话排序遵循置顶优先、分组、更新时间倒序。
+- 支持 Desktop Remote 入口，并显示 Codex Desktop 当前 ready / found / not connected 状态。
+- Android 与网页端一致：Codex Remote 只在主动动作时按需同步。
+
+### 2. VibeLink Agent Composer
+
+- 支持新建任务和继续历史会话。
+- 支持 provider 选择：Codex、Claude、Doubao、GLM。
+- 支持 model override、reasoning effort、working directory 输入。
+- 支持运行中任务停止。
+- 支持运行中任务补充输入；如果 provider 不接受 stdin，会明确显示失败提示。
+- 任务创建遇到 428 approval 时，引导到 Settings / Approvals 处理。
+
+### 3. Codex Desktop Remote
+
+- Android 可进入 Remote 会话并读取可见 transcript。
+- 支持发送到 Codex Desktop Remote 队列。
+- 支持 retry queue、clear queue。
+- 支持有 `desktopIndex` 的会话先 focus 再发送。
+- Remote 文案明确使用 Codex Desktop 当前设置，不和 VibeLink Agent 的 provider/model 选择混淆。
+
+### 4. Tool Events
+
+- Android 已接入 `/api/tool-events` SSE。
+- Tool event 会转成轻量 tool card 消息。
+- 当前实现是可用型摘要卡，不是网页端完整 tool lifecycle 合并器；后续可继续增强输入/输出聚合、审批状态和大 payload 折叠。
+
+### 5. Workspace
+
+- 支持 workspace 列表与切换。
+- 支持目录浏览、上级目录、文本文件预览。
+- 支持 Git status/diff、stage/unstage/restore、stage-all/unstage-all。
+- 支持 workspace command 执行和输出展示。
+- 仍缺文件搜索、编辑、per-hunk 操作、branch/stash/worktree 完整管理。
+
+### 6. Settings / Approvals
+
+- 支持读取 `/api/status` 公共设置。
+- 支持保存 default cwd、Codex/Claude/Doubao command、Doubao CDP endpoint、Doubao URL。
+- 支持配置 sandbox、approval policy、network access、trusted workspace、dangerous command approval。
+- 支持增量写入 OpenAI / Anthropic / Zhipu API key。
+- 支持 pending approvals 列表、approve、deny。
+
+### 7. Live Call Assistant
+
+- 支持 Live Call 会话列表、选择、恢复。
+- 支持事件 catch-up 和 SSE 继续接收。
+- 支持创建/停止通话。
+- 支持选择 Live Call 下游助手 provider：Claude、Codex、Doubao、GLM。
+- 支持 model override 和 ASR provider 字段。
+- 支持手动 transcript 输入，选择 remote/local speaker 和 final/partial。
+- 支持 Android 麦克风 WebSocket 推流到 `/api/live-calls/:id/audio`。
+- 支持音频电平、实时 transcript feed、问题检测、assistant thinking/delta/done/error 的 Q&A 卡片。
+
+## 已调整的后端问题
+
+- `/api/settings` 的 `approvalPolicy` validation 已修正为当前实际策略枚举：`never`、`on-request`、`on-failure`、`untrusted`、`strict`。
+- Android `SettingsPatchRequest` 已补齐 `codexCommand`、`claudeCommand`、`doubaoCommand`、`doubaoCdpEndpoint`、`doubaoUrl`。
+- Android Live Call API client 已补齐 `/api/live-calls/:id/events/catch-up`。
+
+## 尚未完成
+
+| 优先级 | 项目 | 说明 |
+| --- | --- | --- |
+| P0 | Android 原生通知 | 还没有 FCM/本地通知、通知偏好、审批/任务完成推送。 |
+| P0 | 后台任务 | App 退到后台后，长时间 SSE / WebSocket / audio capture 的生命周期还没有产品化。 |
+| P1 | Live Call 真实 ASR | 当前链路支持 Mock ASR 和手动 transcript；真实 provider、端到端 10 分钟 QA、暂停/恢复/录制管理仍待补。 |
+| P1 | Tool event 聚合 | 目前是摘要卡；还没有完全复刻网页端 tool lifecycle 合并、审批嵌入和输出折叠。 |
+| P1 | Workspace 深水区 | 文件搜索/编辑、per-hunk stage、branch/stash/worktree/PR review、冲突向导仍未做。 |
+| P1 | 多设备一致性 | 会话操作、消息删除/编辑、归档/置顶等跨设备同步策略仍需打磨。 |
+| P1 | 系统分享入口 | 还不能从 Android 分享菜单把文本/文件直接发给 VibeLink。 |
+| P2 | iOS | 尚未开始原生 iOS App。 |
+
+## 验证命令
+
+```powershell
+cd apps/android
+.\gradlew.bat assembleDebug
 ```
-apps/android/app/src/main/java/com/vibelink/app/
-├── MainActivity.kt
-├── data/
-│   └── SettingsStore.kt              # DataStore 持久化（token, URL, sessionId）
-├── network/
-│   ├── ApiClient.kt                  # OkHttp REST + SSE 客户端
-│   └── ApiModels.kt                  # 所有数据模型
-└── ui/
-    ├── VibeLinkApp.kt                # 导航宿主（login → sessionList → messageList / call）
-    ├── theme/
-    │   ├── Color.kt                  # VibeLink 色板
-    │   └── Theme.kt                  # Material3 亮色主题
-    ├── components/
-    │   ├── CallComponents.kt         # TranscriptFeed, QaCard, LevelIndicator
-    │   └── ToolCallCard.kt           # 可折叠 ToolCall 卡片
-    └── screens/
-        ├── LoginScreen.kt            # Bridge URL + 配对 Token 登录
-        ├── SessionListScreen.kt      # 会话列表（合并 histories + tasks）
-        ├── SessionListViewModel.kt   # 会话列表逻辑
-        ├── MessageListScreen.kt      # 消息详情（含 ToolCard）
-        ├── MessageListViewModel.kt   # 消息加载 + SSE 订阅
-        └── CallScreen.kt             # Live Call 面板（现有）
+
+本轮已通过 debug 构建。根目录建议同时运行：
+
+```powershell
+npm run build
+node --test test\history.test.js test\remoteTranscript.test.js test\sidebarModel.test.js test\liveCall.test.js
 ```
 
----
+## 下一轮建议
 
-## 导航流程
-
-```
-VibeLinkApp (NavHost)
-  ├── "login" ───────── LoginScreen
-  │                      └── onLoginSuccess → navigate("sessionList")
-  ├── "sessionList" ─── SessionListScreen
-  │                      ├── onSelectConversation → navigate("messageList/{key}")
-  │                      ├── onLogout → navigate("login")
-  │                      └── onOpenLiveCall → navigate("call")
-  ├── "messageList/{key}" ─ MessageListScreen
-  │                        └── onBack → popBackStack()
-  └── "call" ─────────── CallScreen
-                          └── onLogout → navigate("login")
-```
-
----
-
-## 各 API Endpoint 实现状态
-
-| Endpoint | 方法 | Web端 | Android | 备注 |
-|---|---|---|---|---|
-| `/api/status` | GET | ✅ | ✅ `checkStatus()` | LoginScreen 使用 |
-| `/api/login` | POST | ✅ | ✅ `login()` | |
-| `/api/histories` | GET | ✅ | ✅ `listHistories()` | Phase 4 |
-| `/api/histories/{provider}/{id}` | GET | ✅ | ✅ `getHistoryDetail()` | Phase 4 |
-| `/api/tasks` | GET | ✅ | ✅ `listTasks()` | Phase 4 |
-| `/api/tasks` | POST | ✅ | ❌ | 创建新任务 |
-| `/api/tasks/{id}` | GET | ✅ | ✅ `getTask()` | Phase 4 |
-| `/api/tasks/{id}/events` | GET SSE | ✅ | ✅ `subscribeTaskEvents()` | Phase 4 |
-| `/api/tasks/{id}/input` | POST | ✅ | ❌ | 发送 stdin |
-| `/api/tasks/{id}/stop` | POST | ✅ | ❌ | 停止任务 |
-| `/api/tool-events` | GET SSE | ✅ | ✅ `subscribeToolEvents()` | Phase 4 |
-| `/api/tool-runs/{id}` | GET | ✅ | ❌ | 获取 tool run 详情 |
-| `/api/live-calls` | GET/POST | ✅ | ✅ `createSession()`, `listSessions()` | Live Call Assistant |
-| `/api/live-calls/{id}/stop` | POST | ✅ | ✅ `stopSession()` | |
-| `/api/live-calls/{id}/events` | GET SSE | ✅ | ✅ `subscribeLiveCallEvents()` | |
-| `/api/workspaces` | GET | ✅ | ❌ | Phase 6 |
-| `/api/workspaces/{id}/git/*` | GET | ✅ | ❌ | Phase 6 |
-| `/api/settings` | POST | ✅ | ❌ | Phase 7 |
-| `/api/thread-state` | GET/POST | ✅ | ❌ | 会话排序/分组 |
-
----
-
-## 下一步 Phase 6: Workspace (文件树 + Git + 终端)
-
-> 估算：中等难度，3-5 个文件
-
-### 需要新增的 Android 端能力
-
-1. **API Models** (ApiModels.kt 追加)
-   - `WorkspaceItem` — id, name, path
-   - `WorkspaceListResponse` — items
-   - `GitStatusItem` — path, status (modified/added/deleted/untracked)
-   - `GitDiffResponse` — branch, files, fileCount, hunks
-   - `CommandResult` — stdout, stderr, exitCode
-
-2. **API Client** (ApiClient.kt 追加)
-   - `listWorkspaces()` — GET /api/workspaces
-   - `getGitStatus(workspaceId)` — GET /api/workspaces/{id}/git/status
-   - `getGitDiff(workspaceId)` — GET /api/workspaces/{id}/git/diff
-   - `runCommand(workspaceId, command)` — POST /api/workspaces/{id}/command
-
-3. **WorkspaceScreen.kt**
-   - 文件树视图（可折叠目录）
-   - Git 状态指示（M/A/D/?? 标记）
-   - 文件变更预览
-
-4. **TerminalScreen.kt** (可选)
-   - 终端输入/输出
-   - 命令历史
-
-5. **导航整合** — 接入 VibeLinkApp 路由
-
-### 参考实现
-- Web 端 Workspace 逻辑在 `main.jsx` 中搜索 `workspace`、`/api/workspaces`、`changeSummary`
-- Workspace 面板在 Web 端是侧边栏内的可折叠面板
-
----
-
-## 下一步 Phase 7: Settings (设置页)
-
-> 估算：低难度，1-2 个文件
-
-### 需要新增的能力
-
-1. **SettingsScreen.kt**
-   - API Key 配置开关（OpenAI / Anthropic / Zhipu）
-   - 默认工作目录
-   - 权限模式选择（default / auto-approve）
-   - 配对 Token 展示 / 刷新
-   - 断开连接按钮
-
-2. **API Client**
-   - `saveSettings(settings)` — POST /api/settings
-
-### 参考实现
-- Web 端 Settings 在 `main.jsx` 中搜索 `settings`、`/api/settings`
-- 设置页是一个 modal 对话框，不是独立路由
-
----
-
-## 下一步 Phase 8: Bluetooth 音频采集 (Live Call Assistant)
-
-> 估算：高难度，涉及原生 Android 音频 API
-
-### 依赖
-- Android `BluetoothAdapter`, `BluetoothHeadset`, `BluetoothSco`
-- `AudioRecord` / `AudioTrack` 原始音频捕获
-- `MediaRecorder` 编码可选
-- whisper.cpp 集成（已在工具链中 `tools/whisper-bin/`）
-
-### 需要新增的能力
-
-1. **BluetoothService.kt** — 蓝牙设备连接管理
-2. **AudioCaptureService.kt** — 音频流捕获 + 发送
-3. **WhisperIntegration.kt** — JNI / 进程调用 whisper.cpp
-4. **Live Call 增强** — 将 ASR 结果接入 `/api/live-calls` SSE
-5. **权限处理** — BLUETOOTH, RECORD_AUDIO, BLUETOOTH_CONNECT (Android 12+)
-
----
-
-## 已知问题 & 待办
-
-- [ ] **Git push**: 网络连不上 `github.com`（VPN 未配置），需要设置：
-  ```bash
-  git config http.proxy http://127.0.0.1:{vpn_port}
-  git config https.proxy http://127.0.0.1:{vpn_port}
-  ```
-- [ ] **MessageListScreen**: 点击 history 的"继续此会话"按钮尚未实现功能
-- [ ] **MessageListScreen**: ToolEvent SSE 接收后没有实时合并到 toolCalls 中（当前只存了 raw events）
-- [ ] **ToolCallCard**: Input/Output 渲染使用了 Gson pretty-print，大对象可能撑爆 UI
-- [ ] **CallScreen**: sendTranscript 和 sendLevel 功能需要接真实麦克风数据
-- [ ] **VibeLinkApp**: `pendingConversation` 传递方式脆弱，导航回来可能丢失状态
-
----
-
-## 关键技术参考
-
-### Web 端对应文件
-- 全部 UI 逻辑在 `apps/web/src/main.jsx`（~6500 行单文件）
-- 搜索关键词：`workspace`, `settings`, `tool-events`, `changeSummary`, `GitDiff`, `Message`, `ToolCallCards`
-
-### Android 端模式
-- 无 DI 框架：ViewModel 在 `VibeLinkApp` 级别用 `remember {}` 创建
-- API 调用：`ApiClient` 直接传入 Screen 或 ViewModel
-- 导航：Navigation Compose，路由在 `VibeLinkApp.kt` 定义
-- 主题：Material3 lightColorScheme，自定义色板在 `Color.kt`
-- 网络：OkHttp 裸请求 + Gson 解析，SSE 用 `okhttp3-sse`
-- 构建：Gradle 8.11.1, Kotlin 2.1.0, compileSdk 35
-- 编译：`./gradlew assembleDebug`（APK 输出在 `app/build/outputs/apk/debug/`）
-
----
-
-*交接文档生成时间：2026-07-06*
-*上一会话：Phase 4 完成 commit 36d0703*
+1. 为 Android 增加 provider registry / model catalog 接口，而不是在 UI 里硬编码 provider 与模型字段。
+2. 为 Android Tool events 做和网页端一致的 lifecycle reducer。
+3. 为 Live Call 增加真实 ASR provider 配置、暂停/恢复、录制文件列表和长通话压测。
+4. 补 Android 原生通知与后台生命周期策略。
+5. 补系统分享入口，把文本、图片、文件直接送入新建 VibeLink Agent 任务。

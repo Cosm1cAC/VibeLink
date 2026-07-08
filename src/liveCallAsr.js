@@ -26,14 +26,22 @@
 // exercised end-to-end. Real providers (OpenAI Whisper streaming,
 // Azure Speech, Aliyun, etc.) plug in here.
 
-import { recordLiveCallTranscript, getInMemorySession } from "./liveCall.js";
+import { emitLiveCallEvent, recordLiveCallTranscript, getInMemorySession } from "./liveCall.js";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { rootDir } from "./config.js";
+import {
+  TARGET_CHANNELS,
+  TARGET_ENCODING,
+  TARGET_SAMPLE_RATE,
+  createVadSegmenter,
+  normalizePcm16To16kMono
+} from "./liveCallAudioPipeline.js";
 
 const providers = new Map();
 const sessionChannels = new Map(); // sessionId -> Map(channel -> { buffer, sampleRate, channels, encoding, provider })
+const LIVE_CALL_AUDIO_DIR = path.join(rootDir, ".agent-mobile-terminal", "live-call-audio");
 
 let activeProviderId = "mock";
 
@@ -57,7 +65,13 @@ export function registerAsrProvider(provider) {
 }
 
 export function listAsrProviders() {
-  return [...providers.values()].map((p) => ({ id: p.id, label: p.label || p.id }));
+  return [...providers.values()].map((p) => ({
+    id: p.id,
+    label: p.label || p.id,
+    available: typeof p.check === "function" ? Boolean(p.check()) : true,
+    active: p.id === activeProviderId,
+    diagnostics: typeof p.diagnose === "function" ? p.diagnose() : {}
+  }));
 }
 
 // ───────── Whisper.cpp provider ─────────
@@ -125,6 +139,17 @@ class WhisperCppProvider {
     this.binaryPath = findWhisperBinary();
     if (!this.binaryPath) return false;
     return Boolean(findModel());
+  }
+
+  diagnose() {
+    const binaryPath = this.binaryPath || findWhisperBinary();
+    const modelPath = findModel();
+    return {
+      binaryPath,
+      modelPath,
+      ready: Boolean(binaryPath && modelPath),
+      mode: binaryPath ? path.basename(binaryPath) : ""
+    };
   }
 
   async start({ sessionId, channel, sampleRate, channels, encoding }) {
@@ -303,6 +328,18 @@ class MockAsrProvider {
     });
   }
 
+  check() {
+    return true;
+  }
+
+  diagnose() {
+    return {
+      ready: true,
+      mode: "deterministic-mock",
+      activeSessions: this.sessions.size
+    };
+  }
+
   feed(channel, buffer, ctx) {
     const state = this.sessions.get(`${ctx.sessionId}:${channel}`);
     if (!state) return;
@@ -413,8 +450,10 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
   sessionChannels.set(sessionId, channelsKey);
 
   if (payload.stop) {
-    const provider = providers.get(activeProviderId);
-    if (provider?.stop) provider.stop().catch(() => {});
+    for (const state of channelsKey.values()) {
+      const provider = providers.get(state.provider);
+      if (provider?.stop) provider.stop().catch(() => {});
+    }
     channelsKey.clear();
     return;
   }
@@ -422,21 +461,30 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
   let channelState = channelsKey.get(channel);
   if (!channelState) {
     channelState = {
-      sampleRate: payload.sampleRate || 16000,
-      channels: payload.channels || 1,
-      encoding: payload.encoding || "pcm16le",
-      provider: null
+      sampleRate: payload.sampleRate || TARGET_SAMPLE_RATE,
+      channels: payload.channels || TARGET_CHANNELS,
+      encoding: payload.encoding || TARGET_ENCODING,
+      provider: null,
+      requestedProvider: "",
+      fallbackFromProvider: "",
+      vad: createVadSegmenter({ sampleRate: TARGET_SAMPLE_RATE }),
+      segmentIndex: 0,
+      checkpointBytes: 0,
+      checkpointPath: liveCallCheckpointPath(sessionId, channel)
     };
     channelsKey.set(channel, channelState);
   }
 
   // If this is the first frame (provider not started yet), kick off the provider.
   if (!channelState.provider) {
-    const provider = providers.get(activeProviderId) || mockProvider;
+    const requestedProvider = session.asrProvider || session.asr_provider || activeProviderId;
+    const provider = resolveAsrProvider(requestedProvider);
     channelState.provider = provider.id;
-    channelState.sampleRate = payload.sampleRate || channelState.sampleRate;
-    channelState.channels = payload.channels || channelState.channels;
-    channelState.encoding = payload.encoding || channelState.encoding;
+    channelState.requestedProvider = requestedProvider || provider.id;
+    channelState.fallbackFromProvider = provider.id !== requestedProvider ? requestedProvider : "";
+    channelState.sampleRate = TARGET_SAMPLE_RATE;
+    channelState.channels = TARGET_CHANNELS;
+    channelState.encoding = TARGET_ENCODING;
 
     const handlers = {
       onPartial: (ch, text) => safePartial(sessionId, ch, text),
@@ -450,21 +498,128 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
       .start({
         sessionId,
         channel,
-        sampleRate: channelState.sampleRate,
-        channels: channelState.channels,
-        encoding: channelState.encoding
+        sampleRate: TARGET_SAMPLE_RATE,
+        channels: TARGET_CHANNELS,
+        encoding: TARGET_ENCODING
       })
       .catch((error) => console.error(`[liveCallAsr:start]`, error.message));
+    emitLiveCallEvent(sessionId, "live_call.asr.provider", {
+      channel,
+      provider: provider.id,
+      requestedProvider: requestedProvider || provider.id,
+      fallback: Boolean(channelState.fallbackFromProvider),
+      fallbackFromProvider: channelState.fallbackFromProvider
+    });
   }
 
   if (payload.buffer) {
     const provider = providers.get(channelState.provider) || mockProvider;
-    provider.feed(channel, payload.buffer, { sessionId });
+    const normalized = normalizePcm16To16kMono(payload.buffer, {
+      sampleRate: payload.sampleRate || channelState.sampleRate,
+      channels: payload.channels || channelState.channels,
+      encoding: payload.encoding || channelState.encoding
+    });
+    if (normalized.buffer.length) {
+      appendCheckpoint(channelState, normalized.buffer);
+      for (const segment of channelState.vad.push(normalized.buffer)) {
+        feedSegment(sessionId, channel, channelState, provider, segment);
+      }
+    }
   }
   if (payload.flush) {
     const provider = providers.get(channelState.provider) || mockProvider;
+    for (const segment of channelState.vad.flush()) {
+      feedSegment(sessionId, channel, channelState, provider, segment);
+    }
     if (provider.flush) provider.flush().catch(() => {});
   }
+}
+
+function resolveAsrProvider(requestedProvider = "") {
+  const requested = providers.get(requestedProvider);
+  if (requested && providerAvailable(requested)) return requested;
+  const active = providers.get(activeProviderId);
+  if (active && providerAvailable(active)) return active;
+  return mockProvider;
+}
+
+function providerAvailable(provider) {
+  return typeof provider.check === "function" ? Boolean(provider.check()) : true;
+}
+
+function liveCallCheckpointPath(sessionId, channel) {
+  const safeSession = String(sessionId || "").replace(/[^\w.-]+/g, "_");
+  const safeChannel = String(channel || "remote").replace(/[^\w.-]+/g, "_");
+  return path.join(LIVE_CALL_AUDIO_DIR, `${safeSession}-${safeChannel}.pcm`);
+}
+
+function appendCheckpoint(channelState, buffer) {
+  try {
+    fs.mkdirSync(path.dirname(channelState.checkpointPath), { recursive: true });
+    fs.appendFileSync(channelState.checkpointPath, buffer);
+    channelState.checkpointBytes += buffer.length;
+  } catch (error) {
+    channelState.lastCheckpointError = error.message;
+  }
+}
+
+function feedSegment(sessionId, channel, channelState, provider, segment) {
+  channelState.segmentIndex += 1;
+  emitLiveCallEvent(sessionId, "live_call.audio_segment", {
+    channel,
+    provider: provider.id,
+    segmentIndex: channelState.segmentIndex,
+    startedAtMs: Math.round(segment.startedAtMs),
+    endedAtMs: Math.round(segment.endedAtMs),
+    durationMs: Math.round(segment.durationMs),
+    speechMs: Math.round(segment.speechMs),
+    rms: Number(segment.rms.toFixed(5)),
+    bytes: segment.buffer.length,
+    checkpointBytes: channelState.checkpointBytes,
+    sampleRate: segment.sampleRate,
+    channels: segment.channels,
+    encoding: segment.encoding
+  });
+  provider.feed(channel, segment.buffer, {
+    sessionId,
+    sampleRate: segment.sampleRate,
+    channels: segment.channels,
+    encoding: segment.encoding,
+    segmentIndex: channelState.segmentIndex,
+    durationMs: segment.durationMs,
+    checkpointPath: channelState.checkpointPath
+  });
+}
+
+export function getLiveCallAsrCheckpoints(sessionId) {
+  const channelsKey = sessionChannels.get(sessionId);
+  if (!channelsKey) return [];
+  return [...channelsKey.entries()].map(([channel, state]) => ({
+    channel,
+    path: state.checkpointPath,
+    bytes: state.checkpointBytes,
+    provider: state.provider || "",
+    requestedProvider: state.requestedProvider || "",
+    fallbackFromProvider: state.fallbackFromProvider || "",
+    segmentCount: state.segmentIndex || 0,
+    exists: fs.existsSync(state.checkpointPath)
+  }));
+}
+
+export function recoverLiveCallAsrFromCheckpoints(sessionId) {
+  const session = getInMemorySession(sessionId);
+  if (!session) return [];
+  const checkpoints = getLiveCallAsrCheckpoints(sessionId);
+  for (const checkpoint of checkpoints) {
+    if (!checkpoint.exists || !checkpoint.bytes) continue;
+    emitLiveCallEvent(sessionId, "live_call.audio_checkpoint.recovered", {
+      channel: checkpoint.channel,
+      provider: checkpoint.provider,
+      bytes: checkpoint.bytes,
+      path: checkpoint.path
+    });
+  }
+  return checkpoints;
 }
 
 function safePartial(sessionId, channel, text) {

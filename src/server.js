@@ -46,20 +46,23 @@ import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } fro
 import { commandApprovalRequired } from "./commandSafety.js";
 import { subscribeDesktopObserver } from "./desktopObserver.js";
 import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
-import { getHistory, listHistories } from "./history.js";
+import { filterArchivedCodexTasks, getHistory, listHistories } from "./history.js";
 import {
   createLiveCallSession,
   getLiveCallSession,
   listLiveCallEvents,
   listLiveCallSessions,
+  pauseLiveCallSession,
   recordLiveCallAnswer,
   recordLiveCallLevel,
   recordLiveCallTranscript,
+  resumeLiveCallSession,
   restoreLiveCallSessions,
   setLiveCallQuestionHook,
   stopLiveCallSession,
   subscribeLiveCallEvents
 } from "./liveCall.js";
+import { getLiveCallAsrCheckpoints, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
 import { listUnifiedEvents } from "./db.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
@@ -79,7 +82,8 @@ import {
   resolveAllowedPath
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
-import { loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings } from "./store.js";
+import { buildProviderRegistry } from "./providerRegistry.js";
+import { loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets } from "./store.js";
 import { writeApiKeys } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
@@ -303,6 +307,10 @@ function applyFields(items, url) {
   const fields = url.searchParams.get("fields");
   if (!fields || !Array.isArray(items)) return items;
   return items.map((item) => pickFields(item, fields));
+}
+
+function conversationTasks() {
+  return filterArchivedCodexTasks(getTasks());
 }
 
 /**
@@ -1156,6 +1164,28 @@ async function buildDoctorReport(request) {
   };
 }
 
+async function providerRegistryPayload(options = {}) {
+  const settingsValue = await settingsWithSecrets(settings);
+  const probes = {};
+  if (options.fresh) {
+    const [codex, claude, doubao] = await Promise.all([
+      settings.codexCommand && settings.codexCommand !== "auto"
+        ? commandProbe(settings.codexCommand).catch((error) => ({ ok: false, error: error.message }))
+        : Promise.resolve({ ok: true }),
+      commandProbe(settings.claudeCommand || "claude").catch((error) => ({ ok: false, error: error.message })),
+      getDoubaoStatus({
+        endpoint: settings.doubaoCdpEndpoint,
+        url: settings.doubaoUrl,
+        timeoutMs: 5000
+      }).catch((error) => ({ ok: false, error: error.message }))
+    ]);
+    probes.codex = codex;
+    probes.claude = claude;
+    probes.doubao = doubao;
+  }
+  return buildProviderRegistry({ settings: settingsValue, probes });
+}
+
 function serveStatic(request, response, url) {
   const requested = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
   const safePath = path.normalize(requested).replace(/^(\.\.[/\\])+/, "");
@@ -1473,9 +1503,11 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/status" && request.method === "GET") {
     const publicSettingsValue = await publicSettings(settings);
+    const providerRegistry = await providerRegistryPayload();
     sendJson(response, 200, {
       ok: true,
       settings: publicSettingsValue,
+      providerRegistry,
       storage: {
         sqlite: getDbPath()
       },
@@ -1490,7 +1522,7 @@ async function routeApi(request, response, url) {
       },
       workspaces: getWorkspaces(settings),
       network: getNetworkAddresses(settings.port),
-      tasks: getTasks()
+      tasks: conversationTasks()
     });
     return;
   }
@@ -1623,6 +1655,12 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/tool-registry" && request.method === "GET") {
     sendJson(response, 200, { items: applyFields(listToolRegistry({ mcpTools: getCachedMcpTools() }), url) });
+    return;
+  }
+
+  if (url.pathname === "/api/provider-registry" && request.method === "GET") {
+    const registry = await providerRegistryPayload({ fresh: url.searchParams.get("fresh") === "1" });
+    sendJson(response, 200, applyFields(registry, url));
     return;
   }
 
@@ -2070,6 +2108,11 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/live-calls/asr-providers" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listAsrProviders(), url) });
+    return;
+  }
+
   if (url.pathname === "/api/live-calls" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "live_call.create", { limit: 20, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
@@ -2118,6 +2161,54 @@ async function routeApi(request, response, url) {
       return;
     }
     sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  const liveCallPauseMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/pause$/);
+  if (liveCallPauseMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const session = pauseLiveCallSession(liveCallPauseMatch[1], body.reason || "manual");
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  const liveCallResumeMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/resume$/);
+  if (liveCallResumeMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const session = resumeLiveCallSession(liveCallResumeMatch[1], body.reason || "manual");
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { ok: true, session });
+    return;
+  }
+
+  const liveCallAsrCheckpointMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/asr-checkpoints$/);
+  if (liveCallAsrCheckpointMatch && request.method === "GET") {
+    const session = getLiveCallSession(liveCallAsrCheckpointMatch[1]);
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    sendJson(response, 200, { items: applyFields(getLiveCallAsrCheckpoints(liveCallAsrCheckpointMatch[1]), url) });
+    return;
+  }
+
+  const liveCallAsrRecoverMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/asr-recover$/);
+  if (liveCallAsrRecoverMatch && request.method === "POST") {
+    const session = getLiveCallSession(liveCallAsrRecoverMatch[1]);
+    if (!session) {
+      sendError(response, 404, "Live call session not found.");
+      return;
+    }
+    const items = recoverLiveCallAsrFromCheckpoints(liveCallAsrRecoverMatch[1]);
+    audit(request, url, auth, { type: "live_call.asr_recover", success: true, target: liveCallAsrRecoverMatch[1], meta: { checkpointCount: items.length } });
+    sendJson(response, 200, { ok: true, items: applyFields(items, url) });
     return;
   }
 
@@ -2974,7 +3065,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/tasks" && request.method === "GET") {
-    sendJson(response, 200, { items: applyFields(getTasks(), url) });
+    sendJson(response, 200, { items: applyFields(conversationTasks(), url) });
     return;
   }
 

@@ -11,6 +11,7 @@ Stage 2 of the Rust migration isolates the event-store hot path before replacing
 - `listToolEvents`
 - `listLiveCallEvents`
 - `listUnifiedEvents`
+- `replayWindow`
 - `getToolEventStats`
 - `pruneToolEvents`
 - `pruneLiveCallEvents`
@@ -42,6 +43,8 @@ Tool event appends can also be queued and flushed in batches when `VIBELINK_EVEN
 The worker client applies a pending-request cap before posting work to the thread. Set `VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS` to tune the limit; rejected requests fail fast with `EEVENTSTOREBACKPRESSURE` so callers can fall back or surface overload clearly.
 
 Task and tool event append paths still preserve the existing immediate cursor behavior unless their specific async or batch flags are enabled. If the worker fails, VibeLink logs one warning and falls back to the synchronous SQLite adapter.
+
+`GET /api/events/unified` uses the bounded `replayWindow` contract. It returns the existing `items` array plus `nextCursor`, `hasMore`, and `limit` so callers can page through a recent replay window instead of forcing one large cross-table JSON replay. The cursor is opaque to clients and remains compatible with task, tool, and live-call filters.
 
 `GET /api/tool-events/stats` includes `storeMode`:
 

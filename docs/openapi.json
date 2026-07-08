@@ -2689,6 +2689,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            },
+            "description": "Opaque replay cursor returned as nextCursor"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 200
+            }
           }
         ],
         "responses": {
@@ -2704,6 +2722,16 @@
                       "items": {
                         "type": "object"
                       }
+                    },
+                    "nextCursor": {
+                      "type": "number",
+                      "description": "Opaque cursor for the next replay window"
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    },
+                    "limit": {
+                      "type": "integer"
                     }
                   }
                 }

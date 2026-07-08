@@ -36,6 +36,7 @@ const compactServiceMetrics = {
   nullResults: 0,
   summaryInputsBuilt: 0,
   summaryInputTruncations: 0,
+  summaryInputDroppedEvents: 0,
   summaryInputSourceChars: 0,
   summaryInputChars: 0,
   totalMs: 0,
@@ -47,11 +48,13 @@ export function resolveCompactEventLimit(value, options = {}) {
   return resolveEventReplayLimit(value, { defaultLimit: DEFAULT_COMPACT_EVENT_LIMIT, ...options });
 }
 
-export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPACT_INPUT_MAX_CHARS } = {}) {
+export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPACT_INPUT_MAX_CHARS, maxBufferedLines = 0 } = {}) {
   const maximum = Math.max(1, Number(maxChars || DEFAULT_COMPACT_INPUT_MAX_CHARS));
+  const maximumBufferedLines = Math.max(0, Number(maxBufferedLines || 0));
   let sourceChars = 0;
   let includedEvents = 0;
   let skippedEvents = 0;
+  let droppedEvents = 0;
   const compactableLines = [];
 
   for (const ev of events) {
@@ -72,11 +75,15 @@ export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPA
     sourceChars += String(text).length;
     includedEvents += 1;
     compactableLines.push(line);
+    if (maximumBufferedLines && compactableLines.length > maximumBufferedLines) {
+      compactableLines.shift();
+      droppedEvents += 1;
+    }
   }
 
   const lines = [];
   let usedChars = 0;
-  let truncated = false;
+  let truncated = droppedEvents > 0;
   for (let index = compactableLines.length - 1; index >= 0; index -= 1) {
     const line = compactableLines[index];
     const separatorChars = lines.length ? 1 : 0;
@@ -99,10 +106,12 @@ export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPA
     sourceChars,
     includedEvents,
     skippedEvents,
+    droppedEvents,
     truncated
   };
   compactServiceMetrics.summaryInputsBuilt += 1;
   if (result.truncated) compactServiceMetrics.summaryInputTruncations += 1;
+  compactServiceMetrics.summaryInputDroppedEvents += result.droppedEvents;
   compactServiceMetrics.summaryInputSourceChars += result.sourceChars;
   compactServiceMetrics.summaryInputChars += result.text.length;
   return result;
@@ -132,6 +141,7 @@ export function resetCompactServiceMetrics() {
   compactServiceMetrics.nullResults = 0;
   compactServiceMetrics.summaryInputsBuilt = 0;
   compactServiceMetrics.summaryInputTruncations = 0;
+  compactServiceMetrics.summaryInputDroppedEvents = 0;
   compactServiceMetrics.summaryInputSourceChars = 0;
   compactServiceMetrics.summaryInputChars = 0;
   compactServiceMetrics.totalMs = 0;
@@ -151,6 +161,7 @@ export function getCompactServiceMetrics() {
     nullResults: compactServiceMetrics.nullResults,
     summaryInputsBuilt: compactServiceMetrics.summaryInputsBuilt,
     summaryInputTruncations: compactServiceMetrics.summaryInputTruncations,
+    summaryInputDroppedEvents: compactServiceMetrics.summaryInputDroppedEvents,
     summaryInputSourceChars: compactServiceMetrics.summaryInputSourceChars,
     summaryInputChars: compactServiceMetrics.summaryInputChars,
     totalMs: Number(compactServiceMetrics.totalMs.toFixed(3)),

@@ -45,3 +45,22 @@ test("compact summary input builder keeps recent context under cap", () => {
   assert.doesNotMatch(input.text, /old-/);
   assert.equal(input.truncated, true);
 });
+
+test("compact summary input builder reports dropped old compactable events", () => {
+  resetCompactServiceMetrics();
+  const events = Array.from({ length: 20 }, (_, index) => ({
+    type: "user",
+    kind: "user",
+    text: `event-${index}-${"x".repeat(20)}`
+  }));
+
+  const input = buildCompactSummaryInput(events, { maxChars: 80, maxBufferedLines: 3 });
+  const metrics = getCompactServiceMetrics();
+
+  assert.equal(input.includedEvents, 20);
+  assert.equal(input.droppedEvents, 17);
+  assert.match(input.text, /event-19-/);
+  assert.doesNotMatch(input.text, /event-0-/);
+  assert.equal(input.truncated, true);
+  assert.equal(metrics.summaryInputDroppedEvents, 17);
+});

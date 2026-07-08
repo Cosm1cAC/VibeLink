@@ -927,7 +927,67 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "servers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "cachedTools": {
+                      "type": "integer"
+                    },
+                    "persistentSessions": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "serverId": {
+                                "type": "string"
+                              },
+                              "pid": {
+                                "type": "integer"
+                              },
+                              "requests": {
+                                "type": "integer"
+                              },
+                              "responses": {
+                                "type": "integer"
+                              },
+                              "failures": {
+                                "type": "integer"
+                              },
+                              "timeouts": {
+                                "type": "integer"
+                              },
+                              "backpressureRejects": {
+                                "type": "integer"
+                              },
+                              "lastRequestAt": {
+                                "type": "integer"
+                              },
+                              "lastResponseAt": {
+                                "type": "integer"
+                              },
+                              "lastFailureAt": {
+                                "type": "integer"
+                              },
+                              "lastBackpressureAt": {
+                                "type": "integer"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -1447,6 +1507,191 @@
               "application/json": {
                 "schema": {
                   "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/context-budget/metrics": {
+      "get": {
+        "summary": "Context budget metrics",
+        "description": "Returns token-estimation counters and latency summaries for context budget checks.",
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated field selector"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "metrics": {
+                      "type": "object",
+                      "properties": {
+                        "textEstimateCalls": {
+                          "type": "integer"
+                        },
+                        "eventEstimateCalls": {
+                          "type": "integer"
+                        },
+                        "eventsEstimated": {
+                          "type": "integer"
+                        },
+                        "charsEstimated": {
+                          "type": "integer"
+                        },
+                        "totalEstimateMs": {
+                          "type": "number"
+                        },
+                        "lastEstimateMs": {
+                          "type": "number"
+                        },
+                        "avgEstimateMs": {
+                          "type": "number"
+                        },
+                        "maxEstimateMs": {
+                          "type": "number"
+                        },
+                        "encoderCacheSize": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compact/metrics": {
+      "get": {
+        "summary": "Compact service metrics",
+        "description": "Returns compaction budget, summary-input, and latency counters.",
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated field selector"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "metrics": {
+                      "type": "object",
+                      "properties": {
+                        "budgetChecks": {
+                          "type": "integer"
+                        },
+                        "compactTaskCalls": {
+                          "type": "integer"
+                        },
+                        "buildContextCalls": {
+                          "type": "integer"
+                        },
+                        "eventsChecked": {
+                          "type": "integer"
+                        },
+                        "summaryRequestsCreated": {
+                          "type": "integer"
+                        },
+                        "compactedContextsReturned": {
+                          "type": "integer"
+                        },
+                        "nullResults": {
+                          "type": "integer"
+                        },
+                        "summaryInputsBuilt": {
+                          "type": "integer"
+                        },
+                        "summaryInputTruncations": {
+                          "type": "integer"
+                        },
+                        "summaryInputDroppedEvents": {
+                          "type": "integer"
+                        },
+                        "summaryInputSourceChars": {
+                          "type": "integer"
+                        },
+                        "summaryInputChars": {
+                          "type": "integer"
+                        },
+                        "totalMs": {
+                          "type": "number"
+                        },
+                        "lastMs": {
+                          "type": "number"
+                        },
+                        "avgMs": {
+                          "type": "number"
+                        },
+                        "maxMs": {
+                          "type": "number"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }

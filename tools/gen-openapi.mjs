@@ -230,7 +230,38 @@ const paths = {
   )),
   ...path("/api/mcp/status", get("MCP status",
     "Returns configured MCP server status and cached tool count.",
-    { type: "object" }
+    {
+      type: "object",
+      properties: {
+        servers: { type: "array", items: { type: "object" } },
+        cachedTools: { type: "integer" },
+        persistentSessions: {
+          type: "object",
+          properties: {
+            items: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  key: { type: "string" },
+                  serverId: { type: "string" },
+                  pid: { type: "integer" },
+                  requests: { type: "integer" },
+                  responses: { type: "integer" },
+                  failures: { type: "integer" },
+                  timeouts: { type: "integer" },
+                  backpressureRejects: { type: "integer" },
+                  lastRequestAt: { type: "integer" },
+                  lastResponseAt: { type: "integer" },
+                  lastFailureAt: { type: "integer" },
+                  lastBackpressureAt: { type: "integer" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   )),
   ...path("/api/mcp/probe", post("Probe MCP servers",
     "Connects to configured MCP servers, reads tools/list metadata, and caches discovered tools.",
@@ -309,6 +340,59 @@ const paths = {
       }
     },
     { "201": { description: "Created" } }
+  )),
+
+  // Budget and compact metrics
+  ...path("/api/context-budget/metrics", get("Context budget metrics",
+    "Returns token-estimation counters and latency summaries for context budget checks.",
+    {
+      type: "object",
+      properties: {
+        metrics: {
+          type: "object",
+          properties: {
+            textEstimateCalls: { type: "integer" },
+            eventEstimateCalls: { type: "integer" },
+            eventsEstimated: { type: "integer" },
+            charsEstimated: { type: "integer" },
+            totalEstimateMs: { type: "number" },
+            lastEstimateMs: { type: "number" },
+            avgEstimateMs: { type: "number" },
+            maxEstimateMs: { type: "number" },
+            encoderCacheSize: { type: "integer" }
+          }
+        }
+      }
+    }
+  )),
+  ...path("/api/compact/metrics", get("Compact service metrics",
+    "Returns compaction budget, summary-input, and latency counters.",
+    {
+      type: "object",
+      properties: {
+        metrics: {
+          type: "object",
+          properties: {
+            budgetChecks: { type: "integer" },
+            compactTaskCalls: { type: "integer" },
+            buildContextCalls: { type: "integer" },
+            eventsChecked: { type: "integer" },
+            summaryRequestsCreated: { type: "integer" },
+            compactedContextsReturned: { type: "integer" },
+            nullResults: { type: "integer" },
+            summaryInputsBuilt: { type: "integer" },
+            summaryInputTruncations: { type: "integer" },
+            summaryInputDroppedEvents: { type: "integer" },
+            summaryInputSourceChars: { type: "integer" },
+            summaryInputChars: { type: "integer" },
+            totalMs: { type: "number" },
+            lastMs: { type: "number" },
+            avgMs: { type: "number" },
+            maxMs: { type: "number" }
+          }
+        }
+      }
+    }
   )),
 
   // Workspace operations

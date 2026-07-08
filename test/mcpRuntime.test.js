@@ -5,7 +5,14 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { callMcpTool, closePersistentMcpSessions, configuredMcpServers, mcpStatus, probeMcpServer } from "../src/mcpRuntime.js";
+import {
+  callMcpTool,
+  closeIdlePersistentMcpSessions,
+  closePersistentMcpSessions,
+  configuredMcpServers,
+  mcpStatus,
+  probeMcpServer
+} from "../src/mcpRuntime.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -157,6 +164,38 @@ test("mcpStatus reports persistent session state", async () => {
     const status = mcpStatus(settings);
     assert.equal(status.persistentSessions.enabled, true);
     assert.equal(status.persistentSessions.sessions >= 1, true);
+  } finally {
+    await closePersistentMcpSessions();
+    if (previousFlag === undefined) delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+    else process.env.VIBELINK_MCP_PERSISTENT_SESSIONS = previousFlag;
+  }
+});
+
+test("runtime closes idle persistent MCP sessions", async () => {
+  const previousFlag = process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  process.env.VIBELINK_MCP_PERSISTENT_SESSIONS = "1";
+  const settings = {
+    mcp: {
+      servers: [
+        {
+          id: "fake-idle-runtime",
+          name: "fake-idle-runtime",
+          type: "stdio",
+          command: process.execPath,
+          args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+        }
+      ]
+    }
+  };
+
+  try {
+    await callMcpTool(settings, { serverId: "fake-idle-runtime", toolName: "echo", arguments: { q: "idle" } }, { timeoutMs: 5000 });
+    assert.equal(mcpStatus(settings).persistentSessions.sessions, 1);
+
+    const pruned = await closeIdlePersistentMcpSessions({ maxIdleMs: 0 });
+
+    assert.equal(pruned.closed, 1);
+    assert.equal(mcpStatus(settings).persistentSessions.sessions, 0);
   } finally {
     await closePersistentMcpSessions();
     if (previousFlag === undefined) delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;

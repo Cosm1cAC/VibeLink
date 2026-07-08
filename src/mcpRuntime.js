@@ -139,6 +139,13 @@ export async function closePersistentMcpSessions() {
   persistentMcpSessions = null;
 }
 
+export async function closeIdlePersistentMcpSessions(options = {}) {
+  if (!persistentMcpSessions) return { closed: 0, remaining: 0 };
+  const result = await persistentMcpSessions.closeIdleSessions(options);
+  if (result.remaining === 0) persistentMcpSessions = null;
+  return result;
+}
+
 export function getPersistentMcpSessionStats() {
   return {
     enabled: isMcpPersistentSessionsEnabled(),

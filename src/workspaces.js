@@ -16,7 +16,6 @@ const workspaceTreeCache = new Map();
 const workspaceTreeCacheMaxEntries = 128;
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const workspaceContextFileCache = new Map();
-const workspaceContextFileCacheMaxEntries = 256;
 const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
@@ -66,6 +65,11 @@ function gitSummaryCacheTtlMs() {
 function gitCacheMaxEntries() {
   const value = Number(process.env.VIBELINK_GIT_CACHE_MAX_ENTRIES || 128);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 128;
+}
+
+function workspaceContextFileCacheMaxEntries() {
+  const value = Number(process.env.VIBELINK_WORKSPACE_CONTEXT_FILE_CACHE_MAX_ENTRIES || 256);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 256;
 }
 
 function gitSummaryCacheKey(cwd = "") {
@@ -190,7 +194,7 @@ export function getWorkspaceRuntimeStats() {
       cacheHits: workspaceContextFileStats.cacheHits,
       cacheMisses: workspaceContextFileStats.cacheMisses,
       cacheEvictions: workspaceContextFileStats.cacheEvictions,
-      maxEntries: workspaceContextFileCacheMaxEntries
+      maxEntries: workspaceContextFileCacheMaxEntries()
     },
     rustWorkspaceTree: {
       enabled: rustWorkspaceTreeEnabled(),
@@ -336,7 +340,7 @@ function cacheWorkspaceContextFile(filePath, stat, item) {
     signature: workspaceContextFileSignature(stat),
     item: { ...item }
   });
-  while (workspaceContextFileCache.size > workspaceContextFileCacheMaxEntries) {
+  while (workspaceContextFileCache.size > workspaceContextFileCacheMaxEntries()) {
     const oldestKey = workspaceContextFileCache.keys().next().value;
     workspaceContextFileCache.delete(oldestKey);
     workspaceContextFileStats.cacheEvictions += 1;

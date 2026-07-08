@@ -105,6 +105,7 @@ const IGNORED_WORKSPACE_DIRS: &[&str] = &[
     ".next",
     "dist",
     "build",
+    "target",
     "coverage",
     ".agent-mobile-terminal",
 ];
@@ -475,9 +476,11 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
         fs::write(root.join("README.md"), "hello").unwrap();
         fs::write(root.join("src").join("main.rs"), "fn main() {}").unwrap();
         fs::write(root.join("node_modules").join("noise.js"), "ignored").unwrap();
+        fs::write(root.join("target").join("noise.txt"), "ignored").unwrap();
 
         let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
 
@@ -490,6 +493,7 @@ mod tests {
             .items
             .iter()
             .all(|item| !item.path.starts_with("node_modules")));
+        assert!(tree.items.iter().all(|item| !item.path.starts_with("target")));
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -7,7 +7,7 @@ import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from ".
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
 
 const execFileAsync = promisify(execFile);
-const ignoredDirs = new Set([".git", "node_modules", ".next", "dist", "build", "coverage", ".agent-mobile-terminal"]);
+const ignoredDirs = new Set([".git", "node_modules", ".next", "dist", "build", "target", "coverage", ".agent-mobile-terminal"]);
 const gitSummaryCache = new Map();
 const gitSummaryCacheStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([

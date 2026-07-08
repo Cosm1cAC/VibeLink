@@ -215,6 +215,34 @@ test("getWorkspaceContext caches unchanged file samples and refreshes on change"
   }
 });
 
+test("workspace context file cache honors runtime max entries", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-context-file-cache-cap-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  for (let i = 0; i < 6; i += 1) {
+    fs.writeFileSync(path.join(fixture, `file-${i}.md`), `hello-${i}`, "utf8");
+  }
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "context-file-cache-cap" });
+  const previousMaxEntries = process.env.VIBELINK_WORKSPACE_CONTEXT_FILE_CACHE_MAX_ENTRIES;
+  process.env.VIBELINK_WORKSPACE_CONTEXT_FILE_CACHE_MAX_ENTRIES = "3";
+
+  try {
+    const before = getWorkspaceRuntimeStats().workspaceContextFiles;
+    for (let i = 0; i < 6; i += 1) {
+      await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: [`file-${i}.md`] });
+    }
+    const after = getWorkspaceRuntimeStats().workspaceContextFiles;
+
+    assert.equal(after.maxEntries, 3);
+    assert.equal(after.entries <= 3, true);
+    assert.equal(after.cacheEvictions > before.cacheEvictions, true);
+  } finally {
+    restoreEnv("VIBELINK_WORKSPACE_CONTEXT_FILE_CACHE_MAX_ENTRIES", previousMaxEntries);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceTree caps Node scanner cache entries", async () => {
   const fixture = path.join(os.tmpdir(), `vibelink-tree-cache-cap-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });

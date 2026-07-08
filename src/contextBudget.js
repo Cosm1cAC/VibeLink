@@ -14,7 +14,8 @@ const contextBudgetMetrics = {
   eventsEstimated: 0,
   charsEstimated: 0,
   totalEstimateMs: 0,
-  lastEstimateMs: 0
+  lastEstimateMs: 0,
+  maxEstimateMs: 0
 };
 
 function observeEstimate({ textCall = false, eventCall = false, eventCount = 0, charCount = 0, startedAt = 0 } = {}) {
@@ -25,6 +26,7 @@ function observeEstimate({ textCall = false, eventCall = false, eventCount = 0, 
   contextBudgetMetrics.charsEstimated += charCount;
   contextBudgetMetrics.totalEstimateMs += elapsedMs;
   contextBudgetMetrics.lastEstimateMs = elapsedMs;
+  contextBudgetMetrics.maxEstimateMs = Math.max(contextBudgetMetrics.maxEstimateMs, elapsedMs);
 }
 
 export function resetContextBudgetMetrics() {
@@ -34,9 +36,11 @@ export function resetContextBudgetMetrics() {
   contextBudgetMetrics.charsEstimated = 0;
   contextBudgetMetrics.totalEstimateMs = 0;
   contextBudgetMetrics.lastEstimateMs = 0;
+  contextBudgetMetrics.maxEstimateMs = 0;
 }
 
 export function getContextBudgetMetrics() {
+  const estimateCalls = contextBudgetMetrics.textEstimateCalls + contextBudgetMetrics.eventEstimateCalls;
   return {
     textEstimateCalls: contextBudgetMetrics.textEstimateCalls,
     eventEstimateCalls: contextBudgetMetrics.eventEstimateCalls,
@@ -44,6 +48,8 @@ export function getContextBudgetMetrics() {
     charsEstimated: contextBudgetMetrics.charsEstimated,
     totalEstimateMs: Number(contextBudgetMetrics.totalEstimateMs.toFixed(3)),
     lastEstimateMs: Number(contextBudgetMetrics.lastEstimateMs.toFixed(3)),
+    avgEstimateMs: estimateCalls > 0 ? Number((contextBudgetMetrics.totalEstimateMs / estimateCalls).toFixed(3)) : 0,
+    maxEstimateMs: Number(contextBudgetMetrics.maxEstimateMs.toFixed(3)),
     encoderCacheSize: encodings.size
   };
 }

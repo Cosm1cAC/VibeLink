@@ -25,7 +25,7 @@ function emptyMethodStats() {
   };
 }
 
-export function createEventStoreMetrics({ now = () => new Date().toISOString(), stallThresholdMs = 50 } = {}) {
+export function createEventStoreMetrics({ now = () => new Date().toISOString(), stallThresholdMs } = {}) {
   const startedAt = now();
   const methods = new Map();
   let requests = 0;
@@ -33,6 +33,13 @@ export function createEventStoreMetrics({ now = () => new Date().toISOString(), 
   let fallbacks = 0;
   let stalls = 0;
   let maxStallDurationMs = 0;
+
+  function resolvedStallThresholdMs() {
+    const value = stallThresholdMs === undefined
+      ? Number(process.env.VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS)
+      : Number(stallThresholdMs);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 50;
+  }
 
   function record({ method = "unknown", mode = "sync", ok = true, durationMs = 0, fallback = false } = {}) {
     const key = cleanMethod(method);
@@ -57,7 +64,7 @@ export function createEventStoreMetrics({ now = () => new Date().toISOString(), 
       fallbacks += 1;
       stats.fallbacks += 1;
     }
-    if (modeKey === "sync" && duration >= Math.max(1, Number(stallThresholdMs || 50))) {
+    if (modeKey === "sync" && duration >= resolvedStallThresholdMs()) {
       stalls += 1;
       stats.stalls += 1;
       maxStallDurationMs = roundMs(Math.max(maxStallDurationMs, duration));
@@ -87,7 +94,7 @@ export function createEventStoreMetrics({ now = () => new Date().toISOString(), 
       failures,
       fallbacks,
       stalls: {
-        thresholdMs: Math.max(1, Number(stallThresholdMs || 50)),
+        thresholdMs: resolvedStallThresholdMs(),
         count: stalls,
         maxDurationMs: maxStallDurationMs
       },

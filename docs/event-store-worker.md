@@ -54,11 +54,11 @@ Task and tool event append paths still preserve the existing immediate cursor be
 - `worker`: worker flag is enabled and no failure has occurred
 - `sync-fallback`: worker flag is enabled but a worker request failed
 
-It also includes `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, and mode counts. The same response includes tool-event batch metrics, live-call event batch metrics, and tool-event SSE replay metrics. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
+It also includes `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, mode counts, and slow sync-call stalls. Set `VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS` to tune the stall threshold for local hardware or CI; the default is 50ms. The same response includes tool-event batch metrics, live-call event batch metrics, and tool-event SSE replay metrics. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
 
 ## Next Slices
 
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.
 - Window large task/live-call replay paths where callers still request broad history.
-- Add main-thread stall measurements around high-frequency event bursts.
+- Add high-frequency event burst smoke tests around the runtime stall and batch metrics.
 - Reuse the same JSON method contract for a Rust sidecar/native module once the Worker boundary is stable.

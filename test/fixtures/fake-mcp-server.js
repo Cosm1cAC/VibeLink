@@ -28,6 +28,13 @@ rl.on("line", (line) => {
   if (!line.trim()) return;
   const message = JSON.parse(line);
   if (!Object.prototype.hasOwnProperty.call(message, "id")) return;
+  if (process.env.FAKE_MCP_METHOD_LOG) {
+    try {
+      fs.appendFileSync(process.env.FAKE_MCP_METHOD_LOG, `${message.method}\n`, "utf8");
+    } catch {
+      // Test instrumentation should not affect server behavior.
+    }
+  }
 
   if (message.method === "initialize") {
     send(message.id, {

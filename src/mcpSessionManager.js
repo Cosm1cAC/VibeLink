@@ -79,6 +79,7 @@ function createStdioSession(
   let stderr = "";
   let closed = false;
   let initialized = null;
+  let tools = null;
   const pending = new Map();
   const defaultEmitProgress = emitProgress;
   const child = spawnFn(server.command, Array.isArray(server.args) ? server.args : [], {
@@ -179,8 +180,10 @@ function createStdioSession(
     },
     async listTools(options = {}) {
       await ensureInitialized(options);
+      if (tools) return tools;
       const response = await request("tools/list", undefined, options);
-      return Array.isArray(response.result?.tools) ? response.result.tools : [];
+      tools = Array.isArray(response.result?.tools) ? response.result.tools : [];
+      return tools;
     },
     async callTool(name, toolArguments = {}, options = {}) {
       await ensureInitialized(options);

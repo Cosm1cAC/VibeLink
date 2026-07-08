@@ -13,7 +13,8 @@ const gitSummaryCacheStats = { hits: 0, misses: 0 };
 const gitStatusCache = new Map();
 const gitStatusCacheStats = { hits: 0, misses: 0 };
 const workspaceTreeCache = new Map();
-const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0 };
+const workspaceTreeCacheMaxEntries = 128;
+const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
   ".txt",
@@ -148,7 +149,9 @@ export function getWorkspaceRuntimeStats() {
       entries: workspaceTreeCache.size,
       budgetHits: workspaceTreeStats.budgetHits,
       cacheHits: workspaceTreeStats.cacheHits,
-      cacheMisses: workspaceTreeStats.cacheMisses
+      cacheMisses: workspaceTreeStats.cacheMisses,
+      cacheEvictions: workspaceTreeStats.cacheEvictions,
+      maxEntries: workspaceTreeCacheMaxEntries
     },
     rustWorkspaceTree: {
       enabled: rustWorkspaceTreeEnabled(),
@@ -412,6 +415,11 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
   if (entries.length >= maxEntries && queue.length) budgetHit = true;
   if (budgetHit) workspaceTreeStats.budgetHits += 1;
   workspaceTreeCache.set(cacheKey, entries.map((item) => ({ ...item })));
+  while (workspaceTreeCache.size > workspaceTreeCacheMaxEntries) {
+    const oldestKey = workspaceTreeCache.keys().next().value;
+    workspaceTreeCache.delete(oldestKey);
+    workspaceTreeStats.cacheEvictions += 1;
+  }
   return entries;
 }
 

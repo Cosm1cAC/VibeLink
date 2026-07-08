@@ -25,6 +25,24 @@ test("event store metrics aggregate latency and fallback counts", () => {
     "sync-fallback": 1
   });
 });
+
+test("event store metrics count slow main-thread sync calls", () => {
+  const metrics = createEventStoreMetrics({
+    now: () => "2026-01-01T00:00:00.000Z",
+    stallThresholdMs: 25
+  });
+
+  metrics.record({ method: "insertTaskEvent", mode: "sync", ok: true, durationMs: 24.9 });
+  metrics.record({ method: "insertTaskEvent", mode: "sync", ok: true, durationMs: 25 });
+  metrics.record({ method: "insertTaskEvent", mode: "worker", ok: true, durationMs: 50 });
+
+  const snapshot = metrics.snapshot();
+  assert.equal(snapshot.stalls.thresholdMs, 25);
+  assert.equal(snapshot.stalls.count, 1);
+  assert.equal(snapshot.stalls.maxDurationMs, 25);
+  assert.equal(snapshot.methods.insertTaskEvent.stalls, 1);
+});
+
 test("db append paths record event store metrics", () => {
   const taskId = `metrics-task-${Date.now()}`;
   upsertTask({

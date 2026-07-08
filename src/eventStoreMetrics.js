@@ -15,6 +15,7 @@ function emptyMethodStats() {
     count: 0,
     failures: 0,
     fallbacks: 0,
+    stalls: 0,
     totalDurationMs: 0,
     avgDurationMs: 0,
     maxDurationMs: 0,
@@ -24,12 +25,14 @@ function emptyMethodStats() {
   };
 }
 
-export function createEventStoreMetrics({ now = () => new Date().toISOString() } = {}) {
+export function createEventStoreMetrics({ now = () => new Date().toISOString(), stallThresholdMs = 50 } = {}) {
   const startedAt = now();
   const methods = new Map();
   let requests = 0;
   let failures = 0;
   let fallbacks = 0;
+  let stalls = 0;
+  let maxStallDurationMs = 0;
 
   function record({ method = "unknown", mode = "sync", ok = true, durationMs = 0, fallback = false } = {}) {
     const key = cleanMethod(method);
@@ -54,6 +57,11 @@ export function createEventStoreMetrics({ now = () => new Date().toISOString() }
       fallbacks += 1;
       stats.fallbacks += 1;
     }
+    if (modeKey === "sync" && duration >= Math.max(1, Number(stallThresholdMs || 50))) {
+      stalls += 1;
+      stats.stalls += 1;
+      maxStallDurationMs = roundMs(Math.max(maxStallDurationMs, duration));
+    }
 
     methods.set(key, stats);
   }
@@ -65,6 +73,7 @@ export function createEventStoreMetrics({ now = () => new Date().toISOString() }
         count: stats.count,
         failures: stats.failures,
         fallbacks: stats.fallbacks,
+        stalls: stats.stalls,
         avgDurationMs: stats.avgDurationMs,
         maxDurationMs: stats.maxDurationMs,
         lastDurationMs: stats.lastDurationMs,
@@ -77,6 +86,11 @@ export function createEventStoreMetrics({ now = () => new Date().toISOString() }
       requests,
       failures,
       fallbacks,
+      stalls: {
+        thresholdMs: Math.max(1, Number(stallThresholdMs || 50)),
+        count: stalls,
+        maxDurationMs: maxStallDurationMs
+      },
       methods: methodStats
     };
   }

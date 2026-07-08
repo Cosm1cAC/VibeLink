@@ -279,6 +279,17 @@ function sendError(response, status, message) {
   sendJson(response, status, { error: message });
 }
 
+function eventCatchUpWindowPayload(events, limit) {
+  const boundedLimit = Math.max(1, Number(limit || 1));
+  const items = events.slice(0, boundedLimit);
+  return {
+    items,
+    nextCursor: items.length ? Number(items[items.length - 1].cursor || 0) : 0,
+    hasMore: events.length > boundedLimit,
+    limit: boundedLimit
+  };
+}
+
 /**
  * Pick a subset of fields from an object based on a comma-separated list.
  * Supports dot-notation for nested fields: "id,events.type,events.status"
@@ -2259,15 +2270,22 @@ async function routeApi(request, response, url) {
 
   const liveCallEventsCatchUpMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/events\/catch-up$/);
   if (liveCallEventsCatchUpMatch && request.method === "GET") {
+    const limit = resolveEventReplayLimit(url.searchParams.get("limit"), { defaultLimit: 200, maxLimit: 2000 });
     const items = await listLiveCallEventsReplay(liveCallEventsCatchUpMatch[1], {
       after: Number(url.searchParams.get("after") || 0),
-      limit: resolveEventReplayLimit(url.searchParams.get("limit"), { defaultLimit: 200, maxLimit: 2000 })
+      limit: limit + 1
     });
     if (!items) {
       sendError(response, 404, "Live call session not found.");
       return;
     }
-    sendJson(response, 200, { items: applyFields(items, url) });
+    const window = eventCatchUpWindowPayload(items, limit);
+    sendJson(response, 200, {
+      items: applyFields(window.items, url),
+      nextCursor: window.nextCursor,
+      hasMore: window.hasMore,
+      limit: window.limit
+    });
     return;
   }
 
@@ -3215,11 +3233,16 @@ async function routeApi(request, response, url) {
       sendError(response, 404, "Task not found");
       return;
     }
+    const limit = resolveEventReplayLimit(url.searchParams.get("limit"));
+    const window = eventCatchUpWindowPayload(await listTaskEventsAsync(task.id, {
+      after: Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0),
+      limit: limit + 1
+    }), limit);
     sendJson(response, 200, {
-      items: applyFields(await listTaskEventsAsync(task.id, {
-        after: Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0),
-        limit: resolveEventReplayLimit(url.searchParams.get("limit"))
-      }), url)
+      items: applyFields(window.items, url),
+      nextCursor: window.nextCursor,
+      hasMore: window.hasMore,
+      limit: window.limit
     });
     return;
   }

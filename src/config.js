@@ -19,6 +19,9 @@ export const defaultSettings = {
   claudeCommand: process.env.CLAUDE_COMMAND || "claude",
   codexCommand: process.env.CODEX_COMMAND || "auto",
   codexTemplate: process.env.CODEX_TEMPLATE || "",
+  doubaoCommand: process.env.DOUBAO_COMMAND || "auto",
+  doubaoCdpEndpoint: process.env.DOUBAO_CDP_ENDPOINT || "http://127.0.0.1:9222",
+  doubaoUrl: process.env.DOUBAO_WEB_URL || "https://www.doubao.com/chat/",
   permissionMode: "default",
   security: {
     sandboxMode: "workspace-write",

@@ -44,6 +44,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.5")
+    implementation("androidx.camera:camera-core:1.4.1")
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    implementation("androidx.camera:camera-view:1.4.1")
 
     // Network
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
@@ -53,6 +57,7 @@ dependencies {
 
     // JSON
     implementation("com.google.code.gson:gson:2.11.0")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

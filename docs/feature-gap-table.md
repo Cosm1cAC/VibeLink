@@ -15,7 +15,7 @@
 
 已经从“缺失”或高风险口径中下调的能力：
 
-- Desktop remote 已有严格 preflight、最小化后恢复并重新校验、postflight 验证、SQLite 持久队列、draft/send probe 和 target fail-closed。
+- Codex Desktop Remote 已有严格 preflight、最小化后恢复并重新校验、postflight 验证、SQLite 持久队列、draft/send probe 和 target fail-closed。
 - 公网访问已具备 QR pairing session、已登录设备 approve/deny、device token hash、revoke/rotate/expiry、Host allowlist、审计日志、限流和 Cloudflare 向导；公网 Host 下 legacy `/api/login` 默认不能绕过设备确认。
 - Node 运行时约束已提升到 `node >=22.5.0`，匹配 `node:sqlite` / `DatabaseSync`。
 - Task SSE 已支持 cursor、`Last-Event-ID` / `after`、REST catch-up 和错误后 polling fallback，不再在 `onopen` 后立即并行轮询。
@@ -24,28 +24,28 @@
 当前最需要继续追的高优先级差异：
 
 - `P0`：不能真正接管电脑上已经在 Codex App / 终端里运行的进程，只能读取历史、CLI resume、新开任务或 Desktop UI 遥控。
-- `P0`：Desktop remote 输出仍只能做到“实时近似 + 完成后校准”，无法凭空获得 Codex Desktop 未暴露的完整 tool 输出、退出码和内部归属。
+- `P0`：Codex Desktop Remote 输出仍只能做到“实时近似 + 完成后校准”，无法凭空获得 Codex Desktop 未暴露的完整 tool 输出、退出码和内部归属。
 - `P0`：权限与审批仍不是 Codex 原生等价，缺少逐条命令级审批、危险操作解释和细粒度网络/沙箱 UI。
 - `P0`：Desktop UI 遥控仍依赖 Windows UIA、前台窗口、控件文案和 Electron UI 稳定性，不能等同原生协议。
 
 ## 非 T0/P0 差异说明
 
 - 用户消息没有额外 `text` 拼接 / 非增量元数据，不再作为 T0/P0 差异记录；除非后续影响上下文恢复或交互一致性。
-- Desktop remote 的模型、权限、推理强度默认是“使用当前 Codex Desktop 设置”；需要确定性参数时走 CLI 路线。
+- Codex Desktop Remote 的模型、权限、推理强度默认是“使用当前 Codex Desktop 设置”；需要确定性参数时走 VibeLink Agent。
 
 ## 会话与任务
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| blocked | 真正接管电脑上已经在 Codex App / 终端里运行的进程 | 不能夺取已有进程的 stdin/stdout/PTY。当前可选路线是读取 JSONL 历史后 CLI resume，或通过 Codex Desktop UI 遥控继续输入。 | P0 |
+| blocked | 真正接管电脑上已经在 Codex App / 终端里运行的进程 | 不能夺取已有进程的 stdin/stdout/PTY。当前可选模式是读取 JSONL 历史后由 VibeLink Agent resume，或通过 Codex Desktop UI 遥控继续输入。 | P0 |
 | blocked | Codex Desktop 原生回显 | 已验证网页端继续同一 thread 后，Codex Desktop App 不会自动把网页端消息回显到原生 UI。只能共享 thread 历史、Desktop observer 近似同步，或 UI 遥控输入。 | P0 |
-| planned | Codex app-server 客户端代理接入 | 已做 probe/spike，app-server 可作为未来路线；当前主线仍是 CLI resume + Desktop remote，尚未产品化接入。 | P0 |
+| planned | Codex app-server 客户端代理接入 | 已做 probe/spike，app-server 可作为未来增强；当前主线仍是 VibeLink Agent resume + Codex Desktop Remote，尚未产品化接入。 | P0 |
 | partial | Codex Desktop UI 遥控 | 已有 Windows UIA 探测、窗口恢复、会话定位、target 校验、草稿检测、发送队列、postflight 验证和 SQLite 队列恢复；仍依赖前台 UI、控件定位和 Codex UI 稳定性。 | P0 |
-| partial | Desktop remote 输出同步 | live 阶段可读可见 transcript 和状态，event 阶段写入 SQLite cursor；历史可从 JSONL 恢复。仍无法拿到 Codex Desktop 未暴露的完整 tool 输出、退出码和内部 tool 调用归属。 | P0 |
+| partial | Codex Desktop Remote 输出同步 | live 阶段可读可见 transcript 和状态，event 阶段写入 SQLite cursor；历史可从 JSONL 恢复。仍无法拿到 Codex Desktop 未暴露的完整 tool 输出、退出码和内部 tool 调用归属。 | P0 |
 | partial | Codex thread 管理 | 已支持重命名、置顶、归档、恢复、分组、fork；但管理 UI 仍偏原型，不是 Codex 风格的批量/跨设备线程管理。 | P1 |
 | partial | 历史上下文还原 | Codex / Claude 历史可扫描并按 turn/block 聚合，含命令摘要、权限模式等信息；仍不是完整 Codex App 状态，例如计划面板、插件状态、完整审批状态不能全量还原。 | P0 |
 | partial | 搜索 | 可按标题、provider、cwd、sessionId 过滤；缺少全文搜索、标签、收藏和复杂过滤。 | P2 |
-| missing | Agent 任务队列和并发管理 | Desktop remote 队列已持久化，但 CLI/Claude Agent 任务还没有优先级、并发上限、失败重试、批量取消和后台调度面板。 | P1 |
+| missing | Agent 任务队列和并发管理 | Codex Desktop Remote 队列已持久化，但 VibeLink Agent 任务还没有优先级、并发上限、失败重试、批量取消和后台调度面板。 | P1 |
 | partial | 运行中状态恢复 | 本服务启动的任务有 SQLite task event、JSONL 日志、SSE/catch-up；服务重启后能看历史事件，但不能重新绑定仍在跑的 OS 子进程。 | P0 |
 
 ## 输入区
@@ -54,9 +54,9 @@
 | --- | --- | --- | --- |
 | partial | 文件/文件夹选择器 | 已支持手机本地文件上传、文件夹上传、workspace 文件树选择并注入上下文；仍不是 Codex Desktop 原生文件选择器。 | P0 |
 | partial | 附件能力 | 已支持图片、普通文件、文件夹上传、文本预览和本地路径注入；PDF/Office/表格可作为 artifact 打开或交给 agent，但富预览和内容抽取仍有限。 | P1 |
-| partial | 模型选择 | Composer 有模型和推理强度选择器，Codex CLI 透传 `-m` 和 `model_reasoning_effort`，Claude 透传 `--model` 和 `--effort`；仍缺动态模型 catalog 和 Desktop remote 原生菜单验证切换。 | P1 |
+| partial | 模型选择 | Composer 有模型和推理强度选择器，VibeLink Agent 已接入 Codex、Claude、豆包、GLM provider；仍缺统一 provider registry 和动态模型 catalog。Codex Desktop Remote 继续使用 Desktop 当前设置。 | P1 |
 | partial | slash commands | 已支持 `/image`、`/file`、`/folder`、`/workspace`、`/permissions`、`/model`、`/effort`、`/agent`、`/history`、`/clear`；尚未覆盖 `/plugins`、`/apps`、`/hooks` 等完整 Codex 命令。 | P1 |
-| partial | 运行中补充输入 | Desktop remote 可继续排队；CLI running task 可尝试写入输入并返回明确失败原因，但 Codex/Claude exec 模式通常仍不接收 live stdin。 | P0 |
+| partial | 运行中补充输入 | Codex Desktop Remote 可继续排队；VibeLink Agent running task 可尝试写入输入并返回明确失败原因，但部分 provider exec 模式通常仍不接收 live stdin。 | P0 |
 
 ## 输出渲染
 
@@ -64,7 +64,7 @@
 | --- | --- | --- | --- |
 | partial | Markdown 渲染 | 已接入 `react-markdown`、GFM、代码高亮、任务列表、表格、引用、数学公式和本地文件链接；仍缺 Mermaid、复杂 HTML/组件化块、Codex 原生级流式块结构和更细的安全策略。 | P1 |
 | partial | tool call 卡片 | 已有命令摘要卡和通用 tool call 卡，能显示文件、浏览器、插件、审批等类型的输入/输出 payload；仍缺 Codex 原生 tool schema、完整生命周期、审批交互和 Desktop 原生内部 tool 输出。 | P0 |
-| partial | Desktop remote 命令摘要 | 可从可见 transcript 和历史推断“已运行 N 条命令”和部分命令文本；仍没有完整输出、退出码和精确 tool 调用归属。 | P0 |
+| partial | Codex Desktop Remote 命令摘要 | 可从可见 transcript 和历史推断“已运行 N 条命令”和部分命令文本；仍没有完整输出、退出码和精确 tool 调用归属。 | P0 |
 | partial | diff/change card | 已有 workspace/task Git status/diff 摘要、完整 patch 浏览、未跟踪文本文件伪 diff、复制 patch、文件定位、接受/拒绝文件变更和全部暂存；仍缺 per-hunk 操作、冲突处理、review 评论和 Codex 原生 change set。 | P1 |
 | partial | 图片显示 | 已支持本地图片代理、附件图片展示、错误占位、放大、下载、新窗口打开和多图图库；仍缺标注、缩放平移和更完整的媒体管理。 | P2 |
 | partial | artifact 视图 | 已有 artifact 列表，PDF/Text 可 iframe 预览，其他文件可下载或新窗口打开；仍缺 Office、PPT、表格、Notebook 等专门预览和结构化编辑。 | P2 |
@@ -74,7 +74,7 @@
 
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
-| partial | 权限模型 | 已有 `permissionMode`，CLI 任务支持 sandbox、approval policy、network access、trusted workspace UI，并透传到 Codex CLI；Desktop remote 仍使用当前 Desktop 设置，且没有完整命令级权限模型。 | P0 |
+| partial | 权限模型 | VibeLink Agent 任务支持 sandbox、approval policy、network access、trusted workspace UI；Codex Desktop Remote 仍使用当前 Desktop 设置，且不接管 Desktop 内部权限模型。 | P0 |
 | partial | 逐条审批 | 已有危险任务设置拦截，并为 workspace 终端/测试命令新增命令级风险识别与 428 确认：递归删除、Git 历史重写、下载执行、提权、内联解释器、网络安装等会先暂停并写审计；仍缺 Agent tool call 级持久审批、权限升降级说明和审批后继续同一 tool call。 | P0 |
 | partial | API key 存储 | 已接 Windows DPAPI、macOS Keychain、Linux Secret Service，`settings.json` 会清空明文 key，并迁移旧明文；仍需要更明确的失败提示、导入导出和无系统凭据库时的降级策略。 | P1 |
 | partial | 访问审计 | 已有 `audit_log`，记录登录、设备、IP、UA、任务发送、文件访问、失败原因，并对登录、配对、任务、文件等接口限流；仍缺异常告警、审计导出、保留策略和风险看板。 | P1 |
@@ -125,7 +125,7 @@
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
 | partial | 原生移动端 | 已有 Android MVP 工程和构建脚本，但当前主体验仍是网页/PWA；没有完整 Android/iOS App、后台任务、原生通知和系统分享入口。 | P1 |
-| partial | 通话实时转写/面试辅助 | Windows audio probe（list/probe/level/stream）、后端 Live Call API + SQLite 持久化、WebSocket PCM 推流（`/api/live-calls/:id/audio`）、Mock ASR pipeline（`liveCallAsr.js`）、Route B Agent 自动触发（`liveCallAgent.js`）、前端 Live Call 面板（创建/停止/电平/转录/问答/Agent delta SSE）已完成。**尚未完成**：真实 ASR provider 接入、真实 PCM 端到端 10 分钟 QA、前端暂停/恢复/录制管理。详见 `docs/windows-bluetooth-call-transcription-mvp.md`。 | P1 |
+| partial | 通话实时转写/面试辅助 | Windows audio probe（list/probe/level/stream）、后端 Live Call API + SQLite 持久化、WebSocket PCM 推流（`/api/live-calls/:id/audio`）、Mock ASR pipeline（`liveCallAsr.js`）、VibeLink Agent 自动触发（`liveCallAgent.js`）、前端 Live Call 面板（创建/停止/电平/转录/问答/Agent delta SSE）已完成。**尚未完成**：真实 ASR provider 接入、真实 PCM 端到端 10 分钟 QA、前端暂停/恢复/录制管理。详见 `docs/windows-bluetooth-call-transcription-mvp.md`。 | P1 |
 | partial | 推送通知 | 已有 Web Push 订阅、关键事件通知入口和邮件 fallback 配置；仍缺 iOS/Android 原生 APNs/FCM/Expo Push、通知偏好和投递状态。 | P0 |
 | partial | 断线恢复 | task events、desktop observations、live call events 均已写入 SQLite + SSE cursor，SSE 支持 `after` / `Last-Event-ID`，前端 REST catch-up；live call 会话重启可自动从 SQLite 恢复活跃 session。仍缺 ack、保留策略、压缩和多设备一致性测试。 | P0 |
 | partial | 公网访问 | 已有 QR 配对、设备确认、token hash、revoke/rotate/expiry、Host allowlist、审计、限流和 Cloudflare 向导；仍缺完整账号系统、域名/证书自动化、Cloudflare Access 深度集成和部署体检。 | P1 |
@@ -161,8 +161,8 @@
 
 ## 建议下一批优先级
 
-1. `P0`：按 `docs/cli-capability-alignment-plan.md` 先补 CLI runtime 骨架：统一 tool run/event、持久审批队列和审批后继续能力。
-2. `P0`：继续增强 Desktop remote 输出同步：JSONL reconcile、tool 摘要归属、workspace diff/change card 自动关联和失败边界提示。
+1. `P0`：按 `docs/vibelink-agent-architecture.md` 继续收敛 provider registry、模型 catalog 和统一事件恢复。
+2. `P0`：继续增强 Codex Desktop Remote 输出同步：JSONL reconcile、tool 摘要归属、workspace diff/change card 自动关联和失败边界提示。
 3. `P1`：把内置终端升级为 PTY 会话，支持 ANSI、输入补充、长期任务、停止和日志折叠。
 4. `P1`：完善 Workspace/Git：裸路径自动链接、文件搜索/编辑、per-hunk 操作、branch/stash/worktree、PR review 和冲突向导。
 5. `P1`：增强测试视图：框架适配、失败定位、单测重跑和测试历史。

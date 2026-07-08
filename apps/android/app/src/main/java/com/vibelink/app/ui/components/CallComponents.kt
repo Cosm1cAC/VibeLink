@@ -15,8 +15,10 @@ import com.vibelink.app.network.LiveCallEvent
 
 @Composable
 fun TranscriptFeed(events: List<LiveCallEvent>) {
-    val finals = events.filter { it.type == "live_call.transcript.final" }
-    if (finals.isEmpty()) return
+    val transcripts = events
+        .filter { it.type == "live_call.transcript.final" || it.type == "live_call.transcript.partial" }
+        .takeLast(40)
+    if (transcripts.isEmpty()) return
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -27,10 +29,11 @@ fun TranscriptFeed(events: List<LiveCallEvent>) {
             Text("实时转录", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
-            finals.forEach { event ->
+            transcripts.forEach { event ->
                 val speaker = if (event.speaker == "local") "本地" else "远程"
+                val suffix = if (event.type == "live_call.transcript.partial") " ..." else ""
                 Text(
-                    text = "[$speaker] ${event.text}",
+                    text = "[$speaker] ${event.text}$suffix",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     lineHeight = 18.sp,

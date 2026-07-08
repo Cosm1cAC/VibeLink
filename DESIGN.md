@@ -1,39 +1,50 @@
 ---
 name: VibeLink
 description: >
-  Local-first Agent Remote Console — a multi-route bridge for continuing Codex 
+  Local-first Agent Remote Console - a multi-route bridge for continuing Codex
   and Claude Code agent work from web and mobile clients.
 colors:
-  primary: "#1E1B4B"
-  secondary: "#6366F1"
-  tertiary: "#22D3EE"
-  accent: "#F59E0B"
-  neutral: "#F8FAFC"
-  danger: "#EF4444"
-  success: "#10B981"
+  primary: "#202124"
+  ink: "#202124"
+  inkSoft: "#5F6668"
+  inkFaint: "#8B9497"
+  canvas: "#FBFBFA"
+  surface: "#FFFFFF"
+  surfaceSoft: "#F4F5F3"
+  sidebar: "#EAF8FA"
+  sidebarWarm: "#F3F6E8"
+  border: "#DCE3E1"
+  borderStrong: "#C9D2D0"
+  command: "#1F2322"
+  accent: "#FF5A1F"
+  focus: "#147F78"
+  success: "#147F78"
+  warning: "#A86F1B"
+  danger: "#C23B2E"
 typography:
   h1:
     fontFamily: Inter
     fontSize: 1.75rem
-    fontWeight: 700
+    fontWeight: 520
     lineHeight: 1.3
   h2:
     fontFamily: Inter
-    fontSize: 1.35rem
-    fontWeight: 600
+    fontSize: 1.25rem
+    fontWeight: 560
     lineHeight: 1.35
   body:
     fontFamily: Inter
     fontSize: 0.9375rem
-    lineHeight: 1.6
+    lineHeight: 1.58
   mono:
-    fontFamily: JetBrains Mono, Fira Code, monospace
+    fontFamily: Cascadia Mono, JetBrains Mono, Fira Code, monospace
     fontSize: 0.85rem
     lineHeight: 1.5
 rounded:
   sm: 6px
   md: 10px
   lg: 14px
+  pill: 999px
 spacing:
   xs: 4px
   sm: 8px
@@ -42,98 +53,109 @@ spacing:
   xl: 32px
 components:
   button-primary:
-    backgroundColor: "#4338CA"
+    backgroundColor: "{colors.command}"
     textColor: "#FFFFFF"
-    rounded: "{rounded.md}"
-    padding: 10px 20px
+    rounded: "{rounded.pill}"
+    padding: 10px 18px
     typography: "{typography.body}"
   button-primary-hover:
-    backgroundColor: "#3730A3"
+    backgroundColor: "#3A3D3C"
     textColor: "#FFFFFF"
   button-ghost:
-    backgroundColor: transparent
-    textColor: "{colors.secondary}"
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
     rounded: "{rounded.md}"
-    padding: 10px 20px
+    padding: 8px 12px
   card:
-    backgroundColor: "#FFFFFF"
-    textColor: "{colors.primary}"
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
     rounded: "{rounded.lg}"
     padding: "{spacing.lg}"
   tag-agent:
-    backgroundColor: "#4338CA"
-    textColor: "#FFFFFF"
-    rounded: "{rounded.sm}"
+    backgroundColor: "{colors.surfaceSoft}"
+    textColor: "{colors.inkSoft}"
+    rounded: "{rounded.pill}"
     padding: 2px 8px
   tag-route-a:
-    backgroundColor: "#4338CA"
-    textColor: "#FFFFFF"
-    rounded: "{rounded.sm}"
+    backgroundColor: "#EAF8FA"
+    textColor: "#0F665F"
+    rounded: "{rounded.pill}"
     padding: 2px 8px
   tag-route-b:
-    backgroundColor: "#0E7490"
-    textColor: "#FFFFFF"
-    rounded: "{rounded.sm}"
+    backgroundColor: "#E8EEF7"
+    textColor: "#365F9D"
+    rounded: "{rounded.pill}"
     padding: 2px 8px
   tag-route-c:
-    backgroundColor: "#B45309"
-    textColor: "#FFFFFF"
-    rounded: "{rounded.sm}"
+    backgroundColor: "#FFF1DE"
+    textColor: "#7A4C0D"
+    rounded: "{rounded.pill}"
     padding: 2px 8px
   input:
-    backgroundColor: "#FFFFFF"
-    textColor: "{colors.primary}"
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
     rounded: "{rounded.md}"
     padding: 8px 12px
 ---
 
 ## Overview
 
-VibeLink is a **local-first Agent Remote Console** — a multi-route bridge for continuing Codex and Claude Code agent work from web and mobile clients. The UI evokes a premium developer tool with a deep indigo foundation, clean typography, and clear visual distinction between the three agent routes.
+VibeLink is a **local-first Agent Remote Console** - a multi-route bridge for continuing Codex and Claude Code agent work from web and mobile clients. The interface should feel like Codex Desktop: quiet, pale, precise, and tool-focused. The first impression is a mist-blue navigation rail beside a nearly white workspace, with restrained black controls and small orange permission/status emphasis.
 
 Three routes share one Web frontend (React + Vite), one backend bridge:
-- **Route A (Codex Desktop Remote)** — remote control of an existing Codex Desktop session.
-- **Route B (VibeLink CLI Runtime)** — self-hosted, controllable agent execution layer with permissions, tool lifecycle, and sandbox.
-- **Route C (Live Call Assistant)** — real-time call transcription + question detection + agent response.
+- **Route A (Codex Desktop Remote)** - remote control of an existing Codex Desktop session.
+- **Route B (VibeLink CLI Runtime)** - self-hosted, controllable agent execution layer with permissions, tool lifecycle, and sandbox.
+- **Route C (Live Call Assistant)** - real-time call transcription + question detection + agent response.
 
 ## Colors
 
-The palette is rooted in a deep indigo with vibrant accent colors that differentiate the three routes.
+The palette intentionally avoids saturated product gradients. It copies the visual temperature of Codex: a pale cyan sidebar, white central canvas, warm gray separators, graphite text, and one orange permission accent.
 
-- **Primary (#1E1B4D):** Deep indigo ink for headings, key text, nav bars.
-- **Secondary (#6366F1):** Indigo-500 for interactive controls, links, route-A identity.
-- **Tertiary (#22D3EE):** Cyan-400 for route-B highlights, live indicators, secondary actions.
-- **Accent (#F59E0B):** Amber for route-C call states, warnings, attention signals.
-- **Neutral (#F8FAFC):** Slate-50 background foundation — cool, technical.
-- **Danger (#EF4444):** Red-500 for errors, disconnection, destructive actions.
-- **Success (#10B981):** Emerald-500 for online status, successful operations.
+- **Ink (#202124):** Primary text, titles, icons, and compact command controls.
+- **Ink soft (#5F6668):** Secondary labels, metadata, disabled-ish navigation text.
+- **Ink faint (#8B9497):** Timestamps, placeholder text, quiet helper copy.
+- **Canvas (#FBFBFA):** Main workspace background. It should read as white, not gray.
+- **Surface (#FFFFFF):** Composer, cards, modals, list hover states.
+- **Surface soft (#F4F5F3):** Toolbars, grouped controls, code/card headers.
+- **Sidebar (#EAF8FA):** Left navigation background, matching Codex's airy blue-green rail.
+- **Sidebar warm (#F3F6E8):** Very subtle top/edge wash when a panel needs warmth.
+- **Border (#DCE3E1):** Default dividers and input borders.
+- **Border strong (#C9D2D0):** Active list outlines and stronger separators.
+- **Command (#1F2322):** Primary send/run buttons and high-emphasis icon buttons.
+- **Accent (#FF5A1F):** Permission labels, destructive warnings that need attention, "full access" style emphasis.
+- **Focus / Success (#147F78):** Focus rings, ready/online states, subtle route-A identity.
+- **Warning (#A86F1B):** Pending/running states and route-C call states.
+- **Danger (#C23B2E):** Errors, disconnects, destructive actions.
 
 ## Typography
 
-- **Headings (Inter Bold):** H1 for page titles, H2 for section headers within cards. Tight leading for density.
-- **Body (Inter Regular):** Clean, readable at 15px for terminal logs, descriptions, and cards.
-- **Monospace (JetBrains Mono):** All code blocks, tool output, JSON display, terminal emulation. Slightly smaller at ~13.6px to fit more content.
+- **Headings (Inter Medium):** Codex-style headings should be calm and readable rather than heavy. Use 520-560 weight for page titles and section headers.
+- **Body (Inter Regular):** Keep the UI compact at 15px with generous line height for message text and logs.
+- **Monospace (Cascadia Mono / JetBrains Mono):** Use for terminal output, JSON, paths, and command transcripts.
 
 ## Layout & Spacing
 
-- Use 16px (md) as the base spacing unit; stack vertically with 24px (lg) between major sections.
-- Cards get 14px radius for a modern, approachable feel; inputs and buttons use 10px.
-- The main layout is a sidebar nav + main content area on desktop, bottom nav on mobile.
-- Route-specific panels use the route's accent color as a left-border accent (4px) on cards.
+- Use 16px as the base spacing unit, with tighter 8px rhythm inside toolbars and list rows.
+- Keep the desktop shell as a left sidebar plus a large white work area.
+- Sidebar backgrounds use `sidebar`; central panes use `canvas`; cards and composer shells use `surface`.
+- Cards and inputs keep moderate 10-14px radius. Icon/send buttons may use pill radius.
+- Avoid colored left-border route accents as the default pattern; prefer small badges and text/icon color shifts.
 
 ## Components
 
-- **Buttons:** Primary buttons use the route-specific accent color (secondary/cyan/amber). Ghost buttons for secondary actions.
-- **Tags/Chips:** Each route has a tinted tag (`tag-route-a/b/c`) — use for route badges on session cards.
-- **Cards:** White cards with large radius, subtle shadow, and optional left accent border matching the route color.
-- **Inputs:** White background, subtle border, focus ring in the route's accent color.
-- **Status indicators:** A small dot (8px) in success/danger colors for connection state.
+- **Buttons:** Primary action buttons are graphite/black with white icons or text. Secondary controls are transparent or `surfaceSoft`.
+- **Composer:** Use a white surface, soft shadow, rounded shell, and black circular send button.
+- **Tags/Chips:** Route badges are soft tints, not saturated blocks. Text carries the state color.
+- **Cards:** White cards with a thin warm-gray border and very soft shadow.
+- **Inputs:** White background, subtle border, teal focus ring, no saturated fills.
+- **Status indicators:** Small dots in success/warning/danger colors; avoid large colored panels.
 
 ## Do's and Don'ts
 
-- **Do** use monospace for all terminal output and JSON display.
-- **Do** use left-border accents on cards to visually group content by route.
-- **Do** keep the sidebar dark (primary) and content area light (neutral).
-- **Don't** use tertiary (cyan) for destructive actions — use danger (red).
-- **Don't** mix route accent colors in the same card; a card belongs to one route.
-- **Don't** use font weights below 400 for body text on dark backgrounds.
+- **Do** keep the interface mostly white, pale cyan, graphite, and warm gray.
+- **Do** reserve orange for permission, warning, and attention states.
+- **Do** use black circular icon buttons for high-confidence primary actions like send.
+- **Do** keep route colors quiet and badge-sized.
+- **Don't** return to the old indigo/purple/cyan gradient feel.
+- **Don't** make the sidebar dark.
+- **Don't** fill cards with route colors; route identity should be a small annotation.

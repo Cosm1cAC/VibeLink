@@ -1,7 +1,7 @@
-// Live Call Agent bridge (Route C → Route B).
+// Live Call Agent bridge.
 //
 // When `live_call.question.detected` is emitted from liveCall.js, we
-// kick off a Route B agent task via `createTask` and forward the agent's
+// kick off a VibeLink Agent task via `createTask` and forward the agent's
 // streaming output to the live-call SSE as `live_call.agent.delta` /
 // `live_call.agent.done` events.
 //
@@ -64,7 +64,7 @@ function buildLiveCallPrompt(question, history) {
 }
 
 /**
- * Subscribe to a Route B task's event stream and translate each event
+ * Subscribe to a VibeLink Agent task's event stream and translate each event
  * into live-call SSE events. We do this by polling `listTaskEvents`
  * because `subscribeTask` returns an http.ServerResponse — not great
  * for an internal pipe. The poll interval is small enough to feel
@@ -148,7 +148,7 @@ function textFromAgentEvent(event) {
 }
 
 /**
- * Try to dispatch a Route B agent task for a detected question.
+ * Try to dispatch a VibeLink Agent task for a detected question.
  * No-ops if the session is missing, the agent is disabled, or the question
  * is too close to the previous one (debounce).
  */

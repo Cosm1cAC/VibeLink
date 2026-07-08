@@ -1,4 +1,5 @@
 .agent-mobile-terminal/
+.tmp/
 node_modules/
 npm-debug.log*
 *.log
@@ -19,3 +20,4 @@ public/assets/
 tools/whisper-cpp/models/*.bin
 tools/whisper-cpp/source/
 tools/whisper-cpp/build/
+apps/windows/target/

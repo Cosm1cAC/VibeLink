@@ -278,6 +278,9 @@ export async function publicSettings(settings) {
     claudeCommand: settings.claudeCommand,
     codexCommand: settings.codexCommand,
     codexTemplate: settings.codexTemplate,
+    doubaoCommand: settings.doubaoCommand,
+    doubaoCdpEndpoint: settings.doubaoCdpEndpoint,
+    doubaoUrl: settings.doubaoUrl,
     permissionMode: settings.permissionMode,
     security: {
       ...defaultSettings.security,
@@ -326,6 +329,9 @@ export function sanitizeSettingsPatch(patch = {}) {
     "claudeCommand",
     "codexCommand",
     "codexTemplate",
+    "doubaoCommand",
+    "doubaoCdpEndpoint",
+    "doubaoUrl",
     "permissionMode",
     "notificationEmail"
   ];

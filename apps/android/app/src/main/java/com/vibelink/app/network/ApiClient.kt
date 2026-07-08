@@ -32,6 +32,12 @@ class ApiClient(
             .build()
     }
 
+    private val sseClient: OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .readTimeout(0, TimeUnit.SECONDS)
+            .build()
+    }
+
     // ── HTTP helpers ──
 
     private fun authHeaders() = if (token.isNotBlank())
@@ -76,6 +82,24 @@ class ApiClient(
     suspend fun login(pairingToken: String): LoginResponse {
         val json = post("/api/login", mapOf("pairingToken" to pairingToken))
         return gson.fromJson(json, LoginResponse::class.java)
+    }
+
+    suspend fun createPairingSession(deviceLabel: String = "Android"): CreatePairingSessionResponse {
+        val json = post("/api/pairing-sessions", mapOf("deviceLabel" to deviceLabel))
+        return gson.fromJson(json, CreatePairingSessionResponse::class.java)
+    }
+
+    suspend fun getPairingSession(sessionId: String): PairingStatusResponse {
+        val json = get("/api/pairing-sessions/${encode(sessionId)}")
+        return gson.fromJson(json, PairingStatusResponse::class.java)
+    }
+
+    suspend fun claimPairingSession(sessionId: String, code: String, deviceLabel: String = "Android"): ClaimPairingResponse {
+        val json = post("/api/pairing-sessions/${encode(sessionId)}/claim", mapOf(
+            "code" to code,
+            "deviceLabel" to deviceLabel,
+        ))
+        return gson.fromJson(json, ClaimPairingResponse::class.java)
     }
 
     // ── Live Calls ──
@@ -226,13 +250,13 @@ class ApiClient(
         after: Int = 0,
         listener: EventSourceListener
     ): EventSource {
-        val url = "$baseUrl/api/live-calls/$sessionId/events?after=$after" +
-                (if (token.isNotBlank()) "&token=${token}" else "")
+        val url = "$baseUrl/api/live-calls/${encode(sessionId)}/events?after=$after" +
+                (if (token.isNotBlank()) "&token=${encode(token)}" else "")
         val req = Request.Builder()
             .url(url)
             .get()
             .build()
-        val factory = EventSources.createFactory(httpClient)
+        val factory = EventSources.createFactory(sseClient)
         return factory.newEventSource(req, listener)
     }
 
@@ -243,13 +267,13 @@ class ApiClient(
         after: Int = 0,
         listener: EventSourceListener
     ): EventSource {
-        val url = "$baseUrl/api/tasks/$taskId/events?after=$after" +
-                (if (token.isNotBlank()) "&token=${token}" else "")
+        val url = "$baseUrl/api/tasks/${encode(taskId)}/events?after=$after" +
+                (if (token.isNotBlank()) "&token=${encode(token)}" else "")
         val req = Request.Builder()
             .url(url)
             .get()
             .build()
-        val factory = EventSources.createFactory(httpClient)
+        val factory = EventSources.createFactory(sseClient)
         return factory.newEventSource(req, listener)
     }
 
@@ -265,12 +289,12 @@ class ApiClient(
         taskId?.let { params.add("taskId=${encode(it)}") }
         workspaceId?.let { params.add("workspaceId=${encode(it)}") }
         val url = "$baseUrl/api/tool-events?stream=1&${params.joinToString("&")}" +
-                (if (token.isNotBlank()) "&token=${token}" else "")
+                (if (token.isNotBlank()) "&token=${encode(token)}" else "")
         val req = Request.Builder()
             .url(url)
             .get()
             .build()
-        val factory = EventSources.createFactory(httpClient)
+        val factory = EventSources.createFactory(sseClient)
         return factory.newEventSource(req, listener)
     }
 }

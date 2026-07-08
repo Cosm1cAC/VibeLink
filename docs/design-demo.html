@@ -49,8 +49,8 @@
   .btn-ghost:hover { background: #f1f5f9; }
   .card-box { background: var(--card-bg); border-radius: var(--rounded-lg); padding: var(--space-lg); border: 1px solid #e2e8f0; box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
   .tag { display: inline-flex; align-items: center; background: #4338CA; color: #fff; border-radius: var(--rounded-sm); padding: 2px 8px; font-size: 0.8rem; font-weight: 600; }
-  .tag.route-b { background: #0E7490; }
-  .tag.route-c { background: #B45309; }
+  .tag.agent { background: #0E7490; }
+  .tag.live-call { background: #B45309; }
   .input-demo { width: 100%; border: 1px solid #e2e8f0; border-radius: var(--rounded-md); padding: 8px 12px; font-family: var(--font-display); font-size: 0.9375rem; color: var(--primary); background: var(--card-bg); outline: none; }
   .input-demo:focus { border-color: var(--secondary); box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
   .compare-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: var(--space-md) 0; }
@@ -87,15 +87,15 @@
   </div>
   <div class="color-card">
     <div class="color-swatch" style="background:#6366F1;"><span style="color:#fff;">#6366F1</span></div>
-    <div class="color-info"><strong>Secondary</strong><small>Interactive, links, Route A</small></div>
+    <div class="color-info"><strong>Secondary</strong><small>Interactive, links, Desktop Remote</small></div>
   </div>
   <div class="color-card">
     <div class="color-swatch" style="background:#22D3EE;"><span>#22D3EE</span></div>
-    <div class="color-info"><strong>Tertiary</strong><small>Route B, live indicators</small></div>
+    <div class="color-info"><strong>Tertiary</strong><small>VibeLink Agent, live indicators</small></div>
   </div>
   <div class="color-card">
     <div class="color-swatch" style="background:#F59E0B;"><span>#F59E0B</span></div>
-    <div class="color-info"><strong>Accent</strong><small>Route C, warnings</small></div>
+    <div class="color-info"><strong>Accent</strong><small>Live Call, warnings</small></div>
   </div>
   <div class="color-card">
     <div class="color-swatch" style="background:#F8FAFC;"><span>#F8FAFC</span></div>
@@ -196,13 +196,13 @@
     <div class="mono" style="color:#64748b;margin-top:12px;font-size:0.75rem;">primary: #4338CA / #3730A3 hover<br>ghost: transparent + #6366F1</div>
   </div>
   <div class="comp-card">
-    <h3>Route Tags</h3>
+    <h3>Mode Tags</h3>
     <div style="display:flex;flex-wrap:wrap;gap:8px;">
-      <span class="tag">Route A &middot; Codex</span>
-      <span class="tag route-b">Route B &middot; CLI</span>
-      <span class="tag route-c">Route C &middot; Live Call</span>
+      <span class="tag">Desktop Remote</span>
+      <span class="tag agent">VibeLink Agent</span>
+      <span class="tag live-call">Live Call</span>
     </div>
-    <div class="mono" style="color:#64748b;margin-top:12px;font-size:0.75rem;">A: #4338CA &middot; B: #0E7490 &middot; C: #B45309</div>
+    <div class="mono" style="color:#64748b;margin-top:12px;font-size:0.75rem;">Remote: #4338CA &middot; Agent: #0E7490 &middot; Live: #B45309</div>
   </div>
   <div class="comp-card">
     <h3>Card</h3>
@@ -219,12 +219,12 @@
   </div>
 </div>
 
-<!-- 5. ROUTE VISUAL IDENTITY -->
-<h2>5. Route Visual Identity <span class="tag">Three accents</span></h2>
+<!-- 5. MODE VISUAL IDENTITY -->
+<h2>5. Mode Visual Identity <span class="tag">Three accents</span></h2>
 <div class="route-demo">
   <div class="route-card a">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-      <span class="tag">Route A</span>
+      <span class="tag">Remote</span>
       <span class="status-dot online"></span><span class="mono" style="font-size:0.75rem;color:#64748b;">connected</span>
     </div>
     <h4>Codex Desktop Remote</h4>
@@ -232,15 +232,15 @@
   </div>
   <div class="route-card b">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-      <span class="tag route-b">Route B</span>
+      <span class="tag agent">Agent</span>
       <span class="status-dot online"></span><span class="mono" style="font-size:0.75rem;color:#64748b;">running</span>
     </div>
-    <h4>CLI Runtime</h4>
+    <h4>VibeLink Agent</h4>
     <p>Task: npm test &mdash; 12/14 passing</p>
   </div>
   <div class="route-card c">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-      <span class="tag route-c">Route C</span>
+      <span class="tag live-call">Live Call</span>
       <span class="status-dot warning"></span><span class="mono" style="font-size:0.75rem;color:#64748b;">active</span>
     </div>
     <h4>Live Call Assistant</h4>
@@ -271,7 +271,7 @@
       </div>
       <div class="card-box" style="padding:10px;border-left:3px solid var(--tertiary);border-radius:10px;">
         <div style="display:flex;align-items:center;gap:6px;">
-          <span class="tag route-b" style="font-size:0.65rem;padding:1px 6px;">B</span>
+          <span class="tag agent" style="font-size:0.65rem;padding:1px 6px;">Agent</span>
           <strong style="font-size:0.85rem;">Test suite</strong>
         </div>
         <div class="mono" style="font-size:0.7rem;color:#64748b;">running</div>

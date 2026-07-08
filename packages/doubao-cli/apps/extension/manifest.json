@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Doubao Bridge",
+  "version": "0.1.0",
+  "description": "Connects doubao-cli to the logged-in Doubao web page in this browser.",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": [
+    "https://www.doubao.com/*",
+    "http://127.0.0.1/*",
+    "ws://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "src/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.doubao.com/*"],
+      "js": ["src/content/doubao-content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "src/options.html"
+}

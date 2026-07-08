@@ -17,7 +17,7 @@
         "start": "node src/server.js",
         "dev": "node --watch src/server.js",
         "android:build": "cd apps/android && gradlew.bat assembleDebug",
-        "android:adb": ".agent-mobile-terminal/android-sdk/platform-tools/adb.exe",
+        "android:adb": ".\\.agent-mobile-terminal\\android-sdk\\platform-tools\\adb.exe",
         "design:lint": "designmd lint DESIGN.md",
         "design:diff": "designmd diff DESIGN.md DESIGN.md",
         "design:export:tailwind": "designmd export --format css-tailwind DESIGN.md",

@@ -142,6 +142,92 @@ const paths = {
     { type: "object", properties: { items: { type: "array", items: { type: "object" } } } },
     [{ name: "filter", in: "query", schema: { type: "string" }, description: "Filter commands by name" }]
   )),
+  ...path("/api/agent-reach/status", get("Agent Reach status",
+    "Runs Agent Reach version and doctor checks, returning channel availability and install paths.",
+    { type: "object" },
+    [{ name: "timeoutMs", in: "query", schema: { type: "integer" }, description: "Doctor timeout in milliseconds" }]
+  )),
+  ...path("/api/agent-reach/skill", post("Manage Agent Reach skill",
+    "Install or uninstall the Agent Reach skill into local agent skill directories.",
+    {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["install", "uninstall"] },
+        timeoutMs: { type: "integer" }
+      },
+      required: ["operation"]
+    },
+    { type: "object" },
+    { "409": { description: "Agent Reach skill command failed", content: { "application/json": { schema: { type: "object" } } } } }
+  )),
+  ...path("/api/agent-reach/format", post("Format Agent Reach output",
+    "Format raw platform output using Agent Reach formatters. Currently supports xhs.",
+    {
+      type: "object",
+      properties: {
+        platform: { type: "string", enum: ["xhs"] },
+        input: { description: "Raw platform output as JSON value or JSON string" },
+        stdin: { type: "string" },
+        timeoutMs: { type: "integer" }
+      },
+      required: ["platform"]
+    },
+    { type: "object" },
+    { "409": { description: "Agent Reach format failed", content: { "application/json": { schema: { type: "object" } } } } }
+  )),
+  ...path("/api/agent-reach/transcribe", post("Transcribe through Agent Reach",
+    "Transcribe an audio/video URL or local file using Agent Reach.",
+    {
+      type: "object",
+      properties: {
+        source: { type: "string" },
+        provider: { type: "string", enum: ["auto", "groq", "openai"] },
+        timeoutMs: { type: "integer" }
+      },
+      required: ["source"]
+    },
+    { type: "object" },
+    { "409": { description: "Agent Reach transcription failed", content: { "application/json": { schema: { type: "object" } } } } }
+  )),
+  ...path("/api/doubao/status", get("Doubao status",
+    "Checks the local extension bridge used by the Doubao web CLI.",
+    { type: "object" },
+    [
+      { name: "endpoint", in: "query", schema: { type: "string" }, description: "Chrome DevTools endpoint" },
+      { name: "url", in: "query", schema: { type: "string" }, description: "Doubao web chat URL" },
+      { name: "timeoutMs", in: "query", schema: { type: "integer" }, description: "Doctor timeout in milliseconds" }
+    ]
+  )),
+  ...path("/api/doubao/configure", post("Configure Doubao",
+    "Configure the Doubao extension-bridge CLI so an agent can handle '帮我配豆包' with one call.",
+    {
+      type: "object",
+      properties: {
+        noDaemon: { type: "boolean" },
+        noOpen: { type: "boolean" },
+        port: { type: "integer" },
+        url: { type: "string" },
+        timeoutMs: { type: "integer" }
+      }
+    },
+    { type: "object" },
+    { "409": { description: "Doubao configuration failed", content: { "application/json": { schema: { type: "object" } } } } }
+  )),
+  ...path("/api/doubao/ask", post("Ask Doubao web",
+    "Send a prompt to the logged-in Doubao web page through a local browser-control CLI.",
+    {
+      type: "object",
+      properties: {
+        prompt: { type: "string" },
+        endpoint: { type: "string" },
+        url: { type: "string" },
+        timeoutMs: { type: "integer" }
+      },
+      required: ["prompt"]
+    },
+    { type: "object" },
+    { "409": { description: "Doubao web command failed", content: { "application/json": { schema: { type: "object" } } } } }
+  )),
   ...path("/api/mcp/status", get("MCP status",
     "Returns configured MCP server status and cached tool count.",
     { type: "object" }
@@ -204,7 +290,7 @@ const paths = {
       type: "object",
       properties: {
         prompt: { type: "string", description: "Agent prompt" },
-        agent: { type: "string", enum: ["codex", "claude"] },
+        agent: { type: "string", enum: ["codex", "claude", "doubao"] },
         cwd: { type: "string" },
         model: { type: "string" },
         mode: { type: "string", enum: ["new", "continue", "resume"] },

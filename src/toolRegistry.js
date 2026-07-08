@@ -5,13 +5,13 @@ const TOOL_DEFINITIONS = [
     label: "Agent task",
     permission: "agent.run",
     risk: "medium",
-    description: "Create or resume an upstream CLI agent task.",
+    description: "Create or resume a VibeLink Agent task through a configured provider adapter.",
     inputSchema: {
       type: "object",
       properties: {
         prompt: { type: "string" },
         cwd: { type: "string" },
-        agent: { type: "string", enum: ["codex", "claude"] },
+        agent: { type: "string", enum: ["codex", "claude", "doubao", "zhipu"] },
         model: { type: "string" },
         reasoningEffort: { type: "string" },
         security: { type: "object" }
@@ -164,7 +164,7 @@ const TOOL_DEFINITIONS = [
     label: "Doctor",
     permission: "system.diagnose",
     risk: "low",
-    description: "Run local bridge health checks for runtime, CLI, Git, credentials, network, Desktop remote, and event storage.",
+    description: "Run local bridge health checks for VibeLink Agent, CLI adapters, Git, credentials, network, Codex Desktop Remote, and event storage.",
     outputSchema: {
       type: "object",
       properties: {
@@ -173,7 +173,7 @@ const TOOL_DEFINITIONS = [
         git: { type: "object", description: "Git configuration status" },
         credentials: { type: "object", description: "API key availability" },
         network: { type: "object", description: "Network reachability" },
-        desktop: { type: "object", description: "Desktop remote status" },
+        desktop: { type: "object", description: "Codex Desktop Remote status" },
         events: { type: "object", description: "Event storage health" }
       }
     }
@@ -262,6 +262,195 @@ const TOOL_DEFINITIONS = [
         server: { type: "object" },
         toolName: { type: "string" },
         content: { type: "array", items: { type: "object" } },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "agent_reach.status",
+    kind: "agent",
+    label: "Agent Reach status",
+    permission: "agent_reach.read",
+    risk: "low",
+    description: "Run Agent Reach doctor/status and return installed channel availability.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeoutMs: { type: "number" }
+      }
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        version: { type: "string" },
+        channels: { type: "object" },
+        install: { type: "object" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "agent_reach.skill",
+    kind: "agent",
+    label: "Agent Reach skill",
+    permission: "agent_reach.manage",
+    risk: "medium",
+    description: "Install or uninstall the Agent Reach skill into local agent skill directories.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["install", "uninstall"] },
+        timeoutMs: { type: "number" }
+      },
+      required: ["operation"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        stdout: { type: "string" },
+        stderr: { type: "string" },
+        exitCode: { type: "integer" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "agent_reach.format",
+    kind: "agent",
+    label: "Agent Reach format",
+    permission: "agent_reach.read",
+    risk: "low",
+    description: "Format raw platform output through Agent Reach formatters.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        platform: { type: "string", enum: ["xhs"] },
+        input: { description: "Raw platform output as JSON value or JSON string" },
+        stdin: { type: "string" },
+        timeoutMs: { type: "number" }
+      },
+      required: ["platform"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        stdout: { type: "string" },
+        stderr: { type: "string" },
+        exitCode: { type: "integer" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "agent_reach.transcribe",
+    kind: "agent",
+    label: "Agent Reach transcribe",
+    permission: "agent_reach.read",
+    risk: "medium",
+    description: "Transcribe an audio/video URL or local file through Agent Reach.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string" },
+        provider: { type: "string", enum: ["auto", "groq", "openai"] },
+        timeoutMs: { type: "number" }
+      },
+      required: ["source"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        stdout: { type: "string" },
+        stderr: { type: "string" },
+        exitCode: { type: "integer" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "doubao.status",
+    kind: "agent",
+    label: "Doubao status",
+    permission: "doubao.read",
+    risk: "low",
+    description: "Check the local browser bridge used by the Doubao web CLI.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        endpoint: { type: "string", description: "Chrome DevTools endpoint, e.g. http://127.0.0.1:9222" },
+        url: { type: "string", description: "Doubao web chat URL" },
+        timeoutMs: { type: "number" }
+      }
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        browser: { type: "object" },
+        target: { type: "object" },
+        stdout: { type: "string" },
+        stderr: { type: "string" },
+        exitCode: { type: "integer" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "doubao.configure",
+    kind: "agent",
+    label: "Configure Doubao",
+    permission: "doubao.manage",
+    risk: "medium",
+    description: "Configure the standalone Doubao extension-bridge CLI for one-command agent setup.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        noDaemon: { type: "boolean", description: "Write config without starting the bridge daemon" },
+        noOpen: { type: "boolean", description: "Write config without opening the Doubao web page" },
+        port: { type: "number", description: "Local bridge port, default 45771" },
+        url: { type: "string", description: "Doubao web chat URL" },
+        timeoutMs: { type: "number" }
+      }
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        stdout: { type: "string" },
+        stderr: { type: "string" },
+        exitCode: { type: "integer" },
+        toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "doubao.ask",
+    kind: "agent",
+    label: "Doubao ask",
+    permission: "doubao.read",
+    risk: "medium",
+    description: "Send a prompt to the logged-in Doubao web page through the local browser CLI.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string" },
+        endpoint: { type: "string", description: "Chrome DevTools endpoint, e.g. http://127.0.0.1:9222" },
+        url: { type: "string", description: "Doubao web chat URL" },
+        timeoutMs: { type: "number" }
+      },
+      required: ["prompt"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        stdout: { type: "string" },
+        stderr: { type: "string" },
+        exitCode: { type: "integer" },
         toolRunId: { type: "string", description: "ID of the recorded tool run" }
       }
     }

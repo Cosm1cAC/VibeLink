@@ -14,7 +14,7 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LoginScreen(
+fun LegacyLoginScreen(
     apiClient: ApiClient,
     onLoginSuccess: () -> Unit
 ) {

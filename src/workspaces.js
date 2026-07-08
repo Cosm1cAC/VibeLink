@@ -260,6 +260,26 @@ export async function getWorkspaceFile(id, settings, filePath = "") {
   };
 }
 
+export async function openWorkspaceInExplorer(id, settings) {
+  const workspace = workspaceOrThrow(id);
+  const target = resolveAllowedPath(workspace.path, settings);
+  touchWorkspace(workspace.id);
+
+  if (process.platform === "win32") {
+    await execFileAsync("explorer.exe", [target], { windowsHide: true });
+  } else if (process.platform === "darwin") {
+    await execFileAsync("open", [target]);
+  } else {
+    await execFileAsync("xdg-open", [target]);
+  }
+
+  return {
+    ok: true,
+    workspace,
+    path: target
+  };
+}
+
 function parseStatusFiles(stdout = "") {
   return String(stdout || "")
     .split(/\r?\n/)

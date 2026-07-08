@@ -34,4 +34,4 @@
 5. 基于伪终端（PTY）实现终端会话，高危命令启动前复用同一审批拦截逻辑
 6. 基于公开协议与本地清单文件开发插件/MCP 管理能力，不复用参考源码实现
 
-更完整的能力对齐路线见 `docs/cli-capability-alignment-plan.md`。
+更完整的原生运行时规划见 `docs/vibelink-agent-architecture.md`。

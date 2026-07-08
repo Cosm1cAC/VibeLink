@@ -99,7 +99,7 @@ export function emitLiveCallEvent(sessionId, type, payload = {}) {
 /**
  * Append a streaming or final agent delta to the live-call SSE.
  * On the first non-empty delta we also mark the agent task id so the
- * panel can link to the underlying Route B task.
+ * panel can link to the underlying VibeLink Agent task.
  */
 export function appendAgentTaskLiveCallDelta(sessionId, taskId, text, final = false, fullText = "") {
   const session = sessions.get(sessionId);
@@ -231,7 +231,7 @@ export function recordLiveCallTranscript(id, body = {}) {
   if (final && QUESTION_PATTERN.test(text)) {
     session.lastQuestion = text;
     pushEvent(session, "live_call.question.detected", { text });
-    // Fire-and-forget Route C → Route B agent dispatch. The function
+    // Fire-and-forget Live Call → VibeLink Agent dispatch. The function
     // self-guards against missing settings, disabled env, and rapid-fire
     // duplicate questions.
     if (session.questionDetectedHook) {
@@ -247,7 +247,7 @@ export function recordLiveCallTranscript(id, body = {}) {
 
 /**
  * Set a callback to be invoked whenever a question is detected on a session.
- * Used by the Route B agent bridge (liveCallAgent.js) to dispatch tasks.
+ * Used by the Live Call agent bridge (liveCallAgent.js) to dispatch tasks.
  * Returns a teardown function.
  */
 export function setLiveCallQuestionHook(sessionId, hook) {

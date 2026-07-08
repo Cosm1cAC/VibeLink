@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent Reach"
+  short_description: "Research and fetch internet content across multiple platforms."
+  default_prompt: "Use $agent-reach to research a topic or inspect content from a web, social, video, GitHub, RSS, or job platform."
+policy:
+  allow_implicit_invocation: true

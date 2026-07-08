@@ -6,8 +6,9 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { URL } from "node:url";
 import QRCode from "qrcode";
-import { agentReachInstallInfo, withAgentReachPath } from "./agentReachRuntime.js";
+import { agentReachInstallInfo, getAgentReachStatus, runAgentReachCommand, withAgentReachPath } from "./agentReachRuntime.js";
 import { codebaseMemoryInstallInfo } from "./codebaseMemoryRuntime.js";
+import { getDoubaoStatus, runDoubaoCommand } from "./doubaoRuntime.js";
 import { attachmentsDir, getNetworkAddresses, publicDir } from "./config.js";
 import {
   attachToolRunToTask,
@@ -43,7 +44,7 @@ import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
 import { commandApprovalRequired } from "./commandSafety.js";
-import { startDesktopObserver, subscribeDesktopObserver } from "./desktopObserver.js";
+import { subscribeDesktopObserver } from "./desktopObserver.js";
 import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
 import { getHistory, listHistories } from "./history.js";
 import {
@@ -82,7 +83,7 @@ import { loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, 
 import { writeApiKeys } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
-import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
+import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
@@ -99,7 +100,7 @@ import {
   subscribeToolEvents
 } from "./toolRuntime.js";
 import { listToolRegistry } from "./toolRegistry.js";
-import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, BrowserFetchSchema } from "./validation.js";
+import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, BrowserFetchSchema, AgentReachStatusSchema, AgentReachSkillSchema, AgentReachFormatSchema, AgentReachTranscribeSchema, DoubaoStatusSchema, DoubaoAskSchema, DoubaoConfigureSchema } from "./validation.js";
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
@@ -119,7 +120,6 @@ for (const sessionId of restoredLiveCallSessions) {
 if (restoredLiveCallSessions.length) {
   console.log(`[liveCall] restored ${restoredLiveCallSessions.length} active sessions from SQLite`);
 }
-startDesktopObserver();
 setTaskNotificationHandler((payload) => {
   sendCriticalNotification(settings, payload).catch((error) => {
     recordAuditLog({ type: "notification.error", success: false, reason: error.message, meta: payload });
@@ -390,6 +390,11 @@ function publicUrlFor(request, pathValue) {
   const host = request.headers.host || `localhost:${settings.port}`;
   const proto = request.headers["x-forwarded-proto"] || (cleanHost(host).endsWith(".trycloudflare.com") ? "https" : "http");
   return `${proto}://${host}${pathValue}`;
+}
+
+function isLoopbackIp(value) {
+  const ip = String(value || "").replace(/^::ffff:/, "");
+  return ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
 }
 
 function toolEventsRetention(settingsValue = settings) {
@@ -784,6 +789,26 @@ async function executeBrowserFetchToolRun(toolRunId) {
   });
 }
 
+async function executeAgentReachToolRun(toolRunId, action) {
+  return runWorkspaceToolAction({
+    toolRunId,
+    startedText: (input) => ["Agent Reach", action, input.source || input.platform || input.operation || ""].filter(Boolean).join(" "),
+    completedText: "Agent Reach completed.",
+    failedText: "Agent Reach failed.",
+    execute: async (input) => runAgentReachCommand(action, input, { timeoutMs: input.timeoutMs })
+  });
+}
+
+async function executeDoubaoToolRun(toolRunId, action) {
+  return runWorkspaceToolAction({
+    toolRunId,
+    startedText: (input) => ["Doubao", action, input.prompt || ""].filter(Boolean).join(" "),
+    completedText: "Doubao completed.",
+    failedText: "Doubao failed.",
+    execute: async (input) => runDoubaoCommand(action, input, { timeoutMs: input.timeoutMs })
+  });
+}
+
 async function executeMcpCallToolRun(toolRunId, settingsValue) {
   return runWorkspaceToolAction({
     toolRunId,
@@ -1038,13 +1063,18 @@ function sandboxDoctorStatus(settingsValue = settings) {
 
 async function buildDoctorReport(request) {
   const publicSettingsValue = await publicSettings(settings);
-  const [desktop, git, gh, codex, claude, agentReach] = await Promise.all([
+  const [desktop, git, gh, codex, claude, agentReach, doubao] = await Promise.all([
     getCodexDesktopStatus().catch((error) => ({ ok: false, error: error.message })),
     commandProbe("git"),
     commandProbe("gh"),
     settings.codexCommand && settings.codexCommand !== "auto" ? commandProbe(settings.codexCommand) : Promise.resolve({ ok: true, command: settings.codexCommand || "auto", version: "auto" }),
     commandProbe(settings.claudeCommand || "claude"),
-    commandProbe("agent-reach", ["version"])
+    commandProbe("agent-reach", ["version"]),
+    getDoubaoStatus({
+      endpoint: settings.doubaoCdpEndpoint,
+      url: settings.doubaoUrl,
+      timeoutMs: 5000
+    }).catch((error) => ({ ok: false, error: error.message }))
   ]);
   const toolStats = toolEventStatsPayload();
   const workspaces = getWorkspaces(settings);
@@ -1053,20 +1083,22 @@ async function buildDoctorReport(request) {
   const codebaseMemory = codebaseMemoryInstallInfo();
   const sandbox = sandboxDoctorStatus(settings);
   const terminal = terminalCapabilityReport();
-  const hasAnyModelKey = Boolean(publicSettingsValue.hasOpenAIKey || publicSettingsValue.hasAnthropicKey);
+  const hasAnyModelKey = Boolean(publicSettingsValue.hasOpenAIKey || publicSettingsValue.hasAnthropicKey || publicSettingsValue.hasZhipuKey || publicSettingsValue.doubaoCommand);
   const checks = [
     doctorCheck("node", Number(process.versions.node.split(".")[0]) >= 22, "Node runtime", process.version),
     doctorCheck("sqlite", Boolean(getDbPath()), "SQLite", getDbPath()),
     doctorCheck("tool-events", true, "Tool event store", `${toolStats.count} events, cursor ${toolStats.maxCursor || 0}`),
     doctorCheck("credentials", Boolean(publicSettingsValue.credentials?.available), "Credential backend", publicSettingsValue.credentials?.description || "unknown"),
-    doctorCheck("model-key", hasAnyModelKey, "Model API key", hasAnyModelKey ? "configured" : "missing"),
+    doctorCheck("model-key", hasAnyModelKey, "Model provider", hasAnyModelKey ? "configured" : "missing"),
     doctorCheck("openai-key", Boolean(publicSettingsValue.hasOpenAIKey), "OpenAI key", publicSettingsValue.hasOpenAIKey ? "configured" : "missing", "warn"),
     doctorCheck("anthropic-key", Boolean(publicSettingsValue.hasAnthropicKey), "Anthropic key", publicSettingsValue.hasAnthropicKey ? "configured" : "missing", "warn"),
+    doctorCheck("zhipu-key", Boolean(publicSettingsValue.hasZhipuKey), "Zhipu/GLM key", publicSettingsValue.hasZhipuKey ? "configured" : "missing", "warn"),
     doctorCheck("git", git.ok, "Git", git.version || git.error),
     doctorCheck("gh", gh.ok, "GitHub CLI", gh.version || gh.error, "warn"),
     doctorCheck("codex", codex.ok, "Codex command", codex.version || codex.error || codex.command, settings.codexCommand && settings.codexCommand !== "auto" ? "error" : "warn"),
     doctorCheck("claude", claude.ok, "Claude command", claude.version || claude.error, "warn"),
     doctorCheck("agent-reach", agentReach.ok, "Agent Reach", agentReach.version || agentReach.error, "warn"),
+    doctorCheck("doubao", doubao.ok, "Doubao web CLI", doubao.status?.target?.ok ? doubao.status.target.url : doubao.status?.target?.reason || doubao.doctor?.stderr || doubao.doctor?.stdout || doubao.error || "not ready", "warn"),
     doctorCheck("desktop", Boolean(desktop?.ok || desktop?.found), "Codex Desktop", desktop?.target?.windowTitle || desktop?.windowTitle || desktop?.error || "not found", "warn"),
     doctorCheck("host", isHostAllowed(request, settings), "Host allowlist", request.headers.host || "unknown"),
     doctorCheck("workspace-command-network", settings.security?.networkAccess !== false, "Workspace command network", settings.security?.networkAccess === false ? "network commands require approval" : "enabled", "warn"),
@@ -1114,6 +1146,7 @@ async function buildDoctorReport(request) {
       ...agentReach,
       install: agentReachInstallInfo()
     },
+    doubao,
     codebaseMemory,
     toolEvents: toolStats,
     mcp,
@@ -1357,15 +1390,18 @@ async function routeApi(request, response, url) {
   if (url.pathname === "/api/pairing-sessions" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "pairing.create", { limit: 6, windowMs: 10 * 60 * 1000 })) return;
     const body = await readBody(request);
-    const session = createPairingSession({
+    const createdSession = createPairingSession({
       label: body.deviceLabel || requestUserAgent(request) || "New device",
       ip: requestIp(request),
       userAgent: requestUserAgent(request),
       meta: { host: cleanHost(request.headers.host || "") }
     });
+    const localLauncherTrusted = Boolean(body.trustLocalLauncher) && isLoopbackIp(requestIp(request));
+    const approvedSession = localLauncherTrusted ? approvePairingSession(createdSession.id, "local-windows-launcher") : null;
+    const session = approvedSession ? { ...createdSession, ...approvedSession, code: createdSession.code } : createdSession;
     const pairingUrl = publicUrlFor(request, `/?pair=${encodeURIComponent(session.id)}&code=${encodeURIComponent(session.code)}`);
     const qrSvg = await QRCode.toString(pairingUrl, { type: "svg", margin: 1, width: 220 });
-    audit(request, url, null, { type: "pairing.create", success: true, target: session.id, meta: { label: session.label } });
+    audit(request, url, null, { type: "pairing.create", success: true, target: session.id, meta: { label: session.label, localLauncherTrusted } });
     sendJson(response, 201, { ok: true, session, pairingUrl, qrSvg });
     return;
   }
@@ -1628,6 +1664,179 @@ async function routeApi(request, response, url) {
       }
     });
     sendJson(response, 200, { ...result.result, toolRunId: result.toolRunId });
+    return;
+  }
+
+  if (url.pathname === "/api/agent-reach/status" && request.method === "GET") {
+    const validation = validate(AgentReachStatusSchema, { timeoutMs: Number(url.searchParams.get("timeoutMs") || 0) || undefined });
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
+    const result = await runSystemTool({
+      toolName: "agent_reach.status",
+      title: "Agent Reach status",
+      input: validation.data,
+      request,
+      url,
+      auth,
+      execute: async () => {
+        const status = await getAgentReachStatus({ timeoutMs: validation.data.timeoutMs });
+        return { ok: status.ok, result: status, error: status.ok ? "" : status.doctor?.stderr || status.doctor?.stdout || "Agent Reach status failed." };
+      }
+    });
+    sendJson(response, result.result?.ok ? 200 : 409, { ...result.result, toolRunId: result.toolRunId });
+    return;
+  }
+
+  if (url.pathname === "/api/agent-reach/skill" && request.method === "POST") {
+    const body = await readBody(request);
+    const validation = validate(AgentReachSkillSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      toolName: "agent_reach.skill",
+      title: `Agent Reach skill ${validation.data.operation}`,
+      input: validation.data
+    });
+    const result = await executeAgentReachToolRun(toolRun.id, "skill");
+    audit(request, url, auth, {
+      type: "agent_reach.skill",
+      success: Boolean(result.ok),
+      target: validation.data.operation,
+      reason: result.ok ? "" : result.stderr || result.stdout || "Agent Reach skill command failed.",
+      meta: { toolRunId: toolRun.id }
+    });
+    sendJson(response, result.ok ? 200 : 409, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
+  if (url.pathname === "/api/agent-reach/format" && request.method === "POST") {
+    const body = await readBody(request);
+    const validation = validate(AgentReachFormatSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      toolName: "agent_reach.format",
+      title: `Agent Reach format ${validation.data.platform}`,
+      input: validation.data
+    });
+    const result = await executeAgentReachToolRun(toolRun.id, "format");
+    audit(request, url, auth, {
+      type: "agent_reach.format",
+      success: Boolean(result.ok),
+      target: validation.data.platform,
+      reason: result.ok ? "" : result.stderr || result.stdout || "Agent Reach format failed.",
+      meta: { toolRunId: toolRun.id }
+    });
+    sendJson(response, result.ok ? 200 : 409, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
+  if (url.pathname === "/api/agent-reach/transcribe" && request.method === "POST") {
+    const body = await readBody(request);
+    const validation = validate(AgentReachTranscribeSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      toolName: "agent_reach.transcribe",
+      title: `Agent Reach transcribe ${validation.data.source}`,
+      input: validation.data
+    });
+    const result = await executeAgentReachToolRun(toolRun.id, "transcribe");
+    audit(request, url, auth, {
+      type: "agent_reach.transcribe",
+      success: Boolean(result.ok),
+      target: validation.data.source,
+      reason: result.ok ? "" : result.stderr || result.stdout || "Agent Reach transcribe failed.",
+      meta: { toolRunId: toolRun.id }
+    });
+    sendJson(response, result.ok ? 200 : 409, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
+  if (url.pathname === "/api/doubao/status" && request.method === "GET") {
+    const validation = validate(DoubaoStatusSchema, {
+      endpoint: url.searchParams.get("endpoint") || settings.doubaoCdpEndpoint,
+      url: url.searchParams.get("url") || settings.doubaoUrl,
+      timeoutMs: Number(url.searchParams.get("timeoutMs") || 0) || undefined
+    });
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
+    const input = validation.data;
+    const result = await runSystemTool({
+      toolName: "doubao.status",
+      title: "Doubao status",
+      input,
+      request,
+      url,
+      auth,
+      execute: async () => {
+        const status = await getDoubaoStatus(input);
+        return { ok: status.ok, result: status, error: status.ok ? "" : status.doctor?.stderr || status.doctor?.stdout || "Doubao status failed." };
+      }
+    });
+    sendJson(response, result.result?.ok ? 200 : 409, { ...result.result, toolRunId: result.toolRunId });
+    return;
+  }
+
+  if (url.pathname === "/api/doubao/configure" && request.method === "POST") {
+    const body = await readBody(request);
+    const validation = validate(DoubaoConfigureSchema, body);
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      toolName: "doubao.configure",
+      title: "Doubao configure",
+      input: validation.data
+    });
+    const result = await executeDoubaoToolRun(toolRun.id, "configure");
+    audit(request, url, auth, {
+      type: "doubao.configure",
+      success: Boolean(result.ok),
+      target: validation.data.url || settings.doubaoUrl,
+      reason: result.ok ? "" : result.stderr || result.stdout || "Doubao configure failed.",
+      meta: { toolRunId: toolRun.id }
+    });
+    sendJson(response, result.ok ? 200 : 409, { ...result, toolRunId: toolRun.id });
+    return;
+  }
+
+  if (url.pathname === "/api/doubao/ask" && request.method === "POST") {
+    const body = await readBody(request);
+    const validation = validate(DoubaoAskSchema, {
+      endpoint: settings.doubaoCdpEndpoint,
+      url: settings.doubaoUrl,
+      ...body
+    });
+    if (!validation.ok) {
+      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      toolName: "doubao.ask",
+      title: `Doubao ask ${validation.data.prompt}`,
+      input: validation.data
+    });
+    const result = await executeDoubaoToolRun(toolRun.id, "ask");
+    audit(request, url, auth, {
+      type: "doubao.ask",
+      success: Boolean(result.ok),
+      target: validation.data.url || settings.doubaoUrl,
+      reason: result.ok ? "" : result.stderr || result.stdout || "Doubao ask failed.",
+      meta: { toolRunId: toolRun.id }
+    });
+    sendJson(response, result.ok ? 200 : 409, { ...result, toolRunId: toolRun.id });
     return;
   }
 
@@ -2181,6 +2390,12 @@ async function routeApi(request, response, url) {
   const workspaceFileMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file$/);
   if (workspaceFileMatch && request.method === "GET") {
     sendJson(response, 200, await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || ""));
+    return;
+  }
+
+  const workspaceOpenExplorerMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/open-explorer$/);
+  if (workspaceOpenExplorerMatch && request.method === "POST") {
+    sendJson(response, 200, await openWorkspaceInExplorer(workspaceOpenExplorerMatch[1], settings));
     return;
   }
 

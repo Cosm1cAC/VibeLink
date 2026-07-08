@@ -1466,7 +1466,7 @@ export function createThreadForkInDb(payload = {}) {
     id,
     sourceKey: cleanString(payload.sourceKey, 320),
     sourceId: cleanString(payload.sourceId || payload.sessionId || payload.id, 320),
-    provider: payload.provider === "claude" ? "claude" : "codex",
+    provider: ["codex", "claude", "doubao", "zhipu"].includes(payload.provider) ? payload.provider : "codex",
     title: cleanString(payload.title, 160) || "Forked thread",
     cwd: cleanString(payload.cwd, 500),
     group: cleanString(payload.group, 80),

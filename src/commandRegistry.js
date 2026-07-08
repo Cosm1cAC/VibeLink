@@ -85,8 +85,8 @@ const BUILTIN_COMMANDS = [
   {
     id: "agent",
     name: "/agent",
-    description: "Switch AI provider (codex/claude/zhipu)",
-    args: [{ name: "provider", type: "enum", values: ["codex", "claude", "zhipu"], required: true }],
+    description: "Switch AI provider (codex/claude/zhipu/doubao)",
+    args: [{ name: "provider", type: "enum", values: ["codex", "claude", "zhipu", "doubao"], required: true }],
     usage: "/agent <provider>",
     permission: "none",
     toolKind: "settings",

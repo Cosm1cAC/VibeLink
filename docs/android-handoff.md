@@ -81,7 +81,7 @@ VibeLinkApp (NavHost)
 | `/api/tasks/{id}/stop` | POST | ✅ | ❌ | 停止任务 |
 | `/api/tool-events` | GET SSE | ✅ | ✅ `subscribeToolEvents()` | Phase 4 |
 | `/api/tool-runs/{id}` | GET | ✅ | ❌ | 获取 tool run 详情 |
-| `/api/live-calls` | GET/POST | ✅ | ✅ `createSession()`, `listSessions()` | Route C |
+| `/api/live-calls` | GET/POST | ✅ | ✅ `createSession()`, `listSessions()` | Live Call Assistant |
 | `/api/live-calls/{id}/stop` | POST | ✅ | ✅ `stopSession()` | |
 | `/api/live-calls/{id}/events` | GET SSE | ✅ | ✅ `subscribeLiveCallEvents()` | |
 | `/api/workspaces` | GET | ✅ | ❌ | Phase 6 |
@@ -149,7 +149,7 @@ VibeLinkApp (NavHost)
 
 ---
 
-## 下一步 Phase 8: Bluetooth 音频采集 (Route C)
+## 下一步 Phase 8: Bluetooth 音频采集 (Live Call Assistant)
 
 > 估算：高难度，涉及原生 Android 音频 API
 

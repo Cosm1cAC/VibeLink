@@ -120,7 +120,7 @@ function validateDesktopSettingsPolicy(item) {
     return {
       ok: true,
       mode: "use-existing",
-      reason: "Desktop remote will use the current Codex Desktop model, permission, and reasoning settings."
+      reason: "Codex Desktop Remote will use the current Codex Desktop model, permission, and reasoning settings."
     };
   }
 
@@ -129,14 +129,14 @@ function validateDesktopSettingsPolicy(item) {
       ok: true,
       mode: "use-existing",
       ignored: true,
-      reason: "Requested settings are recorded for visibility only; Desktop remote uses the current Codex Desktop settings."
+      reason: "Requested settings are recorded for visibility only; Codex Desktop Remote uses the current Codex Desktop settings."
     };
   }
 
   return {
     ok: false,
     mode: "unsupported",
-    reason: "Desktop remote does not blindly change native Codex model, permission, or reasoning menus. Use CLI mode for deterministic settings, or switch Codex Desktop manually before sending."
+    reason: "Codex Desktop Remote does not blindly change native Codex model, permission, or reasoning menus. Use VibeLink Agent for deterministic settings, or switch Codex Desktop manually before sending."
   };
 }
 
@@ -183,7 +183,7 @@ function evaluateDesktopPreflight(desktop, item) {
   }
 
   if (!item.target || !Number.isFinite(Number(item.target.desktopIndex))) {
-    failures.push({ code: "target_missing", message: "Desktop remote requires a bound visible Codex conversation target." });
+    failures.push({ code: "target_missing", message: "Codex Desktop Remote requires a bound visible Codex conversation target." });
   } else {
     const conversation = targetConversation(desktop, item.target);
     if (!conversation) {
@@ -412,7 +412,7 @@ function restoreQueueItem(item) {
     return {
       ...item,
       status: "waiting",
-      error: "Bridge restarted before this Desktop remote message completed.",
+      error: "Bridge restarted before this Codex Desktop Remote message completed.",
       updatedAt: nowIso()
     };
   }
@@ -579,7 +579,6 @@ export function enqueueDesktopRemoteMessage(text, options = {}) {
 
 export async function getDesktopRemoteState({ fresh = false } = {}) {
   const desktop = await refreshDesktopStatus(fresh);
-  maybeRunDesktopProbe().catch(() => {});
   return {
     ok: true,
     mode: "desktop-remote",

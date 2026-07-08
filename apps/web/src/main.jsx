@@ -23,6 +23,7 @@ import {
   FilePlus2,
   Folder,
   FolderOpen,
+  GitBranch,
   History,
   Image as ImageIcon,
   ImageOff,
@@ -35,6 +36,7 @@ import {
   Monitor,
   MoreHorizontal,
   Pencil,
+  Pin,
   Phone,
   PhoneOff,
   Plus,
@@ -50,9 +52,9 @@ import {
   X
 } from "lucide-react";
 import "./styles.css";
+import { buildConversationTree, filterConversationNodes, projectNameFromPath } from "./sidebarModel.js";
 
 const savedToken = localStorage.getItem("mat.token") || "";
-const desktopObserverCursorKey = "mat.stream.desktopObserver.cursor";
 const typedTextAnimationKeys = new Set();
 
 function cx(...parts) {
@@ -144,7 +146,7 @@ function compact(value, fallback = "Untitled") {
 }
 
 function providerLabel(provider) {
-  const labels = { claude: "Claude", codex: "Codex", zhipu: "智谱" };
+  const labels = { claude: "Claude", codex: "Codex", zhipu: "智谱", doubao: "豆包" };
   return labels[provider] || provider;
 }
 
@@ -499,19 +501,6 @@ function historyToolTaskId(provider, sessionId) {
   return provider && sessionId ? `history:${provider}:${sessionId}` : "";
 }
 
-function desktopRemoteNeedsHistoryRefresh(desktopRemote) {
-  const desktop = desktopRemote?.desktop;
-  const latestItem = latestDesktopQueueItem(desktopRemote?.items || []);
-  const latestAt = new Date(latestItem?.sentAt || latestItem?.updatedAt || 0).getTime();
-  const recentlyTouched = ["sent", "sent_unverified", "sending", "checking", "waiting"].includes(latestItem?.status) && Number.isFinite(latestAt) && Date.now() - latestAt < 180000;
-  return (
-    Number(desktopRemote?.pendingCount || 0) > 0 ||
-    Boolean(desktopRemote?.active) ||
-    recentlyTouched ||
-    desktopRunningTurn(desktop)
-  );
-}
-
 function firstTextFromContent(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -758,17 +747,6 @@ function sortManagedConversations(items) {
   });
 }
 
-function projectNameFromPath(value) {
-  const clean = String(value || "").replace(/[\\/]+$/, "");
-  if (!clean) return "No project";
-  return clean.split(/[\\/]/).filter(Boolean).pop() || clean;
-}
-
-function projectKeyFromPath(value) {
-  const clean = String(value || "").trim();
-  return clean ? `project:${clean.toLowerCase()}` : "project:none";
-}
-
 function normalizePathForMatch(value) {
   return String(value || "").replace(/[\\/]+$/, "").toLowerCase();
 }
@@ -889,80 +867,6 @@ function desktopRemoteTargetSnapshot(source) {
     desktopTitle: source.desktopTitle || source.title || "",
     desktopProjectTitle: source.desktopProjectTitle || projectNameFromPath(source.cwd || "")
   };
-}
-
-function buildConversationTree(items, expandedProjects) {
-  const projects = new Map();
-  const noProject = [];
-
-  for (const item of items) {
-    if (!item.cwd || item.kind === "fork") {
-      noProject.push(item);
-      continue;
-    }
-
-    const key = projectKeyFromPath(item.cwd);
-    const existing = projects.get(key) || {
-      key,
-      kind: "project",
-      provider: item.provider,
-      title: projectNameFromPath(item.cwd),
-      cwd: item.cwd,
-      updatedAt: item.updatedAt,
-      count: 0,
-      children: []
-    };
-    existing.count += 1;
-    existing.updatedAt = latestDate(existing.updatedAt, item.updatedAt);
-    existing.children.push(item);
-    projects.set(key, existing);
-  }
-
-  const nodes = [];
-  for (const project of [...projects.values()].sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())) {
-    const expanded = expandedProjects[project.key] ?? true;
-    nodes.push({ ...project, expanded });
-    if (expanded) nodes.push(...project.children.map((child) => ({ ...child, parentProjectKey: project.key, nested: true })));
-  }
-
-  if (noProject.length) {
-    const key = "project:none";
-    const expanded = expandedProjects[key] ?? true;
-    nodes.push({
-      key,
-      kind: "project",
-      provider: "codex",
-      title: "No project",
-      cwd: "",
-      updatedAt: latestDate(...noProject.map((item) => item.updatedAt)),
-      count: noProject.length,
-      expanded,
-      children: noProject
-    });
-    if (expanded) nodes.push(...noProject.map((child) => ({ ...child, parentProjectKey: key, nested: true })));
-  }
-
-  return nodes;
-}
-
-function filterConversationNodes(nodes, query) {
-  const value = query.trim().toLowerCase();
-  if (!value) return nodes;
-
-  const visibleProjects = new Set();
-  const matched = nodes.filter((item) => {
-    const text = `${item.title} ${item.provider} ${item.cwd} ${item.sessionId}`.toLowerCase();
-    if (item.kind !== "project" && text.includes(value)) {
-      if (item.parentProjectKey) visibleProjects.add(item.parentProjectKey);
-      return true;
-    }
-    return item.kind === "project" && text.includes(value);
-  });
-
-  return nodes.filter((item) => {
-    if (matched.includes(item)) return true;
-    return item.kind === "project" && visibleProjects.has(item.key);
-  });
 }
 
 function normalizeMessageText(text) {
@@ -3003,7 +2907,7 @@ function LoginView({ onLogin, initialError = "" }) {
   );
 }
 
-function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, onRefresh, networkLine, open, loading, onManage, showArchived, setShowArchived, onToggleProject }) {
+function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, onRefresh, networkLine, open, loading, manageMenu, onOpenManage, onCloseManage, onManageAction, showArchived, setShowArchived, onToggleProject }) {
   return (
     <aside id="sidebar" className={cx("sidebar", open && "open")}>
       <div className="sidebar-top">
@@ -3036,50 +2940,95 @@ function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, on
         ) : conversations.length ? (
           conversations.map((item) =>
             item.kind === "project" ? (
-              <button key={item.key} className="project-item" type="button" onClick={() => onToggleProject(item.key)}>
-                <span className={cx("project-chevron", item.expanded && "open")}>{">"}</span>
+              <div key={item.key} className={cx("project-item", manageMenu?.key === item.key && "menu-open")}>
                 <FolderOpen size={17} />
                 <span className="project-title">{item.title}</span>
-                <span className="project-count">{item.count}</span>
-              </button>
-            ) : (
-            <button
-              key={item.key}
-              className={cx("conversation-item", item.nested && "nested", item.key === selected?.key && "active")}
-              type="button"
-              onClick={() => onSelect(item)}
-            >
-              <div className="conversation-title-row">
-                <h3>{item.title}</h3>
-                {item.kind !== "project" ? (
-                  <span
-                    className="conversation-more"
-                    role="button"
-                    tabIndex={0}
-                    title="Manage chat"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onManage(item);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter" && event.key !== " ") return;
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onManage(item);
-                    }}
-                  >
-                    <MoreHorizontal size={16} />
-                  </span>
+                <button className="project-row-icon" type="button" title="展开项目" aria-label="展开项目" onClick={() => onToggleProject(item.key)}>
+                  <ChevronDown size={15} />
+                </button>
+                <button
+                  className="project-row-icon"
+                  type="button"
+                  title="Manage chat"
+                  aria-label="Manage chat"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenManage(item);
+                  }}
+                >
+                  <MoreHorizontal size={16} />
+                </button>
+                <button className="project-row-icon" type="button" title="重命名项目" aria-label="重命名项目" onClick={() => onManageAction(item, "rename")}>
+                  <Pencil size={15} />
+                </button>
+                {manageMenu?.key === item.key ? (
+                  <div className="conversation-manage-menu project-manage-menu" role="menu" onClick={(event) => event.stopPropagation()}>
+                    <button type="button" role="menuitem" onClick={() => onManageAction(item, item.pinned ? "unpin" : "pin")}>
+                      <Pin size={16} />
+                      <span>{item.pinned ? "取消置顶项目" : "置顶项目"}</span>
+                    </button>
+                    <button type="button" role="menuitem" disabled={!item.workspaceId} title={item.workspaceId ? "在资源管理器中打开" : "未找到对应工作区"} onClick={() => onManageAction(item, "open-explorer")}>
+                      <FolderOpen size={16} />
+                      <span>在资源管理器中打开</span>
+                    </button>
+                    <button type="button" role="menuitem" disabled title="后续接入永久工作树能力">
+                      <GitBranch size={16} />
+                      <span>创建永久工作树</span>
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => onManageAction(item, "rename")}>
+                      <Pencil size={16} />
+                      <span>重命名项目</span>
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => onManageAction(item, "read")}>
+                      <CheckSquare size={16} />
+                      <span>全部标为已读</span>
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => onManageAction(item, item.archived ? "restore" : "archive")}>
+                      <Archive size={16} />
+                      <span>{item.archived ? "恢复对话" : "归档对话"}</span>
+                    </button>
+                    <button type="button" role="menuitem" className="danger" onClick={() => onManageAction(item, "remove")}>
+                      <X size={16} />
+                      <span>移除</span>
+                    </button>
+                  </div>
                 ) : null}
               </div>
-              <div className="conversation-meta">
-                <span className={cx("badge", item.provider)}>{item.provider}</span>
-                {item.status && item.status !== "history" && item.status !== "fork" ? <span className={cx("badge", item.status)}>{item.status}</span> : null}
-                {item.pinned ? <span className="badge pinned">Pinned</span> : null}
-                {item.group ? <span className="badge group">{item.group}</span> : null}
-                <span>{item.displayTime || formatTime(item.updatedAt)}</span>
+            ) : item.kind === "project-empty" ? (
+              <div key={item.key} className="project-empty">
+                暂无对话
               </div>
-            </button>
+            ) : item.kind === "project-more" ? (
+              <button key={item.key} className="project-more-row" type="button" onClick={() => onToggleProject(item.parentProjectKey)}>
+                展开显示
+              </button>
+            ) : (
+            <div
+              key={item.key}
+              className={cx("conversation-item", item.nested && "nested", item.key === selected?.key && "active")}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(item)}
+              onKeyDown={(event) => {
+                if (event.currentTarget !== event.target) return;
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                onSelect(item);
+              }}
+            >
+              <div className="conversation-title-row">
+                <span className="conversation-title-line">
+                  <span className="conversation-title-text">{item.title}</span>
+                  <span className="conversation-badges">
+                    <span className={cx("badge", item.provider)}>{item.provider}</span>
+                    {item.status && item.status !== "history" && item.status !== "fork" ? <span className={cx("badge", item.status)}>{item.status}</span> : null}
+                    {item.pinned ? <span className="badge pinned">Pinned</span> : null}
+                    {item.group ? <span className="badge group">{item.group}</span> : null}
+                  </span>
+                </span>
+                <span className="conversation-time">{item.displayTime || formatTime(item.updatedAt)}</span>
+              </div>
+            </div>
             )
           )
         ) : (
@@ -3089,6 +3038,7 @@ function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, on
           </div>
         )}
       </div>
+      {manageMenu ? <button className="manage-menu-backdrop" type="button" aria-label="Close chat menu" onClick={onCloseManage} /> : null}
       <div className="sidebar-foot">{networkLine}</div>
     </aside>
   );
@@ -3715,8 +3665,8 @@ function Composer({
                 <option value="desktop-current">当前 Desktop 设置</option>
               </select>
             ) : (
-              <select value={activeModel} onChange={(event) => setActiveModel(event.target.value)}>
-                <option value="">默认模型</option>
+              <select value={modelAgent === "doubao" ? "" : activeModel} onChange={(event) => setActiveModel(event.target.value)} disabled={modelAgent === "doubao"}>
+                <option value="">{modelAgent === "doubao" ? "网页默认" : "默认模型"}</option>
                 {modelAgent === "claude" ? (
                   <>
                     <option value="opus">opus</option>
@@ -3984,6 +3934,9 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
   const [claudeCommand, setClaudeCommand] = useState(settings?.claudeCommand || "claude");
   const [codexCommand, setCodexCommand] = useState(settings?.codexCommand || "auto");
   const [codexTemplate, setCodexTemplate] = useState(settings?.codexTemplate || "");
+  const [doubaoCommand, setDoubaoCommand] = useState(settings?.doubaoCommand || "auto");
+  const [doubaoCdpEndpoint, setDoubaoCdpEndpoint] = useState(settings?.doubaoCdpEndpoint || "http://127.0.0.1:9222");
+  const [doubaoUrl, setDoubaoUrl] = useState(settings?.doubaoUrl || "https://www.doubao.com/chat/");
   const [sandboxMode, setSandboxMode] = useState(settings?.security?.sandboxMode || "workspace-write");
   const [approvalPolicy, setApprovalPolicy] = useState(settings?.security?.approvalPolicy || "on-request");
   const [networkAccess, setNetworkAccess] = useState(settings?.security?.networkAccess !== false);
@@ -4037,6 +3990,9 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
     setClaudeCommand(settings?.claudeCommand || "claude");
     setCodexCommand(settings?.codexCommand || "auto");
     setCodexTemplate(settings?.codexTemplate || "");
+    setDoubaoCommand(settings?.doubaoCommand || "auto");
+    setDoubaoCdpEndpoint(settings?.doubaoCdpEndpoint || "http://127.0.0.1:9222");
+    setDoubaoUrl(settings?.doubaoUrl || "https://www.doubao.com/chat/");
     setSandboxMode(settings?.security?.sandboxMode || "workspace-write");
     setApprovalPolicy(settings?.security?.approvalPolicy || "on-request");
     setNetworkAccess(settings?.security?.networkAccess !== false);
@@ -4368,6 +4324,9 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
       claudeCommand,
       codexCommand,
       codexTemplate,
+      doubaoCommand,
+      doubaoCdpEndpoint,
+      doubaoUrl,
       security: {
         sandboxMode,
         approvalPolicy,
@@ -4470,10 +4429,22 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
           <span>Codex template</span>
           <input value={codexTemplate} onChange={(event) => setCodexTemplate(event.target.value)} />
         </label>
+        <label>
+          <span>豆包 command</span>
+          <input value={doubaoCommand} onChange={(event) => setDoubaoCommand(event.target.value)} />
+        </label>
+        <label>
+          <span>豆包 Chrome endpoint</span>
+          <input value={doubaoCdpEndpoint} onChange={(event) => setDoubaoCdpEndpoint(event.target.value)} />
+        </label>
+        <label>
+          <span>豆包 URL</span>
+          <input value={doubaoUrl} onChange={(event) => setDoubaoUrl(event.target.value)} />
+        </label>
         <section className="security-settings-card">
           <div>
             <h3>Agent permission model</h3>
-            <p>CLI tasks use these verified settings. Desktop remote keeps using current Codex Desktop settings.</p>
+            <p>VibeLink Agent tasks use these verified settings. Codex Desktop Remote keeps using current Desktop settings.</p>
           </div>
           <label>
             <span>Sandbox</span>
@@ -4495,7 +4466,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
           </label>
           <label className="check-row">
             <input type="checkbox" checked={networkAccess} onChange={(event) => setNetworkAccess(event.target.checked)} />
-            <span>Allow network access for CLI tasks</span>
+            <span>Allow network access for VibeLink Agent tasks</span>
           </label>
           <label className="check-row">
             <input type="checkbox" checked={requireTrustedWorkspace} onChange={(event) => setRequireTrustedWorkspace(event.target.checked)} />
@@ -5209,6 +5180,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [expandedProjects, setExpandedProjects] = useState({});
+  const [manageMenu, setManageMenu] = useState(null);
   const [activeAgent, setActiveAgent] = useState("codex");
   const [controlMode, setControlMode] = useState("agent");
   const [desktopRemote, setDesktopRemote] = useState(null);
@@ -5232,9 +5204,6 @@ function App() {
   const eventSourceRef = useRef(null);
   const toolEventSourceRef = useRef(null);
   const pollRef = useRef(null);
-  const desktopPollRef = useRef(null);
-  const desktopObserverRef = useRef(null);
-  const desktopObserverCursorRef = useRef(Number(localStorage.getItem(desktopObserverCursorKey) || 0));
   const conversationLoadRef = useRef(0);
   const listRef = useRef(null);
 
@@ -5243,6 +5212,7 @@ function App() {
     if (settings?.hasOpenAIKey) items.push("codex");
     if (settings?.hasAnthropicKey) items.push("claude");
     if (settings?.hasZhipuKey) items.push("zhipu");
+    if (settings && settings.doubaoCommand !== "disabled") items.push("doubao");
     return items;
   }, [settings]);
 
@@ -5354,10 +5324,13 @@ function App() {
             displayTime: desktopMatch.displayTime || item.displayTime
           };
         })
-    ).filter((item) => !item.archived);
-    const projectNodes = buildConversationTree(localItems, expandedProjects);
+    ).filter((item) => (showArchived ? item.archived : !item.archived));
+    const projectNodes = buildConversationTree(localItems, expandedProjects, {
+      knownProjects: workspaces,
+      projectItemLimit: query.trim() ? Infinity : undefined
+    });
     return filterConversationNodes(projectNodes, query);
-  }, [tasks, histories, query, desktopRemote, threadState, showArchived, expandedProjects]);
+  }, [tasks, histories, query, desktopRemote, threadState, showArchived, expandedProjects, workspaces]);
 
   useEffect(() => {
     if (!selected || selected.kind === "desktop" || query.trim()) return;
@@ -5433,15 +5406,6 @@ function App() {
     return () => window.cancelAnimationFrame(frame);
   }, [initialScrollSequence]);
 
-  useEffect(() => {
-    if (!token || controlMode !== "desktop") return undefined;
-    if (!desktopRemoteNeedsHistoryRefresh(desktopRemote)) return undefined;
-    const timer = setInterval(() => {
-      refreshDesktopRemote(false).catch((err) => setError(err.message));
-    }, 1800);
-    return () => clearInterval(timer);
-  }, [token, controlMode, desktopRemote?.pendingCount, desktopRemote?.active, desktopRemote?.desktop?.sidebarRunningCount, desktopRemote?.desktop?.reason, desktopRemote?.items]);
-
   async function refresh(options = {}) {
     try {
       const [status, history, thread, registry] = await Promise.all([
@@ -5463,6 +5427,19 @@ function App() {
       if (options.keepSelection && selected) {
         setSelected((current) => current);
       }
+      if (options.syncDesktopRemote) {
+        await refreshDesktopRemote(true);
+        if (selected && hasDesktopBinding(selected)) {
+          const historyId = conversationHistoryId(selected);
+          if (historyId) {
+            const historyMessages = await loadHistoryMessages("codex", historyId, { fresh: true });
+            if (historyMessages.length) {
+              setMessages((items) => mergeDisplayMessagesWithUpdates(items, historyMessages));
+            }
+          }
+          if (selected.cwd) loadWorkspaceChanges(selected.cwd || "").catch(() => {});
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -5470,41 +5447,8 @@ function App() {
 
   async function refreshDesktopRemote(fresh = false) {
     const state = await request(`/api/desktop-remote/status${fresh ? "?fresh=1" : ""}`, {}, token);
-    if (state?.desktop?.observationCursor) {
-      desktopObserverCursorRef.current = rememberStreamCursor(
-        desktopObserverCursorKey,
-        Math.max(desktopObserverCursorRef.current || 0, Number(state.desktop.observationCursor) || 0)
-      );
-    }
     setDesktopRemote(state);
     return state;
-  }
-
-  function applyDesktopObserverEvent(event) {
-    if (!event?.desktop) return;
-    const cursor = Number(event.cursor || 0);
-    if (cursor && desktopObserverCursorRef.current && cursor < desktopObserverCursorRef.current) return;
-    if (cursor) {
-      desktopObserverCursorRef.current = rememberStreamCursor(
-        desktopObserverCursorKey,
-        Math.max(desktopObserverCursorRef.current || 0, cursor)
-      );
-    }
-    setDesktopRemote((current) => ({
-      ...(current || {}),
-      ok: true,
-      mode: "desktop-remote",
-      desktop: event.desktop,
-      observerEvent: {
-        type: event.type,
-        cursor: event.cursor || 0,
-        observedAt: event.observedAt || event.desktop.updatedAt || new Date().toISOString()
-      },
-      updatedAt: event.observedAt || event.desktop.updatedAt || new Date().toISOString(),
-      items: current?.items || [],
-      pendingCount: current?.pendingCount || 0,
-      active: Boolean(current?.active)
-    }));
   }
 
   function handleAuthExpired() {
@@ -5521,136 +5465,10 @@ function App() {
 
   useEffect(() => {
     if (!token) return;
-    refresh().catch(() => {
+    refresh({ syncDesktopRemote: true }).catch(() => {
       handleAuthExpired();
     });
   }, [token]);
-
-  useEffect(() => {
-    if (!token) return undefined;
-    refreshDesktopRemote(true).catch((err) => setError(err.message));
-    desktopObserverRef.current?.close();
-    desktopObserverRef.current = null;
-
-    try {
-      const source = new EventSource(`/api/desktop-remote/events?token=${encodeURIComponent(token)}&after=${desktopObserverCursorRef.current || 0}`);
-      desktopObserverRef.current = source;
-
-      const handleDesktopEvent = (message) => {
-        try {
-          applyDesktopObserverEvent(JSON.parse(message.data));
-        } catch (err) {
-          setError(err.message);
-        }
-      };
-
-      source.addEventListener("desktop.snapshot", handleDesktopEvent);
-      source.addEventListener("desktop.visibleTranscript.delta", handleDesktopEvent);
-      source.addEventListener("desktop.sidebar.running", handleDesktopEvent);
-      source.addEventListener("desktop.selection.changed", handleDesktopEvent);
-      source.onerror = () => {
-        source.close();
-        if (desktopObserverRef.current === source) desktopObserverRef.current = null;
-      };
-    } catch (err) {
-      setError(err.message);
-    }
-
-    desktopPollRef.current = setInterval(() => {
-      refreshDesktopRemote(false).catch((err) => setError(err.message));
-    }, controlMode === "desktop" ? 15000 : 30000);
-    return () => {
-      desktopObserverRef.current?.close();
-      desktopObserverRef.current = null;
-      if (desktopPollRef.current) clearInterval(desktopPollRef.current);
-      desktopPollRef.current = null;
-    };
-  }, [token, controlMode]);
-
-  useEffect(() => {
-    if (!token || controlMode !== "desktop" || selected?.provider !== "codex") return undefined;
-    const historyId = conversationHistoryId(selected);
-    if (!historyId || !desktopRemoteNeedsHistoryRefresh(desktopRemote)) return undefined;
-
-    let cancelled = false;
-    let inFlight = false;
-    const refreshBoundHistory = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const historyMessages = await loadHistoryMessages("codex", historyId, { fresh: true });
-        if (!cancelled && historyMessages.length) {
-          setMessages((items) => mergeDisplayMessagesWithUpdates(items, historyMessages));
-        }
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    refreshBoundHistory().catch((err) => setError(err.message));
-    const timer = setInterval(() => {
-      refreshBoundHistory().catch((err) => setError(err.message));
-    }, 2500);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [
-    token,
-    controlMode,
-    selected?.key,
-    selected?.provider,
-    selected?.id,
-    selected?.sessionId,
-    selected?.sourceId,
-    selected?.historyId,
-    desktopRemote?.pendingCount,
-    desktopRemote?.active,
-    desktopRemote?.desktop?.visibleTranscriptHash,
-    desktopRemote?.desktop?.sidebarRunningCount,
-    desktopRemote?.desktop?.reason,
-    desktopRemote?.items
-  ]);
-
-  useEffect(() => {
-    if (!token || controlMode !== "desktop" || selected?.provider !== "codex" || !selected?.cwd) return undefined;
-    if (!desktopRemoteNeedsHistoryRefresh(desktopRemote)) return undefined;
-
-    let cancelled = false;
-    let inFlight = false;
-    const refreshChanges = async () => {
-      if (cancelled || inFlight) return;
-      inFlight = true;
-      try {
-        await loadWorkspaceChanges(selected.cwd || "");
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    refreshChanges().catch(() => {});
-    const timer = setInterval(() => {
-      refreshChanges().catch(() => {});
-    }, 6000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [
-    token,
-    controlMode,
-    selected?.key,
-    selected?.provider,
-    selected?.cwd,
-    desktopRemote?.pendingCount,
-    desktopRemote?.active,
-    desktopRemote?.desktop?.visibleTranscriptHash,
-    desktopRemote?.desktop?.sidebarRunningCount,
-    desktopRemote?.desktop?.reason,
-    desktopRemote?.items
-  ]);
 
   useEffect(() => {
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
@@ -6026,8 +5844,26 @@ function App() {
     return state;
   }
 
+  async function patchProjectThreads(project, patch) {
+    const children = project.children || [];
+    if (!children.length) return null;
+    let nextState = null;
+    for (const child of children) {
+      nextState = await request(
+        "/api/thread-state",
+        {
+          method: "POST",
+          body: JSON.stringify({ key: child.key, patch })
+        },
+        token
+      );
+    }
+    if (nextState) setThreadState(nextState);
+    return nextState;
+  }
+
   async function forkThread(item) {
-    const title = window.prompt("Fork 鍚嶇О", `${item.title} fork`);
+    const title = window.prompt("Fork 名称", `${item.title} fork`);
     if (!title) return;
     const result = await request(
       "/api/thread-state/forks",
@@ -6063,34 +5899,83 @@ function App() {
     setControlMode("agent");
   }
 
-  async function manageConversation(item) {
-    const action = window.prompt("Action: rename / pin / archive / restore / group / fork", item.archived ? "restore" : "rename");
-    if (!action) return;
-    const normalized = action.trim().toLowerCase();
-    if (normalized === "rename") {
+  async function manageConversation(item, action) {
+    setManageMenu(null);
+    if (item.kind === "project") {
+      const children = item.children || [];
+      if (action === "rename") {
+        if (!item.cwd) {
+          setError("This project has no workspace path to rename.");
+          return;
+        }
+        const title = window.prompt("New project title", item.title);
+        if (title) {
+          await request(
+            "/api/workspaces",
+            {
+              method: "POST",
+              body: JSON.stringify({ path: item.cwd, title })
+            },
+            token
+          );
+          await refresh({ keepSelection: true });
+        }
+        return;
+      }
+      if (action === "open-explorer") {
+        if (!item.workspaceId) {
+          setError("This project is not linked to a workspace.");
+          return;
+        }
+        await request(`/api/workspaces/${item.workspaceId}/open-explorer`, { method: "POST" }, token);
+        return;
+      }
+      if (action === "pin" || action === "unpin") {
+        await patchProjectThreads(item, { pinned: action === "pin" });
+        return;
+      }
+      if (action === "archive") {
+        if (children.length && window.confirm(`Archive all chats in "${item.title}"?`)) await patchProjectThreads(item, { archived: true });
+        return;
+      }
+      if (action === "restore") {
+        await patchProjectThreads(item, { archived: false });
+        return;
+      }
+      if (action === "read") {
+        await patchProjectThreads(item, { meta: { readAt: new Date().toISOString() } });
+        return;
+      }
+      if (action === "remove") {
+        if (children.length && window.confirm(`Remove all chats in "${item.title}" from this list?`)) await patchProjectThreads(item, { archived: true });
+        return;
+      }
+      setError("Unsupported project action.");
+      return;
+    }
+    if (action === "rename") {
       const title = window.prompt("New chat title", item.title);
       if (title) await patchThread(item, { title });
       return;
     }
-    if (normalized === "pin") {
-      await patchThread(item, { pinned: !item.pinned });
+    if (action === "pin" || action === "unpin") {
+      await patchThread(item, { pinned: action === "pin" });
       return;
     }
-    if (normalized === "archive") {
+    if (action === "archive") {
       if (window.confirm(`Archive "${item.title}"?`)) await patchThread(item, { archived: true });
       return;
     }
-    if (normalized === "restore") {
+    if (action === "restore") {
       await patchThread(item, { archived: false });
       return;
     }
-    if (normalized === "group") {
-      const group = window.prompt("Group name; leave blank to remove from group", item.group || "");
-      await patchThread(item, { group: group || "" });
+    if (action === "read") {
+      await patchThread(item, { meta: { readAt: new Date().toISOString() } });
       return;
     }
-    if (normalized === "fork") {
-      await forkThread(item);
+    if (action === "remove") {
+      if (window.confirm(`Remove "${item.title}" from this list?`)) await patchThread(item, { archived: true });
       return;
     }
     setError("Unsupported chat action.");
@@ -6438,10 +6323,13 @@ function App() {
         query={query}
         setQuery={setQuery}
         onSelect={selectConversation}
-        onManage={(item) => manageConversation(item).catch((err) => setError(err.message))}
+        manageMenu={manageMenu}
+        onOpenManage={(item) => setManageMenu((current) => (current?.key === item.key ? null : { key: item.key }))}
+        onCloseManage={() => setManageMenu(null)}
+        onManageAction={(item, action) => manageConversation(item, action).catch((err) => setError(err.message))}
         showArchived={showArchived}
         setShowArchived={setShowArchived}
-        onToggleProject={(key) => setExpandedProjects((current) => ({ ...current, [key]: !(current[key] ?? true) }))}
+        onToggleProject={(key) => setExpandedProjects((current) => ({ ...current, [key]: true }))}
         onNew={() => selectConversation(null)}
         onRefresh={() => refresh({ keepSelection: true }).catch((err) => setError(err.message))}
         networkLine={networkLine}

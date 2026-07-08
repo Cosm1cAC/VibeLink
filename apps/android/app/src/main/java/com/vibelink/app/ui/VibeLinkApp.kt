@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -17,13 +18,15 @@ import com.vibelink.app.ui.screens.*
 
 /**
  * Root composable for VibeLink Android.
- * Navigation: login → sessionList → messageList / call
+ * Navigation: login 鈫?sessionList 鈫?messageList / call
  */
 @Composable
-fun VibeLinkApp() {
+fun VibeLinkApp(initialPairingUri: String? = null) {
     val navController = rememberNavController()
     val apiClient = remember { ApiClient() }
 
+    val context = LocalContext.current
+    val settingsStore = remember { SettingsStore(context.applicationContext) }
     // Shared ViewModels (scoped to app-level, retained via remember)
     val sessionListViewModel = remember { SessionListViewModel() }
     val messageListViewModel = remember { MessageListViewModel() }
@@ -34,10 +37,12 @@ fun VibeLinkApp() {
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
 
     NavHost(navController = navController, startDestination = "login") {
-        // ── Login ──
+        // 鈹€鈹€ Login 鈹€鈹€
         composable("login") {
             LoginScreen(
                 apiClient = apiClient,
+                settingsStore = settingsStore,
+                initialPairingUri = initialPairingUri,
                 onLoginSuccess = {
                     navController.navigate("sessionList") {
                         popUpTo("login") { inclusive = true }
@@ -46,7 +51,7 @@ fun VibeLinkApp() {
             )
         }
 
-        // ── Session List ──
+        // 鈹€鈹€ Session List 鈹€鈹€
         composable("sessionList") {
             SessionListScreen(
                 apiClient = apiClient,
@@ -69,7 +74,7 @@ fun VibeLinkApp() {
             )
         }
 
-        // ── Message List (detail) ──
+        // 鈹€鈹€ Message List (detail) 鈹€鈹€
         composable(
             route = "messageList/{conversationKey}",
             arguments = listOf(navArgument("conversationKey") { type = NavType.StringType }),
@@ -88,7 +93,7 @@ fun VibeLinkApp() {
             )
         }
 
-        // ── Live Call ──
+        // 鈹€鈹€ Live Call 鈹€鈹€
         composable("call") {
             CallScreen(
                 apiClient = apiClient,

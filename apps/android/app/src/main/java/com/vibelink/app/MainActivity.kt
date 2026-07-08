@@ -17,7 +17,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             VibeLinkTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    VibeLinkApp()
+                    VibeLinkApp(initialPairingUri = intent?.data?.takeIf { it.scheme == "vibelink" }?.toString())
                 }
             }
         }

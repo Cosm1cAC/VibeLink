@@ -9,7 +9,7 @@
 // This is an augmentative step — the upstream CLI (Codex/Claude) still
 // manages its own history. We add budget monitoring and summarization
 // at the VibeLink bridge level so that:
-//   - Route B tasks have a predictable token footprint
+//   - VibeLink Agent tasks have a predictable token footprint
 //   - Restored tasks can start with a summary instead of full history
 //   - The UI can display budget/headroom stats
 //

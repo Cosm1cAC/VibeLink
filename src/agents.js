@@ -7,9 +7,11 @@ import { withAgentReachPath } from "./agentReachRuntime.js";
 import { bridgeAgentToolEvent } from "./agentToolBridge.js";
 import { withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 import { tasksDir } from "./config.js";
+import { doubaoAgentArgs, doubaoBridgeCliPath, doubaoCliPath } from "./doubaoRuntime.js";
 import { insertTaskEvent, listTaskEvents, upsertTask } from "./db.js";
 import { resolveAllowedPath } from "./security.js";
 import { settingsWithSecrets } from "./store.js";
+import { zhipuAgentArgs, zhipuCliPath } from "./zhipuRuntime.js";
 
 const tasks = new Map();
 const MAX_RESTORED_TASKS = 80;
@@ -108,6 +110,7 @@ function eventExitCode(events) {
 
 function inferAgent(events) {
   const command = events.find((event) => event.type === "system" && event.text)?.text || "";
+  if (/doubao|doubao-cli/i.test(command)) return "doubao";
   return /claude/i.test(command) && !/codex/i.test(command) ? "claude" : "codex";
 }
 
@@ -295,7 +298,13 @@ function resolveWorkingDir(payload, settings) {
   const requestedResolved = resolveAllowedPath(requested, settings);
   const candidates = [requestedResolved, settings.defaultCwd, process.cwd(), os.homedir()]
     .filter(Boolean)
-    .map((item) => resolveAllowedPath(item, settings));
+    .flatMap((item) => {
+      try {
+        return [resolveAllowedPath(item, settings)];
+      } catch {
+        return [];
+      }
+    });
 
   const cwd = candidates.find(isDirectory) || process.cwd();
   return {
@@ -304,6 +313,12 @@ function resolveWorkingDir(payload, settings) {
     usedFallback: cwd !== requestedResolved
   };
 }
+
+export const __testInternals = {
+  agentLaunchPlan,
+  claudeArgs,
+  resolveWorkingDir
+};
 
 function newestExisting(paths) {
   return paths
@@ -348,6 +363,16 @@ function resolveCodexCommand(command) {
   return commandParts(trimmed || "codex");
 }
 
+function resolveDoubaoCommand(command) {
+  const trimmed = String(command || "").trim();
+  if (!trimmed || trimmed === "auto") {
+    const bridge = doubaoBridgeCliPath();
+    if (pathExists(bridge)) return { command: process.execPath, args: [bridge] };
+    return { command: process.execPath, args: [doubaoCliPath()] };
+  }
+  return commandParts(trimmed);
+}
+
 function quotedPromptArgs(template, prompt) {
   const placeholder = "__MOBILE_AGENT_PROMPT__";
   const safeTemplate = template.includes("{prompt}") ? template.replace("{prompt}", placeholder) : `${template} ${placeholder}`;
@@ -355,7 +380,7 @@ function quotedPromptArgs(template, prompt) {
 }
 
 function claudeArgs(payload, settings) {
-  const args = ["--print", "--output-format", "stream-json", "--include-partial-messages"];
+  const args = ["--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
 
   const permissionMode = payload.permissionMode || settings.permissionMode;
   if (permissionMode && permissionMode !== "default") {
@@ -411,6 +436,31 @@ function codexArgs(payload, settings) {
   }
 
   return ["exec", "--json", ...common, payload.prompt || ""];
+}
+
+function taskAgent(value = "") {
+  if (value === "codex") return "codex";
+  if (value === "zhipu") return "zhipu";
+  if (value === "doubao") return "doubao";
+  return "claude";
+}
+
+function agentLaunchPlan(payload, settings) {
+  const agent = taskAgent(payload.agent);
+  if (agent === "claude") {
+    const base = commandParts(settings.claudeCommand || "claude");
+    return { agent, base, args: [...base.args, ...claudeArgs(payload, settings)] };
+  }
+  if (agent === "doubao") {
+    const base = resolveDoubaoCommand(settings.doubaoCommand || "auto");
+    return { agent, base, args: [...base.args, ...doubaoAgentArgs(payload, settings)] };
+  }
+  if (agent === "zhipu") {
+    const base = { command: process.execPath, args: [zhipuCliPath()] };
+    return { agent, base, args: [...base.args, ...zhipuAgentArgs(payload, settings)] };
+  }
+  const base = resolveCodexCommand(settings.codexCommand || "auto");
+  return { agent, base, args: [...base.args, ...codexArgs(payload, settings)] };
 }
 
 function securityPolicy(payload, settings) {
@@ -524,7 +574,7 @@ export function appendExternalTaskEvent(id, event = {}) {
 }
 
 export async function createTask(payload, settings) {
-  const agent = payload.agent === "codex" ? "codex" : "claude";
+  const agent = taskAgent(payload.agent);
   const runtimeSettings = await settingsWithSecrets(settings);
   const policy = securityPolicy(payload, runtimeSettings);
   let cwd = "";
@@ -545,14 +595,9 @@ export async function createTask(payload, settings) {
   const logPath = path.join(tasksDir, `${id}.jsonl`);
   const title = (payload.title || payload.prompt || `${agent} task`).slice(0, 96);
 
-  const base =
-    agent === "claude"
-      ? commandParts(runtimeSettings.claudeCommand || "claude")
-      : resolveCodexCommand(runtimeSettings.codexCommand || "auto");
-  const args =
-    agent === "claude"
-      ? [...base.args, ...claudeArgs(payload, runtimeSettings)]
-      : [...base.args, ...codexArgs({ ...payload, cwd }, runtimeSettings)];
+  const launch = agentLaunchPlan({ ...payload, cwd, agent }, runtimeSettings);
+  const base = launch.base;
+  const args = launch.args;
 
   const task = {
     id,

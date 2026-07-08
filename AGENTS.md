@@ -108,6 +108,11 @@ HTTP status codes: `400` (validation), `401` (auth), `403` (forbidden), `404` (n
 
 For visual identity tokens (colors, typography, spacing, components), see `DESIGN.md` in the project root.
 
+## Git Workflow
+
+- After completing any repository update, stage the changed files, commit them, and push the current branch to `origin` unless the user explicitly asks not to.
+- Before committing, run the focused tests or build commands that match the edited surface and include the verification result in the handoff.
+
 ## Skills
 
 VibeLink ships structured skill files in `.agents/skills/` that encode agent workflows:

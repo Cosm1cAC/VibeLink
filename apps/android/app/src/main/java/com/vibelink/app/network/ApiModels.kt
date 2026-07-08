@@ -25,6 +25,32 @@ data class DeviceInfo(
     val label: String = "",
 )
 
+data class PairingSession(
+    val id: String = "",
+    val code: String = "",
+    val status: String = "",
+    val label: String = "",
+)
+
+data class CreatePairingSessionResponse(
+    val ok: Boolean = false,
+    val session: PairingSession? = null,
+    val pairingUrl: String = "",
+)
+
+data class PairingStatusResponse(
+    val ok: Boolean = false,
+    val session: PairingSession? = null,
+)
+
+data class ClaimPairingResponse(
+    val ok: Boolean = false,
+    val token: String = "",
+    val device: DeviceInfo? = null,
+    val session: PairingSession? = null,
+    val settings: PublicSettings? = null,
+)
+
 data class StatusResponse(
     val ok: Boolean = false,
     val status: String = "",

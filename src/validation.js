@@ -21,7 +21,7 @@ export const CommandInputSchema = z.object({
 export const TaskInputSchema = z.object({
   prompt: z.string().min(1, "Prompt is required"),
   cwd: z.string().optional(),
-  agent: z.enum(["codex", "claude"]).optional(),
+  agent: z.enum(["codex", "claude", "doubao", "zhipu"]).optional(),
   model: z.string().optional(),
   title: z.string().optional(),
   mode: z.enum(["new", "continue", "resume"]).optional(),
@@ -54,6 +54,9 @@ export const SettingsPatchSchema = z.object({
     anthropic: z.string().optional(),
     zhipu: z.string().optional()
   }).optional(),
+  doubaoCommand: z.string().optional(),
+  doubaoCdpEndpoint: z.string().optional(),
+  doubaoUrl: z.string().optional(),
   mcp: z.any().optional(),
   codebaseMemory: z.object({
     autoMcp: z.boolean().optional()
@@ -107,6 +110,51 @@ export const TerminalSessionSchema = z.object({
 });
 
 // ── Approval decision ──
+
+// Agent Reach
+
+export const AgentReachStatusSchema = z.object({
+  timeoutMs: z.number().int().positive().max(600000).optional()
+});
+
+export const AgentReachSkillSchema = z.object({
+  operation: z.enum(["install", "uninstall"]).default("install"),
+  timeoutMs: z.number().int().positive().max(600000).optional()
+});
+
+export const AgentReachFormatSchema = z.object({
+  platform: z.enum(["xhs"]),
+  input: z.any().optional(),
+  stdin: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(600000).optional()
+});
+
+export const AgentReachTranscribeSchema = z.object({
+  source: z.string().min(1, "Source is required"),
+  provider: z.enum(["auto", "groq", "openai"]).optional(),
+  timeoutMs: z.number().int().positive().max(600000).optional()
+});
+
+export const DoubaoStatusSchema = z.object({
+  endpoint: z.string().optional(),
+  url: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(600000).optional()
+});
+
+export const DoubaoAskSchema = z.object({
+  prompt: z.string().min(1, "Prompt is required"),
+  endpoint: z.string().optional(),
+  url: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(600000).optional()
+});
+
+export const DoubaoConfigureSchema = z.object({
+  noDaemon: z.boolean().optional(),
+  noOpen: z.boolean().optional(),
+  port: z.number().int().min(0).max(65535).optional(),
+  url: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(600000).optional()
+});
 
 export const ApprovalDecisionSchema = z.object({
   decision: z.enum(["approve", "deny"]),

@@ -2112,7 +2112,7 @@ async function routeApi(request, response, url) {
       taskId: url.searchParams.get("taskId") || ""
     };
     if (url.searchParams.get("stream") === "1") {
-      subscribeToolEvents(response, filter);
+      await subscribeToolEvents(response, filter);
       return;
     }
     sendJson(response, 200, {

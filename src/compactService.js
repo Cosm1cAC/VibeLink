@@ -34,6 +34,10 @@ const compactServiceMetrics = {
   summaryRequestsCreated: 0,
   compactedContextsReturned: 0,
   nullResults: 0,
+  summaryInputsBuilt: 0,
+  summaryInputTruncations: 0,
+  summaryInputSourceChars: 0,
+  summaryInputChars: 0,
   totalMs: 0,
   lastMs: 0,
   maxMs: 0
@@ -80,13 +84,18 @@ export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPA
     lines.push(line);
   }
 
-  return {
+  const result = {
     text: lines.join("\n"),
     sourceChars,
     includedEvents,
     skippedEvents,
     truncated
   };
+  compactServiceMetrics.summaryInputsBuilt += 1;
+  if (result.truncated) compactServiceMetrics.summaryInputTruncations += 1;
+  compactServiceMetrics.summaryInputSourceChars += result.sourceChars;
+  compactServiceMetrics.summaryInputChars += result.text.length;
+  return result;
 }
 
 function observeCompactService(operation, { eventCount = 0, summaryRequest = false, compactedContext = false, nullResult = false, startedAt = 0 } = {}) {
@@ -111,6 +120,10 @@ export function resetCompactServiceMetrics() {
   compactServiceMetrics.summaryRequestsCreated = 0;
   compactServiceMetrics.compactedContextsReturned = 0;
   compactServiceMetrics.nullResults = 0;
+  compactServiceMetrics.summaryInputsBuilt = 0;
+  compactServiceMetrics.summaryInputTruncations = 0;
+  compactServiceMetrics.summaryInputSourceChars = 0;
+  compactServiceMetrics.summaryInputChars = 0;
   compactServiceMetrics.totalMs = 0;
   compactServiceMetrics.lastMs = 0;
   compactServiceMetrics.maxMs = 0;
@@ -126,6 +139,10 @@ export function getCompactServiceMetrics() {
     summaryRequestsCreated: compactServiceMetrics.summaryRequestsCreated,
     compactedContextsReturned: compactServiceMetrics.compactedContextsReturned,
     nullResults: compactServiceMetrics.nullResults,
+    summaryInputsBuilt: compactServiceMetrics.summaryInputsBuilt,
+    summaryInputTruncations: compactServiceMetrics.summaryInputTruncations,
+    summaryInputSourceChars: compactServiceMetrics.summaryInputSourceChars,
+    summaryInputChars: compactServiceMetrics.summaryInputChars,
     totalMs: Number(compactServiceMetrics.totalMs.toFixed(3)),
     lastMs: Number(compactServiceMetrics.lastMs.toFixed(3)),
     avgMs: calls > 0 ? Number((compactServiceMetrics.totalMs / calls).toFixed(3)) : 0,

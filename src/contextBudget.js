@@ -4,9 +4,49 @@
 // Provides budget creation for different models and filtering of events
 // to fit within the effective context window.
 
+import { performance } from "node:perf_hooks";
 import { getEncoding } from "js-tiktoken";
 
 const encodings = new Map(); // cache encodings per model family
+const contextBudgetMetrics = {
+  textEstimateCalls: 0,
+  eventEstimateCalls: 0,
+  eventsEstimated: 0,
+  charsEstimated: 0,
+  totalEstimateMs: 0,
+  lastEstimateMs: 0
+};
+
+function observeEstimate({ textCall = false, eventCall = false, eventCount = 0, charCount = 0, startedAt = 0 } = {}) {
+  const elapsedMs = Math.max(0, performance.now() - startedAt);
+  if (textCall) contextBudgetMetrics.textEstimateCalls += 1;
+  if (eventCall) contextBudgetMetrics.eventEstimateCalls += 1;
+  contextBudgetMetrics.eventsEstimated += eventCount;
+  contextBudgetMetrics.charsEstimated += charCount;
+  contextBudgetMetrics.totalEstimateMs += elapsedMs;
+  contextBudgetMetrics.lastEstimateMs = elapsedMs;
+}
+
+export function resetContextBudgetMetrics() {
+  contextBudgetMetrics.textEstimateCalls = 0;
+  contextBudgetMetrics.eventEstimateCalls = 0;
+  contextBudgetMetrics.eventsEstimated = 0;
+  contextBudgetMetrics.charsEstimated = 0;
+  contextBudgetMetrics.totalEstimateMs = 0;
+  contextBudgetMetrics.lastEstimateMs = 0;
+}
+
+export function getContextBudgetMetrics() {
+  return {
+    textEstimateCalls: contextBudgetMetrics.textEstimateCalls,
+    eventEstimateCalls: contextBudgetMetrics.eventEstimateCalls,
+    eventsEstimated: contextBudgetMetrics.eventsEstimated,
+    charsEstimated: contextBudgetMetrics.charsEstimated,
+    totalEstimateMs: Number(contextBudgetMetrics.totalEstimateMs.toFixed(3)),
+    lastEstimateMs: Number(contextBudgetMetrics.lastEstimateMs.toFixed(3)),
+    encoderCacheSize: encodings.size
+  };
+}
 
 function getEncoder(modelHint = "") {
   const key = modelHint.includes("gpt") ? "cl100k_base" : "cl100k_base";
@@ -25,10 +65,16 @@ function getEncoder(modelHint = "") {
  * Falls back to rough char/3 estimate if tiktoken init fails.
  */
 export function estimateTokenCount(text = "", modelHint = "") {
-  if (!text) return 0;
-  const enc = getEncoder(modelHint);
-  if (enc) return enc.encode(text).length;
-  return Math.ceil(text.length / 3); // rough fallback for CJK text
+  const startedAt = performance.now();
+  const value = String(text || "");
+  try {
+    if (!value) return 0;
+    const enc = getEncoder(modelHint);
+    if (enc) return enc.encode(value).length;
+    return Math.ceil(value.length / 3); // rough fallback for CJK text
+  } finally {
+    observeEstimate({ textCall: true, charCount: value.length, startedAt });
+  }
 }
 
 /**
@@ -36,17 +82,22 @@ export function estimateTokenCount(text = "", modelHint = "") {
  * Concatenates relevant text fields.
  */
 export function estimateEventsTokenCount(events = [], modelHint = "") {
+  const startedAt = performance.now();
   let totalChars = 0;
-  for (const event of events) {
-    totalChars += String(event.text || "").length;
-    totalChars += String(event.type || "").length;
-    if (event.payload?.text) totalChars += String(event.payload.text).length;
-    if (event.payload?.input) totalChars += JSON.stringify(event.payload.input).length;
-    if (event.payload?.result) totalChars += JSON.stringify(event.payload.result).length;
+  try {
+    for (const event of events) {
+      totalChars += String(event.text || "").length;
+      totalChars += String(event.type || "").length;
+      if (event.payload?.text) totalChars += String(event.payload.text).length;
+      if (event.payload?.input) totalChars += JSON.stringify(event.payload.input).length;
+      if (event.payload?.result) totalChars += JSON.stringify(event.payload.result).length;
+    }
+    const enc = getEncoder(modelHint);
+    if (enc) return enc.encode("").length + Math.ceil(totalChars / 2.5);
+    return Math.ceil(totalChars / 3);
+  } finally {
+    observeEstimate({ eventCall: true, eventCount: events.length, charCount: totalChars, startedAt });
   }
-  const enc = getEncoder(modelHint);
-  if (enc) return enc.encode("").length + Math.ceil(totalChars / 2.5);
-  return Math.ceil(totalChars / 3);
 }
 
 /**

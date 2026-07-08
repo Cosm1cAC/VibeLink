@@ -8,6 +8,8 @@ import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
 
 const execFileAsync = promisify(execFile);
 const ignoredDirs = new Set([".git", "node_modules", ".next", "dist", "build", "coverage", ".agent-mobile-terminal"]);
+const gitSummaryCache = new Map();
+const gitSummaryCacheStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
   ".txt",
   ".md",
@@ -45,6 +47,44 @@ const textExtensions = new Set([
 function lineCount(value) {
   if (!value) return 0;
   return String(value).split(/\r?\n/).filter(Boolean).length;
+}
+
+function gitSummaryCacheTtlMs() {
+  const value = Number(process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS || 750);
+  return Number.isFinite(value) && value >= 0 ? value : 750;
+}
+
+function gitSummaryCacheKey(cwd = "") {
+  return path.resolve(cwd || "").toLowerCase();
+}
+
+function cloneGitSummary(summary = {}) {
+  return {
+    ...summary,
+    files: Array.isArray(summary.files) ? summary.files.map((file) => ({ ...file })) : [],
+    untrackedPreviewErrors: Array.isArray(summary.untrackedPreviewErrors)
+      ? summary.untrackedPreviewErrors.map((item) => ({ ...item }))
+      : []
+  };
+}
+
+function invalidateGitSummaryCache(cwd = "") {
+  if (!cwd) {
+    gitSummaryCache.clear();
+    return;
+  }
+  gitSummaryCache.delete(gitSummaryCacheKey(cwd));
+}
+
+export function getWorkspaceRuntimeStats() {
+  return {
+    gitSummaryCache: {
+      entries: gitSummaryCache.size,
+      hits: gitSummaryCacheStats.hits,
+      misses: gitSummaryCacheStats.misses,
+      ttlMs: gitSummaryCacheTtlMs()
+    }
+  };
 }
 
 function workspaceOrThrow(id) {
@@ -531,6 +571,26 @@ async function collectGitChangeSummary(cwd) {
   };
 }
 
+async function collectCachedGitChangeSummary(cwd) {
+  const ttlMs = gitSummaryCacheTtlMs();
+  const key = gitSummaryCacheKey(cwd);
+  const cached = gitSummaryCache.get(key);
+  if (ttlMs > 0 && cached && cached.expiresAt > Date.now()) {
+    gitSummaryCacheStats.hits += 1;
+    return cloneGitSummary(cached.summary);
+  }
+
+  gitSummaryCacheStats.misses += 1;
+  const summary = await collectGitChangeSummary(cwd);
+  if (ttlMs > 0) {
+    gitSummaryCache.set(key, {
+      expiresAt: Date.now() + ttlMs,
+      summary: cloneGitSummary(summary)
+    });
+  }
+  return summary;
+}
+
 export async function getWorkspaceGitStatus(id, settings) {
   const workspace = workspaceOrThrow(id);
   const cwd = resolveAllowedPath(workspace.path, settings);
@@ -556,7 +616,7 @@ export async function getWorkspaceGitDiff(id, settings) {
   const workspace = workspaceOrThrow(id);
   const cwd = resolveAllowedPath(workspace.path, settings);
   touchWorkspace(workspace.id);
-  const summary = await collectGitChangeSummary(cwd);
+  const summary = await collectCachedGitChangeSummary(cwd);
   return {
     ...summary,
     workspace,
@@ -616,7 +676,8 @@ export async function applyWorkspaceGitFileAction(id, settings, body = {}) {
     throw error;
   }
 
-  const summary = await collectGitChangeSummary(cwd);
+  invalidateGitSummaryCache(cwd);
+  const summary = await collectCachedGitChangeSummary(cwd);
   return {
     ok: true,
     action,
@@ -678,7 +739,8 @@ export async function applyWorkspaceGitAction(id, settings, body = {}) {
     throw error;
   }
 
-  const summary = await collectGitChangeSummary(cwd);
+  invalidateGitSummaryCache(cwd);
+  const summary = await collectCachedGitChangeSummary(cwd);
   return {
     ok: true,
     action,
@@ -864,7 +926,7 @@ export async function getTaskChanges(task, settings) {
 
   const cwd = resolveAllowedPath(task.cwd, settings);
   const workspace = upsertWorkspace({ path: cwd, allowedRoot: cwd, title: path.basename(cwd) || cwd });
-  const summary = await collectGitChangeSummary(cwd);
+  const summary = await collectCachedGitChangeSummary(cwd);
 
   return {
     ...summary,

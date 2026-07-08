@@ -115,6 +115,29 @@ test("getWorkspaceContext uses Rust scanner for directory samples when enabled",
   }
 });
 
+test("getWorkspaceContext refreshes Node scanner cache when nested directory changes", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-tree-cache-nested-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "src", "nested"), { recursive: true });
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "tree-cache-nested" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+
+  try {
+    const first = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["src"] });
+    fs.writeFileSync(path.join(fixture, "src", "nested", "added.txt"), "fresh", "utf8");
+    const second = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["src"] });
+
+    assert.equal(first.ok, true);
+    assert.doesNotMatch(first.prompt, /file src\/nested\/added\.txt/);
+    assert.match(second.prompt, /file src\/nested\/added\.txt/);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceTree tracks Node scanner budget hits", async () => {
   const fixture = path.join(os.tmpdir(), `vibelink-tree-budget-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });

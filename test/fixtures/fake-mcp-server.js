@@ -59,6 +59,9 @@ rl.on("line", (line) => {
   }
 
   if (message.method === "tools/call") {
+    if (process.env.FAKE_MCP_EXIT_ON_TOOL_CALL === "1") {
+      process.exit(17);
+    }
     sendLater(message.id, {
       content: [
         {

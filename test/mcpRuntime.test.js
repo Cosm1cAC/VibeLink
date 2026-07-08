@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { callMcpTool, closePersistentMcpSessions, configuredMcpServers, probeMcpServer } from "../src/mcpRuntime.js";
+import { callMcpTool, closePersistentMcpSessions, configuredMcpServers, mcpStatus, probeMcpServer } from "../src/mcpRuntime.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -132,5 +132,34 @@ test("probeMcpServer reuses a persistent stdio MCP session when enabled", async 
     if (previousFlag === undefined) delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
     else process.env.VIBELINK_MCP_PERSISTENT_SESSIONS = previousFlag;
     fs.rmSync(spawnLog, { force: true });
+  }
+});
+
+test("mcpStatus reports persistent session state", async () => {
+  const previousFlag = process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  process.env.VIBELINK_MCP_PERSISTENT_SESSIONS = "1";
+  const settings = {
+    mcp: {
+      servers: [
+        {
+          id: "fake-status",
+          name: "fake-status",
+          type: "stdio",
+          command: process.execPath,
+          args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+        }
+      ]
+    }
+  };
+
+  try {
+    await callMcpTool(settings, { serverId: "fake-status", toolName: "echo", arguments: { q: "status" } }, { timeoutMs: 5000 });
+    const status = mcpStatus(settings);
+    assert.equal(status.persistentSessions.enabled, true);
+    assert.equal(status.persistentSessions.sessions >= 1, true);
+  } finally {
+    await closePersistentMcpSessions();
+    if (previousFlag === undefined) delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+    else process.env.VIBELINK_MCP_PERSISTENT_SESSIONS = previousFlag;
   }
 });

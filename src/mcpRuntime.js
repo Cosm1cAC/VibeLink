@@ -139,6 +139,13 @@ export async function closePersistentMcpSessions() {
   persistentMcpSessions = null;
 }
 
+export function getPersistentMcpSessionStats() {
+  return {
+    enabled: isMcpPersistentSessionsEnabled(),
+    ...(persistentMcpSessions?.stats() || { sessions: 0 })
+  };
+}
+
 function parseMcpFullName(fullName = "") {
   const parts = String(fullName || "").split("__");
   if (parts[0] !== "mcp" || parts.length < 3) return { serverId: "", toolName: "" };
@@ -628,6 +635,7 @@ export function mcpStatus(settings = {}) {
     enabled: servers.filter((server) => server.enabled).length,
     servers,
     cachedTools: cachedCount,
+    persistentSessions: getPersistentMcpSessionStats(),
     probeTimeoutMs: settings.mcp?.probeTimeoutMs || 10000
   };
 }

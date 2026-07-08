@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import { storeMcpTools, getCachedMcpTools } from "./db.js";
 import { codebaseMemoryServerConfig, mergeCodebaseMemoryServer, withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
+import { createMcpSessionManager } from "./mcpSessionManager.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const MAX_TOOL_DESCRIPTION = 2048;
 const MAX_STDIO_BUFFER = 1024 * 1024;
+let persistentMcpSessions = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -120,6 +122,21 @@ function initializeParams() {
       version: "0.1.0"
     }
   };
+}
+
+export function isMcpPersistentSessionsEnabled() {
+  return process.env.VIBELINK_MCP_PERSISTENT_SESSIONS === "1";
+}
+
+function mcpSessionManager() {
+  if (!persistentMcpSessions) persistentMcpSessions = createMcpSessionManager();
+  return persistentMcpSessions;
+}
+
+export async function closePersistentMcpSessions() {
+  if (!persistentMcpSessions) return;
+  await persistentMcpSessions.closeAll();
+  persistentMcpSessions = null;
 }
 
 function parseMcpFullName(fullName = "") {
@@ -417,6 +434,12 @@ async function callStdioTool(server, toolName, toolArguments, timeoutMs, emitPro
   });
 }
 
+async function callPersistentStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
+  const session = await mcpSessionManager().getSession(server, { timeoutMs, emitProgress });
+  const result = await session.callTool(toolName, toolArguments || {}, { timeout: timeoutMs, emitProgress });
+  return { result, stderr: session.stats().stderr || "" };
+}
+
 export async function probeMcpServer(server = {}, { timeoutMs = 10000, emitProgress = null } = {}) {
   const startedAt = nowIso();
   const normalized = {
@@ -538,7 +561,9 @@ export async function callMcpTool(settings = {}, call = {}, { timeoutMs = 0, emi
   try {
     emitProgress?.({ phase: "tool.call.start", serverId: server.id, name: server.name, toolName });
     const resultEnvelope = server.type === "stdio"
-      ? await callStdioTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress)
+      ? isMcpPersistentSessionsEnabled()
+        ? await callPersistentStdioTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress)
+        : await callStdioTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress)
       : { result: await callHttpTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress) };
     const result = resultEnvelope.result || {};
     const content = Array.isArray(result.content) ? result.content : [];

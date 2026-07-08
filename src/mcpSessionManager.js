@@ -62,6 +62,7 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
   let closed = false;
   let initialized = null;
   const pending = new Map();
+  const defaultEmitProgress = emitProgress;
   const child = spawnFn(server.command, Array.isArray(server.args) ? server.args : [], {
     cwd: server.cwd || process.cwd(),
     env: withCodebaseMemoryPath({ ...process.env, ...(server.env || {}) }),
@@ -77,14 +78,19 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
     pending.clear();
   }
 
-  function write(message) {
+  function progress(callback, event) {
+    try { (callback || defaultEmitProgress)?.(event); } catch {}
+  }
+
+  function write(message, callback = null) {
     if (closed) throw new Error("MCP session is closed.");
-    emitProgress?.({ phase: "stdio.send", method: message.method, id: message.id });
+    progress(callback, { phase: "stdio.send", method: message.method, id: message.id });
     child.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
   }
 
-  function request(method, params, { timeout = timeoutMs } = {}) {
+  function request(method, params, options = {}) {
     if (closed) return Promise.reject(new Error("MCP session is closed."));
+    const { timeout = timeoutMs, emitProgress: requestEmitProgress = null } = options;
     const id = nextId++;
     const message = jsonRpcMessage(id, method, params);
     return new Promise((resolve, reject) => {
@@ -93,20 +99,20 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
         reject(timeoutError(method, timeout));
       }, Math.max(1, Number(timeout || timeoutMs)));
       timer.unref?.();
-      pending.set(id, { resolve, reject, timer, method });
-      write(message);
+      pending.set(id, { resolve, reject, timer, method, emitProgress: requestEmitProgress });
+      write(message, requestEmitProgress);
     });
   }
 
-  function notify(method, params) {
-    write(jsonRpcMessage(undefined, method, params));
+  function notify(method, params, callback = null) {
+    write(jsonRpcMessage(undefined, method, params), callback);
   }
 
-  async function ensureInitialized() {
+  async function ensureInitialized(options = {}) {
     if (!initialized) {
       initialized = (async () => {
-        const response = await request("initialize", initializeParams());
-        notify("notifications/initialized");
+        const response = await request("initialize", initializeParams(), options);
+        notify("notifications/initialized", undefined, options.emitProgress || null);
         return response.result || response;
       })();
     }
@@ -125,7 +131,7 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
         const pendingRequest = pending.get(message.id);
         pending.delete(message.id);
         clearTimeout(pendingRequest.timer);
-        emitProgress?.({ phase: "stdio.receive", method: pendingRequest.method, id: message.id });
+        progress(pendingRequest.emitProgress, { phase: "stdio.receive", method: pendingRequest.method, id: message.id });
         if (message.error) pendingRequest.reject(new Error(message.error.message || JSON.stringify(message.error)));
         else pendingRequest.resolve(message);
       }
@@ -136,7 +142,9 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
   child.stderr?.on("data", (chunk) => {
     stderr += chunk.toString();
     if (stderr.length > MAX_STDIO_BUFFER) stderr = stderr.slice(-MAX_STDIO_BUFFER);
-    emitProgress?.({ phase: "stdio.stderr", text: compact(chunk.toString(), 500) });
+    const callbacks = new Set([...pending.values()].map((item) => item.emitProgress).filter(Boolean));
+    if (callbacks.size === 0) progress(null, { phase: "stdio.stderr", text: compact(chunk.toString(), 500) });
+    for (const callback of callbacks) progress(callback, { phase: "stdio.stderr", text: compact(chunk.toString(), 500) });
   });
 
   child.on("error", (error) => rejectAll(error));
@@ -146,14 +154,14 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
   });
 
   return {
-    async listTools() {
-      await ensureInitialized();
-      const response = await request("tools/list");
+    async listTools(options = {}) {
+      await ensureInitialized(options);
+      const response = await request("tools/list", undefined, options);
       return Array.isArray(response.result?.tools) ? response.result.tools : [];
     },
-    async callTool(name, toolArguments = {}) {
-      await ensureInitialized();
-      const response = await request("tools/call", { name, arguments: toolArguments || {} });
+    async callTool(name, toolArguments = {}, options = {}) {
+      await ensureInitialized(options);
+      const response = await request("tools/call", { name, arguments: toolArguments || {} }, options);
       return response.result || response;
     },
     async close() {

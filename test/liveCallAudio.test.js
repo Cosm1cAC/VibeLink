@@ -15,6 +15,7 @@ class FakeWebSocket extends EventEmitter {
     this.OPEN = 1;
     this.readyState = this.OPEN;
     this.sent = [];
+    this.bufferedAmount = 0;
   }
 
   send(payload) {
@@ -55,6 +56,36 @@ test("live call audio metrics count frames and oversized drops", () => {
     assert.equal(sessionMetrics.frames, 1);
     assert.equal(sessionMetrics.bytes, 320);
     assert.equal(sessionMetrics.oversizedFrames, 1);
+  } finally {
+    stopLiveCallSession(session.id, "test-cleanup");
+  }
+});
+
+test("live call audio drops frames when websocket backpressure is high", () => {
+  resetLiveCallAudioMetrics();
+  const session = createLiveCallSession({
+    title: "Audio backpressure test",
+    source: "node-test",
+    asrProvider: "mock"
+  });
+  const ws = new FakeWebSocket();
+  ws.bufferedAmount = 2 * 1024 * 1024;
+
+  try {
+    handleLiveCallAudioConnection(session.id, ws, {});
+    ws.emit("message", Buffer.from(JSON.stringify({ sampleRate: 16000, channels: 1, device: "remote" })), false);
+    ws.emit("message", Buffer.alloc(320), true);
+    ws.close(1000, "test-done");
+
+    const metrics = getLiveCallAudioMetrics();
+    const sessionMetrics = metrics.sessions.find((item) => item.sessionId === session.id);
+
+    assert.equal(metrics.frames, 0);
+    assert.equal(metrics.bytes, 0);
+    assert.equal(metrics.droppedFrames, 1);
+    assert.equal(metrics.backpressureFrames, 1);
+    assert.equal(sessionMetrics.backpressureFrames, 1);
+    assert.equal(ws.sent.some((item) => item.type === "drop" && item.reason === "backpressure"), true);
   } finally {
     stopLiveCallSession(session.id, "test-cleanup");
   }

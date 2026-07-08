@@ -2,6 +2,14 @@ function cleanKey(value) {
   return String(value || "default");
 }
 
+function nowMs() {
+  return Number(process.hrtime.bigint()) / 1_000_000;
+}
+
+function roundMs(value) {
+  return Math.round(Number(value || 0) * 10) / 10;
+}
+
 export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize = 0 } = {}) {
   if (typeof flushBatch !== "function") {
     throw new TypeError("createEventStoreBatcher requires a flushBatch function.");
@@ -13,6 +21,9 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize
   let flushes = 0;
   let maxObservedBatchSize = 0;
   let lastFlushAt = "";
+  let totalEvents = 0;
+  let totalFlushDurationMs = 0;
+  let lastFlushDurationMs = 0;
   const batchSizeLimit = Number.isFinite(Number(maxBatchSize)) ? Math.max(0, Number(maxBatchSize)) : 0;
 
   function clearTimer() {
@@ -50,8 +61,10 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize
     if (queue.length === 0) return [];
 
     const items = queue.splice(0, queue.length);
+    const startedAt = nowMs();
     flushing = (async () => {
       flushes += 1;
+      totalEvents += items.length;
       maxObservedBatchSize = Math.max(maxObservedBatchSize, items.length);
       lastFlushAt = new Date().toISOString();
       const groups = new Map();
@@ -74,6 +87,8 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize
     try {
       return await flushing;
     } finally {
+      lastFlushDurationMs = roundMs(nowMs() - startedAt);
+      totalFlushDurationMs = roundMs(totalFlushDurationMs + lastFlushDurationMs);
       flushing = null;
       if (queue.length > 0) schedule();
     }
@@ -87,7 +102,11 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize
     return {
       pending: pendingCount(),
       flushes,
+      totalEvents,
+      avgBatchSize: flushes > 0 ? roundMs(totalEvents / flushes) : 0,
       maxBatchSize: maxObservedBatchSize,
+      lastFlushDurationMs,
+      avgFlushDurationMs: flushes > 0 ? roundMs(totalFlushDurationMs / flushes) : 0,
       lastFlushAt
     };
   }

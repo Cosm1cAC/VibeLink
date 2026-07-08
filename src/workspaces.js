@@ -12,7 +12,8 @@ const gitSummaryCache = new Map();
 const gitSummaryCacheStats = { hits: 0, misses: 0 };
 const gitStatusCache = new Map();
 const gitStatusCacheStats = { hits: 0, misses: 0 };
-const workspaceTreeStats = { budgetHits: 0 };
+const workspaceTreeCache = new Map();
+const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0 };
 const rustWorkspaceTreeStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
   ".txt",
@@ -144,7 +145,10 @@ export function getWorkspaceRuntimeStats() {
       ttlMs: gitSummaryCacheTtlMs()
     },
     workspaceTree: {
-      budgetHits: workspaceTreeStats.budgetHits
+      entries: workspaceTreeCache.size,
+      budgetHits: workspaceTreeStats.budgetHits,
+      cacheHits: workspaceTreeStats.cacheHits,
+      cacheMisses: workspaceTreeStats.cacheMisses
     },
     rustWorkspaceTree: {
       enabled: rustWorkspaceTreeEnabled(),
@@ -294,6 +298,24 @@ function rootGitignoreDirs(root) {
   }
 }
 
+function workspaceTreeCacheKey(dir, root, depth, maxEntries) {
+  const dirStat = fs.statSync(dir);
+  let gitignoreMtimeMs = 0;
+  try {
+    gitignoreMtimeMs = fs.statSync(path.join(root, ".gitignore")).mtimeMs;
+  } catch {
+    gitignoreMtimeMs = 0;
+  }
+  return JSON.stringify({
+    dir: path.resolve(dir),
+    root: path.resolve(root),
+    depth,
+    maxEntries,
+    dirMtimeMs: dirStat.mtimeMs,
+    gitignoreMtimeMs
+  });
+}
+
 function rustWorkspaceTreeEnabled() {
   return /^(1|true|yes|on)$/i.test(process.env.VIBELINK_RUST_WORKSPACE_TREE || "");
 }
@@ -345,6 +367,14 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
   }
 }
 function listDirectory(dir, root, depth = 1, maxEntries = 160) {
+  const cacheKey = workspaceTreeCacheKey(dir, root, depth, maxEntries);
+  const cached = workspaceTreeCache.get(cacheKey);
+  if (cached) {
+    workspaceTreeStats.cacheHits += 1;
+    return cached.map((item) => ({ ...item }));
+  }
+  workspaceTreeStats.cacheMisses += 1;
+
   const entries = [];
   const queue = [{ dir, depth: 0 }];
   const gitignoreDirs = rootGitignoreDirs(root);
@@ -381,6 +411,7 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
 
   if (entries.length >= maxEntries && queue.length) budgetHit = true;
   if (budgetHit) workspaceTreeStats.budgetHits += 1;
+  workspaceTreeCache.set(cacheKey, entries.map((item) => ({ ...item })));
   return entries;
 }
 

@@ -140,3 +140,28 @@ test("getWorkspaceTree tracks Node scanner budget hits", async () => {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+test("getWorkspaceTree reuses unchanged Node scanner results", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-tree-cache-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "tree-cache" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+
+  try {
+    const before = getWorkspaceRuntimeStats().workspaceTree;
+    const first = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const second = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().workspaceTree;
+
+    assert.equal(first.ok, true);
+    assert.deepEqual(second.items, first.items);
+    assert.equal(after.cacheHits, before.cacheHits + 1);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});

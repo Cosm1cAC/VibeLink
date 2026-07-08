@@ -67,7 +67,7 @@ import {
   stopLiveCallSession,
   subscribeLiveCallEvents
 } from "./liveCall.js";
-import { getLiveCallAsrCheckpoints, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
+import { getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
@@ -2122,6 +2122,11 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/live-calls/audio-metrics" && request.method === "GET") {
     sendJson(response, 200, { metrics: getLiveCallAudioMetrics() });
+    return;
+  }
+
+  if (url.pathname === "/api/live-calls/asr-metrics" && request.method === "GET") {
+    sendJson(response, 200, { metrics: getLiveCallAsrMetrics() });
     return;
   }
 

@@ -12,9 +12,11 @@ import {
 import {
   getActiveAsrProviderId,
   getLiveCallAsrCheckpoints,
+  getLiveCallAsrMetrics,
   ingestLiveCallAudio,
   listAsrProviders,
   recoverLiveCallAsrFromCheckpoints,
+  resetLiveCallAsrMetrics,
   setActiveAsrProvider
 } from "../src/liveCallAsr.js";
 
@@ -147,6 +149,65 @@ test("live call ASR normalizes audio, segments speech, and records checkpoints",
     assert.equal(checkpoints[0].exists, true);
     assert.ok(checkpoints[0].bytes > 0);
     assert.equal(recovered[0].channel, "remote");
+    stopLiveCallSession(session.id, "test-cleanup");
+  } finally {
+    setActiveAsrProvider(previousProvider);
+  }
+});
+
+test("live call ASR metrics count normalized audio segments", () => {
+  resetLiveCallAsrMetrics();
+  const previousProvider = getActiveAsrProviderId();
+  setActiveAsrProvider("mock");
+  try {
+    const session = createLiveCallSession({
+      title: "ASR metrics test",
+      source: "node-test",
+      asrProvider: "missing-real-provider"
+    });
+    const silence = Buffer.alloc(4800 * 2 * 2);
+    const speech = Buffer.alloc(4800 * 2 * 2);
+    for (let index = 0; index < speech.length; index += 2) speech.writeInt16LE(9000, index);
+
+    ingestLiveCallAudio(session.id, {
+      channel: "remote",
+      sampleRate: 48000,
+      channels: 2,
+      encoding: "pcm16le",
+      buffer: silence
+    });
+    ingestLiveCallAudio(session.id, {
+      channel: "remote",
+      sampleRate: 48000,
+      channels: 2,
+      encoding: "pcm16le",
+      buffer: speech
+    });
+    ingestLiveCallAudio(session.id, {
+      channel: "remote",
+      sampleRate: 48000,
+      channels: 2,
+      encoding: "pcm16le",
+      buffer: speech
+    });
+    ingestLiveCallAudio(session.id, {
+      channel: "remote",
+      sampleRate: 48000,
+      channels: 2,
+      encoding: "pcm16le",
+      buffer: silence
+    });
+    ingestLiveCallAudio(session.id, { channel: "remote", flush: true });
+
+    const metrics = getLiveCallAsrMetrics();
+    const sessionMetrics = metrics.sessions.find((item) => item.sessionId === session.id);
+
+    assert.ok(metrics.inputBytes > 0);
+    assert.ok(metrics.normalizedBytes > 0);
+    assert.ok(metrics.segments > 0);
+    assert.ok(metrics.providerFeedCalls > 0);
+    assert.equal(sessionMetrics.providerFallbacks, 1);
+    assert.equal(sessionMetrics.segments, metrics.segments);
     stopLiveCallSession(session.id, "test-cleanup");
   } finally {
     setActiveAsrProvider(previousProvider);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createEventStoreMetrics } from "../src/eventStoreMetrics.js";
+import { getEventStoreRuntimeStats, insertTaskEvent, upsertTask } from "../src/db.js";
 
 test("event store metrics aggregate latency and fallback counts", () => {
   const metrics = createEventStoreMetrics({ now: () => "2026-01-01T00:00:00.000Z" });
@@ -23,4 +24,26 @@ test("event store metrics aggregate latency and fallback counts", () => {
     worker: 2,
     "sync-fallback": 1
   });
+});
+test("db append paths record event store metrics", () => {
+  const taskId = `metrics-task-${Date.now()}`;
+  upsertTask({
+    id: taskId,
+    agent: "test",
+    title: "Metrics append test",
+    cwd: process.cwd(),
+    status: "running",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  });
+  insertTaskEvent(taskId, {
+    id: `${taskId}:event-1`,
+    at: "2026-01-01T00:00:00.000Z",
+    type: "stdout",
+    text: "one"
+  });
+
+  const stats = getEventStoreRuntimeStats();
+  assert.equal(stats.metrics.methods.insertTaskEvent.count >= 1, true);
+  assert.equal(stats.metrics.methods.insertTaskEvent.modeCounts.sync >= 1, true);
 });

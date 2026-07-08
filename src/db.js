@@ -443,6 +443,18 @@ function eventStoreWorkerClient() {
   return eventStoreWorker;
 }
 
+function eventStoreSyncCall(method, callback) {
+  const start = performance.now();
+  try {
+    const result = callback();
+    eventStoreMetrics.record({ method, mode: "sync", ok: true, durationMs: performance.now() - start });
+    return result;
+  } catch (error) {
+    eventStoreMetrics.record({ method, mode: "sync", ok: false, durationMs: performance.now() - start });
+    throw error;
+  }
+}
+
 async function eventStoreWorkerCall(method, args, fallback) {
   const client = eventStoreWorkerClient();
   if (!client) {
@@ -919,11 +931,11 @@ export function upsertTask(task) {
 }
 
 export function insertTaskEvent(taskId, event) {
-  return sqliteEventStore().insertTaskEvent(taskId, event);
+  return eventStoreSyncCall("insertTaskEvent", () => sqliteEventStore().insertTaskEvent(taskId, event));
 }
 
 export function insertTaskEvents(taskId, events = []) {
-  return sqliteEventStore().insertTaskEvents(taskId, events);
+  return eventStoreSyncCall("insertTaskEvents", () => sqliteEventStore().insertTaskEvents(taskId, events));
 }
 
 export function listTaskEvents(taskId, { after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
@@ -1060,11 +1072,11 @@ export function listToolRuns({ workspaceId = "", taskId = "", limit = 100 } = {}
 }
 
 export function insertToolEvent(toolRunId, event = {}) {
-  return sqliteEventStore().insertToolEvent(toolRunId, event);
+  return eventStoreSyncCall("insertToolEvent", () => sqliteEventStore().insertToolEvent(toolRunId, event));
 }
 
 export function insertToolEvents(toolRunId, events = []) {
-  return sqliteEventStore().insertToolEvents(toolRunId, events);
+  return eventStoreSyncCall("insertToolEvents", () => sqliteEventStore().insertToolEvents(toolRunId, events));
 }
 
 export function listToolEvents({ toolRunId = "", workspaceId = "", taskId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
@@ -1681,11 +1693,11 @@ export function updateLiveCall(id, patch = {}) {
 }
 
 export function insertLiveCallEvent(sessionId, event = {}) {
-  return sqliteEventStore().insertLiveCallEvent(sessionId, event);
+  return eventStoreSyncCall("insertLiveCallEvent", () => sqliteEventStore().insertLiveCallEvent(sessionId, event));
 }
 
 export function insertLiveCallEvents(sessionId, events = []) {
-  return sqliteEventStore().insertLiveCallEvents(sessionId, events);
+  return eventStoreSyncCall("insertLiveCallEvents", () => sqliteEventStore().insertLiveCallEvents(sessionId, events));
 }
 
 export function listLiveCallEvents({ sessionId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {

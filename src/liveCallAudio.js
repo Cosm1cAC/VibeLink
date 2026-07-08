@@ -27,6 +27,122 @@ import { ingestLiveCallAudio } from "./liveCallAsr.js";
 
 const MAX_FRAME_BYTES = 1 * 1024 * 1024; // 1 MB upper bound per binary frame
 
+function createAudioMetrics() {
+  return {
+    connections: 0,
+    activeConnections: 0,
+    frames: 0,
+    bytes: 0,
+    droppedFrames: 0,
+    oversizedFrames: 0,
+    errors: 0,
+    acks: 0,
+    maxFrameBytes: 0,
+    lastFrameAt: 0,
+    totalInterFrameMs: 0,
+    interFrameSamples: 0
+  };
+}
+
+const liveCallAudioMetrics = createAudioMetrics();
+const liveCallAudioSessionMetrics = new Map();
+
+function resetMetrics(target) {
+  Object.assign(target, createAudioMetrics());
+}
+
+function sessionMetrics(sessionId) {
+  let metrics = liveCallAudioSessionMetrics.get(sessionId);
+  if (!metrics) {
+    metrics = createAudioMetrics();
+    liveCallAudioSessionMetrics.set(sessionId, metrics);
+  }
+  return metrics;
+}
+
+function publicMetrics(metrics) {
+  const avgInterFrameMs = metrics.interFrameSamples
+    ? metrics.totalInterFrameMs / metrics.interFrameSamples
+    : 0;
+  return {
+    connections: metrics.connections,
+    activeConnections: metrics.activeConnections,
+    frames: metrics.frames,
+    bytes: metrics.bytes,
+    droppedFrames: metrics.droppedFrames,
+    oversizedFrames: metrics.oversizedFrames,
+    errors: metrics.errors,
+    acks: metrics.acks,
+    maxFrameBytes: metrics.maxFrameBytes,
+    avgInterFrameMs: Number(avgInterFrameMs.toFixed(2)),
+    lastFrameAt: metrics.lastFrameAt
+  };
+}
+
+function updateFrameMetrics(metrics, byteLength, now) {
+  metrics.frames += 1;
+  metrics.bytes += byteLength;
+  metrics.maxFrameBytes = Math.max(metrics.maxFrameBytes, byteLength);
+  if (metrics.lastFrameAt) {
+    metrics.totalInterFrameMs += Math.max(0, now - metrics.lastFrameAt);
+    metrics.interFrameSamples += 1;
+  }
+  metrics.lastFrameAt = now;
+}
+
+function recordAudioConnection(sessionId) {
+  liveCallAudioMetrics.connections += 1;
+  liveCallAudioMetrics.activeConnections += 1;
+  const metrics = sessionMetrics(sessionId);
+  metrics.connections += 1;
+  metrics.activeConnections += 1;
+}
+
+function recordAudioDisconnect(sessionId) {
+  liveCallAudioMetrics.activeConnections = Math.max(0, liveCallAudioMetrics.activeConnections - 1);
+  const metrics = sessionMetrics(sessionId);
+  metrics.activeConnections = Math.max(0, metrics.activeConnections - 1);
+}
+
+function recordAudioFrame(sessionId, byteLength) {
+  const now = Date.now();
+  updateFrameMetrics(liveCallAudioMetrics, byteLength, now);
+  updateFrameMetrics(sessionMetrics(sessionId), byteLength, now);
+}
+
+function recordDroppedFrame(sessionId, { oversized = false } = {}) {
+  liveCallAudioMetrics.droppedFrames += 1;
+  if (oversized) liveCallAudioMetrics.oversizedFrames += 1;
+  const metrics = sessionMetrics(sessionId);
+  metrics.droppedFrames += 1;
+  if (oversized) metrics.oversizedFrames += 1;
+}
+
+function recordAudioError(sessionId) {
+  liveCallAudioMetrics.errors += 1;
+  sessionMetrics(sessionId).errors += 1;
+}
+
+function recordAudioAck(sessionId) {
+  liveCallAudioMetrics.acks += 1;
+  sessionMetrics(sessionId).acks += 1;
+}
+
+export function resetLiveCallAudioMetrics() {
+  resetMetrics(liveCallAudioMetrics);
+  liveCallAudioSessionMetrics.clear();
+}
+
+export function getLiveCallAudioMetrics() {
+  return {
+    ...publicMetrics(liveCallAudioMetrics),
+    sessions: [...liveCallAudioSessionMetrics.entries()].map(([sessionId, metrics]) => ({
+      sessionId,
+      ...publicMetrics(metrics)
+    }))
+  };
+}
+
 function safeSend(ws, payload) {
   if (ws.readyState !== ws.OPEN) return;
   try {
@@ -48,6 +164,9 @@ export function handleLiveCallAudioConnection(sessionId, ws, ctx = {}) {
   let frameCount = 0;
   let bytes = 0;
   let startedAt = Date.now();
+  let closed = false;
+
+  recordAudioConnection(sessionId);
 
   emitLiveCallEvent(sessionId, "live_call.audio_stream.connected", {
     source: ctx?.auth?.device?.id ? "device" : "open",
@@ -116,11 +235,13 @@ export function handleLiveCallAudioConnection(sessionId, ws, ctx = {}) {
       const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       if (buf.length === 0) return;
       if (buf.length > MAX_FRAME_BYTES) {
+        recordDroppedFrame(sessionId, { oversized: true });
         safeSend(ws, { type: "error", error: "frame_too_large", bytes: buf.length });
         return;
       }
       bytes += buf.length;
       frameCount += 1;
+      recordAudioFrame(sessionId, buf.length);
       const channel = header.device === "local" ? "local" : "remote";
       ingestLiveCallAudio(sessionId, {
         channel,
@@ -131,14 +252,19 @@ export function handleLiveCallAudioConnection(sessionId, ws, ctx = {}) {
         seq: frameCount
       });
       if (frameCount % 20 === 0) {
+        recordAudioAck(sessionId);
         safeSend(ws, { type: "ack", seq: frameCount, bytes });
       }
     } catch (error) {
+      recordAudioError(sessionId);
       safeSend(ws, { type: "error", error: String(error?.message || error) });
     }
   });
 
   ws.on("close", (code, reason) => {
+    if (closed) return;
+    closed = true;
+    recordAudioDisconnect(sessionId);
     const durationMs = Date.now() - startedAt;
     emitLiveCallEvent(sessionId, "live_call.audio_stream.disconnected", {
       code,
@@ -151,6 +277,7 @@ export function handleLiveCallAudioConnection(sessionId, ws, ctx = {}) {
   });
 
   ws.on("error", (error) => {
+    recordAudioError(sessionId);
     safeSend(ws, { type: "error", error: error.message });
   });
 }

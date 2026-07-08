@@ -132,6 +132,31 @@ test("doubao ask can read prompt from stdin", async () => {
   }
 });
 
+test("doubao bridge keeps an older open extension connection after a newer one closes", async () => {
+  const daemon = await startBridgeDaemon({ port: 0, token: "test-token" });
+  const contentConnection = new WebSocket(`ws://127.0.0.1:${daemon.port}/extension?token=test-token`);
+  const workerConnection = new WebSocket(`ws://127.0.0.1:${daemon.port}/extension?token=test-token`);
+  await Promise.all([
+    new Promise((resolve) => contentConnection.once("open", resolve)),
+    new Promise((resolve) => workerConnection.once("open", resolve))
+  ]);
+
+  try {
+    workerConnection.close();
+    await new Promise((resolve) => workerConnection.once("close", resolve));
+
+    const result = await runCli(["doctor", "--json", "--port", String(daemon.port), "--token", "test-token"]);
+    const payload = JSON.parse(result.stdout.trim());
+
+    assert.equal(result.code, 0);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.bridge.extension.connected, true);
+  } finally {
+    contentConnection.close();
+    await daemon.close();
+  }
+});
+
 test("doubao daemon run starts a bridge process", async () => {
   const child = spawn(process.execPath, [cliPath, "daemon", "run", "--json", "--port", "0", "--token", "test-token"], {
     cwd: rootDir,

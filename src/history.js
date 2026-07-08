@@ -791,6 +791,20 @@ function codexSessionsFromIndex(home) {
     .slice(0, 300);
 }
 
+function archivedCodexSessionIds(home) {
+  const root = path.join(home, ".codex", "archived_sessions");
+  const ids = new Set();
+  if (!fs.existsSync(root)) return ids;
+
+  for (const filePath of walkFiles(root, (candidate, name) => name.endsWith(".jsonl"))) {
+    const first = readFirstJsonLine(filePath);
+    const id = first?.payload?.id || first?.payload?.session_id || first?.id || "";
+    if (id) ids.add(id);
+  }
+
+  return ids;
+}
+
 function codexSessionsFromFiles(home) {
   const root = path.join(home, ".codex", "sessions");
   return walkFiles(root, (filePath, name) => name.endsWith(".jsonl"))
@@ -828,10 +842,12 @@ export function listHistories({ fresh = false } = {}) {
   }
 
   const home = getHomeDir();
+  const archivedCodexIds = archivedCodexSessionIds(home);
   const codexById = new Map();
 
   for (const item of [...codexSessionsFromFiles(home), ...codexSessionsFromIndex(home)]) {
     if (!item.id) continue;
+    if (archivedCodexIds.has(item.id)) continue;
     const existing = codexById.get(item.id);
 
     if (!existing) {
@@ -904,3 +920,7 @@ export function getHistory(provider, id, { fresh = false } = {}) {
     transcript: []
   };
 }
+
+export const __testInternals = {
+  archivedCodexSessionIds
+};

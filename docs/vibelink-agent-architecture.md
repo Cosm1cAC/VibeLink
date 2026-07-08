@@ -187,6 +187,7 @@ VibeLink Agent 达到产品化的最低标准：
 
 - 用户能明确看到当前是 Codex Desktop Remote 还是 VibeLink Agent。
 - Codex Desktop Remote 只在刷新、进入绑定会话、发送/聚焦等动作时同步，不在后台持续监听 Desktop UI。
+- Codex Desktop Remote 会话区使用专门 transcript 视图，不复用 VibeLink Agent 的工具审计卡片流。
 - VibeLink Agent provider 可选择，模型列表和可用性来自同一个 registry。
 - 每次工具调用都有 `tool_run_id`、生命周期、审批状态和结果事件。
 - 服务重启、浏览器刷新、手机断线后能 replay 任务、工具卡和审批状态。

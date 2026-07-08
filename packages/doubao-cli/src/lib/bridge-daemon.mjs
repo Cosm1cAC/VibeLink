@@ -66,9 +66,11 @@ export async function startBridgeDaemon(options = {}) {
   const token = String(options.token || "");
   const port = Number(options.port ?? 45771);
   const pending = new Map();
-  let activeExtension = null;
+  const extensions = new Set();
 
-  const isExtensionConnected = () => activeExtension?.readyState === WebSocket.OPEN;
+  const openExtensions = () => [...extensions].filter((socket) => socket.readyState === WebSocket.OPEN);
+  const activeExtension = () => openExtensions().at(-1) || null;
+  const isExtensionConnected = () => Boolean(activeExtension());
 
   const requestExtension = (method, params = {}, timeoutMs = 120000) => new Promise((resolve, reject) => {
     if (!isExtensionConnected()) {
@@ -93,7 +95,7 @@ export async function startBridgeDaemon(options = {}) {
       }
     });
 
-    activeExtension.send(JSON.stringify({ id, type: "rpc", method, params }));
+    activeExtension().send(JSON.stringify({ id, type: "rpc", method, params }));
   });
 
   const server = http.createServer(async (request, response) => {
@@ -166,7 +168,7 @@ export async function startBridgeDaemon(options = {}) {
 
   const wss = new WebSocketServer({ noServer: true });
   wss.on("connection", (socket) => {
-    activeExtension = socket;
+    extensions.add(socket);
     socket.on("message", (data) => {
       let message;
       try {
@@ -180,7 +182,7 @@ export async function startBridgeDaemon(options = {}) {
       waiter.resolve(message);
     });
     socket.on("close", () => {
-      if (activeExtension === socket) activeExtension = null;
+      extensions.delete(socket);
     });
   });
 
@@ -207,6 +209,7 @@ export async function startBridgeDaemon(options = {}) {
     close: async () => {
       for (const waiter of pending.values()) waiter.reject(new Error("BRIDGE_CLOSED"));
       pending.clear();
+      extensions.clear();
       for (const client of wss.clients) client.close();
       await new Promise((resolve) => wss.close(resolve));
       await new Promise((resolve) => server.close(resolve));

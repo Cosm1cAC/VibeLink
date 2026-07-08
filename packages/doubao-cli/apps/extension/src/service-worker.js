@@ -87,7 +87,7 @@ async function sendToDoubaoContent(tabId, message) {
 async function handleDoubaoRequest(message, config) {
   const tab = await findOrCreateDoubaoTab(config);
   return sendToDoubaoContent(tab.id, {
-    type: `${message.method}.v2`,
+    type: `${message.method}.v4`,
     params: message.params || {}
   });
 }

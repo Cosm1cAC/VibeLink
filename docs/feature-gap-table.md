@@ -63,8 +63,9 @@
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
 | partial | Markdown 渲染 | 已接入 `react-markdown`、GFM、代码高亮、任务列表、表格、引用、数学公式和本地文件链接；仍缺 Mermaid、复杂 HTML/组件化块、Codex 原生级流式块结构和更细的安全策略。 | P1 |
-| partial | tool call 卡片 | 已有命令摘要卡和通用 tool call 卡，能显示文件、浏览器、插件、审批等类型的输入/输出 payload；仍缺 Codex 原生 tool schema、完整生命周期、审批交互和 Desktop 原生内部 tool 输出。 | P0 |
-| partial | Codex Desktop Remote 命令摘要 | 可从可见 transcript 和历史推断“已运行 N 条命令”和部分命令文本；仍没有完整输出、退出码和精确 tool 调用归属。 | P0 |
+| partial | tool call 卡片 | VibeLink Agent 视图保留命令摘要卡和通用 tool call 卡，可显示文件、浏览器、插件、审批等类型的输入/输出 payload；Codex Desktop Remote 默认改用轻量 transcript 工具行。仍缺 Codex 原生 tool schema、完整生命周期、审批交互和 Desktop 原生内部 tool 输出。 | P0 |
+| partial | Codex Desktop Remote transcript 视图 | 已为 Remote 单独渲染连续正文、hover 操作和轻量“已运行”工具行，避免默认展示 VibeLink Agent 审计卡片；仍需继续对齐 Codex 原生 turn 边距、顶部栏密度和更细粒度的命令折叠。 | P0 |
+| partial | Codex Desktop Remote 命令摘要 | 可从可见 transcript 和历史推断“已运行 N 条命令”和部分命令文本，并以轻量行插回 transcript；仍没有完整输出、退出码和精确 tool 调用归属。 | P0 |
 | partial | diff/change card | 已有 workspace/task Git status/diff 摘要、完整 patch 浏览、未跟踪文本文件伪 diff、复制 patch、文件定位、接受/拒绝文件变更和全部暂存；仍缺 per-hunk 操作、冲突处理、review 评论和 Codex 原生 change set。 | P1 |
 | partial | 图片显示 | 已支持本地图片代理、附件图片展示、错误占位、放大、下载、新窗口打开和多图图库；仍缺标注、缩放平移和更完整的媒体管理。 | P2 |
 | partial | artifact 视图 | 已有 artifact 列表，PDF/Text 可 iframe 预览，其他文件可下载或新窗口打开；仍缺 Office、PPT、表格、Notebook 等专门预览和结构化编辑。 | P2 |

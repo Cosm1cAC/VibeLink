@@ -50,6 +50,7 @@ Live Call Assistant
 - 只能读取可见 transcript 和可恢复历史，不能获得 Codex Desktop 未暴露的完整内部 tool 输出、退出码和归属。
 - 不负责选择 GPT/Claude/GLM/豆包等模型；模型只能来自 Codex Desktop 当前已支持、已登录、已选择的设置。
 - 不做常驻自动监听；只在刷新 VibeLink 浏览器端/Android 端、点进已绑定会话、发送/重试/聚焦等明确动作时半自动同步一次，避免 Codex Desktop 正在工作时被频繁采样打断。
+- 会话区默认使用 Codex Remote transcript 视图：连续正文 + 轻量“已运行”工具行；完整 tool 审计卡片保留给 VibeLink Agent 视图。
 - 不作为 VibeLink Agent 的替代品。
 
 ### VibeLink Agent

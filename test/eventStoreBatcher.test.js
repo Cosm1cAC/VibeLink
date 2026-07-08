@@ -17,6 +17,7 @@ test("event store batcher flushes grouped events in order", async () => {
   const second = batcher.enqueue("tool:1", { id: "b" });
   const third = batcher.enqueue("task:1", { id: "c" });
 
+  assert.equal(batcher.stats().pending, 3);
   await batcher.flushNow();
 
   assert.deepEqual(flushed, [
@@ -29,4 +30,7 @@ test("event store batcher flushes grouped events in order", async () => {
     "task:1:c:0"
   ]);
   assert.equal(batcher.pendingCount(), 0);
+  assert.equal(batcher.stats().flushes, 1);
+  assert.equal(batcher.stats().maxBatchSize, 3);
+  assert.equal(typeof batcher.stats().lastFlushAt, "string");
 });

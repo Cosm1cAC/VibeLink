@@ -10,6 +10,9 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
   const queue = [];
   let timer = null;
   let flushing = null;
+  let flushes = 0;
+  let maxBatchSize = 0;
+  let lastFlushAt = "";
 
   function clearTimer() {
     if (!timer) return;
@@ -40,6 +43,9 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
 
     const items = queue.splice(0, queue.length);
     flushing = (async () => {
+      flushes += 1;
+      maxBatchSize = Math.max(maxBatchSize, items.length);
+      lastFlushAt = new Date().toISOString();
       const groups = new Map();
       for (const item of items) {
         if (!groups.has(item.key)) groups.set(item.key, []);
@@ -69,5 +75,14 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
     return queue.length;
   }
 
-  return { enqueue, flushNow, pendingCount };
+  function stats() {
+    return {
+      pending: pendingCount(),
+      flushes,
+      maxBatchSize,
+      lastFlushAt
+    };
+  }
+
+  return { enqueue, flushNow, pendingCount, stats };
 }

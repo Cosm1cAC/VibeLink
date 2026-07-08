@@ -32,7 +32,8 @@ const compactServiceMetrics = {
   compactedContextsReturned: 0,
   nullResults: 0,
   totalMs: 0,
-  lastMs: 0
+  lastMs: 0,
+  maxMs: 0
 };
 
 function observeCompactService(operation, { eventCount = 0, summaryRequest = false, compactedContext = false, nullResult = false, startedAt = 0 } = {}) {
@@ -46,6 +47,7 @@ function observeCompactService(operation, { eventCount = 0, summaryRequest = fal
   if (nullResult) compactServiceMetrics.nullResults += 1;
   compactServiceMetrics.totalMs += elapsedMs;
   compactServiceMetrics.lastMs = elapsedMs;
+  compactServiceMetrics.maxMs = Math.max(compactServiceMetrics.maxMs, elapsedMs);
 }
 
 export function resetCompactServiceMetrics() {
@@ -58,9 +60,11 @@ export function resetCompactServiceMetrics() {
   compactServiceMetrics.nullResults = 0;
   compactServiceMetrics.totalMs = 0;
   compactServiceMetrics.lastMs = 0;
+  compactServiceMetrics.maxMs = 0;
 }
 
 export function getCompactServiceMetrics() {
+  const calls = compactServiceMetrics.budgetChecks + compactServiceMetrics.compactTaskCalls + compactServiceMetrics.buildContextCalls;
   return {
     budgetChecks: compactServiceMetrics.budgetChecks,
     compactTaskCalls: compactServiceMetrics.compactTaskCalls,
@@ -70,7 +74,9 @@ export function getCompactServiceMetrics() {
     compactedContextsReturned: compactServiceMetrics.compactedContextsReturned,
     nullResults: compactServiceMetrics.nullResults,
     totalMs: Number(compactServiceMetrics.totalMs.toFixed(3)),
-    lastMs: Number(compactServiceMetrics.lastMs.toFixed(3))
+    lastMs: Number(compactServiceMetrics.lastMs.toFixed(3)),
+    avgMs: calls > 0 ? Number((compactServiceMetrics.totalMs / calls).toFixed(3)) : 0,
+    maxMs: Number(compactServiceMetrics.maxMs.toFixed(3))
   };
 }
 

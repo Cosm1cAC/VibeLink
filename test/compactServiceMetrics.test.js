@@ -27,4 +27,6 @@ test("compact service metrics count compacted context builds", () => {
   assert.equal(metrics.eventsChecked, 2);
   assert.equal(metrics.compactedContextsReturned, 1);
   assert.ok(metrics.totalMs >= 0);
+  assert.equal(typeof metrics.avgMs, "number");
+  assert.equal(typeof metrics.maxMs, "number");
 });

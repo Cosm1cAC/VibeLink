@@ -103,3 +103,25 @@ test("event store worker handles append and replay requests", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("event store worker client rejects requests above the pending cap", async () => {
+  const { dir, dbPath } = createWorkerDb();
+  const client = createEventStoreWorkerClient({
+    dbPath,
+    timeoutMs: 5000,
+    maxPendingRequests: 1,
+    workerUrl: new URL("./fixtures/slow-event-store-worker.js", import.meta.url)
+  });
+
+  try {
+    const first = client.request("slow", []);
+    await assert.rejects(
+      client.request("slow", []),
+      (error) => error.code === "EEVENTSTOREBACKPRESSURE"
+    );
+    assert.equal(await first, true);
+  } finally {
+    await client.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

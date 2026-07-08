@@ -65,3 +65,15 @@ test("db append paths record event store metrics", () => {
   assert.equal(stats.metrics.methods.insertTaskEvent.count >= 1, true);
   assert.equal(stats.metrics.methods.insertTaskEvent.modeCounts.sync >= 1, true);
 });
+
+test("db event store metrics expose runtime stall threshold env", () => {
+  const previousThreshold = process.env.VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS;
+  process.env.VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS = "17";
+  try {
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.metrics.stalls.thresholdMs, 17);
+  } finally {
+    if (previousThreshold === undefined) delete process.env.VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS;
+    else process.env.VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS = previousThreshold;
+  }
+});

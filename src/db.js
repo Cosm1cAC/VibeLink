@@ -4,6 +4,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { dataDir } from "./config.js";
+import { createEventStoreBatcher } from "./eventStoreBatcher.js";
 import { DEFAULT_EVENT_REPLAY_LIMIT, createSqliteEventStore, normalizeEventReplayLimit } from "./eventStore.js";
 import { createEventStoreMetrics } from "./eventStoreMetrics.js";
 import { createEventStoreWorkerClient } from "./eventStoreWorkerClient.js";
@@ -416,10 +417,15 @@ function sqliteEventStore() {
 
 let eventStoreWorker = null;
 let eventStoreWorkerFailed = false;
+let toolEventAppendBatcher = null;
 const eventStoreMetrics = createEventStoreMetrics();
 
 export function isEventStoreWorkerEnabled() {
   return process.env.VIBELINK_EVENT_STORE_WORKER === "1";
+}
+
+export function isEventStoreBatchAppendEnabled() {
+  return process.env.VIBELINK_EVENT_STORE_BATCH_APPEND === "1";
 }
 
 export function eventStoreMode() {
@@ -432,7 +438,36 @@ export function getEventStoreRuntimeStats() {
     mode: eventStoreMode(),
     workerEnabled: isEventStoreWorkerEnabled(),
     workerFailed: eventStoreWorkerFailed,
+    batchAppend: getToolEventBatchAppendStats(),
     metrics: eventStoreMetrics.snapshot()
+  };
+}
+
+function eventStoreBatchDelayMs() {
+  const value = Number(process.env.VIBELINK_EVENT_STORE_BATCH_DELAY_MS || 50);
+  return Number.isFinite(value) && value >= 0 ? value : 50;
+}
+
+function toolEventBatcher() {
+  if (!toolEventAppendBatcher) {
+    toolEventAppendBatcher = createEventStoreBatcher({
+      delayMs: eventStoreBatchDelayMs(),
+      flushBatch: (toolRunId, events) => insertToolEvents(toolRunId, events)
+    });
+  }
+  return toolEventAppendBatcher;
+}
+
+function getToolEventBatchAppendStats() {
+  const stats = toolEventAppendBatcher?.stats() || {
+    pending: 0,
+    flushes: 0,
+    maxBatchSize: 0,
+    lastFlushAt: ""
+  };
+  return {
+    enabled: isEventStoreBatchAppendEnabled(),
+    ...stats
   };
 }
 
@@ -1077,6 +1112,16 @@ export function insertToolEvent(toolRunId, event = {}) {
 
 export function insertToolEvents(toolRunId, events = []) {
   return eventStoreSyncCall("insertToolEvents", () => sqliteEventStore().insertToolEvents(toolRunId, events));
+}
+
+export async function insertToolEventBatchedAsync(toolRunId, event = {}) {
+  if (!isEventStoreBatchAppendEnabled()) return insertToolEvent(toolRunId, event);
+  return toolEventBatcher().enqueue(cleanString(toolRunId, 160), event);
+}
+
+export async function flushToolEventBatches() {
+  if (!toolEventAppendBatcher) return [];
+  return toolEventAppendBatcher.flushNow();
 }
 
 export function listToolEvents({ toolRunId = "", workspaceId = "", taskId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {

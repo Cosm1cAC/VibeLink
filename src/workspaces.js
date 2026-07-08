@@ -12,6 +12,7 @@ const gitSummaryCache = new Map();
 const gitSummaryCacheStats = { hits: 0, misses: 0 };
 const gitStatusCache = new Map();
 const gitStatusCacheStats = { hits: 0, misses: 0 };
+const workspaceTreeStats = { budgetHits: 0 };
 const rustWorkspaceTreeStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
   ".txt",
@@ -141,6 +142,9 @@ export function getWorkspaceRuntimeStats() {
       hits: gitStatusCacheStats.hits,
       misses: gitStatusCacheStats.misses,
       ttlMs: gitSummaryCacheTtlMs()
+    },
+    workspaceTree: {
+      budgetHits: workspaceTreeStats.budgetHits
     },
     rustWorkspaceTree: {
       enabled: rustWorkspaceTreeEnabled(),
@@ -344,6 +348,7 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
   const entries = [];
   const queue = [{ dir, depth: 0 }];
   const gitignoreDirs = rootGitignoreDirs(root);
+  let budgetHit = false;
 
   while (queue.length && entries.length < maxEntries) {
     const current = queue.shift();
@@ -355,7 +360,10 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
       .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
 
     for (const entry of children) {
-      if (entries.length >= maxEntries) break;
+      if (entries.length >= maxEntries) {
+        budgetHit = true;
+        break;
+      }
       const fullPath = path.join(current.dir, entry.name);
       const stat = fs.statSync(fullPath);
       const rel = path.relative(root, fullPath).replaceAll("\\", "/");
@@ -371,6 +379,8 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
     }
   }
 
+  if (entries.length >= maxEntries && queue.length) budgetHit = true;
+  if (budgetHit) workspaceTreeStats.budgetHits += 1;
   return entries;
 }
 

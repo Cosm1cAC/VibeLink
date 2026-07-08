@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { upsertWorkspace } from "../src/db.js";
-import { getWorkspaceGitDiff, getWorkspaceRuntimeStats } from "../src/workspaces.js";
+import { getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaceRuntimeStats } from "../src/workspaces.js";
 
 function git(cwd, args) {
   return execFileSync("git", args, {
@@ -72,6 +72,35 @@ test("getWorkspaceGitDiff refreshes the cache when the worktree changes", async 
   } finally {
     if (previousTtl === undefined) delete process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS;
     else process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS = previousTtl;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceGitStatus reuses a short-lived git status cache", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-git-status-cache-"));
+  const repo = path.join(tempRoot, "repo");
+  fs.mkdirSync(repo, { recursive: true });
+  git(repo, ["init", "-b", "main"]);
+  git(repo, ["config", "user.email", "test@example.com"]);
+  git(repo, ["config", "user.name", "VibeLink Test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "# Test\n", "utf8");
+  git(repo, ["add", "README.md"]);
+  git(repo, ["commit", "-m", "initial"]);
+  fs.writeFileSync(path.join(repo, "NEW.md"), "new\n", "utf8");
+
+  const workspace = upsertWorkspace({ path: repo, allowedRoot: repo, title: "git-status-cache" });
+
+  try {
+    const before = getWorkspaceRuntimeStats().gitStatusCache;
+    const first = await getWorkspaceGitStatus(workspace.id, { allowedRoots: [tempRoot] });
+    const second = await getWorkspaceGitStatus(workspace.id, { allowedRoots: [tempRoot] });
+    const after = getWorkspaceRuntimeStats().gitStatusCache;
+
+    assert.equal(first.changedCount, 1);
+    assert.equal(second.changedCount, 1);
+    assert.equal(after.misses, before.misses + 1);
+    assert.equal(after.hits, before.hits + 1);
+  } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });

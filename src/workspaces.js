@@ -10,6 +10,8 @@ const execFileAsync = promisify(execFile);
 const ignoredDirs = new Set([".git", "node_modules", ".next", "dist", "build", "target", "coverage", ".agent-mobile-terminal"]);
 const gitSummaryCache = new Map();
 const gitSummaryCacheStats = { hits: 0, misses: 0 };
+const gitStatusCache = new Map();
+const gitStatusCacheStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
   ".txt",
   ".md",
@@ -118,9 +120,11 @@ function cloneGitSummary(summary = {}) {
 function invalidateGitSummaryCache(cwd = "") {
   if (!cwd) {
     gitSummaryCache.clear();
+    gitStatusCache.clear();
     return;
   }
   gitSummaryCache.delete(gitSummaryCacheKey(cwd));
+  gitStatusCache.delete(gitSummaryCacheKey(cwd));
 }
 
 export function getWorkspaceRuntimeStats() {
@@ -129,6 +133,12 @@ export function getWorkspaceRuntimeStats() {
       entries: gitSummaryCache.size,
       hits: gitSummaryCacheStats.hits,
       misses: gitSummaryCacheStats.misses,
+      ttlMs: gitSummaryCacheTtlMs()
+    },
+    gitStatusCache: {
+      entries: gitStatusCache.size,
+      hits: gitStatusCacheStats.hits,
+      misses: gitStatusCacheStats.misses,
       ttlMs: gitSummaryCacheTtlMs()
     }
   };
@@ -640,24 +650,61 @@ async function collectCachedGitChangeSummary(cwd) {
   return summary;
 }
 
+function gitStatusSummary(stdout = "", result = {}) {
+  const lines = String(stdout || "").split(/\r?\n/).filter(Boolean);
+  const branchLine = lines.find((line) => line.startsWith("##")) || "";
+  const files = parseStatusFiles(stdout);
+  return {
+    ok: result.ok,
+    branch: branchLine.replace(/^##\s*/, ""),
+    files,
+    changedCount: files.length,
+    stdout,
+    stderr: result.stderr || "",
+    exitCode: result.exitCode || 0
+  };
+}
+
+function cloneGitStatusSummary(summary = {}) {
+  return {
+    ...summary,
+    files: Array.isArray(summary.files) ? summary.files.map((file) => ({ ...file })) : []
+  };
+}
+
+async function collectCachedGitStatus(cwd) {
+  const ttlMs = gitSummaryCacheTtlMs();
+  const key = gitSummaryCacheKey(cwd);
+  const signature = gitSummaryCacheSignature(cwd);
+  const cached = gitStatusCache.get(key);
+  if (ttlMs > 0 && cached && cached.signature === signature && cached.expiresAt > Date.now()) {
+    gitStatusCacheStats.hits += 1;
+    return cloneGitStatusSummary(cached.summary);
+  }
+
+  gitStatusCacheStats.misses += 1;
+  const result = await git(["status", "--porcelain=v1", "-b"], cwd);
+  const summary = gitStatusSummary(result.stdout, result);
+  if (ttlMs > 0) {
+    gitStatusCache.set(key, {
+      expiresAt: Date.now() + ttlMs,
+      signature: gitSummaryCacheSignature(cwd),
+      summary: cloneGitStatusSummary(summary)
+    });
+  }
+  return summary;
+}
+
 export async function getWorkspaceGitStatus(id, settings) {
   const workspace = workspaceOrThrow(id);
   const cwd = resolveAllowedPath(workspace.path, settings);
   touchWorkspace(workspace.id);
-  const result = await git(["status", "--porcelain=v1", "-b"], cwd);
-  const lines = result.stdout.split(/\r?\n/).filter(Boolean);
-  const branchLine = lines.find((line) => line.startsWith("##")) || "";
-  const files = parseStatusFiles(result.stdout);
+  const summary = await collectCachedGitStatus(cwd);
 
   return {
-    ok: result.ok,
+    ...summary,
     workspace,
-    branch: branchLine.replace(/^##\s*/, ""),
-    files,
-    changedCount: files.length,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    exitCode: result.exitCode || 0
+    cwd
   };
 }
 

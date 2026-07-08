@@ -2120,6 +2120,11 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/live-calls/audio-metrics" && request.method === "GET") {
+    sendJson(response, 200, { metrics: getLiveCallAudioMetrics() });
+    return;
+  }
+
   if (url.pathname === "/api/live-calls" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "live_call.create", { limit: 20, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
@@ -3270,7 +3275,7 @@ const server = http.createServer(async (request, response) => {
 });
 
 import { WebSocketServer } from "ws";
-import { handleLiveCallAudioConnection } from "./liveCallAudio.js";
+import { getLiveCallAudioMetrics, handleLiveCallAudioConnection } from "./liveCallAudio.js";
 
 server.on("clientError", (error, socket) => {
   try {

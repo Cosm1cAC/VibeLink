@@ -63,8 +63,11 @@ test("getWorkspaceTree falls back to Node scanner when Rust scanner fails", asyn
   fs.rmSync(fixture, { recursive: true, force: true });
   fs.mkdirSync(path.join(fixture, "src"), { recursive: true });
   fs.mkdirSync(path.join(fixture, "target"), { recursive: true });
+  fs.mkdirSync(path.join(fixture, "tmp-cache"), { recursive: true });
+  fs.writeFileSync(path.join(fixture, ".gitignore"), "tmp-cache/\n", "utf8");
   fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
   fs.writeFileSync(path.join(fixture, "target", "noise.txt"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "tmp-cache", "noise.txt"), "ignored", "utf8");
 
   const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-fallback" });
   const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
@@ -76,6 +79,7 @@ test("getWorkspaceTree falls back to Node scanner when Rust scanner fails", asyn
     const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
     assert.equal(result.ok, true);
     assert.deepEqual(result.items.map((item) => item.name), ["src", "README.md"]);
+    assert.equal(result.items.some((item) => item.path.startsWith("tmp-cache")), false);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);

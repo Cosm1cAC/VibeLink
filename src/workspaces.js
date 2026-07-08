@@ -273,6 +273,23 @@ function readTextSample(filePath, stat) {
   return raw.toString("utf8");
 }
 
+function rootGitignoreDirs(root) {
+  try {
+    const dirs = new Set();
+    const content = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!") || trimmed.includes("*")) continue;
+      const pattern = trimmed.replace(/^\/+/, "").replace(/\/+$/, "");
+      if (!pattern || pattern.includes("/")) continue;
+      dirs.add(pattern);
+    }
+    return dirs;
+  } catch {
+    return new Set();
+  }
+}
+
 function rustWorkspaceTreeEnabled() {
   return /^(1|true|yes|on)$/i.test(process.env.VIBELINK_RUST_WORKSPACE_TREE || "");
 }
@@ -326,6 +343,7 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
 function listDirectory(dir, root, depth = 1, maxEntries = 160) {
   const entries = [];
   const queue = [{ dir, depth: 0 }];
+  const gitignoreDirs = rootGitignoreDirs(root);
 
   while (queue.length && entries.length < maxEntries) {
     const current = queue.shift();
@@ -333,6 +351,7 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
       .readdirSync(current.dir, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith(".") || entry.name === ".env")
       .filter((entry) => !(entry.isDirectory() && ignoredDirs.has(entry.name)))
+      .filter((entry) => !(entry.isDirectory() && gitignoreDirs.has(entry.name)))
       .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
 
     for (const entry of children) {

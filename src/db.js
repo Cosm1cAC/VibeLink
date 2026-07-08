@@ -1,9 +1,11 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { dataDir } from "./config.js";
 import { DEFAULT_EVENT_REPLAY_LIMIT, createSqliteEventStore, normalizeEventReplayLimit } from "./eventStore.js";
+import { createEventStoreMetrics } from "./eventStoreMetrics.js";
 import { createEventStoreWorkerClient } from "./eventStoreWorkerClient.js";
 
 const dbPath = path.join(dataDir, "mobile-agent.sqlite");
@@ -414,6 +416,7 @@ function sqliteEventStore() {
 
 let eventStoreWorker = null;
 let eventStoreWorkerFailed = false;
+const eventStoreMetrics = createEventStoreMetrics();
 
 export function isEventStoreWorkerEnabled() {
   return process.env.VIBELINK_EVENT_STORE_WORKER === "1";
@@ -422,6 +425,15 @@ export function isEventStoreWorkerEnabled() {
 export function eventStoreMode() {
   if (!isEventStoreWorkerEnabled()) return "sync";
   return eventStoreWorkerFailed ? "sync-fallback" : "worker";
+}
+
+export function getEventStoreRuntimeStats() {
+  return {
+    mode: eventStoreMode(),
+    workerEnabled: isEventStoreWorkerEnabled(),
+    workerFailed: eventStoreWorkerFailed,
+    metrics: eventStoreMetrics.snapshot()
+  };
 }
 
 function eventStoreWorkerClient() {
@@ -433,16 +445,39 @@ function eventStoreWorkerClient() {
 
 async function eventStoreWorkerCall(method, args, fallback) {
   const client = eventStoreWorkerClient();
-  if (!client) return fallback();
+  if (!client) {
+    const start = performance.now();
+    try {
+      const result = await fallback();
+      eventStoreMetrics.record({ method, mode: eventStoreMode(), ok: true, durationMs: performance.now() - start });
+      return result;
+    } catch (error) {
+      eventStoreMetrics.record({ method, mode: eventStoreMode(), ok: false, durationMs: performance.now() - start });
+      throw error;
+    }
+  }
+
+  const workerStart = performance.now();
   try {
-    return await client.request(method, args);
+    const result = await client.request(method, args);
+    eventStoreMetrics.record({ method, mode: "worker", ok: true, durationMs: performance.now() - workerStart });
+    return result;
   } catch (error) {
+    eventStoreMetrics.record({ method, mode: "worker", ok: false, durationMs: performance.now() - workerStart, fallback: true });
     eventStoreWorkerFailed = true;
     const failedWorker = eventStoreWorker;
     eventStoreWorker = null;
     failedWorker?.close().catch(() => {});
     console.warn(`[eventStore] worker failed; falling back to sync SQLite: ${error.message}`);
-    return fallback();
+    const fallbackStart = performance.now();
+    try {
+      const result = await fallback();
+      eventStoreMetrics.record({ method, mode: "sync-fallback", ok: true, durationMs: performance.now() - fallbackStart });
+      return result;
+    } catch (fallbackError) {
+      eventStoreMetrics.record({ method, mode: "sync-fallback", ok: false, durationMs: performance.now() - fallbackStart });
+      throw fallbackError;
+    }
   }
 }
 

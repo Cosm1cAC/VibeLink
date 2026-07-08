@@ -24,6 +24,7 @@ import { appendExternalTaskEvent } from "./agents.js";
 import { listTaskEvents, resolveEventReplayLimit } from "./db.js";
 
 export const DEFAULT_COMPACT_EVENT_LIMIT = 1000;
+export const DEFAULT_COMPACT_INPUT_MAX_CHARS = 120_000;
 
 const compactServiceMetrics = {
   budgetChecks: 0,
@@ -40,6 +41,52 @@ const compactServiceMetrics = {
 
 export function resolveCompactEventLimit(value, options = {}) {
   return resolveEventReplayLimit(value, { defaultLimit: DEFAULT_COMPACT_EVENT_LIMIT, ...options });
+}
+
+export function buildCompactSummaryInput(events = [], { maxChars = DEFAULT_COMPACT_INPUT_MAX_CHARS } = {}) {
+  const maximum = Math.max(1, Number(maxChars || DEFAULT_COMPACT_INPUT_MAX_CHARS));
+  let sourceChars = 0;
+  let includedEvents = 0;
+  let skippedEvents = 0;
+  let truncated = false;
+  const lines = [];
+
+  for (const ev of events) {
+    const type = ev.type || "";
+    if (type.startsWith("tool.output") || type.startsWith("stderr") || type.startsWith("tool.started")) {
+      skippedEvents += 1;
+      continue;
+    }
+
+    const role = kindToRole(ev.kind || ev.type || "");
+    const text = ev.text || ev.payload?.text || "";
+    if (!role && !text) {
+      skippedEvents += 1;
+      continue;
+    }
+
+    const line = `${role ? role + ": " : ""}${text}`;
+    sourceChars += String(text).length;
+    includedEvents += 1;
+    if (truncated) continue;
+    const nextText = lines.length ? `${lines.join("\n")}\n${line}` : line;
+    if (nextText.length > maximum) {
+      const current = lines.join("\n");
+      const remaining = Math.max(0, maximum - (current.length ? current.length + 1 : 0));
+      if (remaining > 0) lines.push(line.slice(0, remaining));
+      truncated = true;
+      continue;
+    }
+    lines.push(line);
+  }
+
+  return {
+    text: lines.join("\n"),
+    sourceChars,
+    includedEvents,
+    skippedEvents,
+    truncated
+  };
 }
 
 function observeCompactService(operation, { eventCount = 0, summaryRequest = false, compactedContext = false, nullResult = false, startedAt = 0 } = {}) {
@@ -145,24 +192,9 @@ export async function compactTask(taskId, model = "", options = {}) {
       return null;
     }
 
-    // Extract compactable text (skip binary/running tool output).
-    const compactable = events
-      .filter((ev) => {
-        const type = ev.type || "";
-        return !type.startsWith("tool.output") &&
-               !type.startsWith("stderr") &&
-               !type.startsWith("tool.started");
-      })
-      .map((ev) => {
-        const role = kindToRole(ev.kind || ev.type || "");
-        const text = ev.text || ev.payload?.text || "";
-        if (!role && !text) return "";
-        return `${role ? role + ": " : ""}${text}`;
-      })
-      .filter(Boolean)
-      .join("\n");
+    const compactable = buildCompactSummaryInput(events, { maxChars: options.maxInputChars });
 
-    if (!compactable.trim()) {
+    if (!compactable.text.trim()) {
       nullResult = true;
       return null;
     }
@@ -181,7 +213,9 @@ export async function compactTask(taskId, model = "", options = {}) {
         eventCount: events.length,
         tokenEstimate: report.used,
         excessTokens,
-        compactableLength: compactable.length
+        compactableLength: compactable.text.length,
+        compactableSourceChars: compactable.sourceChars,
+        compactableTruncated: compactable.truncated
       }
     };
 

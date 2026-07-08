@@ -458,7 +458,7 @@ function toolEventBatcher() {
     toolEventAppendBatcher = createEventStoreBatcher({
       delayMs: eventStoreBatchDelayMs(),
       maxBatchSize: eventStoreBatchMaxSize(),
-      flushBatch: (toolRunId, events) => insertToolEvents(toolRunId, events)
+      flushBatch: (toolRunId, events) => insertToolEventsAsync(toolRunId, events)
     });
   }
   return toolEventAppendBatcher;
@@ -984,6 +984,22 @@ export function insertTaskEvents(taskId, events = []) {
   return eventStoreSyncCall("insertTaskEvents", () => sqliteEventStore().insertTaskEvents(taskId, events));
 }
 
+export async function insertTaskEventAsync(taskId, event) {
+  return eventStoreWorkerCall(
+    "insertTaskEvent",
+    [taskId, event],
+    () => sqliteEventStore().insertTaskEvent(taskId, event)
+  );
+}
+
+export async function insertTaskEventsAsync(taskId, events = []) {
+  return eventStoreWorkerCall(
+    "insertTaskEvents",
+    [taskId, events],
+    () => sqliteEventStore().insertTaskEvents(taskId, events)
+  );
+}
+
 export function listTaskEvents(taskId, { after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
   return sqliteEventStore().listTaskEvents(taskId, { after, limit });
 }
@@ -1123,6 +1139,22 @@ export function insertToolEvent(toolRunId, event = {}) {
 
 export function insertToolEvents(toolRunId, events = []) {
   return eventStoreSyncCall("insertToolEvents", () => sqliteEventStore().insertToolEvents(toolRunId, events));
+}
+
+export async function insertToolEventAsync(toolRunId, event = {}) {
+  return eventStoreWorkerCall(
+    "insertToolEvent",
+    [toolRunId, event],
+    () => sqliteEventStore().insertToolEvent(toolRunId, event)
+  );
+}
+
+export async function insertToolEventsAsync(toolRunId, events = []) {
+  return eventStoreWorkerCall(
+    "insertToolEvents",
+    [toolRunId, events],
+    () => sqliteEventStore().insertToolEvents(toolRunId, events)
+  );
 }
 
 export async function insertToolEventBatchedAsync(toolRunId, event = {}) {
@@ -1754,6 +1786,22 @@ export function insertLiveCallEvent(sessionId, event = {}) {
 
 export function insertLiveCallEvents(sessionId, events = []) {
   return eventStoreSyncCall("insertLiveCallEvents", () => sqliteEventStore().insertLiveCallEvents(sessionId, events));
+}
+
+export async function insertLiveCallEventAsync(sessionId, event = {}) {
+  return eventStoreWorkerCall(
+    "insertLiveCallEvent",
+    [sessionId, event],
+    () => sqliteEventStore().insertLiveCallEvent(sessionId, event)
+  );
+}
+
+export async function insertLiveCallEventsAsync(sessionId, events = []) {
+  return eventStoreWorkerCall(
+    "insertLiveCallEvents",
+    [sessionId, events],
+    () => sqliteEventStore().insertLiveCallEvents(sessionId, events)
+  );
 }
 
 export function listLiveCallEvents({ sessionId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {

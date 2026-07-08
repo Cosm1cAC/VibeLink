@@ -13,7 +13,6 @@ const gitSummaryCacheStats = { hits: 0, misses: 0, evictions: 0 };
 const gitStatusCache = new Map();
 const gitStatusCacheStats = { hits: 0, misses: 0, evictions: 0 };
 const workspaceTreeCache = new Map();
-const workspaceTreeCacheMaxEntries = 128;
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const workspaceContextFileCache = new Map();
 const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
@@ -70,6 +69,11 @@ function gitCacheMaxEntries() {
 function workspaceContextFileCacheMaxEntries() {
   const value = Number(process.env.VIBELINK_WORKSPACE_CONTEXT_FILE_CACHE_MAX_ENTRIES || 256);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 256;
+}
+
+function workspaceTreeCacheMaxEntries() {
+  const value = Number(process.env.VIBELINK_WORKSPACE_TREE_CACHE_MAX_ENTRIES || 128);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 128;
 }
 
 function gitSummaryCacheKey(cwd = "") {
@@ -187,7 +191,7 @@ export function getWorkspaceRuntimeStats() {
       cacheHits: workspaceTreeStats.cacheHits,
       cacheMisses: workspaceTreeStats.cacheMisses,
       cacheEvictions: workspaceTreeStats.cacheEvictions,
-      maxEntries: workspaceTreeCacheMaxEntries
+      maxEntries: workspaceTreeCacheMaxEntries()
     },
     workspaceContextFiles: {
       entries: workspaceContextFileCache.size,
@@ -532,7 +536,7 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
   if (entries.length >= maxEntries && queue.length) budgetHit = true;
   if (budgetHit) workspaceTreeStats.budgetHits += 1;
   workspaceTreeCache.set(cacheKey, entries.map((item) => ({ ...item })));
-  while (workspaceTreeCache.size > workspaceTreeCacheMaxEntries) {
+  while (workspaceTreeCache.size > workspaceTreeCacheMaxEntries()) {
     const oldestKey = workspaceTreeCache.keys().next().value;
     workspaceTreeCache.delete(oldestKey);
     workspaceTreeStats.cacheEvictions += 1;

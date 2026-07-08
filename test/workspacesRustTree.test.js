@@ -247,7 +247,7 @@ test("getWorkspaceTree caps Node scanner cache entries", async () => {
   const fixture = path.join(os.tmpdir(), `vibelink-tree-cache-cap-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
   fs.mkdirSync(fixture, { recursive: true });
-  for (let i = 0; i < 140; i += 1) {
+  for (let i = 0; i < 12; i += 1) {
     const dir = path.join(fixture, `dir-${String(i).padStart(3, "0")}`);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "README.md"), "hello", "utf8");
@@ -255,18 +255,22 @@ test("getWorkspaceTree caps Node scanner cache entries", async () => {
 
   const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "tree-cache-cap" });
   const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousMaxEntries = process.env.VIBELINK_WORKSPACE_TREE_CACHE_MAX_ENTRIES;
   delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  process.env.VIBELINK_WORKSPACE_TREE_CACHE_MAX_ENTRIES = "8";
 
   try {
-    for (let i = 0; i < 140; i += 1) {
+    for (let i = 0; i < 12; i += 1) {
       await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, `dir-${String(i).padStart(3, "0")}`);
     }
     const stats = getWorkspaceRuntimeStats().workspaceTree;
 
-    assert.equal(stats.entries <= 128, true);
+    assert.equal(stats.maxEntries, 8);
+    assert.equal(stats.entries <= 8, true);
     assert.equal(stats.cacheEvictions > 0, true);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_WORKSPACE_TREE_CACHE_MAX_ENTRIES", previousMaxEntries);
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 });

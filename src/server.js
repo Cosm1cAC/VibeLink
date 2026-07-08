@@ -3196,7 +3196,7 @@ async function routeApi(request, response, url) {
   const taskEventsMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/events$/);
   if (taskEventsMatch && request.method === "GET") {
     const after = Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0);
-    const ok = subscribeTask(taskEventsMatch[1], response, { after });
+    const ok = await subscribeTask(taskEventsMatch[1], response, { after });
     if (!ok) sendError(response, 404, "Task not found");
     return;
   }

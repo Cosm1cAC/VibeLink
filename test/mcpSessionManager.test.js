@@ -71,6 +71,36 @@ test("MCP session caches tools/list results after initialization", async () => {
   }
 });
 
+test("MCP session manager exposes per-session runtime stats", async () => {
+  const manager = createMcpSessionManager();
+  const server = {
+    id: "fake-stats",
+    name: "fake-stats",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const session = await manager.getSession(server, { timeoutMs: 5000 });
+    await session.listTools();
+
+    const stats = manager.stats();
+    assert.equal(stats.sessions, 1);
+    assert.equal(stats.activeSessions, 1);
+    assert.equal(stats.totalPending, 0);
+    assert.equal(stats.items.length, 1);
+    assert.equal(stats.items[0].id, "fake-stats");
+    assert.equal(stats.items[0].closed, false);
+    assert.equal(stats.items[0].pending, 0);
+    assert.equal(stats.items[0].toolsCached, true);
+    assert.equal(stats.items[0].toolCount, 1);
+    assert.match(stats.items[0].lastUsedAt, /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    await manager.closeAll();
+  }
+});
+
 test("MCP session manager rejects requests above the pending cap", async () => {
   let spawns = 0;
   const manager = createMcpSessionManager({

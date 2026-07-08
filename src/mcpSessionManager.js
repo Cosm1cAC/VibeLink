@@ -80,6 +80,8 @@ function createStdioSession(
   let closed = false;
   let initialized = null;
   let tools = null;
+  const startedAt = new Date().toISOString();
+  let lastUsedAt = startedAt;
   const pending = new Map();
   const defaultEmitProgress = emitProgress;
   const child = spawnFn(server.command, Array.isArray(server.args) ? server.args : [], {
@@ -103,6 +105,7 @@ function createStdioSession(
 
   function write(message, callback = null) {
     if (closed) throw new Error("MCP session is closed.");
+    lastUsedAt = new Date().toISOString();
     progress(callback, { phase: "stdio.send", method: message.method, id: message.id });
     child.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
   }
@@ -180,7 +183,10 @@ function createStdioSession(
     },
     async listTools(options = {}) {
       await ensureInitialized(options);
-      if (tools) return tools;
+      if (tools) {
+        lastUsedAt = new Date().toISOString();
+        return tools;
+      }
       const response = await request("tools/list", undefined, options);
       tools = Array.isArray(response.result?.tools) ? response.result.tools : [];
       return tools;
@@ -199,9 +205,15 @@ function createStdioSession(
     },
     stats() {
       return {
+        id: server.id || server.name || "",
+        name: server.name || server.id || "",
         closed,
         pending: pending.size,
         maxPendingRequests: maxPendingRequestsValue(maxPendingRequests),
+        toolsCached: tools !== null,
+        toolCount: Array.isArray(tools) ? tools.length : 0,
+        startedAt,
+        lastUsedAt,
         stderr: compact(stderr, 4000)
       };
     }
@@ -229,8 +241,12 @@ export function createMcpSessionManager({ spawnFn = spawn } = {}) {
       await Promise.all(active.map((session) => session.close().catch(() => {})));
     },
     stats() {
+      const items = [...sessions.values()].map((session) => session.stats());
       return {
-        sessions: sessions.size
+        sessions: sessions.size,
+        activeSessions: items.filter((item) => !item.closed).length,
+        totalPending: items.reduce((sum, item) => sum + Number(item.pending || 0), 0),
+        items
       };
     }
   };

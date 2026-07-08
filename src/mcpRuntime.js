@@ -345,6 +345,21 @@ async function probeStdioServer(server, timeoutMs, emitProgress) {
   });
 }
 
+async function probePersistentStdioServer(server, timeoutMs, emitProgress) {
+  const session = await mcpSessionManager().getSession(server, { timeoutMs, emitProgress });
+  const initialize = await session.initialize({ timeout: timeoutMs, emitProgress });
+  const tools = await session.listTools({ timeout: timeoutMs, emitProgress });
+  return {
+    ok: true,
+    transport: "stdio",
+    protocolVersion: initialize.protocolVersion || "",
+    serverInfo: initialize.serverInfo || null,
+    capabilities: initialize.capabilities || null,
+    tools: tools.map((tool) => normalizeTool(server.name, tool)),
+    stderr: session.stats().stderr || ""
+  };
+}
+
 async function callStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
   if (!server.command) throw new Error("MCP stdio server command is empty.");
   let nextId = 1;
@@ -463,7 +478,9 @@ export async function probeMcpServer(server = {}, { timeoutMs = 10000, emitProgr
 
   try {
     const result = normalized.type === "stdio"
-      ? await probeStdioServer(normalized, timeoutMs, emitProgress)
+      ? isMcpPersistentSessionsEnabled()
+        ? await probePersistentStdioServer(normalized, timeoutMs, emitProgress)
+        : await probeStdioServer(normalized, timeoutMs, emitProgress)
       : await probeHttpServer(normalized, timeoutMs, emitProgress);
     return {
       ...result,

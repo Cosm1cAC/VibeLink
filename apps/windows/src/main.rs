@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::{
     env,
     net::UdpSocket,
@@ -137,6 +137,7 @@ fn list_workspace_tree(
     let mut queue = VecDeque::from([(target.clone(), 0usize)]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
+    let gitignore_dirs = root_gitignore_dirs(&root);
 
     while let Some((current, current_depth)) = queue.pop_front() {
         if items.len() >= max_entries {
@@ -154,6 +155,9 @@ fn list_workspace_tree(
                 continue;
             }
             if file_type.is_dir() && IGNORED_WORKSPACE_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            if file_type.is_dir() && gitignore_dirs.contains(name.as_str()) {
                 continue;
             }
             children.push((name, entry.path(), file_type.is_dir()));
@@ -188,6 +192,31 @@ fn list_workspace_tree(
         dir: slash_path(target.strip_prefix(&root).unwrap_or(Path::new(""))),
         items,
     })
+}
+
+fn root_gitignore_dirs(root: &Path) -> HashSet<String> {
+    let mut dirs = HashSet::new();
+    let Ok(content) = std::fs::read_to_string(root.join(".gitignore")) else {
+        return dirs;
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('!')
+            || trimmed.contains('*')
+        {
+            continue;
+        }
+        let pattern = trimmed.trim_start_matches('/').trim_end_matches('/');
+        if pattern.is_empty() || pattern.contains('/') {
+            continue;
+        }
+        dirs.insert(pattern.to_string());
+    }
+
+    dirs
 }
 
 fn safe_workspace_child(root: &Path, child: &Path) -> Result<PathBuf> {
@@ -477,10 +506,13 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("node_modules")).unwrap();
         fs::create_dir_all(root.join("target")).unwrap();
+        fs::create_dir_all(root.join("tmp-cache")).unwrap();
+        fs::write(root.join(".gitignore"), "tmp-cache/\n").unwrap();
         fs::write(root.join("README.md"), "hello").unwrap();
         fs::write(root.join("src").join("main.rs"), "fn main() {}").unwrap();
         fs::write(root.join("node_modules").join("noise.js"), "ignored").unwrap();
         fs::write(root.join("target").join("noise.txt"), "ignored").unwrap();
+        fs::write(root.join("tmp-cache").join("noise.txt"), "ignored").unwrap();
 
         let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
 
@@ -494,6 +526,10 @@ mod tests {
             .iter()
             .all(|item| !item.path.starts_with("node_modules")));
         assert!(tree.items.iter().all(|item| !item.path.starts_with("target")));
+        assert!(tree
+            .items
+            .iter()
+            .all(|item| !item.path.starts_with("tmp-cache")));
 
         let _ = fs::remove_dir_all(&root);
     }

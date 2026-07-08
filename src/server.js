@@ -47,6 +47,7 @@ import {
 import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
+import { getContextBudgetMetrics } from "./contextBudget.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
 import { commandApprovalRequired } from "./commandSafety.js";
 import { subscribeDesktopObserver } from "./desktopObserver.js";
@@ -1531,6 +1532,11 @@ async function routeApi(request, response, url) {
       network: getNetworkAddresses(settings.port),
       tasks: conversationTasks()
     });
+    return;
+  }
+
+  if (url.pathname === "/api/context-budget/metrics" && request.method === "GET") {
+    sendJson(response, 200, { metrics: getContextBudgetMetrics() });
     return;
   }
 

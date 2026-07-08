@@ -1808,6 +1808,14 @@ export function listLiveCallEvents({ sessionId = "", after = 0, limit = DEFAULT_
   return sqliteEventStore().listLiveCallEvents({ sessionId, after, limit });
 }
 
+export async function listLiveCallEventsAsync({ sessionId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
+  return eventStoreWorkerCall(
+    "listLiveCallEvents",
+    [{ sessionId, after, limit }],
+    () => listLiveCallEvents({ sessionId, after, limit })
+  );
+}
+
 export function pruneLiveCallEvents({ retentionDays = 30, keepLatest = 5000 } = {}) {
   return sqliteEventStore().pruneLiveCallEvents({ retentionDays, keepLatest });
 }

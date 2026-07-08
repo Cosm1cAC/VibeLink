@@ -2251,7 +2251,7 @@ async function routeApi(request, response, url) {
       sendError(response, 404, "Live call session not found.");
       return;
     }
-    subscribeLiveCallEvents(liveCallEventsMatch[1], response, { after });
+    await subscribeLiveCallEvents(liveCallEventsMatch[1], response, { after });
     return;
   }
 

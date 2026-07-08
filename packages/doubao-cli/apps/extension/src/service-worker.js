@@ -3,6 +3,7 @@ const DEFAULT_DOUBAO_URL = "https://www.doubao.com/chat/";
 
 let socket = null;
 let reconnectTimer = null;
+let heartbeatTimer = null;
 
 function isOpen(ws) {
   return ws && ws.readyState === WebSocket.OPEN;
@@ -10,12 +11,16 @@ function isOpen(ws) {
 
 async function loadConfig() {
   const generated = await loadGeneratedConfig();
-  const config = await chrome.storage.local.get({
-    bridgeUrl: generated.bridgeUrl || DEFAULT_BRIDGE_URL,
-    bridgeToken: generated.bridgeToken || "",
-    doubaoUrl: generated.doubaoUrl || DEFAULT_DOUBAO_URL
+  const stored = await chrome.storage.local.get({
+    bridgeUrl: DEFAULT_BRIDGE_URL,
+    bridgeToken: "",
+    doubaoUrl: DEFAULT_DOUBAO_URL
   });
-  return config;
+  return {
+    bridgeUrl: generated.bridgeUrl || stored.bridgeUrl || DEFAULT_BRIDGE_URL,
+    bridgeToken: generated.bridgeToken || stored.bridgeToken || "",
+    doubaoUrl: generated.doubaoUrl || stored.doubaoUrl || DEFAULT_DOUBAO_URL
+  };
 }
 
 async function loadGeneratedConfig() {
@@ -42,12 +47,47 @@ function scheduleReconnect() {
   }, 1500);
 }
 
+function clearHeartbeat() {
+  if (!heartbeatTimer) return;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+function startHeartbeat(ws) {
+  clearHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (!isOpen(ws)) {
+      clearHeartbeat();
+      return;
+    }
+    ws.send(JSON.stringify({ type: "heartbeat", ts: Date.now() }));
+  }, 20000);
+}
+
 async function connectBridge() {
   if (isOpen(socket)) return;
-  const config = await loadConfig();
-  socket = new WebSocket(bridgeUrlWithToken(config.bridgeUrl, config.bridgeToken));
+
+  let config;
+  try {
+    config = await loadConfig();
+  } catch {
+    scheduleReconnect();
+    return;
+  }
+
+  try {
+    socket = new WebSocket(bridgeUrlWithToken(config.bridgeUrl, config.bridgeToken));
+  } catch {
+    scheduleReconnect();
+    return;
+  }
+
+  socket.onopen = () => startHeartbeat(socket);
   socket.onmessage = (event) => handleBridgeMessage(event.data, config);
-  socket.onclose = () => scheduleReconnect();
+  socket.onclose = () => {
+    clearHeartbeat();
+    scheduleReconnect();
+  };
   socket.onerror = () => {
     try {
       socket.close();
@@ -56,7 +96,6 @@ async function connectBridge() {
     }
   };
 }
-
 async function findOrCreateDoubaoTab(config) {
   const tabs = await chrome.tabs.query({ url: "https://www.doubao.com/*" });
   const existing = tabs.find((tab) => /doubao\.com/i.test(tab.url || ""));
@@ -87,7 +126,7 @@ async function sendToDoubaoContent(tabId, message) {
 async function handleDoubaoRequest(message, config) {
   const tab = await findOrCreateDoubaoTab(config);
   return sendToDoubaoContent(tab.id, {
-    type: `${message.method}.v4`,
+    type: `${message.method}.v6`,
     params: message.params || {}
   });
 }
@@ -140,13 +179,11 @@ async function handleBridgeMessage(raw, config) {
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  connectBridge();
-});
+function startBridgeConnection() {
+  connectBridge().catch(() => scheduleReconnect());
+}
 
-chrome.runtime.onStartup.addListener(() => {
-  connectBridge();
-});
+chrome.runtime.onInstalled.addListener(startBridgeConnection);
+chrome.runtime.onStartup.addListener(startBridgeConnection);
 
-connectBridge();
-
+startBridgeConnection();

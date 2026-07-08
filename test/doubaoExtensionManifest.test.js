@@ -5,6 +5,7 @@ import test from "node:test";
 
 const rootDir = path.resolve(import.meta.dirname, "..");
 const extensionDir = path.join(rootDir, "packages", "doubao-cli", "apps", "extension");
+const allowedHostPermissionSchemes = /^(https?|file|\*):\/\//;
 
 test("Doubao bridge extension manifest scopes permissions to Doubao and loopback bridge", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8"));
@@ -13,7 +14,7 @@ test("Doubao bridge extension manifest scopes permissions to Doubao and loopback
   assert.deepEqual(manifest.permissions.sort(), ["scripting", "storage", "tabs"].sort());
   assert.ok(manifest.host_permissions.includes("https://www.doubao.com/*"));
   assert.ok(manifest.host_permissions.includes("http://127.0.0.1/*"));
-  assert.ok(manifest.host_permissions.includes("ws://127.0.0.1/*"));
+  assert.ok(manifest.host_permissions.every((pattern) => allowedHostPermissionSchemes.test(pattern)));
   assert.equal(manifest.background.service_worker, "src/service-worker.js");
   assert.equal(manifest.content_scripts[0].js[0], "src/content/doubao-content.js");
 });

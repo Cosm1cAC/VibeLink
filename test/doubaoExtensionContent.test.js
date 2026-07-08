@@ -57,6 +57,12 @@ function loadContentScript(elements) {
   return context;
 }
 
+function loadContentScriptWithBodyText(bodyText, elements = []) {
+  const context = loadContentScript(elements);
+  context.document.body.innerText = bodyText;
+  return context;
+}
+
 test("Doubao content script ignores answers that existed before sending a prompt", () => {
   const context = loadContentScript([fakeElement("old assistant answer")]);
 
@@ -76,4 +82,19 @@ test("Doubao content script waits for the newest non-ignored answer", async () =
     await context.__DOUBAO_BRIDGE_CONTENT_INTERNALS__.waitForAnswer("fresh prompt", 5000, new Set(["old assistant answer"])),
     "new assistant answer"
   );
+});
+
+test("Doubao content script leaves local bridge transport to the service worker", () => {
+  const source = fs.readFileSync(contentScriptPath, "utf8");
+
+  assert.doesNotMatch(source, /new WebSocket|bridgeSocket|loadBridgeConfig|generated-config|chrome\.storage/);
+});
+
+test("Doubao content script recognizes Chinese login prompts", () => {
+  const context = loadContentScriptWithBodyText("登录后继续使用 手机号 验证码");
+
+  const diagnosis = context.__DOUBAO_BRIDGE_CONTENT_INTERNALS__.diagnosePage();
+
+  assert.equal(diagnosis.hasEditor, false);
+  assert.equal(diagnosis.loginLikely, true);
 });

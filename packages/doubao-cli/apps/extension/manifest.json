@@ -6,8 +6,7 @@
   "permissions": ["tabs", "scripting", "storage"],
   "host_permissions": [
     "https://www.doubao.com/*",
-    "http://127.0.0.1/*",
-    "ws://127.0.0.1/*"
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "src/service-worker.js",

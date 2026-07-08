@@ -1,17 +1,11 @@
 (() => {
-if (globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ >= 4) {
+if (globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ >= 6) {
   return;
 }
-globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ = 4;
+globalThis.__DOUBAO_BRIDGE_CONTENT_VERSION__ = 6;
 
 const DEFAULT_TIMEOUT_MS = 120000;
 const STABLE_ANSWER_MS = 2500;
-const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:45771/extension";
-const DEFAULT_DOUBAO_URL = "https://www.doubao.com/chat/";
-
-let bridgeSocket = null;
-let bridgeReconnectTimer = null;
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -30,61 +24,6 @@ function compactText(value, max = 20000) {
     .replace(/\n{3,}/g, "\n\n")
     .trim()
     .slice(-max);
-}
-
-async function loadGeneratedConfig() {
-  try {
-    const response = await fetch(chrome.runtime.getURL("generated-config.json"));
-    if (!response.ok) return {};
-    return await response.json();
-  } catch {
-    return {};
-  }
-}
-
-async function loadBridgeConfig() {
-  const generated = await loadGeneratedConfig();
-  const defaults = {
-    bridgeUrl: generated.bridgeUrl || DEFAULT_BRIDGE_URL,
-    bridgeToken: generated.bridgeToken || "",
-    doubaoUrl: generated.doubaoUrl || DEFAULT_DOUBAO_URL
-  };
-  if (!chrome.storage?.local?.get) return defaults;
-  return chrome.storage.local.get(defaults);
-}
-
-function bridgeUrlWithToken(url, token) {
-  const bridgeUrl = new URL(url);
-  if (token) bridgeUrl.searchParams.set("token", token);
-  return bridgeUrl.toString();
-}
-
-function bridgeIsOpen(socket) {
-  return socket && socket.readyState === WebSocket.OPEN;
-}
-
-function scheduleBridgeReconnect() {
-  if (bridgeReconnectTimer) return;
-  bridgeReconnectTimer = setTimeout(() => {
-    bridgeReconnectTimer = null;
-    connectBridge();
-  }, 1500);
-}
-
-async function connectBridge() {
-  if (typeof WebSocket === "undefined") return;
-  if (bridgeIsOpen(bridgeSocket)) return;
-  const config = await loadBridgeConfig();
-  bridgeSocket = new WebSocket(bridgeUrlWithToken(config.bridgeUrl, config.bridgeToken));
-  bridgeSocket.onmessage = (event) => handleBridgeMessage(event.data);
-  bridgeSocket.onclose = () => scheduleBridgeReconnect();
-  bridgeSocket.onerror = () => {
-    try {
-      bridgeSocket.close();
-    } catch {
-      // Best effort.
-    }
-  };
 }
 
 function comparableText(value) {
@@ -235,78 +174,22 @@ async function askDoubao(params = {}) {
   };
 }
 
-async function handleBridgeMessage(raw) {
-  let message;
-  try {
-    message = JSON.parse(raw);
-  } catch {
-    return;
-  }
-
-  try {
-    if (message.method === "doubao.diagnose") {
-      bridgeSocket?.send(JSON.stringify({
-        id: message.id,
-        ok: true,
-        result: {
-          ...diagnosePage(),
-          scriptVersion: 4,
-          bridgeClient: "content"
-        }
-      }));
-      return;
-    }
-
-    if (message.method === "doubao.ask") {
-      const result = await askDoubao(message.params || {});
-      bridgeSocket?.send(JSON.stringify({
-        id: message.id,
-        ok: true,
-        result: {
-          ...result,
-          scriptVersion: 4,
-          bridgeClient: "content"
-        }
-      }));
-      return;
-    }
-
-    bridgeSocket?.send(JSON.stringify({
-      id: message.id,
-      ok: false,
-      error: {
-        code: "UNSUPPORTED_METHOD",
-        message: `Unsupported method: ${message.method}`,
-        recoverable: false
-      }
-    }));
-  } catch (error) {
-    bridgeSocket?.send(JSON.stringify({
-      id: message.id,
-      ok: false,
-      error: {
-        code: "UNSUPPORTED_UI",
-        message: error instanceof Error ? error.message : String(error),
-        recoverable: true
-      }
-    }));
-  }
-}
-
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "doubao.diagnose.v4") {
+  if (message?.type === "doubao.diagnose.v6") {
     sendResponse({
       ...diagnosePage(),
-      scriptVersion: 4
+      scriptVersion: 6,
+      bridgeClient: "service_worker"
     });
     return false;
   }
 
-  if (message?.type === "doubao.ask.v4") {
+  if (message?.type === "doubao.ask.v6") {
     askDoubao(message.params || {})
       .then((result) => sendResponse({
         ...result,
-        scriptVersion: 4
+        scriptVersion: 6,
+        bridgeClient: "service_worker"
       }))
       .catch((error) => sendResponse({
         ok: false,
@@ -325,8 +208,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 globalThis.__DOUBAO_BRIDGE_CONTENT_INTERNALS__ = {
   answerCandidates,
   answerSnapshot,
+  diagnosePage,
   waitForAnswer
 };
 
-connectBridge();
+// Local bridge transport is owned by the MV3 service worker; this content script only manipulates the Doubao page and responds to versioned runtime messages.
 })();

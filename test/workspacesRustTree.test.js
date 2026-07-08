@@ -114,3 +114,29 @@ test("getWorkspaceContext uses Rust scanner for directory samples when enabled",
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+test("getWorkspaceTree tracks Node scanner budget hits", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-tree-budget-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  for (let i = 0; i < 260; i += 1) {
+    fs.writeFileSync(path.join(fixture, `file-${String(i).padStart(3, "0")}.txt`), "x", "utf8");
+  }
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "tree-budget" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+
+  try {
+    const before = getWorkspaceRuntimeStats().workspaceTree;
+    const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().workspaceTree;
+
+    assert.equal(result.ok, true);
+    assert.equal(result.items.length, 240);
+    assert.equal(after.budgetHits, before.budgetHits + 1);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});

@@ -45,6 +45,133 @@ const LIVE_CALL_AUDIO_DIR = path.join(rootDir, ".agent-mobile-terminal", "live-c
 
 let activeProviderId = "mock";
 
+function createAsrMetrics() {
+  return {
+    ingestCalls: 0,
+    inputBytes: 0,
+    normalizedBytes: 0,
+    segments: 0,
+    segmentBytes: 0,
+    flushes: 0,
+    stops: 0,
+    providerStarts: 0,
+    providerFallbacks: 0,
+    providerFeedCalls: 0,
+    errors: 0,
+    lastIngestAt: 0
+  };
+}
+
+const liveCallAsrMetrics = createAsrMetrics();
+const liveCallAsrSessionMetrics = new Map();
+
+function resetAsrMetrics(target) {
+  Object.assign(target, createAsrMetrics());
+}
+
+function sessionAsrMetrics(sessionId) {
+  let metrics = liveCallAsrSessionMetrics.get(sessionId);
+  if (!metrics) {
+    metrics = createAsrMetrics();
+    liveCallAsrSessionMetrics.set(sessionId, metrics);
+  }
+  return metrics;
+}
+
+function updateAsrMetrics(sessionId, updater) {
+  updater(liveCallAsrMetrics);
+  updater(sessionAsrMetrics(sessionId));
+}
+
+function publicAsrMetrics(metrics) {
+  return {
+    ingestCalls: metrics.ingestCalls,
+    inputBytes: metrics.inputBytes,
+    normalizedBytes: metrics.normalizedBytes,
+    segments: metrics.segments,
+    segmentBytes: metrics.segmentBytes,
+    flushes: metrics.flushes,
+    stops: metrics.stops,
+    providerStarts: metrics.providerStarts,
+    providerFallbacks: metrics.providerFallbacks,
+    providerFeedCalls: metrics.providerFeedCalls,
+    errors: metrics.errors,
+    lastIngestAt: metrics.lastIngestAt
+  };
+}
+
+function recordAsrIngest(sessionId) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.ingestCalls += 1;
+    metrics.lastIngestAt = Date.now();
+  });
+}
+
+function recordAsrInput(sessionId, byteLength) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.inputBytes += byteLength;
+  });
+}
+
+function recordAsrNormalized(sessionId, byteLength) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.normalizedBytes += byteLength;
+  });
+}
+
+function recordAsrSegment(sessionId, byteLength) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.segments += 1;
+    metrics.segmentBytes += byteLength;
+  });
+}
+
+function recordProviderStart(sessionId, fallback) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.providerStarts += 1;
+    if (fallback) metrics.providerFallbacks += 1;
+  });
+}
+
+function recordProviderFeed(sessionId) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.providerFeedCalls += 1;
+  });
+}
+
+function recordAsrFlush(sessionId) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.flushes += 1;
+  });
+}
+
+function recordAsrStop(sessionId) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.stops += 1;
+  });
+}
+
+function recordAsrError(sessionId) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    metrics.errors += 1;
+  });
+}
+
+export function resetLiveCallAsrMetrics() {
+  resetAsrMetrics(liveCallAsrMetrics);
+  liveCallAsrSessionMetrics.clear();
+}
+
+export function getLiveCallAsrMetrics() {
+  return {
+    ...publicAsrMetrics(liveCallAsrMetrics),
+    sessions: [...liveCallAsrSessionMetrics.entries()].map(([sessionId, metrics]) => ({
+      sessionId,
+      ...publicAsrMetrics(metrics)
+    }))
+  };
+}
+
 /**
  * Pick the active ASR provider for a new audio stream. Today there is only
  * `mock`; real providers register via `registerAsrProvider` and can be
@@ -445,11 +572,13 @@ registerAsrProvider(mockProvider);
 export function ingestLiveCallAudio(sessionId, payload = {}) {
   const session = getInMemorySession(sessionId);
   if (!session) return;
+  recordAsrIngest(sessionId);
   const channel = payload.channel || "remote";
   const channelsKey = sessionChannels.get(sessionId) || new Map();
   sessionChannels.set(sessionId, channelsKey);
 
   if (payload.stop) {
+    recordAsrStop(sessionId);
     for (const state of channelsKey.values()) {
       const provider = providers.get(state.provider);
       if (provider?.stop) provider.stop().catch(() => {});
@@ -489,11 +618,15 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
     const handlers = {
       onPartial: (ch, text) => safePartial(sessionId, ch, text),
       onFinal: (ch, text) => safeFinal(sessionId, ch, text),
-      onError: (error) => console.error(`[liveCallAsr:${provider.id}]`, error?.message || error)
+      onError: (error) => {
+        recordAsrError(sessionId);
+        console.error(`[liveCallAsr:${provider.id}]`, error?.message || error);
+      }
     };
     provider.onPartial = handlers.onPartial;
     provider.onFinal = handlers.onFinal;
     provider.onError = handlers.onError;
+    recordProviderStart(sessionId, Boolean(channelState.fallbackFromProvider));
     provider
       .start({
         sessionId,
@@ -502,7 +635,10 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
         channels: TARGET_CHANNELS,
         encoding: TARGET_ENCODING
       })
-      .catch((error) => console.error(`[liveCallAsr:start]`, error.message));
+      .catch((error) => {
+        recordAsrError(sessionId);
+        console.error(`[liveCallAsr:start]`, error.message);
+      });
     emitLiveCallEvent(sessionId, "live_call.asr.provider", {
       channel,
       provider: provider.id,
@@ -514,11 +650,13 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
 
   if (payload.buffer) {
     const provider = providers.get(channelState.provider) || mockProvider;
+    recordAsrInput(sessionId, payload.buffer.length);
     const normalized = normalizePcm16To16kMono(payload.buffer, {
       sampleRate: payload.sampleRate || channelState.sampleRate,
       channels: payload.channels || channelState.channels,
       encoding: payload.encoding || channelState.encoding
     });
+    recordAsrNormalized(sessionId, normalized.buffer.length);
     if (normalized.buffer.length) {
       appendCheckpoint(channelState, normalized.buffer);
       for (const segment of channelState.vad.push(normalized.buffer)) {
@@ -527,6 +665,7 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
     }
   }
   if (payload.flush) {
+    recordAsrFlush(sessionId);
     const provider = providers.get(channelState.provider) || mockProvider;
     for (const segment of channelState.vad.flush()) {
       feedSegment(sessionId, channel, channelState, provider, segment);
@@ -565,6 +704,7 @@ function appendCheckpoint(channelState, buffer) {
 
 function feedSegment(sessionId, channel, channelState, provider, segment) {
   channelState.segmentIndex += 1;
+  recordAsrSegment(sessionId, segment.buffer.length);
   emitLiveCallEvent(sessionId, "live_call.audio_segment", {
     channel,
     provider: provider.id,
@@ -589,6 +729,7 @@ function feedSegment(sessionId, channel, channelState, provider, segment) {
     durationMs: segment.durationMs,
     checkpointPath: channelState.checkpointPath
   });
+  recordProviderFeed(sessionId);
 }
 
 export function getLiveCallAsrCheckpoints(sessionId) {

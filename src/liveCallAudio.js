@@ -44,6 +44,7 @@ function createAudioMetrics() {
     errors: 0,
     acks: 0,
     maxFrameBytes: 0,
+    maxBufferedAmount: 0,
     lastFrameAt: 0,
     totalInterFrameMs: 0,
     interFrameSamples: 0
@@ -81,6 +82,7 @@ function publicMetrics(metrics) {
     errors: metrics.errors,
     acks: metrics.acks,
     maxFrameBytes: metrics.maxFrameBytes,
+    maxBufferedAmount: metrics.maxBufferedAmount,
     avgInterFrameMs: Number(avgInterFrameMs.toFixed(2)),
     lastFrameAt: metrics.lastFrameAt
   };
@@ -115,6 +117,13 @@ function recordAudioFrame(sessionId, byteLength) {
   const now = Date.now();
   updateFrameMetrics(liveCallAudioMetrics, byteLength, now);
   updateFrameMetrics(sessionMetrics(sessionId), byteLength, now);
+}
+
+function recordBufferedAmount(sessionId, bufferedAmount) {
+  const value = Math.max(0, Number(bufferedAmount) || 0);
+  liveCallAudioMetrics.maxBufferedAmount = Math.max(liveCallAudioMetrics.maxBufferedAmount, value);
+  const metrics = sessionMetrics(sessionId);
+  metrics.maxBufferedAmount = Math.max(metrics.maxBufferedAmount, value);
 }
 
 function recordDroppedFrame(sessionId, { oversized = false, backpressure = false } = {}) {
@@ -249,6 +258,7 @@ export function handleLiveCallAudioConnection(sessionId, ws, ctx = {}) {
         return;
       }
       const bufferedAmount = Number(ws.bufferedAmount || 0);
+      recordBufferedAmount(sessionId, bufferedAmount);
       const bufferedLimit = backpressureBytesLimit();
       if (bufferedAmount > bufferedLimit) {
         recordDroppedFrame(sessionId, { backpressure: true });

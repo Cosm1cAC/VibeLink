@@ -84,7 +84,9 @@ test("live call audio drops frames when websocket backpressure is high", () => {
     assert.equal(metrics.bytes, 0);
     assert.equal(metrics.droppedFrames, 1);
     assert.equal(metrics.backpressureFrames, 1);
+    assert.equal(metrics.maxBufferedAmount, 2 * 1024 * 1024);
     assert.equal(sessionMetrics.backpressureFrames, 1);
+    assert.equal(sessionMetrics.maxBufferedAmount, 2 * 1024 * 1024);
     assert.equal(ws.sent.some((item) => item.type === "drop" && item.reason === "backpressure"), true);
   } finally {
     stopLiveCallSession(session.id, "test-cleanup");

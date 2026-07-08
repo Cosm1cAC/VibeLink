@@ -39,6 +39,34 @@ test("db async tool event append uses worker when enabled", async () => {
   }
 });
 
+test("event store runtime stats expose worker pending capacity", async () => {
+  const previousWorkerFlag = process.env.VIBELINK_EVENT_STORE_WORKER;
+  const previousMaxPending = process.env.VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS;
+  process.env.VIBELINK_EVENT_STORE_WORKER = "1";
+  process.env.VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS = "7";
+  try {
+    const run = createToolRun({
+      id: `worker-stats-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+
+    await insertToolEventsAsync(run.id, [
+      { id: `${run.id}:event-1`, type: "tool.stdout", text: "one" }
+    ]);
+
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.worker.enabled, true);
+    assert.equal(stats.worker.active, true);
+    assert.equal(stats.worker.maxPendingRequests, 7);
+    assert.equal(stats.worker.pending, 0);
+  } finally {
+    await drainEventStoreRuntime();
+    restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
+    restoreEnv("VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS", previousMaxPending);
+  }
+});
+
 test("batched tool event flush uses worker append when both flags are enabled", async () => {
   const previousWorkerFlag = process.env.VIBELINK_EVENT_STORE_WORKER;
   const previousBatchFlag = process.env.VIBELINK_EVENT_STORE_BATCH_APPEND;

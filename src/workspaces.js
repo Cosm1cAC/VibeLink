@@ -9,9 +9,9 @@ import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
 const execFileAsync = promisify(execFile);
 const ignoredDirs = new Set([".git", "node_modules", ".next", "dist", "build", "target", "coverage", ".agent-mobile-terminal"]);
 const gitSummaryCache = new Map();
-const gitSummaryCacheStats = { hits: 0, misses: 0 };
+const gitSummaryCacheStats = { hits: 0, misses: 0, evictions: 0 };
 const gitStatusCache = new Map();
-const gitStatusCacheStats = { hits: 0, misses: 0 };
+const gitStatusCacheStats = { hits: 0, misses: 0, evictions: 0 };
 const workspaceTreeCache = new Map();
 const workspaceTreeCacheMaxEntries = 128;
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
@@ -58,6 +58,11 @@ function lineCount(value) {
 function gitSummaryCacheTtlMs() {
   const value = Number(process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS || 750);
   return Number.isFinite(value) && value >= 0 ? value : 750;
+}
+
+function gitCacheMaxEntries() {
+  const value = Number(process.env.VIBELINK_GIT_CACHE_MAX_ENTRIES || 128);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 128;
 }
 
 function gitSummaryCacheKey(cwd = "") {
@@ -131,19 +136,32 @@ function invalidateGitSummaryCache(cwd = "") {
   gitStatusCache.delete(gitSummaryCacheKey(cwd));
 }
 
+function capGitCache(cache, stats) {
+  const maxEntries = gitCacheMaxEntries();
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+    stats.evictions += 1;
+  }
+}
+
 export function getWorkspaceRuntimeStats() {
   return {
     gitSummaryCache: {
       entries: gitSummaryCache.size,
       hits: gitSummaryCacheStats.hits,
       misses: gitSummaryCacheStats.misses,
-      ttlMs: gitSummaryCacheTtlMs()
+      evictions: gitSummaryCacheStats.evictions,
+      ttlMs: gitSummaryCacheTtlMs(),
+      maxEntries: gitCacheMaxEntries()
     },
     gitStatusCache: {
       entries: gitStatusCache.size,
       hits: gitStatusCacheStats.hits,
       misses: gitStatusCacheStats.misses,
-      ttlMs: gitSummaryCacheTtlMs()
+      evictions: gitStatusCacheStats.evictions,
+      ttlMs: gitSummaryCacheTtlMs(),
+      maxEntries: gitCacheMaxEntries()
     },
     workspaceTree: {
       entries: workspaceTreeCache.size,
@@ -756,6 +774,7 @@ async function collectCachedGitChangeSummary(cwd) {
       signature: gitSummaryCacheSignature(cwd),
       summary: cloneGitSummary(summary)
     });
+    capGitCache(gitSummaryCache, gitSummaryCacheStats);
   }
   return summary;
 }
@@ -801,6 +820,7 @@ async function collectCachedGitStatus(cwd) {
       signature: gitSummaryCacheSignature(cwd),
       summary: cloneGitStatusSummary(summary)
     });
+    capGitCache(gitStatusCache, gitStatusCacheStats);
   }
   return summary;
 }

@@ -105,6 +105,7 @@ import {
   expireToolApproval,
   emitToolEvent,
   emitToolEventBatched,
+  getToolEventSseMetrics,
   requestToolApproval,
   runApprovedWorkspaceCommand,
   runWorkspaceToolAction,
@@ -432,6 +433,7 @@ async function toolEventStatsPayload() {
     ...(await getToolEventStatsAsync()),
     storeMode: eventStoreMode(),
     eventStore: getEventStoreRuntimeStats(),
+    sse: getToolEventSseMetrics(),
     retention: toolEventsRetention(settings),
     autoPrune: toolEventsPruneState
   };

@@ -292,6 +292,113 @@ export function createSqliteEventStore({ database }) {
     } catch {}
   }
 
+  function listUnifiedEvents({
+    taskId = "",
+    liveCallSessionId = "",
+    toolRunId = "",
+    after = 0,
+    limit = 200
+  } = {}) {
+    const queryLimit = normalizeEventReplayLimit(limit, { defaultLimit: 200, maxLimit: 2000 });
+    const afterCursor = Number(after || 0);
+    const qtaskId = cleanString(taskId, 160);
+    const qsessionId = cleanString(liveCallSessionId, 160);
+    const qtoolRunId = cleanString(toolRunId, 160);
+    const results = [];
+    const db = database();
+
+    if (!liveCallSessionId && !toolRunId) {
+      const rows = db
+        .prepare(`
+          SELECT cursor, task_id, event_id, event_type, event_kind, turn_id, block_id,
+                 event_at, text
+          FROM task_events
+          WHERE (? = '' OR task_id = ?) AND cursor > ?
+          ORDER BY cursor ASC
+          LIMIT ?
+        `)
+        .all(qtaskId, qtaskId, afterCursor, queryLimit);
+      for (const row of rows) {
+        results.push({
+          cursor: row.cursor,
+          eventId: row.event_id,
+          type: row.event_type || "",
+          kind: row.event_kind || "",
+          at: row.event_at,
+          text: row.text || "",
+          sessionId: "",
+          taskId: row.task_id || "",
+          toolRunId: "",
+          turnId: row.turn_id || "",
+          blockId: row.block_id || ""
+        });
+      }
+    }
+
+    if (!liveCallSessionId) {
+      const remaining = queryLimit - results.length;
+      if (remaining > 0) {
+        const rows = db
+          .prepare(`
+            SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
+            FROM tool_events
+            WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor > ?
+            ORDER BY cursor ASC
+            LIMIT ?
+          `)
+          .all(qtaskId, qtaskId, qtoolRunId, qtoolRunId, afterCursor, remaining);
+        for (const row of rows) {
+          results.push({
+            cursor: row.cursor,
+            eventId: row.event_id,
+            type: row.event_type,
+            kind: "tool",
+            at: row.event_at,
+            text: row.text || "",
+            sessionId: "",
+            taskId: row.task_id || "",
+            toolRunId: row.tool_run_id || "",
+            turnId: "",
+            blockId: ""
+          });
+        }
+      }
+    }
+
+    if (!taskId && !toolRunId) {
+      const remaining = queryLimit - results.length;
+      if (remaining > 0) {
+        const rows = db
+          .prepare(`
+            SELECT cursor, session_id, event_id, event_type, event_at, text
+            FROM live_call_events
+            WHERE (? = '' OR session_id = ?) AND cursor > ?
+            ORDER BY cursor ASC
+            LIMIT ?
+          `)
+          .all(qsessionId, qsessionId, afterCursor, remaining);
+        for (const row of rows) {
+          results.push({
+            cursor: row.cursor,
+            eventId: row.event_id,
+            type: row.event_type,
+            kind: "live_call",
+            at: row.event_at,
+            text: row.text || "",
+            sessionId: row.session_id || "",
+            taskId: "",
+            toolRunId: "",
+            turnId: "",
+            blockId: ""
+          });
+        }
+      }
+    }
+
+    results.sort((a, b) => a.cursor - b.cursor);
+    return results.slice(0, queryLimit);
+  }
+
   return {
     insertTaskEvent,
     insertTaskEvents,
@@ -305,6 +412,7 @@ export function createSqliteEventStore({ database }) {
     insertLiveCallEvent,
     insertLiveCallEvents,
     listLiveCallEvents,
-    pruneLiveCallEvents
+    pruneLiveCallEvents,
+    listUnifiedEvents
   };
 }

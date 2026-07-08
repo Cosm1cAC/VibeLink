@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { dataDir } from "./config.js";
 import { DEFAULT_EVENT_REPLAY_LIMIT, createSqliteEventStore, normalizeEventReplayLimit } from "./eventStore.js";
+import { createEventStoreWorkerClient } from "./eventStoreWorkerClient.js";
 
 const dbPath = path.join(dataDir, "mobile-agent.sqlite");
 
@@ -409,6 +410,47 @@ let eventStore = null;
 function sqliteEventStore() {
   if (!eventStore) eventStore = createSqliteEventStore({ database });
   return eventStore;
+}
+
+let eventStoreWorker = null;
+let eventStoreWorkerFailed = false;
+
+export function isEventStoreWorkerEnabled() {
+  return process.env.VIBELINK_EVENT_STORE_WORKER === "1";
+}
+
+export function eventStoreMode() {
+  if (!isEventStoreWorkerEnabled()) return "sync";
+  return eventStoreWorkerFailed ? "sync-fallback" : "worker";
+}
+
+function eventStoreWorkerClient() {
+  if (!isEventStoreWorkerEnabled() || eventStoreWorkerFailed) return null;
+  initDb();
+  if (!eventStoreWorker) eventStoreWorker = createEventStoreWorkerClient({ dbPath });
+  return eventStoreWorker;
+}
+
+async function eventStoreWorkerCall(method, args, fallback) {
+  const client = eventStoreWorkerClient();
+  if (!client) return fallback();
+  try {
+    return await client.request(method, args);
+  } catch (error) {
+    eventStoreWorkerFailed = true;
+    const failedWorker = eventStoreWorker;
+    eventStoreWorker = null;
+    failedWorker?.close().catch(() => {});
+    console.warn(`[eventStore] worker failed; falling back to sync SQLite: ${error.message}`);
+    return fallback();
+  }
+}
+
+export async function closeEventStoreWorker() {
+  if (!eventStoreWorker) return;
+  await eventStoreWorker.close();
+  eventStoreWorker = null;
+  eventStoreWorkerFailed = false;
 }
 
 export function getDbPath() {
@@ -853,6 +895,14 @@ export function listTaskEvents(taskId, { after = 0, limit = DEFAULT_EVENT_REPLAY
   return sqliteEventStore().listTaskEvents(taskId, { after, limit });
 }
 
+export async function listTaskEventsAsync(taskId, { after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
+  return eventStoreWorkerCall(
+    "listTaskEvents",
+    [taskId, { after, limit }],
+    () => listTaskEvents(taskId, { after, limit })
+  );
+}
+
 export function getTaskEventCount(taskId) {
   return sqliteEventStore().getTaskEventCount(taskId);
 }
@@ -986,12 +1036,32 @@ export function listToolEvents({ toolRunId = "", workspaceId = "", taskId = "", 
   return sqliteEventStore().listToolEvents({ toolRunId, workspaceId, taskId, after, limit });
 }
 
+export async function listToolEventsAsync({ toolRunId = "", workspaceId = "", taskId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
+  return eventStoreWorkerCall(
+    "listToolEvents",
+    [{ toolRunId, workspaceId, taskId, after, limit }],
+    () => listToolEvents({ toolRunId, workspaceId, taskId, after, limit })
+  );
+}
+
 export function getToolEventStats() {
   return sqliteEventStore().getToolEventStats();
 }
 
+export async function getToolEventStatsAsync() {
+  return eventStoreWorkerCall("getToolEventStats", [], () => getToolEventStats());
+}
+
 export function pruneToolEvents({ before = "", keepLatest = 5000, dryRun = true } = {}) {
   return sqliteEventStore().pruneToolEvents({ before, keepLatest, dryRun });
+}
+
+export async function pruneToolEventsAsync({ before = "", keepLatest = 5000, dryRun = true } = {}) {
+  return eventStoreWorkerCall(
+    "pruneToolEvents",
+    [{ before, keepLatest, dryRun }],
+    () => pruneToolEvents({ before, keepLatest, dryRun })
+  );
 }
 
 function publicApprovalRequest(row) {
@@ -1636,113 +1706,21 @@ export function listUnifiedEvents({
   after = 0,
   limit = 200
 } = {}) {
-  const LIMIT = Math.max(1, Math.min(Number(limit || 200), 2000));
-  const AFTER = Number(after || 0);
-  const qtaskId = cleanString(taskId, 160);
-  const qsessionId = cleanString(liveCallSessionId, 160);
-  const qtoolRunId = cleanString(toolRunId, 160);
+  return sqliteEventStore().listUnifiedEvents({ taskId, liveCallSessionId, toolRunId, after, limit });
+}
 
-  // We query each table separately (simpler SQLite, avoid UNION overhead on many rows).
-  const results = [];
-
-  // task_events
-  if (!liveCallSessionId && !toolRunId) {
-    const rows = database()
-      .prepare(`
-        SELECT cursor, task_id, event_id, event_type, event_kind, turn_id, block_id,
-               event_at, text, payload_json, event_json
-        FROM task_events
-        WHERE (? = '' OR task_id = ?) AND cursor > ?
-        ORDER BY cursor ASC
-        LIMIT ?
-      `)
-      .all(qtaskId, qtaskId, AFTER, LIMIT);
-    for (const row of rows) {
-      results.push({
-        cursor: row.cursor,
-        eventId: row.event_id,
-        type: row.event_type || "",
-        kind: row.event_kind || "",
-        at: row.event_at,
-        text: row.text || "",
-        sessionId: "",
-        taskId: row.task_id || "",
-        toolRunId: "",
-        turnId: row.turn_id || "",
-        blockId: row.block_id || ""
-      });
-    }
-  }
-
-  // tool_events
-  if (!liveCallSessionId) {
-    const remaining = LIMIT - results.length;
-    if (remaining > 0) {
-      const rows = database()
-        .prepare(`
-          SELECT cursor, task_id, tool_run_id, event_id, event_type, '' as event_kind,
-                 '' as turn_id, '' as block_id,
-                 event_at, text, payload_json, event_json
-          FROM tool_events
-          WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor > ?
-          ORDER BY cursor ASC
-          LIMIT ?
-        `)
-        .all(qtaskId, qtaskId, qtoolRunId, qtoolRunId, AFTER, remaining);
-      for (const row of rows) {
-        results.push({
-          cursor: row.cursor,
-          eventId: row.event_id,
-          type: row.event_type,
-          kind: "tool",
-          at: row.event_at,
-          text: row.text || "",
-          sessionId: "",
-          taskId: row.task_id || "",
-          toolRunId: row.tool_run_id || "",
-          turnId: "",
-          blockId: ""
-        });
-      }
-    }
-  }
-
-  // live_call_events
-  if (!taskId && !toolRunId) {
-    const remaining = LIMIT - results.length;
-    if (remaining > 0) {
-      const rows = database()
-        .prepare(`
-          SELECT cursor, session_id, event_id, event_type, '' as event_kind,
-                 '' as turn_id, '' as block_id,
-                 event_at, text, payload_json, event_json
-          FROM live_call_events
-          WHERE (? = '' OR session_id = ?) AND cursor > ?
-          ORDER BY cursor ASC
-          LIMIT ?
-        `)
-        .all(qsessionId, qsessionId, AFTER, remaining);
-      for (const row of rows) {
-        results.push({
-          cursor: row.cursor,
-          eventId: row.event_id,
-          type: row.event_type,
-          kind: "live_call",
-          at: row.event_at,
-          text: row.text || "",
-          sessionId: row.session_id || "",
-          taskId: "",
-          toolRunId: "",
-          turnId: "",
-          blockId: ""
-        });
-      }
-    }
-  }
-
-  // Sort all by cursor ASC and cap.
-  results.sort((a, b) => a.cursor - b.cursor);
-  return results.slice(0, LIMIT);
+export async function listUnifiedEventsAsync({
+  taskId = "",
+  liveCallSessionId = "",
+  toolRunId = "",
+  after = 0,
+  limit = 200
+} = {}) {
+  return eventStoreWorkerCall(
+    "listUnifiedEvents",
+    [{ taskId, liveCallSessionId, toolRunId, after, limit }],
+    () => listUnifiedEvents({ taskId, liveCallSessionId, toolRunId, after, limit })
+  );
 }
 
 // ── MCP tool cache ──

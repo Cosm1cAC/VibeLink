@@ -124,6 +124,23 @@ test("event store appends and replays live call events", () => {
   assert.equal(events[0].type, "live_call.transcript.final");
 });
 
+test("event store replays unified events with filters", () => {
+  const { db, store } = createStore();
+  db.prepare("INSERT INTO tool_runs (id, task_id, workspace_id, tool_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run("tool-1", "task-1", "workspace-1", "shell", "running", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+  db.prepare("INSERT INTO live_calls (id) VALUES (?)").run("session-1");
+
+  store.insertTaskEvent("task-1", { id: "task-event-1", at: "2026-01-01T00:00:00.000Z", type: "assistant", text: "task" });
+  store.insertToolEvent("tool-1", { id: "tool-event-1", at: "2026-01-01T00:00:01.000Z", type: "tool.stdout", text: "tool" });
+  store.insertLiveCallEvent("session-1", { id: "live-event-1", at: "2026-01-01T00:00:02.000Z", type: "live_call.transcript.final", text: "live" });
+
+  const events = store.listUnifiedEvents({ after: 0, limit: 10 });
+  assert.equal(events.length, 3);
+  assert.deepEqual(events.map((event) => event.kind), ["assistant", "tool", "live_call"]);
+  assert.deepEqual(store.listUnifiedEvents({ taskId: "task-1", limit: 10 }).map((event) => event.kind), ["assistant", "tool"]);
+  assert.deepEqual(store.listUnifiedEvents({ liveCallSessionId: "session-1", limit: 10 }).map((event) => event.kind), ["live_call"]);
+});
+
 
 test("event store normalizes replay limits", () => {
   assert.equal(normalizeEventReplayLimit(undefined), 500);

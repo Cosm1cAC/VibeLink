@@ -27,17 +27,19 @@ import {
   listDesktopObservations,
   listDevices,
   listPairingSessions,
-  listTaskEvents,
-  listToolEvents,
+  listTaskEventsAsync,
+  listToolEventsAsync,
   resolveEventReplayLimit,
   listToolRuns,
-  getToolEventStats,
-  pruneToolEvents,
+  getToolEventStatsAsync,
+  pruneToolEventsAsync,
   recordAuditLog,
   revokeDevice,
   revokePushSubscription,
   rotateDeviceToken,
   updateToolRun,
+  eventStoreMode,
+  listUnifiedEventsAsync,
   upsertPushSubscription
 } from "./db.js";
 import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
@@ -64,7 +66,6 @@ import {
   subscribeLiveCallEvents
 } from "./liveCall.js";
 import { getLiveCallAsrCheckpoints, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
-import { listUnifiedEvents } from "./db.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
@@ -421,17 +422,18 @@ function toolEventsRetention(settingsValue = settings) {
   };
 }
 
-function toolEventStatsPayload() {
+async function toolEventStatsPayload() {
   return {
-    ...getToolEventStats(),
+    ...(await getToolEventStatsAsync()),
+    storeMode: eventStoreMode(),
     retention: toolEventsRetention(settings),
     autoPrune: toolEventsPruneState
   };
 }
 
-function runToolEventsPrune({ dryRun = true } = {}) {
+async function runToolEventsPrune({ dryRun = true } = {}) {
   const retention = toolEventsRetention(settings);
-  return pruneToolEvents({
+  return pruneToolEventsAsync({
     before: retention.cutoff,
     keepLatest: retention.keepLatest,
     dryRun
@@ -467,9 +469,9 @@ function scheduleToolEventsPrune() {
   };
   if (!retention.autoPrune) return;
 
-  const run = () => {
+  const run = async () => {
     try {
-      const result = runToolEventsPrune({ dryRun: false });
+      const result = await runToolEventsPrune({ dryRun: false });
       toolEventsPruneState = {
         lastRunAt: new Date().toISOString(),
         nextRunAt: new Date(Date.now() + intervalMs).toISOString(),
@@ -1085,7 +1087,7 @@ async function buildDoctorReport(request) {
       timeoutMs: 5000
     }).catch((error) => ({ ok: false, error: error.message }))
   ]);
-  const toolStats = toolEventStatsPayload();
+  const toolStats = await toolEventStatsPayload();
   const workspaces = getWorkspaces(settings);
   const trusted = settings.security?.trustedWorkspaces || [];
   const mcp = mcpStatus(settings);
@@ -1618,7 +1620,7 @@ async function routeApi(request, response, url) {
     }
     sendJson(response, 200, {
       toolRun,
-      events: listToolEvents({
+      events: await listToolEventsAsync({
         toolRunId: toolRun.id,
         after: Number(url.searchParams.get("after") || 0),
         limit: resolveEventReplayLimit(url.searchParams.get("limit"))
@@ -1666,7 +1668,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/tool-events/stats" && request.method === "GET") {
-    sendJson(response, 200, toolEventStatsPayload());
+    sendJson(response, 200, await toolEventStatsPayload());
     return;
   }
 
@@ -1674,7 +1676,7 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     const retention = toolEventsRetention(settings);
     const dryRun = isDryRun(url) || body.dryRun !== false;
-    const result = pruneToolEvents({
+    const result = await pruneToolEventsAsync({
       before: body.before || retention.cutoff,
       keepLatest: body.keepLatest ?? retention.keepLatest,
       dryRun
@@ -2096,7 +2098,7 @@ async function routeApi(request, response, url) {
       return;
     }
     sendJson(response, 200, {
-      items: applyFields(listToolEvents({
+      items: applyFields(await listToolEventsAsync({
         ...filter,
         limit: resolveEventReplayLimit(url.searchParams.get("limit"))
       }), url)
@@ -2241,7 +2243,7 @@ async function routeApi(request, response, url) {
 
   // Unified event log (cross-table).
   if (url.pathname === "/api/events/unified" && request.method === "GET") {
-    const items = listUnifiedEvents({
+    const items = await listUnifiedEventsAsync({
       taskId: url.searchParams.get("taskId") || "",
       liveCallSessionId: url.searchParams.get("liveCallSessionId") || "",
       toolRunId: url.searchParams.get("toolRunId") || "",
@@ -3179,7 +3181,7 @@ async function routeApi(request, response, url) {
       return;
     }
     sendJson(response, 200, {
-      items: applyFields(listTaskEvents(task.id, {
+      items: applyFields(await listTaskEventsAsync(task.id, {
         after: Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0),
         limit: resolveEventReplayLimit(url.searchParams.get("limit"))
       }), url)

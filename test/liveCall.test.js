@@ -206,7 +206,11 @@ test("live call ASR metrics count normalized audio segments", () => {
     assert.ok(metrics.normalizedBytes > 0);
     assert.ok(metrics.segments > 0);
     assert.ok(metrics.providerFeedCalls > 0);
+    assert.equal(metrics.ingestDurationSamples, metrics.ingestCalls);
+    assert.equal(typeof metrics.avgIngestMs, "number");
+    assert.ok(metrics.maxIngestMs >= 0);
     assert.equal(sessionMetrics.providerFallbacks, 1);
+    assert.equal(sessionMetrics.ingestDurationSamples, sessionMetrics.ingestCalls);
     assert.equal(sessionMetrics.segments, metrics.segments);
     stopLiveCallSession(session.id, "test-cleanup");
   } finally {

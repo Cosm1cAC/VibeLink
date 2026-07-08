@@ -58,7 +58,10 @@ function createAsrMetrics() {
     providerFallbacks: 0,
     providerFeedCalls: 0,
     errors: 0,
-    lastIngestAt: 0
+    lastIngestAt: 0,
+    ingestDurationSamples: 0,
+    totalIngestMs: 0,
+    maxIngestMs: 0
   };
 }
 
@@ -96,7 +99,12 @@ function publicAsrMetrics(metrics) {
     providerFallbacks: metrics.providerFallbacks,
     providerFeedCalls: metrics.providerFeedCalls,
     errors: metrics.errors,
-    lastIngestAt: metrics.lastIngestAt
+    lastIngestAt: metrics.lastIngestAt,
+    ingestDurationSamples: metrics.ingestDurationSamples,
+    avgIngestMs: metrics.ingestDurationSamples
+      ? Number((metrics.totalIngestMs / metrics.ingestDurationSamples).toFixed(2))
+      : 0,
+    maxIngestMs: metrics.maxIngestMs
   };
 }
 
@@ -154,6 +162,15 @@ function recordAsrStop(sessionId) {
 function recordAsrError(sessionId) {
   updateAsrMetrics(sessionId, (metrics) => {
     metrics.errors += 1;
+  });
+}
+
+function recordAsrIngestDuration(sessionId, durationMs) {
+  updateAsrMetrics(sessionId, (metrics) => {
+    const safeDurationMs = Math.max(0, durationMs);
+    metrics.ingestDurationSamples += 1;
+    metrics.totalIngestMs += safeDurationMs;
+    metrics.maxIngestMs = Math.max(metrics.maxIngestMs, safeDurationMs);
   });
 }
 
@@ -572,105 +589,110 @@ registerAsrProvider(mockProvider);
 export function ingestLiveCallAudio(sessionId, payload = {}) {
   const session = getInMemorySession(sessionId);
   if (!session) return;
+  const ingestStartedAt = Date.now();
   recordAsrIngest(sessionId);
   const channel = payload.channel || "remote";
   const channelsKey = sessionChannels.get(sessionId) || new Map();
   sessionChannels.set(sessionId, channelsKey);
 
-  if (payload.stop) {
-    recordAsrStop(sessionId);
-    for (const state of channelsKey.values()) {
-      const provider = providers.get(state.provider);
-      if (provider?.stop) provider.stop().catch(() => {});
-    }
-    channelsKey.clear();
-    return;
-  }
-
-  let channelState = channelsKey.get(channel);
-  if (!channelState) {
-    channelState = {
-      sampleRate: payload.sampleRate || TARGET_SAMPLE_RATE,
-      channels: payload.channels || TARGET_CHANNELS,
-      encoding: payload.encoding || TARGET_ENCODING,
-      provider: null,
-      requestedProvider: "",
-      fallbackFromProvider: "",
-      vad: createVadSegmenter({ sampleRate: TARGET_SAMPLE_RATE }),
-      segmentIndex: 0,
-      checkpointBytes: 0,
-      checkpointPath: liveCallCheckpointPath(sessionId, channel)
-    };
-    channelsKey.set(channel, channelState);
-  }
-
-  // If this is the first frame (provider not started yet), kick off the provider.
-  if (!channelState.provider) {
-    const requestedProvider = session.asrProvider || session.asr_provider || activeProviderId;
-    const provider = resolveAsrProvider(requestedProvider);
-    channelState.provider = provider.id;
-    channelState.requestedProvider = requestedProvider || provider.id;
-    channelState.fallbackFromProvider = provider.id !== requestedProvider ? requestedProvider : "";
-    channelState.sampleRate = TARGET_SAMPLE_RATE;
-    channelState.channels = TARGET_CHANNELS;
-    channelState.encoding = TARGET_ENCODING;
-
-    const handlers = {
-      onPartial: (ch, text) => safePartial(sessionId, ch, text),
-      onFinal: (ch, text) => safeFinal(sessionId, ch, text),
-      onError: (error) => {
-        recordAsrError(sessionId);
-        console.error(`[liveCallAsr:${provider.id}]`, error?.message || error);
+  try {
+    if (payload.stop) {
+      recordAsrStop(sessionId);
+      for (const state of channelsKey.values()) {
+        const provider = providers.get(state.provider);
+        if (provider?.stop) provider.stop().catch(() => {});
       }
-    };
-    provider.onPartial = handlers.onPartial;
-    provider.onFinal = handlers.onFinal;
-    provider.onError = handlers.onError;
-    recordProviderStart(sessionId, Boolean(channelState.fallbackFromProvider));
-    provider
-      .start({
-        sessionId,
-        channel,
-        sampleRate: TARGET_SAMPLE_RATE,
-        channels: TARGET_CHANNELS,
-        encoding: TARGET_ENCODING
-      })
-      .catch((error) => {
-        recordAsrError(sessionId);
-        console.error(`[liveCallAsr:start]`, error.message);
-      });
-    emitLiveCallEvent(sessionId, "live_call.asr.provider", {
-      channel,
-      provider: provider.id,
-      requestedProvider: requestedProvider || provider.id,
-      fallback: Boolean(channelState.fallbackFromProvider),
-      fallbackFromProvider: channelState.fallbackFromProvider
-    });
-  }
+      channelsKey.clear();
+      return;
+    }
 
-  if (payload.buffer) {
-    const provider = providers.get(channelState.provider) || mockProvider;
-    recordAsrInput(sessionId, payload.buffer.length);
-    const normalized = normalizePcm16To16kMono(payload.buffer, {
-      sampleRate: payload.sampleRate || channelState.sampleRate,
-      channels: payload.channels || channelState.channels,
-      encoding: payload.encoding || channelState.encoding
-    });
-    recordAsrNormalized(sessionId, normalized.buffer.length);
-    if (normalized.buffer.length) {
-      appendCheckpoint(channelState, normalized.buffer);
-      for (const segment of channelState.vad.push(normalized.buffer)) {
+    let channelState = channelsKey.get(channel);
+    if (!channelState) {
+      channelState = {
+        sampleRate: payload.sampleRate || TARGET_SAMPLE_RATE,
+        channels: payload.channels || TARGET_CHANNELS,
+        encoding: payload.encoding || TARGET_ENCODING,
+        provider: null,
+        requestedProvider: "",
+        fallbackFromProvider: "",
+        vad: createVadSegmenter({ sampleRate: TARGET_SAMPLE_RATE }),
+        segmentIndex: 0,
+        checkpointBytes: 0,
+        checkpointPath: liveCallCheckpointPath(sessionId, channel)
+      };
+      channelsKey.set(channel, channelState);
+    }
+
+    // If this is the first frame (provider not started yet), kick off the provider.
+    if (!channelState.provider) {
+      const requestedProvider = session.asrProvider || session.asr_provider || activeProviderId;
+      const provider = resolveAsrProvider(requestedProvider);
+      channelState.provider = provider.id;
+      channelState.requestedProvider = requestedProvider || provider.id;
+      channelState.fallbackFromProvider = provider.id !== requestedProvider ? requestedProvider : "";
+      channelState.sampleRate = TARGET_SAMPLE_RATE;
+      channelState.channels = TARGET_CHANNELS;
+      channelState.encoding = TARGET_ENCODING;
+
+      const handlers = {
+        onPartial: (ch, text) => safePartial(sessionId, ch, text),
+        onFinal: (ch, text) => safeFinal(sessionId, ch, text),
+        onError: (error) => {
+          recordAsrError(sessionId);
+          console.error(`[liveCallAsr:${provider.id}]`, error?.message || error);
+        }
+      };
+      provider.onPartial = handlers.onPartial;
+      provider.onFinal = handlers.onFinal;
+      provider.onError = handlers.onError;
+      recordProviderStart(sessionId, Boolean(channelState.fallbackFromProvider));
+      provider
+        .start({
+          sessionId,
+          channel,
+          sampleRate: TARGET_SAMPLE_RATE,
+          channels: TARGET_CHANNELS,
+          encoding: TARGET_ENCODING
+        })
+        .catch((error) => {
+          recordAsrError(sessionId);
+          console.error(`[liveCallAsr:start]`, error.message);
+        });
+      emitLiveCallEvent(sessionId, "live_call.asr.provider", {
+        channel,
+        provider: provider.id,
+        requestedProvider: requestedProvider || provider.id,
+        fallback: Boolean(channelState.fallbackFromProvider),
+        fallbackFromProvider: channelState.fallbackFromProvider
+      });
+    }
+
+    if (payload.buffer) {
+      const provider = providers.get(channelState.provider) || mockProvider;
+      recordAsrInput(sessionId, payload.buffer.length);
+      const normalized = normalizePcm16To16kMono(payload.buffer, {
+        sampleRate: payload.sampleRate || channelState.sampleRate,
+        channels: payload.channels || channelState.channels,
+        encoding: payload.encoding || channelState.encoding
+      });
+      recordAsrNormalized(sessionId, normalized.buffer.length);
+      if (normalized.buffer.length) {
+        appendCheckpoint(channelState, normalized.buffer);
+        for (const segment of channelState.vad.push(normalized.buffer)) {
+          feedSegment(sessionId, channel, channelState, provider, segment);
+        }
+      }
+    }
+    if (payload.flush) {
+      recordAsrFlush(sessionId);
+      const provider = providers.get(channelState.provider) || mockProvider;
+      for (const segment of channelState.vad.flush()) {
         feedSegment(sessionId, channel, channelState, provider, segment);
       }
+      if (provider.flush) provider.flush().catch(() => {});
     }
-  }
-  if (payload.flush) {
-    recordAsrFlush(sessionId);
-    const provider = providers.get(channelState.provider) || mockProvider;
-    for (const segment of channelState.vad.flush()) {
-      feedSegment(sessionId, channel, channelState, provider, segment);
-    }
-    if (provider.flush) provider.flush().catch(() => {});
+  } finally {
+    recordAsrIngestDuration(sessionId, Date.now() - ingestStartedAt);
   }
 }
 

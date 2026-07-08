@@ -189,6 +189,32 @@ test("getWorkspaceTree reuses unchanged Node scanner results", async () => {
   }
 });
 
+test("getWorkspaceContext caches unchanged file samples and refreshes on change", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-context-file-cache-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "context-file-cache" });
+
+  try {
+    const before = getWorkspaceRuntimeStats().workspaceContextFiles;
+    const first = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["README.md"] });
+    const second = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["README.md"] });
+    fs.writeFileSync(path.join(fixture, "README.md"), "fresh", "utf8");
+    const third = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["README.md"] });
+    const after = getWorkspaceRuntimeStats().workspaceContextFiles;
+
+    assert.equal(first.ok, true);
+    assert.match(second.prompt, /hello/);
+    assert.match(third.prompt, /fresh/);
+    assert.equal(after.cacheHits, before.cacheHits + 1);
+    assert.equal(after.cacheMisses >= before.cacheMisses + 2, true);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceTree caps Node scanner cache entries", async () => {
   const fixture = path.join(os.tmpdir(), `vibelink-tree-cache-cap-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });

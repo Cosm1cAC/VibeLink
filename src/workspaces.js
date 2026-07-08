@@ -15,6 +15,9 @@ const gitStatusCacheStats = { hits: 0, misses: 0, evictions: 0 };
 const workspaceTreeCache = new Map();
 const workspaceTreeCacheMaxEntries = 128;
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
+const workspaceContextFileCache = new Map();
+const workspaceContextFileCacheMaxEntries = 256;
+const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
   ".txt",
@@ -171,6 +174,13 @@ export function getWorkspaceRuntimeStats() {
       cacheEvictions: workspaceTreeStats.cacheEvictions,
       maxEntries: workspaceTreeCacheMaxEntries
     },
+    workspaceContextFiles: {
+      entries: workspaceContextFileCache.size,
+      cacheHits: workspaceContextFileStats.cacheHits,
+      cacheMisses: workspaceContextFileStats.cacheMisses,
+      cacheEvictions: workspaceContextFileStats.cacheEvictions,
+      maxEntries: workspaceContextFileCacheMaxEntries
+    },
     rustWorkspaceTree: {
       enabled: rustWorkspaceTreeEnabled(),
       hits: rustWorkspaceTreeStats.hits,
@@ -300,6 +310,53 @@ function readTextSample(filePath, stat) {
   const raw = fs.readFileSync(filePath);
   if (raw.includes(0)) return "";
   return raw.toString("utf8");
+}
+
+function workspaceContextFileCacheKey(filePath) {
+  return path.resolve(filePath).toLowerCase();
+}
+
+function workspaceContextFileSignature(stat) {
+  return `${Math.trunc(stat.mtimeMs)}:${Math.trunc(stat.ctimeMs)}:${stat.size}`;
+}
+
+function cacheWorkspaceContextFile(filePath, stat, item) {
+  workspaceContextFileCache.set(workspaceContextFileCacheKey(filePath), {
+    signature: workspaceContextFileSignature(stat),
+    item: { ...item }
+  });
+  while (workspaceContextFileCache.size > workspaceContextFileCacheMaxEntries) {
+    const oldestKey = workspaceContextFileCache.keys().next().value;
+    workspaceContextFileCache.delete(oldestKey);
+    workspaceContextFileStats.cacheEvictions += 1;
+  }
+  return item;
+}
+
+function workspaceContextForFile(target, rel, stat) {
+  const key = workspaceContextFileCacheKey(target);
+  const signature = workspaceContextFileSignature(stat);
+  const cached = workspaceContextFileCache.get(key);
+  if (cached?.signature === signature) {
+    workspaceContextFileStats.cacheHits += 1;
+    return { ...cached.item };
+  }
+  workspaceContextFileStats.cacheMisses += 1;
+
+  const content = readTextSample(target, stat);
+  if (!content) {
+    return cacheWorkspaceContextFile(target, stat, {
+      type: "file",
+      path: rel,
+      text: `<file path="${rel}" size="${stat.size}" binary_or_too_large="true" />`
+    });
+  }
+
+  return cacheWorkspaceContextFile(target, stat, {
+    type: "file",
+    path: rel,
+    text: `<file path="${rel}">\n${content.slice(0, 12000)}\n</file>`
+  });
 }
 
 function rootGitignoreDirs(root) {
@@ -502,20 +559,7 @@ async function contextForPath(root, itemPath) {
     };
   }
 
-  const content = readTextSample(target, stat);
-  if (!content) {
-    return {
-      type: "file",
-      path: rel,
-      text: `<file path="${rel}" size="${stat.size}" binary_or_too_large="true" />`
-    };
-  }
-
-  return {
-    type: "file",
-    path: rel,
-    text: `<file path="${rel}">\n${content.slice(0, 12000)}\n</file>`
-  };
+  return workspaceContextForFile(target, rel, stat);
 }
 
 export async function getWorkspaceContext(id, settings, body = {}) {

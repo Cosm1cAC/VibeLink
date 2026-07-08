@@ -12,6 +12,7 @@ const gitSummaryCache = new Map();
 const gitSummaryCacheStats = { hits: 0, misses: 0 };
 const gitStatusCache = new Map();
 const gitStatusCacheStats = { hits: 0, misses: 0 };
+const rustWorkspaceTreeStats = { hits: 0, misses: 0 };
 const textExtensions = new Set([
   ".txt",
   ".md",
@@ -140,6 +141,11 @@ export function getWorkspaceRuntimeStats() {
       hits: gitStatusCacheStats.hits,
       misses: gitStatusCacheStats.misses,
       ttlMs: gitSummaryCacheTtlMs()
+    },
+    rustWorkspaceTree: {
+      enabled: rustWorkspaceTreeEnabled(),
+      hits: rustWorkspaceTreeStats.hits,
+      misses: rustWorkspaceTreeStats.misses
     }
   };
 }
@@ -289,7 +295,10 @@ function rustWorkspaceTreeBaseArgs() {
 async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
   if (!rustWorkspaceTreeEnabled()) return null;
   const command = rustWorkspaceTreeCommand();
-  if (!fs.existsSync(command)) return null;
+  if (!fs.existsSync(command)) {
+    rustWorkspaceTreeStats.misses += 1;
+    return null;
+  }
   try {
     const { stdout } = await execFileAsync(command, [
       ...rustWorkspaceTreeBaseArgs(),
@@ -303,8 +312,14 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
       maxBuffer: 10 * 1024 * 1024
     });
     const parsed = JSON.parse(stdout);
-    return Array.isArray(parsed.items) ? parsed.items : null;
+    if (Array.isArray(parsed.items)) {
+      rustWorkspaceTreeStats.hits += 1;
+      return parsed.items;
+    }
+    rustWorkspaceTreeStats.misses += 1;
+    return null;
   } catch {
+    rustWorkspaceTreeStats.misses += 1;
     return null;
   }
 }

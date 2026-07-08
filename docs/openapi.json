@@ -910,7 +910,7 @@
     "/api/mcp/status": {
       "get": {
         "summary": "MCP status",
-        "description": "Returns configured MCP server status and cached tool count.",
+        "description": "Returns configured MCP server status, cached tool count, and persistent stdio session health counters.",
         "parameters": [
           {
             "name": "fields",
@@ -927,7 +927,112 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "configured": {
+                      "type": "integer"
+                    },
+                    "enabled": {
+                      "type": "integer"
+                    },
+                    "servers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "cachedTools": {
+                      "type": "integer"
+                    },
+                    "persistentSessions": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "sessions": {
+                          "type": "integer"
+                        },
+                        "activeSessions": {
+                          "type": "integer"
+                        },
+                        "totalPending": {
+                          "type": "integer"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "closed": {
+                                "type": "boolean"
+                              },
+                              "pending": {
+                                "type": "integer"
+                              },
+                              "maxPendingRequests": {
+                                "type": "integer"
+                              },
+                              "requests": {
+                                "type": "integer"
+                              },
+                              "responses": {
+                                "type": "integer"
+                              },
+                              "failures": {
+                                "type": "integer"
+                              },
+                              "timeouts": {
+                                "type": "integer"
+                              },
+                              "backpressureRejects": {
+                                "type": "integer"
+                              },
+                              "toolsCached": {
+                                "type": "boolean"
+                              },
+                              "toolCount": {
+                                "type": "integer"
+                              },
+                              "startedAt": {
+                                "type": "string"
+                              },
+                              "lastUsedAt": {
+                                "type": "string"
+                              },
+                              "lastRequestAt": {
+                                "type": "string"
+                              },
+                              "lastResponseAt": {
+                                "type": "string"
+                              },
+                              "lastFailureAt": {
+                                "type": "string"
+                              },
+                              "lastBackpressureAt": {
+                                "type": "string"
+                              },
+                              "stderr": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "probeTimeoutMs": {
+                      "type": "integer"
+                    }
+                  }
                 }
               }
             }

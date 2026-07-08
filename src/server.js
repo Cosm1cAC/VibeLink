@@ -58,6 +58,7 @@ import {
   createLiveCallSession,
   getLiveCallSession,
   listLiveCallEvents,
+  listLiveCallEventsReplay,
   listLiveCallSessions,
   pauseLiveCallSession,
   recordLiveCallAnswer,
@@ -2257,7 +2258,7 @@ async function routeApi(request, response, url) {
 
   const liveCallEventsCatchUpMatch = url.pathname.match(/^\/api\/live-calls\/([^/]+)\/events\/catch-up$/);
   if (liveCallEventsCatchUpMatch && request.method === "GET") {
-    const items = listLiveCallEvents(liveCallEventsCatchUpMatch[1], {
+    const items = await listLiveCallEventsReplay(liveCallEventsCatchUpMatch[1], {
       after: Number(url.searchParams.get("after") || 0),
       limit: resolveEventReplayLimit(url.searchParams.get("limit"), { defaultLimit: 200, maxLimit: 2000 })
     });

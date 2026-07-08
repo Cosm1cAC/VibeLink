@@ -8,19 +8,62 @@ import {
   insertToolEventBatchedAsync,
   isEventStoreBatchAppendEnabled,
   listToolEvents,
+  resolveEventReplayLimit,
   updateApprovalRequest,
   updateToolRun
 } from "./db.js";
 import { getToolDefinition } from "./toolRegistry.js";
 
 const toolEventListeners = new Set();
+const toolEventSseMetrics = {
+  replays: 0,
+  replayEvents: 0,
+  totalReplayDurationMs: 0,
+  lastReplayDurationMs: 0,
+  avgReplayDurationMs: 0,
+  lastReplayEvents: 0,
+  lastReplayAt: ""
+};
 
 function nowIso() {
   return new Date().toISOString();
 }
 
+function nowMs() {
+  return Number(process.hrtime.bigint()) / 1_000_000;
+}
+
+function roundMs(value) {
+  return Math.round(Number(value || 0) * 10) / 10;
+}
+
 function addMinutes(minutes) {
   return new Date(Date.now() + Number(minutes || 0) * 60 * 1000).toISOString();
+}
+
+function recordToolEventReplay({ count = 0, durationMs = 0 } = {}) {
+  const duration = roundMs(durationMs);
+  toolEventSseMetrics.replays += 1;
+  toolEventSseMetrics.replayEvents += Number(count || 0);
+  toolEventSseMetrics.totalReplayDurationMs = roundMs(toolEventSseMetrics.totalReplayDurationMs + duration);
+  toolEventSseMetrics.lastReplayDurationMs = duration;
+  toolEventSseMetrics.avgReplayDurationMs = roundMs(toolEventSseMetrics.totalReplayDurationMs / toolEventSseMetrics.replays);
+  toolEventSseMetrics.lastReplayEvents = Number(count || 0);
+  toolEventSseMetrics.lastReplayAt = nowIso();
+}
+
+export function getToolEventSseMetrics() {
+  return { ...toolEventSseMetrics };
+}
+
+export function resetToolEventSseMetrics() {
+  toolEventSseMetrics.replays = 0;
+  toolEventSseMetrics.replayEvents = 0;
+  toolEventSseMetrics.totalReplayDurationMs = 0;
+  toolEventSseMetrics.lastReplayDurationMs = 0;
+  toolEventSseMetrics.avgReplayDurationMs = 0;
+  toolEventSseMetrics.lastReplayEvents = 0;
+  toolEventSseMetrics.lastReplayAt = "";
 }
 
 function compact(value, max = 200) {
@@ -242,7 +285,10 @@ export function subscribeToolEvents(response, filter = {}) {
     response.write(`data: ${JSON.stringify(event)}\n\n`);
   };
 
-  for (const event of listToolEvents({ ...filter, after, limit: resolveEventReplayLimit(filter.limit) })) send(event);
+  const replayStart = nowMs();
+  const replayEvents = listToolEvents({ ...filter, after, limit: resolveEventReplayLimit(filter.limit) });
+  for (const event of replayEvents) send(event);
+  recordToolEventReplay({ count: replayEvents.length, durationMs: nowMs() - replayStart });
 
   const heartbeat = setInterval(() => {
     if (!response.destroyed && !response.writableEnded) response.write(": ping\n\n");

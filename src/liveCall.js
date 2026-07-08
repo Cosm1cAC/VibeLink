@@ -4,6 +4,7 @@ import {
   getLiveCall as dbGetLiveCall,
   insertLiveCallEvent,
   listLiveCallEvents as dbListLiveCallEvents,
+  listLiveCallEventsAsync as dbListLiveCallEventsAsync,
   listLiveCalls as dbListLiveCalls,
   updateLiveCall as dbUpdateLiveCall
 } from "./db.js";
@@ -310,7 +311,13 @@ export function listLiveCallEvents(id, { after = 0, limit = 200 } = {}) {
   return dbListLiveCallEvents({ sessionId: id, after, limit });
 }
 
-export function subscribeLiveCallEvents(id, response, { after = 0 } = {}) {
+async function listLiveCallEventsForReplay(id, { after = 0, limit = 200 } = {}) {
+  const events = await dbListLiveCallEventsAsync({ sessionId: id, after, limit });
+  if (events.length || !sessions.has(id)) return events.map(publicEvent);
+  return listLiveCallEvents(id, { after, limit });
+}
+
+export async function subscribeLiveCallEvents(id, response, { after = 0 } = {}) {
   const session = sessions.get(id) || dbGetLiveCall(id);
   if (!session) return false;
   response.writeHead(200, {
@@ -320,7 +327,7 @@ export function subscribeLiveCallEvents(id, response, { after = 0 } = {}) {
     "X-Accel-Buffering": "no"
   });
   response.write(`retry: 1500\n\n`);
-  const events = listLiveCallEvents(id, { after, limit: MAX_EVENTS }) || [];
+  const events = await listLiveCallEventsForReplay(id, { after, limit: MAX_EVENTS }) || [];
   for (const event of events) {
     response.write(`id: ${event.cursor}\n`);
     response.write(`event: ${event.type}\n`);

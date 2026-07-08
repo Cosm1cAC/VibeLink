@@ -910,7 +910,7 @@
     "/api/mcp/status": {
       "get": {
         "summary": "MCP status",
-        "description": "Returns configured MCP server status, cached tool count, and persistent stdio session health counters.",
+        "description": "Returns configured MCP server status and cached tool count.",
         "parameters": [
           {
             "name": "fields",
@@ -927,112 +927,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    },
-                    "configured": {
-                      "type": "integer"
-                    },
-                    "enabled": {
-                      "type": "integer"
-                    },
-                    "servers": {
-                      "type": "array",
-                      "items": {
-                        "type": "object"
-                      }
-                    },
-                    "cachedTools": {
-                      "type": "integer"
-                    },
-                    "persistentSessions": {
-                      "type": "object",
-                      "properties": {
-                        "enabled": {
-                          "type": "boolean"
-                        },
-                        "sessions": {
-                          "type": "integer"
-                        },
-                        "activeSessions": {
-                          "type": "integer"
-                        },
-                        "totalPending": {
-                          "type": "integer"
-                        },
-                        "items": {
-                          "type": "array",
-                          "items": {
-                            "type": "object",
-                            "properties": {
-                              "id": {
-                                "type": "string"
-                              },
-                              "name": {
-                                "type": "string"
-                              },
-                              "closed": {
-                                "type": "boolean"
-                              },
-                              "pending": {
-                                "type": "integer"
-                              },
-                              "maxPendingRequests": {
-                                "type": "integer"
-                              },
-                              "requests": {
-                                "type": "integer"
-                              },
-                              "responses": {
-                                "type": "integer"
-                              },
-                              "failures": {
-                                "type": "integer"
-                              },
-                              "timeouts": {
-                                "type": "integer"
-                              },
-                              "backpressureRejects": {
-                                "type": "integer"
-                              },
-                              "toolsCached": {
-                                "type": "boolean"
-                              },
-                              "toolCount": {
-                                "type": "integer"
-                              },
-                              "startedAt": {
-                                "type": "string"
-                              },
-                              "lastUsedAt": {
-                                "type": "string"
-                              },
-                              "lastRequestAt": {
-                                "type": "string"
-                              },
-                              "lastResponseAt": {
-                                "type": "string"
-                              },
-                              "lastFailureAt": {
-                                "type": "string"
-                              },
-                              "lastBackpressureAt": {
-                                "type": "string"
-                              },
-                              "stderr": {
-                                "type": "string"
-                              }
-                            }
-                          }
-                        }
-                      }
-                    },
-                    "probeTimeoutMs": {
-                      "type": "integer"
-                    }
-                  }
+                  "type": "object"
                 }
               }
             }
@@ -1552,98 +1447,6 @@
               "application/json": {
                 "schema": {
                   "type": "object"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limit exceeded",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RateLimitError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/tasks/{id}/events/catch-up": {
-      "get": {
-        "summary": "Catch up task events",
-        "description": "Returns a bounded task event replay window with pagination metadata.",
-        "parameters": [
-          {
-            "name": "fields",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Comma-separated field selector"
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "after",
-            "in": "query",
-            "schema": {
-              "type": "number"
-            },
-            "description": "Opaque event cursor returned as nextCursor"
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 5000,
-              "default": 500
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "type": "object"
-                      }
-                    },
-                    "nextCursor": {
-                      "type": "number",
-                      "description": "Opaque cursor for the next catch-up window"
-                    },
-                    "hasMore": {
-                      "type": "boolean"
-                    },
-                    "limit": {
-                      "type": "integer"
-                    }
-                  }
                 }
               }
             }
@@ -2886,24 +2689,6 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "name": "after",
-            "in": "query",
-            "schema": {
-              "type": "number"
-            },
-            "description": "Opaque replay cursor returned as nextCursor"
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 5000,
-              "default": 200
-            }
           }
         ],
         "responses": {
@@ -2919,16 +2704,6 @@
                       "items": {
                         "type": "object"
                       }
-                    },
-                    "nextCursor": {
-                      "type": "number",
-                      "description": "Opaque cursor for the next replay window"
-                    },
-                    "hasMore": {
-                      "type": "boolean"
-                    },
-                    "limit": {
-                      "type": "integer"
                     }
                   }
                 }
@@ -3063,10 +2838,10 @@
         }
       }
     },
-    "/api/live-calls/{id}/events/catch-up": {
+    "/api/live-calls/audio-metrics": {
       "get": {
-        "summary": "Catch up live call events",
-        "description": "Returns a bounded live-call event replay window with pagination metadata.",
+        "summary": "Live call audio metrics",
+        "description": "Returns WebSocket audio stream counters including frames, drops, backpressure, acknowledgements, and per-session totals.",
         "parameters": [
           {
             "name": "fields",
@@ -3075,32 +2850,6 @@
               "type": "string"
             },
             "description": "Comma-separated field selector"
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "after",
-            "in": "query",
-            "schema": {
-              "type": "number"
-            },
-            "description": "Opaque event cursor returned as nextCursor"
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 2000,
-              "default": 200
-            }
           }
         ],
         "responses": {
@@ -3111,21 +2860,114 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "type": "object"
+                    "metrics": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/live-calls/asr-metrics": {
+      "get": {
+        "summary": "Live call ASR metrics",
+        "description": "Returns ASR ingest, normalization, segment, provider, and ingest-duration counters with per-session totals.",
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated field selector"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "metrics": {
+                      "type": "object",
+                      "properties": {
+                        "ingestCalls": {
+                          "type": "integer"
+                        },
+                        "inputBytes": {
+                          "type": "integer"
+                        },
+                        "normalizedBytes": {
+                          "type": "integer"
+                        },
+                        "segments": {
+                          "type": "integer"
+                        },
+                        "segmentBytes": {
+                          "type": "integer"
+                        },
+                        "flushes": {
+                          "type": "integer"
+                        },
+                        "stops": {
+                          "type": "integer"
+                        },
+                        "providerStarts": {
+                          "type": "integer"
+                        },
+                        "providerFallbacks": {
+                          "type": "integer"
+                        },
+                        "providerFeedCalls": {
+                          "type": "integer"
+                        },
+                        "errors": {
+                          "type": "integer"
+                        },
+                        "lastIngestAt": {
+                          "type": "integer"
+                        },
+                        "ingestDurationSamples": {
+                          "type": "integer"
+                        },
+                        "avgIngestMs": {
+                          "type": "number"
+                        },
+                        "maxIngestMs": {
+                          "type": "number"
+                        },
+                        "sessions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        }
                       }
-                    },
-                    "nextCursor": {
-                      "type": "number",
-                      "description": "Opaque cursor for the next catch-up window"
-                    },
-                    "hasMore": {
-                      "type": "boolean"
-                    },
-                    "limit": {
-                      "type": "integer"
                     }
                   }
                 }

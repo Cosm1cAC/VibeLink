@@ -507,6 +507,39 @@ const paths = {
     { type: "object", properties: { ok: { type: "boolean" }, session: { type: "object" } } },
     { "201": { description: "Created" } }
   )),
+  ...path("/api/live-calls/audio-metrics", get("Live call audio metrics",
+    "Returns WebSocket audio stream counters including frames, drops, backpressure, acknowledgements, and per-session totals.",
+    { type: "object", properties: { metrics: { type: "object" } } }
+  )),
+  ...path("/api/live-calls/asr-metrics", get("Live call ASR metrics",
+    "Returns ASR ingest, normalization, segment, provider, and ingest-duration counters with per-session totals.",
+    {
+      type: "object",
+      properties: {
+        metrics: {
+          type: "object",
+          properties: {
+            ingestCalls: { type: "integer" },
+            inputBytes: { type: "integer" },
+            normalizedBytes: { type: "integer" },
+            segments: { type: "integer" },
+            segmentBytes: { type: "integer" },
+            flushes: { type: "integer" },
+            stops: { type: "integer" },
+            providerStarts: { type: "integer" },
+            providerFallbacks: { type: "integer" },
+            providerFeedCalls: { type: "integer" },
+            errors: { type: "integer" },
+            lastIngestAt: { type: "integer" },
+            ingestDurationSamples: { type: "integer" },
+            avgIngestMs: { type: "number" },
+            maxIngestMs: { type: "number" },
+            sessions: { type: "array", items: { type: "object" } }
+          }
+        }
+      }
+    }
+  )),
 
   // Settings
   ...path("/api/settings", post("Update settings",

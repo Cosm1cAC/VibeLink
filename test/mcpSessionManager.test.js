@@ -166,3 +166,39 @@ test("MCP session manager replaces a closed stdio session", async () => {
     await manager.closeAll();
   }
 });
+
+test("MCP session manager replaces a crashed stdio session", async () => {
+  let spawns = 0;
+  let firstSpawn = true;
+  const manager = createMcpSessionManager({
+    spawnFn: (command, args, options = {}) => {
+      spawns += 1;
+      const env = firstSpawn
+        ? { ...(options.env || {}), FAKE_MCP_EXIT_ON_TOOL_CALL: "1" }
+        : options.env;
+      firstSpawn = false;
+      return spawn(command, args, { ...options, env });
+    }
+  });
+  const server = {
+    id: "fake-crash",
+    name: "fake-crash",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const firstSession = await manager.getSession(server, { timeoutMs: 5000 });
+    await assert.rejects(firstSession.callTool("echo", { q: "crash" }));
+
+    const nextSession = await manager.getSession(server, { timeoutMs: 5000 });
+    const result = await nextSession.callTool("echo", { q: "after-crash" });
+
+    assert.equal(spawns, 2);
+    assert.notEqual(firstSession, nextSession);
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "after-crash" } });
+  } finally {
+    await manager.closeAll();
+  }
+});

@@ -27,6 +27,11 @@ import { ingestLiveCallAudio } from "./liveCallAsr.js";
 
 const MAX_FRAME_BYTES = 1 * 1024 * 1024; // 1 MB upper bound per binary frame
 
+function backpressureBytesLimit() {
+  const value = Number(process.env.VIBELINK_LIVE_CALL_AUDIO_BACKPRESSURE_BYTES || 1024 * 1024);
+  return Number.isFinite(value) && value > 0 ? value : 1024 * 1024;
+}
+
 function createAudioMetrics() {
   return {
     connections: 0,
@@ -35,6 +40,7 @@ function createAudioMetrics() {
     bytes: 0,
     droppedFrames: 0,
     oversizedFrames: 0,
+    backpressureFrames: 0,
     errors: 0,
     acks: 0,
     maxFrameBytes: 0,
@@ -71,6 +77,7 @@ function publicMetrics(metrics) {
     bytes: metrics.bytes,
     droppedFrames: metrics.droppedFrames,
     oversizedFrames: metrics.oversizedFrames,
+    backpressureFrames: metrics.backpressureFrames,
     errors: metrics.errors,
     acks: metrics.acks,
     maxFrameBytes: metrics.maxFrameBytes,
@@ -110,12 +117,14 @@ function recordAudioFrame(sessionId, byteLength) {
   updateFrameMetrics(sessionMetrics(sessionId), byteLength, now);
 }
 
-function recordDroppedFrame(sessionId, { oversized = false } = {}) {
+function recordDroppedFrame(sessionId, { oversized = false, backpressure = false } = {}) {
   liveCallAudioMetrics.droppedFrames += 1;
   if (oversized) liveCallAudioMetrics.oversizedFrames += 1;
+  if (backpressure) liveCallAudioMetrics.backpressureFrames += 1;
   const metrics = sessionMetrics(sessionId);
   metrics.droppedFrames += 1;
   if (oversized) metrics.oversizedFrames += 1;
+  if (backpressure) metrics.backpressureFrames += 1;
 }
 
 function recordAudioError(sessionId) {
@@ -237,6 +246,19 @@ export function handleLiveCallAudioConnection(sessionId, ws, ctx = {}) {
       if (buf.length > MAX_FRAME_BYTES) {
         recordDroppedFrame(sessionId, { oversized: true });
         safeSend(ws, { type: "error", error: "frame_too_large", bytes: buf.length });
+        return;
+      }
+      const bufferedAmount = Number(ws.bufferedAmount || 0);
+      const bufferedLimit = backpressureBytesLimit();
+      if (bufferedAmount > bufferedLimit) {
+        recordDroppedFrame(sessionId, { backpressure: true });
+        safeSend(ws, {
+          type: "drop",
+          reason: "backpressure",
+          bufferedAmount,
+          limit: bufferedLimit,
+          bytes: buf.length
+        });
         return;
       }
       bytes += buf.length;

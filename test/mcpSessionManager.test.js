@@ -73,3 +73,36 @@ test("MCP session manager rejects requests above the pending cap", async () => {
     await manager.closeAll();
   }
 });
+
+test("MCP session manager replaces a closed stdio session", async () => {
+  let spawns = 0;
+  const manager = createMcpSessionManager({
+    spawnFn: (...args) => {
+      spawns += 1;
+      return spawn(...args);
+    }
+  });
+  const server = {
+    id: "fake-restart",
+    name: "fake-restart",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const firstSession = await manager.getSession(server, { timeoutMs: 5000 });
+    const first = await firstSession.callTool("echo", { q: "before-close" });
+    await firstSession.close();
+
+    const nextSession = await manager.getSession(server, { timeoutMs: 5000 });
+    const second = await nextSession.callTool("echo", { q: "after-close" });
+
+    assert.equal(spawns, 2);
+    assert.notEqual(firstSession, nextSession);
+    assert.deepEqual(JSON.parse(first.content[0].text), { name: "echo", arguments: { q: "before-close" } });
+    assert.deepEqual(JSON.parse(second.content[0].text), { name: "echo", arguments: { q: "after-close" } });
+  } finally {
+    await manager.closeAll();
+  }
+});

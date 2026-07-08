@@ -134,6 +134,39 @@ test("MCP session manager rejects requests above the pending cap", async () => {
   }
 });
 
+test("MCP session manager reports per-session request health counters", async () => {
+  const manager = createMcpSessionManager();
+  const server = {
+    id: "fake-health",
+    name: "fake-health",
+    type: "stdio",
+    command: process.execPath,
+    env: { FAKE_MCP_RESPONSE_DELAY_MS: "100" },
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const session = await manager.getSession(server, { timeoutMs: 5000, maxPendingRequests: 1 });
+    await session.initialize();
+    const first = session.callTool("echo", { q: "health" });
+    await assert.rejects(
+      session.callTool("echo", { q: "backpressure" }),
+      (error) => error.code === "EMCPBACKPRESSURE"
+    );
+    await first;
+
+    const stats = session.stats();
+    assert.equal(stats.requests >= 2, true);
+    assert.equal(stats.responses >= 2, true);
+    assert.equal(stats.failures, 0);
+    assert.equal(stats.backpressureRejects, 1);
+    assert.equal(typeof stats.lastRequestAt, "string");
+    assert.equal(typeof stats.lastResponseAt, "string");
+  } finally {
+    await manager.closeAll();
+  }
+});
+
 test("MCP session manager replaces a closed stdio session", async () => {
   let spawns = 0;
   const manager = createMcpSessionManager({

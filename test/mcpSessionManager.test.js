@@ -40,3 +40,36 @@ test("MCP session manager reuses one stdio child for repeated requests", async (
     await manager.closeAll();
   }
 });
+
+test("MCP session manager rejects requests above the pending cap", async () => {
+  let spawns = 0;
+  const manager = createMcpSessionManager({
+    spawnFn: (...args) => {
+      spawns += 1;
+      return spawn(...args);
+    }
+  });
+  const server = {
+    id: "fake-backpressure",
+    name: "fake-backpressure",
+    type: "stdio",
+    command: process.execPath,
+    env: { FAKE_MCP_RESPONSE_DELAY_MS: "100" },
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const session = await manager.getSession(server, { timeoutMs: 5000, maxPendingRequests: 1 });
+    const first = session.callTool("echo", { q: "first" });
+    await assert.rejects(
+      session.callTool("echo", { q: "second" }),
+      (error) => error.code === "EMCPBACKPRESSURE"
+    );
+    const result = await first;
+
+    assert.equal(spawns, 1);
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "first" } });
+  } finally {
+    await manager.closeAll();
+  }
+});

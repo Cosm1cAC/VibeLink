@@ -15,6 +15,15 @@ function send(id, result) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
 }
 
+function sendLater(id, result) {
+  const delayMs = Number(process.env.FAKE_MCP_RESPONSE_DELAY_MS || 0);
+  if (Number.isFinite(delayMs) && delayMs > 0) {
+    setTimeout(() => send(id, result), delayMs);
+    return;
+  }
+  send(id, result);
+}
+
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const message = JSON.parse(line);
@@ -43,7 +52,7 @@ rl.on("line", (line) => {
   }
 
   if (message.method === "tools/call") {
-    send(message.id, {
+    sendLater(message.id, {
       content: [
         {
           type: "text",

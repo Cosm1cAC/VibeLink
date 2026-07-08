@@ -53,7 +53,25 @@ function timeoutError(method, timeoutMs) {
   return error;
 }
 
-function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, emitProgress = null } = {}) {
+function maxPendingRequestsValue(value = process.env.VIBELINK_MCP_SESSION_MAX_PENDING_REQUESTS) {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+  return 32;
+}
+
+function backpressureError(method, maxPendingRequests) {
+  const error = new Error(
+    `MCP session backpressure: ${method} rejected because ${maxPendingRequests} request(s) are already pending.`
+  );
+  error.code = "EMCPBACKPRESSURE";
+  error.maxPendingRequests = maxPendingRequests;
+  return error;
+}
+
+function createStdioSession(
+  server = {},
+  { timeoutMs = 10000, spawnFn = spawn, emitProgress = null, maxPendingRequests = maxPendingRequestsValue() } = {}
+) {
   if (!server.command) throw new Error("MCP stdio server command is empty.");
 
   let nextId = 1;
@@ -91,6 +109,8 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
   function request(method, params, options = {}) {
     if (closed) return Promise.reject(new Error("MCP session is closed."));
     const { timeout = timeoutMs, emitProgress: requestEmitProgress = null } = options;
+    const pendingLimit = maxPendingRequestsValue(options.maxPendingRequests ?? maxPendingRequests);
+    if (pending.size >= pendingLimit) return Promise.reject(backpressureError(method, pendingLimit));
     const id = nextId++;
     const message = jsonRpcMessage(id, method, params);
     return new Promise((resolve, reject) => {
@@ -178,6 +198,7 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
       return {
         closed,
         pending: pending.size,
+        maxPendingRequests: maxPendingRequestsValue(maxPendingRequests),
         stderr: compact(stderr, 4000)
       };
     }
@@ -188,10 +209,13 @@ export function createMcpSessionManager({ spawnFn = spawn } = {}) {
   const sessions = new Map();
 
   return {
-    async getSession(server = {}, { timeoutMs = 10000, emitProgress = null } = {}) {
+    async getSession(
+      server = {},
+      { timeoutMs = 10000, emitProgress = null, maxPendingRequests = maxPendingRequestsValue() } = {}
+    ) {
       const key = serverKey(server);
       if (!sessions.has(key)) {
-        sessions.set(key, createStdioSession(server, { timeoutMs, spawnFn, emitProgress }));
+        sessions.set(key, createStdioSession(server, { timeoutMs, spawnFn, emitProgress, maxPendingRequests }));
       }
       return sessions.get(key);
     },

@@ -5,6 +5,8 @@ import {
   getApprovalRequest,
   getToolRun,
   insertToolEvent,
+  insertToolEventBatchedAsync,
+  isEventStoreBatchAppendEnabled,
   listToolEvents,
   updateApprovalRequest,
   updateToolRun
@@ -40,6 +42,25 @@ function lifecycleForToolEvent(type = "") {
   if (value.startsWith("approval.")) return "approval";
   if (value.startsWith("tool.")) return "running";
   return "event";
+}
+
+function enrichToolEvent(toolRunId, event = {}) {
+  const run = getToolRun(toolRunId);
+  const lifecycle = event.lifecycle || event.payload?.lifecycle || lifecycleForToolEvent(event.type);
+  return {
+    id: event.id || crypto.randomUUID(),
+    at: event.at || nowIso(),
+    ...event,
+    lifecycle,
+    sourceConfidence: event.sourceConfidence || event.payload?.sourceConfidence || "authoritative",
+    toolRunId,
+    taskId: event.taskId || run?.taskId || "",
+    workspaceId: event.workspaceId || run?.workspaceId || ""
+  };
+}
+
+function notifyToolEvent(event) {
+  for (const listener of toolEventListeners) listener(event);
 }
 
 export function createWorkspaceCommandToolRun({ workspaceId = "", taskId = "", kind = "terminal", command = "", timeoutMs = 120000, risk = null } = {}) {
@@ -181,21 +202,25 @@ export function finishObservedToolRun({ toolRunId = "", ok = true, result = null
 }
 
 export function emitToolEvent(toolRunId, event = {}) {
-  const run = getToolRun(toolRunId);
-  const lifecycle = event.lifecycle || event.payload?.lifecycle || lifecycleForToolEvent(event.type);
-  const enriched = {
-    id: event.id || crypto.randomUUID(),
-    at: event.at || nowIso(),
-    ...event,
-    lifecycle,
-    sourceConfidence: event.sourceConfidence || event.payload?.sourceConfidence || "authoritative",
-    toolRunId,
-    taskId: event.taskId || run?.taskId || "",
-    workspaceId: event.workspaceId || run?.workspaceId || ""
-  };
+  const enriched = enrichToolEvent(toolRunId, event);
   const cursor = insertToolEvent(toolRunId, enriched);
   if (cursor) enriched.cursor = cursor;
-  for (const listener of toolEventListeners) listener(enriched);
+  notifyToolEvent(enriched);
+  return enriched;
+}
+
+export function emitToolEventBatched(toolRunId, event = {}) {
+  if (!isEventStoreBatchAppendEnabled()) return emitToolEvent(toolRunId, event);
+
+  const enriched = enrichToolEvent(toolRunId, event);
+  insertToolEventBatchedAsync(toolRunId, enriched)
+    .then((cursor) => {
+      if (cursor) enriched.cursor = cursor;
+      notifyToolEvent(enriched);
+    })
+    .catch((error) => {
+      console.warn(`[toolRuntime] batched tool event append failed: ${error.message}`);
+    });
   return enriched;
 }
 

@@ -101,6 +101,7 @@ import {
   denyToolApproval,
   expireToolApproval,
   emitToolEvent,
+  emitToolEventBatched,
   requestToolApproval,
   runApprovedWorkspaceCommand,
   runWorkspaceToolAction,
@@ -620,7 +621,7 @@ async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
           bytes: Buffer.byteLength(chunk.text || "", "utf8"),
           cwd
         };
-        const event = emitToolEvent(toolRunId, {
+        const event = emitToolEventBatched(toolRunId, {
           type: "tool.output",
           text: chunk.text,
           payload
@@ -657,7 +658,7 @@ async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
         );
       }
     });
-    emitToolEvent(toolRunId, {
+    emitToolEventBatched(toolRunId, {
       type: "tool.output",
       text: `terminal mode=${session.mode} shell=${session.shell}`,
       payload: { session }
@@ -705,7 +706,7 @@ async function executeWorkspaceCommandToolRun(toolRunId, settingsValue) {
               command: chunk.command,
               cwd: chunk.cwd
             };
-            const event = emitToolEvent(toolRunId, {
+            const event = emitToolEventBatched(toolRunId, {
               type: "tool.output",
               text: chunk.text,
               payload
@@ -792,7 +793,7 @@ async function executeBrowserFetchToolRun(toolRunId) {
     failedText: "Browser fetch failed.",
     execute: async (input) => fetchBrowserPage(input, {
       emitProgress: (event) => {
-        emitToolEvent(toolRunId, {
+        emitToolEventBatched(toolRunId, {
           type: "tool.output",
           text: [event.phase, event.status || event.bytes || event.url || ""].filter(Boolean).join(" "),
           payload: event
@@ -831,7 +832,7 @@ async function executeMcpCallToolRun(toolRunId, settingsValue) {
     execute: async (input) => callMcpTool(settingsValue, input, {
       timeoutMs: Number(input.timeoutMs || 0),
       emitProgress: (event) => {
-        emitToolEvent(toolRunId, {
+        emitToolEventBatched(toolRunId, {
           type: "tool.output",
           text: [event.phase, event.name || event.serverId || event.method || event.toolName || "", event.status || ""].filter(Boolean).join(" "),
           payload: event
@@ -1915,7 +1916,7 @@ async function routeApi(request, response, url) {
           serverId: body.serverId || "",
           timeoutMs: Number(body.timeoutMs || 0),
           emitProgress: (event) => {
-            emitToolEvent(toolRun.id, {
+            emitToolEventBatched(toolRun.id, {
               type: "tool.output",
               text: [event.phase, event.name || event.serverId || event.method || "", event.status || ""].filter(Boolean).join(" "),
               payload: event

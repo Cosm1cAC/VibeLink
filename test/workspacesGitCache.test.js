@@ -135,3 +135,34 @@ test("getWorkspaceGitStatus refreshes the cache when the worktree changes", asyn
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("workspace git caches cap retained repository entries", async () => {
+  const previousTtl = process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS;
+  const previousMaxEntries = process.env.VIBELINK_GIT_CACHE_MAX_ENTRIES;
+  process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS = "60000";
+  process.env.VIBELINK_GIT_CACHE_MAX_ENTRIES = "8";
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-git-cache-cap-"));
+
+  try {
+    for (let i = 0; i < 12; i += 1) {
+      const repo = path.join(tempRoot, `repo-${String(i).padStart(3, "0")}`);
+      fs.mkdirSync(repo, { recursive: true });
+      git(repo, ["init", "-b", "main"]);
+      const workspace = upsertWorkspace({ path: repo, allowedRoot: repo, title: `git-cache-cap-${i}` });
+      await getWorkspaceGitStatus(workspace.id, { allowedRoots: [tempRoot] });
+      await getWorkspaceGitDiff(workspace.id, { allowedRoots: [tempRoot] });
+    }
+    const stats = getWorkspaceRuntimeStats();
+
+    assert.equal(stats.gitStatusCache.entries <= 8, true);
+    assert.equal(stats.gitSummaryCache.entries <= 8, true);
+    assert.equal(stats.gitStatusCache.evictions > 0, true);
+    assert.equal(stats.gitSummaryCache.evictions > 0, true);
+  } finally {
+    if (previousTtl === undefined) delete process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS;
+    else process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS = previousTtl;
+    if (previousMaxEntries === undefined) delete process.env.VIBELINK_GIT_CACHE_MAX_ENTRIES;
+    else process.env.VIBELINK_GIT_CACHE_MAX_ENTRIES = previousMaxEntries;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

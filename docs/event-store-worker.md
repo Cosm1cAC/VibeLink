@@ -44,6 +44,8 @@ The worker client applies a pending-request cap before posting work to the threa
 
 Task and tool event append paths still preserve the existing immediate cursor behavior unless their specific async or batch flags are enabled. If the worker fails, VibeLink logs one warning and falls back to the synchronous SQLite adapter.
 
+`GET /api/tasks/:id/events/catch-up` and `GET /api/live-calls/:id/events/catch-up` return the existing `items` array plus `nextCursor`, `hasMore`, and `limit`. Each route fetches `limit + 1` events internally to expose a cheap next-page signal without changing the item contract.
+
 `GET /api/events/unified` uses the bounded `replayWindow` contract. It returns the existing `items` array plus `nextCursor`, `hasMore`, and `limit` so callers can page through a recent replay window instead of forcing one large cross-table JSON replay. The cursor is opaque to clients and remains compatible with task, tool, and live-call filters.
 
 `GET /api/tool-events/stats` includes `storeMode`:

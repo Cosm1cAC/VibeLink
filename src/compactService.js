@@ -230,7 +230,10 @@ export async function compactTask(taskId, model = "", options = {}) {
       return null;
     }
 
-    const compactable = buildCompactSummaryInput(events, { maxChars: options.maxInputChars });
+    const compactable = buildCompactSummaryInput(events, {
+      maxChars: options.maxInputChars,
+      maxBufferedLines: options.maxBufferedLines
+    });
 
     if (!compactable.text.trim()) {
       nullResult = true;
@@ -253,6 +256,7 @@ export async function compactTask(taskId, model = "", options = {}) {
         excessTokens,
         compactableLength: compactable.text.length,
         compactableSourceChars: compactable.sourceChars,
+        compactableDroppedEvents: compactable.droppedEvents,
         compactableTruncated: compactable.truncated
       }
     };

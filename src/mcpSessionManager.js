@@ -82,6 +82,15 @@ function createStdioSession(
   let tools = null;
   const startedAt = new Date().toISOString();
   let lastUsedAt = startedAt;
+  let lastRequestAt = "";
+  let lastResponseAt = "";
+  let lastFailureAt = "";
+  let lastBackpressureAt = "";
+  let requests = 0;
+  let responses = 0;
+  let failures = 0;
+  let timeouts = 0;
+  let backpressureRejects = 0;
   const pending = new Map();
   const defaultEmitProgress = emitProgress;
   const child = spawnFn(server.command, Array.isArray(server.args) ? server.args : [], {
@@ -114,12 +123,19 @@ function createStdioSession(
     if (closed) return Promise.reject(new Error("MCP session is closed."));
     const { timeout = timeoutMs, emitProgress: requestEmitProgress = null } = options;
     const pendingLimit = maxPendingRequestsValue(options.maxPendingRequests ?? maxPendingRequests);
-    if (pending.size >= pendingLimit) return Promise.reject(backpressureError(method, pendingLimit));
+    if (pending.size >= pendingLimit) {
+      backpressureRejects += 1;
+      lastBackpressureAt = new Date().toISOString();
+      return Promise.reject(backpressureError(method, pendingLimit));
+    }
     const id = nextId++;
     const message = jsonRpcMessage(id, method, params);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const error = timeoutError(method, timeout);
+        failures += 1;
+        timeouts += 1;
+        lastFailureAt = new Date().toISOString();
         pending.delete(id);
         closed = true;
         reject(error);
@@ -128,6 +144,8 @@ function createStdioSession(
       }, Math.max(1, Number(timeout || timeoutMs)));
       timer.unref?.();
       pending.set(id, { resolve, reject, timer, method, emitProgress: requestEmitProgress });
+      requests += 1;
+      lastRequestAt = new Date().toISOString();
       write(message, requestEmitProgress);
     });
   }
@@ -160,8 +178,15 @@ function createStdioSession(
         pending.delete(message.id);
         clearTimeout(pendingRequest.timer);
         progress(pendingRequest.emitProgress, { phase: "stdio.receive", method: pendingRequest.method, id: message.id });
-        if (message.error) pendingRequest.reject(new Error(message.error.message || JSON.stringify(message.error)));
-        else pendingRequest.resolve(message);
+        if (message.error) {
+          failures += 1;
+          lastFailureAt = new Date().toISOString();
+          pendingRequest.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        } else {
+          responses += 1;
+          lastResponseAt = new Date().toISOString();
+          pendingRequest.resolve(message);
+        }
       }
       newline = stdout.indexOf("\n");
     }
@@ -214,10 +239,19 @@ function createStdioSession(
         closed,
         pending: pending.size,
         maxPendingRequests: maxPendingRequestsValue(maxPendingRequests),
+        requests,
+        responses,
+        failures,
+        timeouts,
+        backpressureRejects,
         toolsCached: tools !== null,
         toolCount: Array.isArray(tools) ? tools.length : 0,
         startedAt,
         lastUsedAt,
+        lastRequestAt,
+        lastResponseAt,
+        lastFailureAt,
+        lastBackpressureAt,
         stderr: compact(stderr, 4000)
       };
     }

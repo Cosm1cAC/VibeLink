@@ -41,9 +41,11 @@ Synchronous append paths remain on the main thread for now so existing callers k
 - `worker`: worker flag is enabled and no failure has occurred
 - `sync-fallback`: worker flag is enabled but a worker request failed
 
+It also includes `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, and mode counts. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
+
 ## Next Slices
 
 - Move append paths behind a queue while preserving cursor ordering.
 - Add a 20-100 ms batch flush for high-frequency tool output.
-- Add metrics for query latency, append latency, worker fallback, batch size, and SSE replay time.
+- Add append latency, batch size, and SSE replay time metrics.
 - Reuse the same JSON method contract for a Rust sidecar/native module once the Worker boundary is stable.

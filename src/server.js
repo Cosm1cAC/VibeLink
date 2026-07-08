@@ -39,6 +39,7 @@ import {
   rotateDeviceToken,
   updateToolRun,
   eventStoreMode,
+  getEventStoreRuntimeStats,
   listUnifiedEventsAsync,
   upsertPushSubscription
 } from "./db.js";
@@ -426,6 +427,7 @@ async function toolEventStatsPayload() {
   return {
     ...(await getToolEventStatsAsync()),
     storeMode: eventStoreMode(),
+    eventStore: getEventStoreRuntimeStats(),
     retention: toolEventsRetention(settings),
     autoPrune: toolEventsPruneState
   };

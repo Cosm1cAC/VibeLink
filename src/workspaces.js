@@ -302,7 +302,6 @@ function rootGitignoreDirs(root) {
 }
 
 function workspaceTreeCacheKey(dir, root, depth, maxEntries) {
-  const dirStat = fs.statSync(dir);
   let gitignoreMtimeMs = 0;
   try {
     gitignoreMtimeMs = fs.statSync(path.join(root, ".gitignore")).mtimeMs;
@@ -314,9 +313,37 @@ function workspaceTreeCacheKey(dir, root, depth, maxEntries) {
     root: path.resolve(root),
     depth,
     maxEntries,
-    dirMtimeMs: dirStat.mtimeMs,
+    dirVersion: workspaceTreeDirectoryVersion(dir, root, depth),
     gitignoreMtimeMs
   });
+}
+
+function workspaceTreeDirectoryVersion(dir, root, depth) {
+  const gitignoreDirs = rootGitignoreDirs(root);
+  const parts = [];
+  const queue = [{ dir, rel: "", depth: 0 }];
+
+  while (queue.length) {
+    const current = queue.shift();
+    const stat = fs.statSync(current.dir);
+    parts.push(`${current.rel}:${stat.mtimeMs}`);
+    if (current.depth + 1 >= depth) continue;
+
+    const children = fs
+      .readdirSync(current.dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .filter((entry) => !entry.name.startsWith("."))
+      .filter((entry) => !ignoredDirs.has(entry.name))
+      .filter((entry) => !gitignoreDirs.has(entry.name))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of children) {
+      const rel = current.rel ? `${current.rel}/${entry.name}` : entry.name;
+      queue.push({ dir: path.join(current.dir, entry.name), rel, depth: current.depth + 1 });
+    }
+  }
+
+  return parts.join("|");
 }
 
 function rustWorkspaceTreeEnabled() {

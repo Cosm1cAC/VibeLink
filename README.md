@@ -99,6 +99,40 @@ Live Call Assistant
 | 需要确定性模型/权限/沙箱/审批 | VibeLink Agent |
 | 只需要观察和接管当前 Desktop 可见状态 | Codex Desktop Remote |
 
+
+## Rust 化性能架构
+
+VibeLink 的长期性能方向是混合架构：Node bridge 继续负责 HTTP API、权限、设备配对、provider 编排和前端交付；Rust 负责高频、流式、CPU/IO 密集的底层热路径。这样可以保持现有产品接口稳定，同时把最容易阻塞 Node 主线程的工作迁移到更适合的运行时。
+
+### 分层边界
+
+- **Node control plane**：`src/server.js`、settings、安全策略、approval、provider adapter、REST/SSE 路由和产品级状态机仍由 Node 承载。
+- **Rust data plane**：事件追加与 replay、workspace 文件扫描、MCP stdio session 管理、音频流预处理、压缩/上下文预算等热路径逐步迁移到 Rust。
+- **Sidecar first**：优先以 Rust CLI/sidecar 形式接入，先验证性能和行为兼容，再决定是否做 native addon 或更深内嵌。
+- **Fallback required**：每个 Rust 化模块都必须保留 Node fallback，避免 Windows 环境、依赖安装或 sidecar 启动失败时影响核心功能。
+
+### 迁移优先级
+
+1. **Workspace scanner**：替换目录遍历、忽略规则、排序、metadata 读取和上下文文件采样。当前已在 `apps/windows` 增加 `workspace-tree` 子命令，并由 `src/workspaces.js` 在 `VIBELINK_RUST_WORKSPACE_TREE=1` 时优先调用 Rust scanner；失败、未编译或未启用时自动回退 Node scanner。
+2. **Event store worker**：把 `task_events`、`tool_events`、`live_call_events` 的 append、cursor 查询、retention prune 和 SSE replay 从同步 SQLite 主线程路径挪到 Rust/worker 边界。
+3. **Persistent MCP sessions**：为 stdio MCP server 建立长连接池，复用 initialize 状态，减少每次 probe/call 的 spawn 成本，并统一超时、重启和背压。
+4. **Live audio pipeline**：把音频分片、level meter、ring buffer、VAD/重采样等低延迟路径放到 Rust，Node 只接收 transcript 和事件。
+5. **Compression adapter**：优先复用 Headroom sidecar/proxy；只有当明确需要 VibeLink 内置可控压缩时，才考虑 Rust 实现轻量 token budget、日志压缩和 JSON 抽样。
+
+### 当前执行计划
+
+- **Slice 1：Workspace tree**：完成 Rust CLI、Node opt-in 接入、兼容测试和 fallback；后续把目录上下文采样、ignore 规则和增量缓存继续下沉。
+- **Slice 2：Event store worker**：先抽象事件 append/replay contract，再把 SQLite 同步热路径隔离到 worker/Rust 边界，最后接 SSE replay/fanout 指标。
+- **Slice 3：MCP persistent sessions**：保留现有 JSON-RPC 语义，新增 long-lived stdio session manager、请求队列、超时、重启和背压。
+- **Slice 4：Audio pipeline**：以 live call ring buffer、level meter 和 backpressure 为第一批低延迟 Rust 化目标。
+
+### 接入原则
+
+- Rust 模块以小型、可测试的 vertical slice 进入；每个 slice 提供稳定 JSON contract。
+- Node 侧只依赖命令输出或本地 HTTP/stdio contract，不共享内部结构。
+- 任何 Rust 化都要先跑同等输入的兼容测试，再接入生产路径。
+- 性能收益以端到端指标衡量：主线程阻塞时间、SSE replay 延迟、workspace tree 响应时间、MCP call 冷启动次数和 live audio 抖动。
+
 ## 启动
 
 ```bash

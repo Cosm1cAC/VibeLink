@@ -170,6 +170,47 @@ function readTextSample(filePath, stat) {
   return raw.toString("utf8");
 }
 
+function rustWorkspaceTreeEnabled() {
+  return /^(1|true|yes|on)$/i.test(process.env.VIBELINK_RUST_WORKSPACE_TREE || "");
+}
+
+function rustWorkspaceTreeCommand() {
+  if (process.env.VIBELINK_RUST_BIN) return process.env.VIBELINK_RUST_BIN;
+  return path.join(process.cwd(), "apps", "windows", "target", "debug", process.platform === "win32" ? "vibelink.exe" : "vibelink");
+}
+
+function rustWorkspaceTreeBaseArgs() {
+  if (!process.env.VIBELINK_RUST_BIN_ARGS_JSON) return [];
+  try {
+    const parsed = JSON.parse(process.env.VIBELINK_RUST_BIN_ARGS_JSON);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
+  if (!rustWorkspaceTreeEnabled()) return null;
+  const command = rustWorkspaceTreeCommand();
+  if (!fs.existsSync(command)) return null;
+  try {
+    const { stdout } = await execFileAsync(command, [
+      ...rustWorkspaceTreeBaseArgs(),
+      "workspace-tree",
+      "--root", root,
+      "--dir", path.relative(root, dir),
+      "--depth", String(depth),
+      "--max-entries", String(maxEntries)
+    ], {
+      windowsHide: true,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    const parsed = JSON.parse(stdout);
+    return Array.isArray(parsed.items) ? parsed.items : null;
+  } catch {
+    return null;
+  }
+}
 function listDirectory(dir, root, depth = 1, maxEntries = 160) {
   const entries = [];
   const queue = [{ dir, depth: 0 }];
@@ -213,11 +254,12 @@ export async function getWorkspaceTree(id, settings, dir = "") {
     throw error;
   }
   touchWorkspace(workspace.id);
+  const items = (await listDirectoryRust(target, root, 1, 240)) || listDirectory(target, root, 1, 240);
   return {
     ok: true,
     workspace,
     dir: path.relative(root, target).replaceAll("\\", "/"),
-    items: listDirectory(target, root, 1, 240)
+    items
   };
 }
 

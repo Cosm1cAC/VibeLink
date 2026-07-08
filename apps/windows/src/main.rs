@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::{
     env,
     net::UdpSocket,
@@ -43,6 +45,17 @@ enum Mode {
     Pair,
     /// Check bridge health.
     Doctor,
+    /// List a workspace directory using the Rust filesystem scanner.
+    WorkspaceTree {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long, default_value = "")]
+        dir: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+        #[arg(long = "max-entries", default_value_t = 240)]
+        max_entries: usize,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +81,143 @@ struct PairingSession {
     expires_at: String,
 }
 
+#[derive(Debug, Serialize)]
+struct WorkspaceTree {
+    ok: bool,
+    dir: String,
+    items: Vec<WorkspaceTreeItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceTreeItem {
+    name: String,
+    path: String,
+    #[serde(rename = "type")]
+    kind: String,
+    size: u64,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+}
+
+const IGNORED_WORKSPACE_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    ".next",
+    "dist",
+    "build",
+    "coverage",
+    ".agent-mobile-terminal",
+];
+
+fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize) -> Result<()> {
+    let tree = list_workspace_tree(root, dir, depth, max_entries)?;
+    println!("{}", serde_json::to_string_pretty(&tree)?);
+    Ok(())
+}
+
+fn list_workspace_tree(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    max_entries: usize,
+) -> Result<WorkspaceTree> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve workspace root {}", root.display()))?;
+    let target = safe_workspace_child(&root, dir)?;
+    if !target.is_dir() {
+        bail!(
+            "Workspace tree path must be a directory: {}",
+            target.display()
+        );
+    }
+
+    let mut items = Vec::new();
+    let mut queue = VecDeque::from([(target.clone(), 0usize)]);
+    let max_entries = max_entries.max(1);
+    let depth = depth.max(1);
+
+    while let Some((current, current_depth)) = queue.pop_front() {
+        if items.len() >= max_entries {
+            break;
+        }
+
+        let mut children = Vec::new();
+        for entry in std::fs::read_dir(&current)
+            .with_context(|| format!("Cannot read {}", current.display()))?
+        {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let file_type = entry.file_type()?;
+            if name.starts_with('.') && name != ".env" {
+                continue;
+            }
+            if file_type.is_dir() && IGNORED_WORKSPACE_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            children.push((name, entry.path(), file_type.is_dir()));
+        }
+
+        children.sort_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
+
+        for (name, full_path, is_dir) in children {
+            if items.len() >= max_entries {
+                break;
+            }
+            let metadata = std::fs::metadata(&full_path)?;
+            let rel = slash_path(full_path.strip_prefix(&root).unwrap_or(&full_path));
+            items.push(WorkspaceTreeItem {
+                name,
+                path: rel,
+                kind: if is_dir { "directory" } else { "file" }.to_string(),
+                size: metadata.len(),
+                updated_at: system_time_iso(metadata.modified().ok()),
+            });
+            if is_dir && current_depth + 1 < depth {
+                queue.push_back((full_path, current_depth + 1));
+            }
+        }
+    }
+
+    Ok(WorkspaceTree {
+        ok: true,
+        dir: slash_path(target.strip_prefix(&root).unwrap_or(Path::new(""))),
+        items,
+    })
+}
+
+fn safe_workspace_child(root: &Path, child: &Path) -> Result<PathBuf> {
+    let mut target = PathBuf::from(root);
+    for component in child.components() {
+        match component {
+            std::path::Component::Normal(part) => target.push(part),
+            std::path::Component::CurDir => {}
+            _ => bail!("Path is outside workspace: {}", child.display()),
+        }
+    }
+    let canonical = target
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve {}", target.display()))?;
+    if !canonical.starts_with(root) {
+        bail!("Path is outside workspace: {}", child.display());
+    }
+    Ok(canonical)
+}
+
+fn slash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn system_time_iso(value: Option<std::time::SystemTime>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let datetime: DateTime<Utc> = value.into();
+    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
 fn main() {
     if let Err(error) = run() {
         eprintln!("VibeLink failed: {error:#}");
@@ -82,6 +232,12 @@ fn run() -> Result<()> {
         Mode::Bridge => run_bridge_role(&cli),
         Mode::Pair => run_pairing_flow(&cli),
         Mode::Doctor => run_doctor(&cli),
+        Mode::WorkspaceTree {
+            root,
+            dir,
+            depth,
+            max_entries,
+        } => run_workspace_tree(&root, &dir, depth, max_entries),
     }
 }
 
@@ -103,7 +259,9 @@ fn run_user_entry(cli: &Cli) -> Result<()> {
     println!("Development mode: keep this process open to keep the supervised bridge running.");
     println!("Next milestone: replace this console surface with a native Windows tray/window.");
 
-    let status = bridge.wait().context("Bridge role failed to exit cleanly")?;
+    let status = bridge
+        .wait()
+        .context("Bridge role failed to exit cleanly")?;
     if !status.success() {
         bail!("Bridge role exited with status {status}");
     }
@@ -205,7 +363,9 @@ fn create_pairing_session(base_url: &str, label: &str) -> Result<PairingSession>
         bail!("Bridge rejected pairing session creation");
     }
 
-    response.session.context("Bridge response did not include a pairing session")
+    response
+        .session
+        .context("Bridge response did not include a pairing session")
 }
 
 fn android_pairing_uri(base_url: &str, session: &PairingSession) -> String {
@@ -291,6 +451,7 @@ fn find_project_root_from(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn android_pairing_uri_uses_deep_link_and_escapes_server() {
@@ -308,5 +469,28 @@ mod tests {
             "vibelink://pair?server=http%3A%2F%2F192.168.1.10%3A8787&session=session%201&code=ABC123"
         );
     }
-}
+    #[test]
+    fn workspace_tree_lists_directories_first_and_skips_heavy_dirs() {
+        let root = env::temp_dir().join(format!("vibelink-workspace-tree-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(root.join("README.md"), "hello").unwrap();
+        fs::write(root.join("src").join("main.rs"), "fn main() {}").unwrap();
+        fs::write(root.join("node_modules").join("noise.js"), "ignored").unwrap();
 
+        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+
+        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["src", "README.md"]);
+        assert_eq!(tree.items[0].kind, "directory");
+        assert_eq!(tree.items[1].kind, "file");
+        assert!(tree.items[1].updated_at.contains("T"));
+        assert!(tree
+            .items
+            .iter()
+            .all(|item| !item.path.starts_with("node_modules")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}

@@ -7,7 +7,7 @@ import {
   insertToolEvent,
   insertToolEventBatchedAsync,
   isEventStoreBatchAppendEnabled,
-  listToolEvents,
+  listToolEventsAsync,
   resolveEventReplayLimit,
   updateApprovalRequest,
   updateToolRun
@@ -267,7 +267,7 @@ export function emitToolEventBatched(toolRunId, event = {}) {
   return enriched;
 }
 
-export function subscribeToolEvents(response, filter = {}) {
+export async function subscribeToolEvents(response, filter = {}) {
   const after = Number(filter.after || 0);
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -286,7 +286,7 @@ export function subscribeToolEvents(response, filter = {}) {
   };
 
   const replayStart = nowMs();
-  const replayEvents = listToolEvents({ ...filter, after, limit: resolveEventReplayLimit(filter.limit) });
+  const replayEvents = await listToolEventsAsync({ ...filter, after, limit: resolveEventReplayLimit(filter.limit) });
   for (const event of replayEvents) send(event);
   recordToolEventReplay({ count: replayEvents.length, durationMs: nowMs() - replayStart });
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { createToolRun, insertToolEvent } from "../src/db.js";
+import { createToolRun, drainEventStoreRuntime, getEventStoreRuntimeStats, insertToolEvent } from "../src/db.js";
 import { getToolEventSseMetrics, resetToolEventSseMetrics, subscribeToolEvents } from "../src/toolRuntime.js";
 
 class FakeSseResponse extends EventEmitter {
@@ -30,7 +30,12 @@ class FakeSseResponse extends EventEmitter {
   }
 }
 
-test("tool event SSE metrics record replay count and latency", () => {
+function restoreEnv(key, previous) {
+  if (previous === undefined) delete process.env[key];
+  else process.env[key] = previous;
+}
+
+test("tool event SSE metrics record replay count and latency", async () => {
   resetToolEventSseMetrics();
   const run = createToolRun({
     id: `sse-metrics-${Date.now()}`,
@@ -44,7 +49,7 @@ test("tool event SSE metrics record replay count and latency", () => {
   });
 
   const response = new FakeSseResponse();
-  assert.equal(subscribeToolEvents(response, { toolRunId: run.id }), true);
+  assert.equal(await subscribeToolEvents(response, { toolRunId: run.id }), true);
   response.close();
 
   const metrics = getToolEventSseMetrics();
@@ -54,4 +59,34 @@ test("tool event SSE metrics record replay count and latency", () => {
   assert.equal(typeof metrics.avgReplayDurationMs, "number");
   assert.equal(metrics.lastReplayEvents, 1);
   assert.match(response.chunks.join(""), /tool\.stdout/);
+});
+
+test("tool event SSE replay uses worker query when enabled", async () => {
+  const previousWorkerFlag = process.env.VIBELINK_EVENT_STORE_WORKER;
+  process.env.VIBELINK_EVENT_STORE_WORKER = "1";
+  resetToolEventSseMetrics();
+
+  try {
+    const run = createToolRun({
+      id: `sse-worker-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+    insertToolEvent(run.id, {
+      id: `${run.id}:event-1`,
+      type: "tool.stdout",
+      text: "worker"
+    });
+
+    const response = new FakeSseResponse();
+    assert.equal(await subscribeToolEvents(response, { toolRunId: run.id }), true);
+    response.close();
+
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.metrics.methods.listToolEvents.modeCounts.worker >= 1, true);
+    assert.match(response.chunks.join(""), /worker/);
+  } finally {
+    await drainEventStoreRuntime();
+    restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
+  }
 });

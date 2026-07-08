@@ -27,7 +27,7 @@ import {
   createTask,
   stopTask
 } from "./agents.js";
-import { listTaskEvents } from "./db.js";
+import { listTaskEvents, resolveEventReplayLimit } from "./db.js";
 import { buildCompactedContext } from "./compactService.js";
 
 const SESSION_QUESTION_DEBOUNCE_MS = 1500;
@@ -170,7 +170,7 @@ export async function dispatchLiveCallQuestion({ sessionId, question, history, s
   let task;
   try {
     // Inject compacted context if the event history is large.
-    const events = listTaskEvents("", { after: 0, limit: 5000 }) || [];
+    const events = listTaskEvents("", { after: 0, limit: resolveEventReplayLimit(undefined) }) || [];
     const compacted = buildCompactedContext("", events, model);
     const agentPrompt = compacted
       ? `${compacted.text}\n\n---\n\n${buildLiveCallPrompt(question, history)}\n\n(Note: the conversation above was compacted from ${compacted.payload?.eventCount || 0} previous events.)`

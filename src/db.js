@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { dataDir } from "./config.js";
+import { DEFAULT_EVENT_REPLAY_LIMIT, createSqliteEventStore, normalizeEventReplayLimit } from "./eventStore.js";
 
 const dbPath = path.join(dataDir, "mobile-agent.sqlite");
 
@@ -403,30 +404,27 @@ function database() {
   return initDb();
 }
 
+let eventStore = null;
+
+function sqliteEventStore() {
+  if (!eventStore) eventStore = createSqliteEventStore({ database });
+  return eventStore;
+}
+
 export function getDbPath() {
   return dbPath;
 }
 
-export function hashToken(token) {
-  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+export function getDefaultEventReplayLimit() {
+  return DEFAULT_EVENT_REPLAY_LIMIT;
 }
 
-/**
- * Classify a task event into a unified event kind.
- * Used by insertTaskEvent to fill the event_kind column.
- */
-function classifyEventKind(event) {
-  const type = String(event.type || "");
-  if (type === "user_message" || type === "user" || type === "attachment") return "user";
-  if (type === "assistant_message" || type === "assistant") return "assistant";
-  if (type === "system") return "system";
-  if (type === "error") return "error";
-  if (type === "summarization") return "summary";
-  if (type.startsWith("live_call.")) return "live_call";
-  if (type.startsWith("approval.")) return "approval";
-  if (type.startsWith("tool.")) return "tool";
-  if (type === "stderr" || type === "stdout") return "output";
-  return "system";
+export function resolveEventReplayLimit(value, options = {}) {
+  return normalizeEventReplayLimit(value, options);
+}
+
+export function hashToken(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
 }
 
 export function upsertWorkspace(input = {}) {
@@ -844,68 +842,19 @@ export function upsertTask(task) {
 }
 
 export function insertTaskEvent(taskId, event) {
-  const current = nowIso();
-  const eventAt = event.at || current;
-  const eventId = event.id || `${taskId}:${eventAt}:${Math.random()}`;
-  const payload = event.payload === undefined ? null : event.payload;
-  const eventKind = event.kind || classifyEventKind(event);
-  const turnId = event.turnId || "";
-  const blockId = event.blockId || "";
-  const eventJson = {
-    ...event,
-    id: eventId,
-    at: eventAt,
-    kind: eventKind,
-    turnId,
-    blockId
-  };
-
-  database()
-    .prepare(`
-      INSERT OR IGNORE INTO task_events (
-        task_id, event_id, event_type, event_at, text, payload_json, event_json,
-        created_at, event_kind, turn_id, block_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
-      taskId,
-      eventId,
-      event.type || "",
-      eventAt,
-      typeof event.text === "string" ? event.text : "",
-      toJson(payload),
-      toJson(eventJson),
-      current,
-      eventKind,
-      turnId,
-      blockId
-    );
-
-  const row = database()
-    .prepare("SELECT cursor FROM task_events WHERE task_id = ? AND event_id = ?")
-    .get(taskId, eventId);
-  return row?.cursor || null;
+  return sqliteEventStore().insertTaskEvent(taskId, event);
 }
 
-export function listTaskEvents(taskId, { after = 0, limit = 5000 } = {}) {
-  return database()
-    .prepare(`
-      SELECT cursor, event_json
-      FROM task_events
-      WHERE task_id = ? AND cursor > ?
-      ORDER BY cursor ASC
-      LIMIT ?
-    `)
-    .all(taskId, Number(after || 0), Number(limit || 5000))
-    .map((row) => ({
-      ...fromJson(row.event_json, {}),
-      cursor: row.cursor
-    }));
+export function insertTaskEvents(taskId, events = []) {
+  return sqliteEventStore().insertTaskEvents(taskId, events);
+}
+
+export function listTaskEvents(taskId, { after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
+  return sqliteEventStore().listTaskEvents(taskId, { after, limit });
 }
 
 export function getTaskEventCount(taskId) {
-  const row = database().prepare("SELECT COUNT(*) AS count FROM task_events WHERE task_id = ?").get(taskId);
-  return Number(row?.count || 0);
+  return sqliteEventStore().getTaskEventCount(taskId);
 }
 
 function publicToolRun(row) {
@@ -1026,121 +975,23 @@ export function listToolRuns({ workspaceId = "", taskId = "", limit = 100 } = {}
 }
 
 export function insertToolEvent(toolRunId, event = {}) {
-  const run = database().prepare("SELECT * FROM tool_runs WHERE id = ?").get(toolRunId);
-  if (!run) return null;
-  const current = nowIso();
-  const eventAt = event.at || current;
-  const eventId = event.id || crypto.randomUUID();
-  const payload = event.payload === undefined ? null : event.payload;
-  const eventJson = {
-    ...event,
-    id: eventId,
-    at: eventAt,
-    toolRunId,
-    taskId: event.taskId || run.task_id || "",
-    workspaceId: event.workspaceId || run.workspace_id || ""
-  };
-
-  database()
-    .prepare(`
-      INSERT OR IGNORE INTO tool_events (
-        tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
-        text, payload_json, event_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
-      toolRunId,
-      run.task_id || "",
-      run.workspace_id || "",
-      eventId,
-      cleanString(event.type || "tool.event", 120),
-      eventAt,
-      typeof event.text === "string" ? event.text : "",
-      toJson(payload),
-      toJson(eventJson),
-      current
-    );
-
-  const row = database()
-    .prepare("SELECT cursor FROM tool_events WHERE tool_run_id = ? AND event_id = ?")
-    .get(toolRunId, eventId);
-  return row?.cursor || null;
+  return sqliteEventStore().insertToolEvent(toolRunId, event);
 }
 
-export function listToolEvents({ toolRunId = "", workspaceId = "", taskId = "", after = 0, limit = 1000 } = {}) {
-  return database()
-    .prepare(`
-      SELECT cursor, event_json
-      FROM tool_events
-      WHERE cursor > ?
-        AND (? = '' OR tool_run_id = ?)
-        AND (? = '' OR workspace_id = ?)
-        AND (? = '' OR task_id = ?)
-      ORDER BY cursor ASC
-      LIMIT ?
-    `)
-    .all(
-      Number(after || 0),
-      cleanString(toolRunId, 160),
-      cleanString(toolRunId, 160),
-      cleanString(workspaceId, 160),
-      cleanString(workspaceId, 160),
-      cleanString(taskId, 160),
-      cleanString(taskId, 160),
-      Number(limit || 1000)
-    )
-    .map((row) => ({
-      ...fromJson(row.event_json, {}),
-      cursor: row.cursor
-    }));
+export function insertToolEvents(toolRunId, events = []) {
+  return sqliteEventStore().insertToolEvents(toolRunId, events);
+}
+
+export function listToolEvents({ toolRunId = "", workspaceId = "", taskId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
+  return sqliteEventStore().listToolEvents({ toolRunId, workspaceId, taskId, after, limit });
 }
 
 export function getToolEventStats() {
-  const row = database()
-    .prepare(`
-      SELECT
-        COUNT(*) AS count,
-        MIN(cursor) AS min_cursor,
-        MAX(cursor) AS max_cursor,
-        MIN(event_at) AS oldest_at,
-        MAX(event_at) AS newest_at
-      FROM tool_events
-    `)
-    .get();
-  return {
-    count: Number(row?.count || 0),
-    minCursor: Number(row?.min_cursor || 0),
-    maxCursor: Number(row?.max_cursor || 0),
-    oldestAt: row?.oldest_at || "",
-    newestAt: row?.newest_at || ""
-  };
+  return sqliteEventStore().getToolEventStats();
 }
 
 export function pruneToolEvents({ before = "", keepLatest = 5000, dryRun = true } = {}) {
-  const cutoff = before || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const keep = Math.max(0, Number(keepLatest || 0));
-  const thresholdRow = database()
-    .prepare("SELECT cursor FROM tool_events ORDER BY cursor DESC LIMIT 1 OFFSET ?")
-    .get(keep);
-  const maxPrunableCursor = Number(thresholdRow?.cursor || 0);
-  const countRow = database()
-    .prepare("SELECT COUNT(*) AS count FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)")
-    .get(cutoff, maxPrunableCursor, maxPrunableCursor);
-  const prunable = Number(countRow?.count || 0);
-  if (!dryRun && prunable > 0) {
-    database()
-      .prepare("DELETE FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)")
-      .run(cutoff, maxPrunableCursor, maxPrunableCursor);
-  }
-  return {
-    cutoff,
-    keepLatest: keep,
-    maxPrunableCursor,
-    prunable,
-    deleted: dryRun ? 0 : prunable,
-    dryRun: Boolean(dryRun),
-    stats: getToolEventStats()
-  };
+  return sqliteEventStore().pruneToolEvents({ before, keepLatest, dryRun });
 }
 
 function publicApprovalRequest(row) {
@@ -1725,66 +1576,19 @@ export function updateLiveCall(id, patch = {}) {
 }
 
 export function insertLiveCallEvent(sessionId, event = {}) {
-  const session = database().prepare("SELECT id FROM live_calls WHERE id = ?").get(sessionId);
-  if (!session) return null;
-  const current = nowIso();
-  const eventAt = event.at || current;
-  const eventId = event.id || crypto.randomUUID();
-  const payload = event.payload === undefined ? null : event.payload;
-  const eventJson = {
-    ...event,
-    id: eventId,
-    at: eventAt,
-    sessionId
-  };
-
-  database()
-    .prepare(`
-      INSERT OR IGNORE INTO live_call_events (
-        session_id, event_id, event_type, event_at,
-        text, payload_json, event_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
-      sessionId,
-      eventId,
-      cleanString(event.type || "live_call.event", 120),
-      eventAt,
-      typeof event.text === "string" ? event.text : "",
-      toJson(payload),
-      toJson(eventJson),
-      current
-    );
-
-  const row = database()
-    .prepare("SELECT cursor FROM live_call_events WHERE session_id = ? AND event_id = ?")
-    .get(sessionId, eventId);
-  return row?.cursor || null;
+  return sqliteEventStore().insertLiveCallEvent(sessionId, event);
 }
 
-export function listLiveCallEvents({ sessionId = "", after = 0, limit = 500 } = {}) {
-  if (!sessionId) return [];
-  return database()
-    .prepare(`
-      SELECT cursor, event_json
-      FROM live_call_events
-      WHERE session_id = ?
-        AND cursor > ?
-      ORDER BY cursor ASC
-      LIMIT ?
-    `)
-    .all(sessionId, Number(after || 0), Math.max(1, Math.min(Number(limit || 500), 2000)))
-    .map((row) => ({
-      ...fromJson(row.event_json, {}),
-      cursor: row.cursor
-    }));
+export function insertLiveCallEvents(sessionId, events = []) {
+  return sqliteEventStore().insertLiveCallEvents(sessionId, events);
+}
+
+export function listLiveCallEvents({ sessionId = "", after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {
+  return sqliteEventStore().listLiveCallEvents({ sessionId, after, limit });
 }
 
 export function pruneLiveCallEvents({ retentionDays = 30, keepLatest = 5000 } = {}) {
-  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-  try {
-    database().prepare("DELETE FROM live_call_events WHERE event_at < ? AND cursor NOT IN (SELECT cursor FROM live_call_events WHERE session_id IN (SELECT id FROM live_calls) ORDER BY cursor DESC LIMIT ?)").run(cutoff, Number(keepLatest || 5000));
-  } catch {}
+  return sqliteEventStore().pruneLiveCallEvents({ retentionDays, keepLatest });
 }
 
 function publicLiveCall(row) {

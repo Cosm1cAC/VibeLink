@@ -20,7 +20,7 @@
 
 import { estimateEventsTokenCount, createTokenBudget, checkBudget } from "./contextBudget.js";
 import { appendExternalTaskEvent } from "./agents.js";
-import { listTaskEvents } from "./db.js";
+import { listTaskEvents, resolveEventReplayLimit } from "./db.js";
 
 const SUMMARY_PROMPT = `Please provide a concise summary of the task so far. Focus on:
 - What has been accomplished
@@ -37,9 +37,9 @@ Keep the summary under 300 words. Use the same language as the conversation.`;
  * Returns:
  *   { shouldCompact, usedTokens, remainingTokens, percentUsed }
  */
-export function checkTaskBudget(taskId, model = "", { total, threshold = 0.7 } = {}) {
+export function checkTaskBudget(taskId, model = "", { total, threshold = 0.7, limit } = {}) {
   const budget = createTokenBudget(model, { total });
-  const events = listTaskEvents(taskId, { after: 0, limit: 5000 }) || [];
+  const events = listTaskEvents(taskId, { after: 0, limit: resolveEventReplayLimit(limit, { defaultLimit: 5000 }) }) || [];
   const report = checkBudget(budget, events);
   return {
     shouldCompact: report.percentUsed > threshold * 100,
@@ -61,7 +61,7 @@ export function checkTaskBudget(taskId, model = "", { total, threshold = 0.7 } =
  */
 export async function compactTask(taskId, model = "", options = {}) {
   const budget = createTokenBudget(model, { total: options.total });
-  const events = listTaskEvents(taskId, { after: 0, limit: 5000 }) || [];
+  const events = listTaskEvents(taskId, { after: 0, limit: resolveEventReplayLimit(options.limit, { defaultLimit: 5000 }) }) || [];
 
   if (!events.length) return null;
 

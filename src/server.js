@@ -29,6 +29,7 @@ import {
   listPairingSessions,
   listTaskEvents,
   listToolEvents,
+  resolveEventReplayLimit,
   listToolRuns,
   getToolEventStats,
   pruneToolEvents,
@@ -1620,7 +1621,7 @@ async function routeApi(request, response, url) {
       events: listToolEvents({
         toolRunId: toolRun.id,
         after: Number(url.searchParams.get("after") || 0),
-        limit: Number(url.searchParams.get("limit") || 1000)
+        limit: resolveEventReplayLimit(url.searchParams.get("limit"))
       })
     });
     return;
@@ -2097,7 +2098,7 @@ async function routeApi(request, response, url) {
     sendJson(response, 200, {
       items: applyFields(listToolEvents({
         ...filter,
-        limit: Number(url.searchParams.get("limit") || 1000)
+        limit: resolveEventReplayLimit(url.searchParams.get("limit"))
       }), url)
     });
     return;
@@ -2228,7 +2229,7 @@ async function routeApi(request, response, url) {
   if (liveCallEventsCatchUpMatch && request.method === "GET") {
     const items = listLiveCallEvents(liveCallEventsCatchUpMatch[1], {
       after: Number(url.searchParams.get("after") || 0),
-      limit: Number(url.searchParams.get("limit") || 200)
+      limit: resolveEventReplayLimit(url.searchParams.get("limit"), { defaultLimit: 200, maxLimit: 2000 })
     });
     if (!items) {
       sendError(response, 404, "Live call session not found.");
@@ -3180,7 +3181,7 @@ async function routeApi(request, response, url) {
     sendJson(response, 200, {
       items: applyFields(listTaskEvents(task.id, {
         after: Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0),
-        limit: Number(url.searchParams.get("limit") || 5000)
+        limit: resolveEventReplayLimit(url.searchParams.get("limit"))
       }), url)
     });
     return;

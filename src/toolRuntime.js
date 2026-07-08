@@ -217,7 +217,7 @@ export function subscribeToolEvents(response, filter = {}) {
     response.write(`data: ${JSON.stringify(event)}\n\n`);
   };
 
-  for (const event of listToolEvents({ ...filter, after })) send(event);
+  for (const event of listToolEvents({ ...filter, after, limit: resolveEventReplayLimit(filter.limit) })) send(event);
 
   const heartbeat = setInterval(() => {
     if (!response.destroyed && !response.writableEnded) response.write(": ping\n\n");

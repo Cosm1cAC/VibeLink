@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { createLiveCallSession, recordLiveCallTranscript, subscribeLiveCallEvents } from "../src/liveCall.js";
+import { createLiveCallSession, listLiveCallEventsReplay, recordLiveCallTranscript, subscribeLiveCallEvents } from "../src/liveCall.js";
 import { drainEventStoreRuntime, getEventStoreRuntimeStats } from "../src/db.js";
 
 class FakeSseResponse extends EventEmitter {
@@ -53,6 +53,28 @@ test("live call SSE replay uses worker query when enabled", async () => {
     const stats = getEventStoreRuntimeStats();
     assert.equal(stats.metrics.methods.listLiveCallEvents.modeCounts.worker >= 1, true);
     assert.match(response.chunks.join(""), /worker live transcript/);
+  } finally {
+    await drainEventStoreRuntime();
+    restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
+  }
+});
+
+test("live call catch-up replay uses worker query when enabled", async () => {
+  const previousWorkerFlag = process.env.VIBELINK_EVENT_STORE_WORKER;
+  process.env.VIBELINK_EVENT_STORE_WORKER = "1";
+
+  try {
+    const session = createLiveCallSession({ title: "Worker catch-up smoke" });
+    recordLiveCallTranscript(session.id, {
+      text: "worker catch-up transcript",
+      final: true
+    });
+
+    const items = await listLiveCallEventsReplay(session.id, { after: 0, limit: 100 });
+    const stats = getEventStoreRuntimeStats();
+
+    assert.equal(stats.metrics.methods.listLiveCallEvents.modeCounts.worker >= 1, true);
+    assert.equal(items.some((event) => /worker catch-up transcript/.test(event.text || "")), true);
   } finally {
     await drainEventStoreRuntime();
     restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);

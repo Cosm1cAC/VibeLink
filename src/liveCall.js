@@ -311,7 +311,8 @@ export function listLiveCallEvents(id, { after = 0, limit = 200 } = {}) {
   return dbListLiveCallEvents({ sessionId: id, after, limit });
 }
 
-async function listLiveCallEventsForReplay(id, { after = 0, limit = 200 } = {}) {
+export async function listLiveCallEventsReplay(id, { after = 0, limit = 200 } = {}) {
+  if (!sessions.has(id) && !dbGetLiveCall(id)) return null;
   const events = await dbListLiveCallEventsAsync({ sessionId: id, after, limit });
   if (events.length || !sessions.has(id)) return events.map(publicEvent);
   return listLiveCallEvents(id, { after, limit });
@@ -327,7 +328,7 @@ export async function subscribeLiveCallEvents(id, response, { after = 0 } = {}) 
     "X-Accel-Buffering": "no"
   });
   response.write(`retry: 1500\n\n`);
-  const events = await listLiveCallEventsForReplay(id, { after, limit: MAX_EVENTS }) || [];
+  const events = await listLiveCallEventsReplay(id, { after, limit: MAX_EVENTS }) || [];
   for (const event of events) {
     response.write(`id: ${event.cursor}\n`);
     response.write(`event: ${event.type}\n`);

@@ -119,8 +119,12 @@ function createStdioSession(
     const message = jsonRpcMessage(id, method, params);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        const error = timeoutError(method, timeout);
         pending.delete(id);
-        reject(timeoutError(method, timeout));
+        closed = true;
+        reject(error);
+        rejectAll(error);
+        try { child.kill(); } catch {}
       }, Math.max(1, Number(timeout || timeoutMs)));
       timer.unref?.();
       pending.set(id, { resolve, reject, timer, method, emitProgress: requestEmitProgress });

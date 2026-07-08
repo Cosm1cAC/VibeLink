@@ -107,16 +107,27 @@ function currentGitRefPath(gitDir) {
   }
 }
 
-function gitSummaryCacheSignature(cwd) {
+async function gitChangedFilesSignature(cwd) {
+  const status = await git(["--no-optional-locks", "status", "--porcelain=v1"], cwd);
+  if (!status.ok) return "";
+  const files = parseStatusFiles(status.stdout)
+    .map((file) => file.path)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+  return files.map((filePath) => `${filePath}:${statSignature(path.join(cwd, filePath))}`).join("|");
+}
+
+async function gitSummaryCacheSignature(cwd) {
   const gitDir = resolveGitDir(cwd);
   const refPath = currentGitRefPath(gitDir);
-  return [
+  const baseSignature = [
     statSignature(cwd),
     statSignature(path.join(cwd, ".git")),
     statSignature(path.join(gitDir, "HEAD")),
     refPath ? statSignature(refPath) : "",
     statSignature(path.join(gitDir, "index"))
   ].join("|");
+  return `${baseSignature}|${await gitChangedFilesSignature(cwd)}`;
 }
 
 function cloneGitSummary(summary = {}) {
@@ -803,7 +814,7 @@ async function collectGitChangeSummary(cwd) {
 async function collectCachedGitChangeSummary(cwd) {
   const ttlMs = gitSummaryCacheTtlMs();
   const key = gitSummaryCacheKey(cwd);
-  const signature = gitSummaryCacheSignature(cwd);
+  const signature = await gitSummaryCacheSignature(cwd);
   const cached = gitSummaryCache.get(key);
   if (ttlMs > 0 && cached && cached.signature === signature && cached.expiresAt > Date.now()) {
     gitSummaryCacheStats.hits += 1;
@@ -815,7 +826,7 @@ async function collectCachedGitChangeSummary(cwd) {
   if (ttlMs > 0) {
     gitSummaryCache.set(key, {
       expiresAt: Date.now() + ttlMs,
-      signature: gitSummaryCacheSignature(cwd),
+      signature: await gitSummaryCacheSignature(cwd),
       summary: cloneGitSummary(summary)
     });
     capGitCache(gitSummaryCache, gitSummaryCacheStats);
@@ -848,7 +859,7 @@ function cloneGitStatusSummary(summary = {}) {
 async function collectCachedGitStatus(cwd) {
   const ttlMs = gitSummaryCacheTtlMs();
   const key = gitSummaryCacheKey(cwd);
-  const signature = gitSummaryCacheSignature(cwd);
+  const signature = await gitSummaryCacheSignature(cwd);
   const cached = gitStatusCache.get(key);
   if (ttlMs > 0 && cached && cached.signature === signature && cached.expiresAt > Date.now()) {
     gitStatusCacheStats.hits += 1;
@@ -861,7 +872,7 @@ async function collectCachedGitStatus(cwd) {
   if (ttlMs > 0) {
     gitStatusCache.set(key, {
       expiresAt: Date.now() + ttlMs,
-      signature: gitSummaryCacheSignature(cwd),
+      signature: await gitSummaryCacheSignature(cwd),
       summary: cloneGitStatusSummary(summary)
     });
     capGitCache(gitStatusCache, gitStatusCacheStats);

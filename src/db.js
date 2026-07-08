@@ -433,11 +433,29 @@ export function eventStoreMode() {
   return eventStoreWorkerFailed ? "sync-fallback" : "worker";
 }
 
+function eventStoreWorkerMaxPendingRequests() {
+  const value = Number(process.env.VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS);
+  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  return 128;
+}
+
+function getEventStoreWorkerStats() {
+  const stats = eventStoreWorker?.stats?.();
+  return {
+    enabled: isEventStoreWorkerEnabled(),
+    active: Boolean(eventStoreWorker),
+    failed: eventStoreWorkerFailed,
+    pending: stats?.pending ?? 0,
+    maxPendingRequests: stats?.maxPendingRequests ?? eventStoreWorkerMaxPendingRequests()
+  };
+}
+
 export function getEventStoreRuntimeStats() {
   return {
     mode: eventStoreMode(),
     workerEnabled: isEventStoreWorkerEnabled(),
     workerFailed: eventStoreWorkerFailed,
+    worker: getEventStoreWorkerStats(),
     batchAppend: getToolEventBatchAppendStats(),
     metrics: eventStoreMetrics.snapshot()
   };

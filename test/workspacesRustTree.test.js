@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getWorkspaceContext, getWorkspaceTree } from "../src/workspaces.js";
+import { getWorkspaceContext, getWorkspaceRuntimeStats, getWorkspaceTree } from "../src/workspaces.js";
 import { upsertWorkspace } from "../src/db.js";
 
 function restoreEnv(key, previous) {
@@ -43,9 +43,13 @@ test("getWorkspaceTree uses Rust scanner when explicitly enabled", async () => {
   process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
 
   try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
     const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
     assert.equal(result.ok, true);
     assert.deepEqual(result.items.map((item) => item.name), ["from-rust.txt"]);
+    assert.equal(after.hits, before.hits + 1);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);

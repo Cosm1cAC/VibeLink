@@ -214,7 +214,8 @@ export function createMcpSessionManager({ spawnFn = spawn } = {}) {
       { timeoutMs = 10000, emitProgress = null, maxPendingRequests = maxPendingRequestsValue() } = {}
     ) {
       const key = serverKey(server);
-      if (!sessions.has(key)) {
+      const existing = sessions.get(key);
+      if (!existing || existing.stats().closed) {
         sessions.set(key, createStdioSession(server, { timeoutMs, spawnFn, emitProgress, maxPendingRequests }));
       }
       return sessions.get(key);

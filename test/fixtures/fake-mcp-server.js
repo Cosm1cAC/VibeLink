@@ -1,6 +1,15 @@
 import { createInterface } from "node:readline";
+import fs from "node:fs";
 
 const rl = createInterface({ input: process.stdin });
+
+if (process.env.FAKE_MCP_SPAWN_LOG) {
+  try {
+    fs.appendFileSync(process.env.FAKE_MCP_SPAWN_LOG, "spawn\n", "utf8");
+  } catch {
+    // Test instrumentation should not affect server behavior.
+  }
+}
 
 function send(id, result) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);

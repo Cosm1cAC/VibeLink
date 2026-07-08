@@ -448,10 +448,16 @@ function eventStoreBatchDelayMs() {
   return Number.isFinite(value) && value >= 0 ? value : 50;
 }
 
+function eventStoreBatchMaxSize() {
+  const value = Number(process.env.VIBELINK_EVENT_STORE_BATCH_MAX_SIZE || 100);
+  return Number.isFinite(value) && value >= 0 ? value : 100;
+}
+
 function toolEventBatcher() {
   if (!toolEventAppendBatcher) {
     toolEventAppendBatcher = createEventStoreBatcher({
       delayMs: eventStoreBatchDelayMs(),
+      maxBatchSize: eventStoreBatchMaxSize(),
       flushBatch: (toolRunId, events) => insertToolEvents(toolRunId, events)
     });
   }

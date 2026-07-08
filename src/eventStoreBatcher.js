@@ -2,7 +2,7 @@ function cleanKey(value) {
   return String(value || "default");
 }
 
-export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
+export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize = 0 } = {}) {
   if (typeof flushBatch !== "function") {
     throw new TypeError("createEventStoreBatcher requires a flushBatch function.");
   }
@@ -11,8 +11,9 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
   let timer = null;
   let flushing = null;
   let flushes = 0;
-  let maxBatchSize = 0;
+  let maxObservedBatchSize = 0;
   let lastFlushAt = "";
+  const batchSizeLimit = Number.isFinite(Number(maxBatchSize)) ? Math.max(0, Number(maxBatchSize)) : 0;
 
   function clearTimer() {
     if (!timer) return;
@@ -32,7 +33,14 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
   function enqueue(key, event) {
     return new Promise((resolve, reject) => {
       queue.push({ key: cleanKey(key), event, resolve, reject });
-      schedule();
+      if (batchSizeLimit > 0 && queue.length >= batchSizeLimit) {
+        clearTimer();
+        queueMicrotask(() => {
+          flushNow().catch(() => {});
+        });
+      } else {
+        schedule();
+      }
     });
   }
 
@@ -44,7 +52,7 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
     const items = queue.splice(0, queue.length);
     flushing = (async () => {
       flushes += 1;
-      maxBatchSize = Math.max(maxBatchSize, items.length);
+      maxObservedBatchSize = Math.max(maxObservedBatchSize, items.length);
       lastFlushAt = new Date().toISOString();
       const groups = new Map();
       for (const item of items) {
@@ -79,7 +87,7 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50 } = {}) {
     return {
       pending: pendingCount(),
       flushes,
-      maxBatchSize,
+      maxBatchSize: maxObservedBatchSize,
       lastFlushAt
     };
   }

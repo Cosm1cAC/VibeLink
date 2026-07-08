@@ -34,3 +34,22 @@ test("event store batcher flushes grouped events in order", async () => {
   assert.equal(batcher.stats().maxBatchSize, 3);
   assert.equal(typeof batcher.stats().lastFlushAt, "string");
 });
+
+test("event store batcher flushes when max batch size is reached", async () => {
+  const flushed = [];
+  const batcher = createEventStoreBatcher({
+    delayMs: 10000,
+    maxBatchSize: 2,
+    flushBatch: async (key, events) => {
+      flushed.push({ key, count: events.length });
+      return events.map((event) => event.id);
+    }
+  });
+
+  const first = batcher.enqueue("tool:1", { id: "a" });
+  const second = batcher.enqueue("tool:1", { id: "b" });
+
+  assert.deepEqual(await Promise.all([first, second]), ["a", "b"]);
+  assert.deepEqual(flushed, [{ key: "tool:1", count: 2 }]);
+  assert.equal(batcher.stats().maxBatchSize, 2);
+});

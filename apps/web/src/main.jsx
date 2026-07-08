@@ -52,6 +52,7 @@ import {
   X
 } from "lucide-react";
 import "./styles.css";
+import { selectionStartState } from "./chatSelection.js";
 import { remoteTranscriptItems } from "./remoteTranscript.js";
 import { buildConversationTree, filterConversationNodes, projectNameFromPath } from "./sidebarModel.js";
 
@@ -6112,22 +6113,22 @@ function App() {
     stopToolEventStream();
     const loadSequence = conversationLoadRef.current + 1;
     conversationLoadRef.current = loadSequence;
+    const nextSelection = selectionStartState(conversation);
     setInitialScrollSequence(0);
-    setSelected(conversation);
+    setSelected(nextSelection.selected);
     setSidebarOpen(false);
     setError("");
     setChangeSummary(null);
     setToolEvents([]);
+    setControlMode(nextSelection.controlMode);
+    setRunning(nextSelection.running);
+    setMessages(nextSelection.messages);
 
     if (!conversation) {
-      setMessages([]);
-      setRunning(false);
       return;
     }
 
     setActiveAgent(conversation.provider);
-    setControlMode(hasDesktopBinding(conversation) ? "desktop" : "agent");
-    setMessages([{ role: "system", text: "Reading local context." }]);
 
     if (conversation.kind === "task") {
       const task = await request(`/api/tasks/${conversation.id}`, {}, token);

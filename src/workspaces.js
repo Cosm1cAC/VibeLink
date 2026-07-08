@@ -58,6 +58,53 @@ function gitSummaryCacheKey(cwd = "") {
   return path.resolve(cwd || "").toLowerCase();
 }
 
+function statSignature(targetPath) {
+  try {
+    const stat = fs.statSync(targetPath);
+    return `${Math.trunc(stat.mtimeMs)}:${stat.size}`;
+  } catch {
+    return "missing";
+  }
+}
+
+function resolveGitDir(cwd) {
+  const dotGit = path.join(cwd, ".git");
+  try {
+    const stat = fs.statSync(dotGit);
+    if (stat.isDirectory()) return dotGit;
+    if (stat.isFile()) {
+      const content = fs.readFileSync(dotGit, "utf8").trim();
+      const match = /^gitdir:\s*(.+)$/i.exec(content);
+      if (match) return path.resolve(cwd, match[1]);
+    }
+  } catch {
+    // Fall through to the common repository layout.
+  }
+  return dotGit;
+}
+
+function currentGitRefPath(gitDir) {
+  try {
+    const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
+    const match = /^ref:\s*(.+)$/i.exec(head);
+    return match ? path.join(gitDir, match[1]) : "";
+  } catch {
+    return "";
+  }
+}
+
+function gitSummaryCacheSignature(cwd) {
+  const gitDir = resolveGitDir(cwd);
+  const refPath = currentGitRefPath(gitDir);
+  return [
+    statSignature(cwd),
+    statSignature(path.join(cwd, ".git")),
+    statSignature(path.join(gitDir, "HEAD")),
+    refPath ? statSignature(refPath) : "",
+    statSignature(path.join(gitDir, "index"))
+  ].join("|");
+}
+
 function cloneGitSummary(summary = {}) {
   return {
     ...summary,
@@ -574,8 +621,9 @@ async function collectGitChangeSummary(cwd) {
 async function collectCachedGitChangeSummary(cwd) {
   const ttlMs = gitSummaryCacheTtlMs();
   const key = gitSummaryCacheKey(cwd);
+  const signature = gitSummaryCacheSignature(cwd);
   const cached = gitSummaryCache.get(key);
-  if (ttlMs > 0 && cached && cached.expiresAt > Date.now()) {
+  if (ttlMs > 0 && cached && cached.signature === signature && cached.expiresAt > Date.now()) {
     gitSummaryCacheStats.hits += 1;
     return cloneGitSummary(cached.summary);
   }
@@ -585,6 +633,7 @@ async function collectCachedGitChangeSummary(cwd) {
   if (ttlMs > 0) {
     gitSummaryCache.set(key, {
       expiresAt: Date.now() + ttlMs,
+      signature: gitSummaryCacheSignature(cwd),
       summary: cloneGitSummary(summary)
     });
   }

@@ -92,7 +92,7 @@ import { writeApiKeys } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
 import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceTree, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
-import { callMcpTool, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
+import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
   approveToolApproval,
@@ -3294,8 +3294,9 @@ async function shutdown(signal) {
   forceExit.unref?.();
   try {
     await drainEventStoreRuntime();
+    await closePersistentMcpSessions();
   } catch (error) {
-    console.error(`[shutdown] event store drain failed: ${error.stack || error.message}`);
+    console.error(`[shutdown] runtime drain failed: ${error.stack || error.message}`);
   }
   server.close(() => {
     clearTimeout(forceExit);

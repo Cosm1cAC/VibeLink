@@ -14,6 +14,7 @@ import {
   attachToolRunToTask,
   approvePairingSession,
   claimPairingSession,
+  drainEventStoreRuntime,
   createPairingSession,
   denyPairingSession,
   getDbPath,
@@ -3281,6 +3282,39 @@ server.on("clientError", (error, socket) => {
 
 server.on("error", (error) => {
   console.error(error.stack || error.message);
+});
+
+let shuttingDown = false;
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}; draining event store runtime...`);
+  const forceExit = setTimeout(() => process.exit(1), 5000);
+  forceExit.unref?.();
+  try {
+    await drainEventStoreRuntime();
+  } catch (error) {
+    console.error(`[shutdown] event store drain failed: ${error.stack || error.message}`);
+  }
+  server.close(() => {
+    clearTimeout(forceExit);
+    process.exit(0);
+  });
+}
+
+process.once("SIGINT", () => {
+  shutdown("SIGINT").catch((error) => {
+    console.error(`[shutdown] SIGINT failed: ${error.stack || error.message}`);
+    process.exit(1);
+  });
+});
+
+process.once("SIGTERM", () => {
+  shutdown("SIGTERM").catch((error) => {
+    console.error(`[shutdown] SIGTERM failed: ${error.stack || error.message}`);
+    process.exit(1);
+  });
 });
 
 // WebSocket upgrade handler — only used for /api/live-calls/:id/audio today.

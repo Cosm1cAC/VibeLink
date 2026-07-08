@@ -154,6 +154,9 @@ function createStdioSession(server = {}, { timeoutMs = 10000, spawnFn = spawn, e
   });
 
   return {
+    async initialize(options = {}) {
+      return ensureInitialized(options);
+    },
     async listTools(options = {}) {
       await ensureInitialized(options);
       const response = await request("tools/list", undefined, options);

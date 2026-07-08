@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { callMcpTool, closePersistentMcpSessions, configuredMcpServers } from "../src/mcpRuntime.js";
+import { callMcpTool, closePersistentMcpSessions, configuredMcpServers, probeMcpServer } from "../src/mcpRuntime.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,6 +95,36 @@ test("callMcpTool reuses a persistent stdio MCP session when enabled", async () 
 
     assert.equal(first.ok, true);
     assert.equal(second.ok, true);
+    const spawns = fs.readFileSync(spawnLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
+    assert.equal(spawns.length, 1);
+  } finally {
+    await closePersistentMcpSessions();
+    if (previousFlag === undefined) delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+    else process.env.VIBELINK_MCP_PERSISTENT_SESSIONS = previousFlag;
+    fs.rmSync(spawnLog, { force: true });
+  }
+});
+
+test("probeMcpServer reuses a persistent stdio MCP session when enabled", async () => {
+  const previousFlag = process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  const spawnLog = path.join(os.tmpdir(), `vibelink-fake-mcp-probe-spawns-${Date.now()}.log`);
+  process.env.VIBELINK_MCP_PERSISTENT_SESSIONS = "1";
+  const server = {
+    id: "fake-probe",
+    name: "fake-probe",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")],
+    env: { FAKE_MCP_SPAWN_LOG: spawnLog }
+  };
+
+  try {
+    const first = await probeMcpServer(server, { timeoutMs: 5000 });
+    const second = await probeMcpServer(server, { timeoutMs: 5000 });
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.deepEqual(second.tools.map((tool) => tool.name), ["echo"]);
     const spawns = fs.readFileSync(spawnLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
     assert.equal(spawns.length, 1);
   } finally {

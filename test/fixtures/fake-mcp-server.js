@@ -20,6 +20,19 @@ rl.on("line", (line) => {
     return;
   }
 
+  if (message.method === "tools/list") {
+    send(message.id, {
+      tools: [
+        {
+          name: "echo",
+          description: "Echo arguments.",
+          inputSchema: { type: "object" }
+        }
+      ]
+    });
+    return;
+  }
+
   if (message.method === "tools/call") {
     send(message.id, {
       content: [

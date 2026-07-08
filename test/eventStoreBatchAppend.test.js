@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createToolRun,
+  drainEventStoreRuntime,
   flushToolEventBatches,
   getEventStoreRuntimeStats,
   insertToolEventBatchedAsync,
@@ -121,6 +122,31 @@ test("runtime batched tool event emitter queues when enabled", async () => {
     assert.deepEqual(listToolEvents({ toolRunId: run.id }), []);
     await flushToolEventBatches();
     assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((item) => item.text), ["async-runtime"]);
+  } finally {
+    await flushToolEventBatches();
+    restoreEnv("VIBELINK_EVENT_STORE_BATCH_APPEND", previousFlag);
+  }
+});
+
+test("event store runtime drain flushes pending batched tool events", async () => {
+  const previousFlag = process.env.VIBELINK_EVENT_STORE_BATCH_APPEND;
+  process.env.VIBELINK_EVENT_STORE_BATCH_APPEND = "1";
+  try {
+    const run = createToolRun({
+      id: `runtime-drain-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+
+    emitToolEventBatched(run.id, {
+      id: `${run.id}:event-1`,
+      type: "tool.output",
+      text: "drained"
+    });
+
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }), []);
+    await drainEventStoreRuntime();
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((item) => item.text), ["drained"]);
   } finally {
     await flushToolEventBatches();
     restoreEnv("VIBELINK_EVENT_STORE_BATCH_APPEND", previousFlag);

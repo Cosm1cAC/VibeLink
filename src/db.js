@@ -541,6 +541,11 @@ export async function closeEventStoreWorker() {
   eventStoreWorkerFailed = false;
 }
 
+export async function drainEventStoreRuntime() {
+  await flushToolEventBatches();
+  await closeEventStoreWorker();
+}
+
 export function getDbPath() {
   return dbPath;
 }

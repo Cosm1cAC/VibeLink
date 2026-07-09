@@ -2,7 +2,7 @@
 
 ## Goal
 
-Stage 2 of the Rust migration isolates the event-store hot path before replacing any internals with Rust. The stable contract lives in `src/eventStore.js` and covers:
+Stage 2 of the Rust migration isolates the event-store hot path behind a shared Node Worker/Rust sidecar contract. The stable contract lives in `src/eventStore.js` and covers:
 
 - `insertTaskEvent` / `insertTaskEvents`
 - `insertToolEvent` / `insertToolEvents`
@@ -44,7 +44,7 @@ The worker client applies a pending-request cap before posting work to the threa
 
 Task and tool event append paths still preserve the existing immediate cursor behavior unless their specific async or batch flags are enabled. If the worker fails, VibeLink logs one warning and falls back to the synchronous SQLite adapter.
 
-## Rust Sidecar Contract Smoke
+## Rust Sidecar Opt-In
 
 `src/eventStoreContract.js` now owns the shared JSON method allowlist, control method names, protocol version, and error envelope used by both the Node Worker and sidecar smoke fixture. `src/eventStoreSidecarClient.js` speaks the Rust-ready stdio JSONL shape:
 
@@ -57,7 +57,20 @@ Task and tool event append paths still preserve the existing immediate cursor be
 {"id":3,"result":{"pending":0,"requests":3,"failures":0}}
 ```
 
-`test/eventStoreSidecarContract.test.js` runs that protocol against `test/fixtures/event-store-json-sidecar.js`, which reuses the SQLite event-store adapter as a stand-in for the future Rust process. This keeps the production path unchanged while locking the compatibility surface for append, replay, health/status reporting, error envelopes, close, invalid JSON handling, timeout handling, and pending-request accounting.
+`test/eventStoreSidecarContract.test.js` runs that protocol against both `test/fixtures/event-store-json-sidecar.js` and the real Rust `vibelink event-store-sidecar` command in `apps/windows`. `src/db.js` can route async event-store append/replay calls to the Rust sidecar only when explicitly enabled:
+
+```bash
+VIBELINK_EVENT_STORE_RUST_SIDECAR=1 npm start
+```
+
+By default the command is `apps/windows/target/debug/vibelink(.exe)` with `event-store-sidecar <db-path>` appended. Tests and local experiments can override the command and leading args with:
+
+```bash
+VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND=node
+VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON='["test/fixtures/event-store-json-sidecar.js"]'
+```
+
+Before the first routed request, `src/db.js` calls `__health` and verifies `ok`, protocol version, schema readiness, and support for every event-store contract method. Missing binaries, failed health, timeouts, sidecar request errors, invalid responses, or process exits close the Rust client, mark the sidecar failed, record fallback stats, and continue through the existing Node Worker or sync SQLite fallback path.
 
 `GET /api/tasks/:id/events/catch-up` and `GET /api/live-calls/:id/events/catch-up` return the existing `items` array plus `nextCursor`, `hasMore`, and `limit`. Each route fetches `limit + 1` events internally to expose a cheap next-page signal without changing the item contract.
 
@@ -66,14 +79,16 @@ Task and tool event append paths still preserve the existing immediate cursor be
 `GET /api/tool-events/stats` includes `storeMode`:
 
 - `sync`: default main-thread adapter
+- `rust-sidecar`: Rust sidecar flag is enabled and the sidecar has not failed
 - `worker`: worker flag is enabled and no failure has occurred
-- `sync-fallback`: worker flag is enabled but a worker request failed
+- `worker-fallback`: Rust sidecar flag is enabled, Rust failed, and the Node Worker is handling requests
+- `sync-fallback`: Rust or Worker routing failed and sync SQLite is handling requests
 
-It also includes `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, mode counts, and slow sync-call stalls. Set `VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS` to tune the stall threshold for local hardware or CI; the default is 50ms. The same response includes task-event batch metrics, tool-event batch metrics, live-call event batch metrics, and tool-event SSE replay metrics. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
+It also includes `eventStore.rustSidecar`, `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, mode counts, and slow sync-call stalls. Set `VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS` to tune the stall threshold for local hardware or CI; the default is 50ms. The same response includes task-event batch metrics, tool-event batch metrics, live-call event batch metrics, and tool-event SSE replay metrics. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
 
 ## Next Slices
 
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.
 - Window large task/live-call replay paths where callers still request broad history.
 - Add high-frequency event burst smoke tests around the runtime stall and batch metrics.
-- Wire the JSONL sidecar client to a real Rust sidecar/native module once the Worker boundary is stable.
+- Add `auto` readiness mode, rollback docs, invalid JSON/sidecar-exit db.js fallback tests, and latency/fallback-rate canary thresholds before making the Rust sidecar broader than manual opt-in.

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-09",
+  "updatedAt": "2026-07-10",
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
@@ -26,8 +26,8 @@
         "README.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, partial gitignore basename rules, truncation, signature output, and Node-side cache reuse.",
-      "nextAction": "Add auto mode, parity gates, fallback counters, lastError stats, and either full gitignore path semantics or an explicit blocker before canary.",
+      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node-side cache reuse.",
+      "nextAction": "Add auto mode, parity gates, fallback counters, lastError stats, and an explicit long-lived scanner/cache plan before canary.",
       "promotionGate": "Can move to canary only after Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback."
     },
     {
@@ -63,25 +63,29 @@
       "id": "event-store-sidecar",
       "title": "Event store append/replay sidecar",
       "priority": "P0",
-      "status": "contract",
-      "rollout": "contract smoke only; production uses sync SQLite or Node Worker",
+      "status": "opt-in",
+      "rollout": "manual flag only",
       "featureFlags": [
         { "name": "VIBELINK_EVENT_STORE_WORKER", "requiredInCode": true },
         { "name": "VIBELINK_EVENT_STORE_BATCH_APPEND", "requiredInCode": true },
         { "name": "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", "requiredInCode": true },
         { "name": "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR", "requiredInCode": false }
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS", "requiredInCode": true }
       ],
       "nodeEntry": "src/db.js",
-      "rustEntry": "planned: apps/windows/src/main.rs event-store-sidecar subcommand",
-      "sidecarCommand": "planned: vibelink event-store-sidecar --db <path>",
-      "nodeFallback": "Current production fallback chain is sync SQLite, with optional Node Worker when VIBELINK_EVENT_STORE_WORKER=1. A Rust sidecar must fall back to Worker or sync SQLite.",
-      "runtimeStats": "eventStoreStatus() in src/db.js exposes mode, worker status, batch append stats, and eventStore metrics. Rust sidecar stats are not implemented yet.",
+      "rustEntry": "apps/windows/src/main.rs",
+      "sidecarCommand": "vibelink event-store-sidecar <db-path>",
+      "nodeFallback": "src/db.js prefers the Rust sidecar only when VIBELINK_EVENT_STORE_RUST_SIDECAR=1. Missing binary, bad health, timeout, request failure, or sidecar exit falls back to the Node Worker when enabled, otherwise sync SQLite.",
+      "runtimeStats": "getEventStoreRuntimeStats() in src/db.js exposes mode, rustSidecar enabled/active/ready/failed, starts/failures/fallbacks/lastError/client stats, worker status, batch append stats, and eventStore metrics.",
       "tests": [
         "test/eventStoreContract.test.js",
         "test/eventStoreWorker.test.js",
         "test/eventStoreWorkerAppend.test.js",
         "test/eventStoreSidecarContract.test.js",
+        "test/eventStoreRustRuntime.test.js",
         "test/eventStoreBatchAppend.test.js",
         "test/eventStoreBatcher.test.js",
         "test/eventStoreMetrics.test.js"
@@ -90,9 +94,9 @@
         "docs/event-store-worker.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, and JS fixture contract smoke exist. A real Rust event-store sidecar does not exist yet.",
-      "nextAction": "Add __health/stats to the JSONL contract, implement a real Rust event-store-sidecar command, then wire src/db.js to prefer it only under an explicit flag with Worker/sync fallback.",
-      "promotionGate": "Cannot move to opt-in until contract tests pass against a real Rust sidecar, Rust/Node share the same SQLite DB fixtures, unsupported methods return structured errors, and runtime stats expose starts/failures/fallbacks/pending/lastError."
+      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, health gate, and Worker/sync fallback tests exist.",
+      "nextAction": "Add auto/readiness mode, invalid JSON/runtime exit fallback tests at the db.js routing layer, rollback docs, and canary promotion thresholds for latency, fallback rate, and main-thread stall reduction.",
+      "promotionGate": "Can move to canary only after auto mode validates command/health readiness, db.js tests cover spawn failure, bad health, timeout, invalid JSON, sidecar exit, request failure, and Worker/sync fallback without task-visible failure, and docs define rollback plus latency/fallback-rate thresholds."
     },
     {
       "id": "audio-pipeline",

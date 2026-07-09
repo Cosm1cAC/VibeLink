@@ -1,6 +1,6 @@
 # Rust Migration Status
 
-Last updated: 2026-07-09
+Last updated: 2026-07-10
 
 This file is the human-readable status view for the Rust migration program. The machine-readable source of truth is `docs/rust-migration-status.json`; run `npm run rust:migration:check` before changing statuses.
 
@@ -27,9 +27,9 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `opt-in` | Manual flag only | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Add `auto` mode, parity gates, fallback counters, lastError stats, and resolve/record full gitignore path semantics before canary. |
+| Workspace tree scanner | `opt-in` | Manual flag only | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Add `auto` mode, parity gates, fallback counters, lastError stats, and a long-lived scanner/cache plan before canary. |
 | Persistent MCP stdio sessions | `opt-in` | Manual flag only | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Add `auto` mode, health readiness checks, spawn-reduction/fallback-rate promotion gates, and rollback docs. |
-| Event store append/replay sidecar | `contract` | Contract smoke only | Current Worker/batch flags; planned `VIBELINK_EVENT_STORE_RUST_SIDECAR` | Sync SQLite, optionally Node Worker with `VIBELINK_EVENT_STORE_WORKER=1` | Add `__health`/`stats`, implement real Rust `event-store-sidecar`, then wire explicit Rust flag with Worker/sync fallback. |
+| Event store append/replay sidecar | `opt-in` | Manual flag only | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Add `auto`/readiness mode, route-level invalid JSON/exit fallback tests, rollback docs, and latency/fallback-rate canary gates. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
 | Compression and context budget helper | `planned` | Not implemented; conditional need | Planned `VIBELINK_RUST_COMPRESSION` | Existing Node/provider prompt construction | Only if needed, define deterministic byte/log sampling and budget trimming helper; do not claim semantic summarization or exact provider tokens. |
 
@@ -37,14 +37,14 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, partial gitignore basename rules, truncation, signature output, and Node cache reuse.
+Current state: Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node cache reuse.
 
 Can move to `canary` only when:
 
 - Node/Rust parity tests cover directories-first sorting, hidden file policy, fixed ignores, nested `.gitignore`, path-pattern `.gitignore`, truncation, signature/cache behavior, and missing-binary fallback.
 - `VIBELINK_RUST_WORKSPACE_TREE=auto` or an equivalent safe-detection mode exists.
 - Runtime stats include fallback count and last error.
-- Any remaining gitignore semantic gap is explicitly listed as a blocker.
+- Any remaining gitignore semantic gap or long-lived scanner/cache limitation is explicitly listed as a blocker.
 
 ### Persistent MCP stdio sessions
 
@@ -59,15 +59,14 @@ Can move to `canary` only when:
 
 ### Event store append/replay sidecar
 
-Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, and JS fixture contract smoke exist. A real Rust event-store sidecar does not exist yet.
+Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, a real Rust `event-store-sidecar` command, real Rust contract coverage, explicit opt-in runtime routing, a health gate, runtime stats, and Worker/sync fallback tests exist.
 
-Can move to `opt-in` only when:
+Can move to `canary` only when:
 
-- `test/eventStoreSidecarContract.test.js` runs against a real Rust sidecar as well as the JS fixture.
-- Rust and Node read/write the same SQLite DB fixtures with matching cursor and duplicate-event semantics.
-- Unsupported methods return structured errors and do not crash the process.
-- `src/db.js` exposes Rust sidecar mode and fallback stats.
-- Missing binary, bad health, timeout, or request failure falls back to Worker or sync SQLite.
+- `VIBELINK_EVENT_STORE_RUST_SIDECAR=auto` or equivalent safe readiness detection validates command, health, protocol version, method support, and schema readiness before routing production traffic.
+- `src/db.js` route-level tests cover spawn failure, bad health, timeout, invalid JSON, sidecar exit, request failure, and Worker/sync fallback without task-visible failure.
+- Runtime status exposes starts, failures, fallbacks, pending, terminated, ready/failed state, last error, and mode counts for Rust, Worker, and sync fallback.
+- Docs define rollback steps plus canary thresholds for latency, fallback rate, and main-thread stall reduction.
 
 ### Live audio low-latency pipeline
 
@@ -102,6 +101,7 @@ Run this bundle before promoting any Rust status:
 ```bash
 npm run rust:migration:check
 node --test test/eventStoreSidecarContract.test.js
+node --test test/eventStoreRustRuntime.test.js
 node --test test/eventStoreWorker.test.js
 node --test test/eventStoreMetrics.test.js
 node --test test/eventStoreBatcher.test.js

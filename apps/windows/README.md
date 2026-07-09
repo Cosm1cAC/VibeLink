@@ -18,6 +18,7 @@ vibelink.exe pair
 vibelink.exe doctor
 vibelink.exe workspace-tree --root C:\path\to\repo --dir src --depth 2
 vibelink.exe mcp-session-sidecar
+vibelink.exe event-store-sidecar C:\path\to\mobile-agent.sqlite
 ```
 
 - `bridge`: hosts the existing Node bridge in phase 1.
@@ -25,6 +26,7 @@ vibelink.exe mcp-session-sidecar
 - `doctor`: checks whether the bridge API is reachable.
 - `workspace-tree`: emits the Rust workspace scanner JSON contract used by the Node bridge when `VIBELINK_RUST_WORKSPACE_TREE=1` is enabled.
 - `mcp-session-sidecar`: serves the MCP persistent session JSONL contract for Rust-side stdio session reuse experiments.
+- `event-store-sidecar`: serves the SQLite event-store JSONL contract for explicit Rust-side append/replay experiments.
 
 The user should not need to run internal modes directly.
 
@@ -34,7 +36,7 @@ The scanner skips heavy directories such as `.git`, `node_modules`, `target`, an
 
 The JSON response includes a metadata `signature` for the scanned directory window. It also includes `truncated: true` when `--max-entries` prevents the scanner from returning every matching item. The Node bridge records the latest signature, Rust workspace-tree budget hits, and Rust scanner result cache hits/misses/evictions in runtime stats.
 
-Remaining migration work: full gitignore path semantics and moving the reusable scanner cache into a long-lived Rust sidecar/native scanner are still future Rust slices.
+Remaining migration work: auto/readiness promotion gates, runtime fallback stats, and moving the reusable scanner cache into a long-lived Rust sidecar/native scanner are still future Rust slices.
 
 ## Build
 

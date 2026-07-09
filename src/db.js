@@ -6,7 +6,9 @@ import { DatabaseSync } from "node:sqlite";
 import { dataDir } from "./config.js";
 import { createEventStoreBatcher } from "./eventStoreBatcher.js";
 import { DEFAULT_EVENT_REPLAY_LIMIT, createSqliteEventStore, normalizeEventReplayLimit } from "./eventStore.js";
+import { EVENT_STORE_CONTRACT_METHODS, EVENT_STORE_SIDECAR_PROTOCOL_VERSION } from "./eventStoreContract.js";
 import { createEventStoreMetrics } from "./eventStoreMetrics.js";
+import { createEventStoreSidecarClient } from "./eventStoreSidecarClient.js";
 import { createEventStoreWorkerClient } from "./eventStoreWorkerClient.js";
 
 const dbPath = path.join(dataDir, "mobile-agent.sqlite");
@@ -417,10 +419,24 @@ function sqliteEventStore() {
 
 let eventStoreWorker = null;
 let eventStoreWorkerFailed = false;
+let eventStoreRustSidecar = null;
+let eventStoreRustSidecarFailed = false;
+let eventStoreRustSidecarReady = false;
 let taskEventAppendBatcher = null;
 let toolEventAppendBatcher = null;
 let liveCallEventAppendBatcher = null;
 const eventStoreMetrics = createEventStoreMetrics();
+const eventStoreRustSidecarStats = {
+  starts: 0,
+  failures: 0,
+  fallbacks: 0,
+  lastFailureAt: "",
+  lastError: ""
+};
+
+export function isEventStoreRustSidecarEnabled() {
+  return process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR === "1";
+}
 
 export function isEventStoreWorkerEnabled() {
   return process.env.VIBELINK_EVENT_STORE_WORKER === "1";
@@ -439,14 +455,88 @@ export function isTaskEventBatchAppendEnabled() {
 }
 
 export function eventStoreMode() {
+  if (isEventStoreRustSidecarEnabled()) {
+    if (!eventStoreRustSidecarFailed) return "rust-sidecar";
+    if (!isEventStoreWorkerEnabled()) return "sync-fallback";
+    return eventStoreWorkerFailed ? "sync-fallback" : "worker-fallback";
+  }
   if (!isEventStoreWorkerEnabled()) return "sync";
   return eventStoreWorkerFailed ? "sync-fallback" : "worker";
+}
+
+function eventStoreRustSidecarCommand() {
+  if (process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND) {
+    return process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND;
+  }
+  return path.join(
+    process.cwd(),
+    "apps",
+    "windows",
+    "target",
+    "debug",
+    process.platform === "win32" ? "vibelink.exe" : "vibelink"
+  );
+}
+
+function eventStoreRustSidecarArgs() {
+  if (!process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON) return ["event-store-sidecar"];
+  try {
+    const parsed = JSON.parse(process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON);
+    return Array.isArray(parsed) ? parsed.map(String) : ["event-store-sidecar"];
+  } catch {
+    return ["event-store-sidecar"];
+  }
+}
+
+function eventStoreRustSidecarTimeoutMs() {
+  const value = Number(process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS || 10000);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10000;
+}
+
+function eventStoreRustSidecarMaxPendingRequests() {
+  const value = Number(
+    process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_MAX_PENDING_REQUESTS ||
+    process.env.VIBELINK_EVENT_STORE_SIDECAR_MAX_PENDING_REQUESTS
+  );
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 128;
 }
 
 function eventStoreWorkerMaxPendingRequests() {
   const value = Number(process.env.VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS);
   if (Number.isFinite(value) && value > 0) return Math.floor(value);
   return 128;
+}
+
+function eventStoreRustSidecarClient() {
+  if (!isEventStoreRustSidecarEnabled() || eventStoreRustSidecarFailed) return null;
+  initDb();
+  if (!eventStoreRustSidecar) {
+    eventStoreRustSidecar = createEventStoreSidecarClient({
+      command: eventStoreRustSidecarCommand(),
+      args: [...eventStoreRustSidecarArgs(), dbPath],
+      timeoutMs: eventStoreRustSidecarTimeoutMs(),
+      maxPendingRequests: eventStoreRustSidecarMaxPendingRequests()
+    });
+    eventStoreRustSidecarStats.starts += 1;
+  }
+  return eventStoreRustSidecar;
+}
+
+function getEventStoreRustSidecarStats() {
+  return {
+    enabled: isEventStoreRustSidecarEnabled(),
+    active: Boolean(eventStoreRustSidecar),
+    ready: eventStoreRustSidecarReady,
+    failed: eventStoreRustSidecarFailed,
+    command: isEventStoreRustSidecarEnabled() ? eventStoreRustSidecarCommand() : "",
+    args: isEventStoreRustSidecarEnabled() ? [...eventStoreRustSidecarArgs(), dbPath] : [],
+    starts: eventStoreRustSidecarStats.starts,
+    failures: eventStoreRustSidecarStats.failures,
+    fallbacks: eventStoreRustSidecarStats.fallbacks,
+    lastFailureAt: eventStoreRustSidecarStats.lastFailureAt,
+    lastError: eventStoreRustSidecarStats.lastError,
+    client: eventStoreRustSidecar?.stats() || { pending: 0, terminated: true }
+  };
 }
 
 function getEventStoreWorkerStats() {
@@ -463,6 +553,9 @@ function getEventStoreWorkerStats() {
 export function getEventStoreRuntimeStats() {
   return {
     mode: eventStoreMode(),
+    rustSidecarEnabled: isEventStoreRustSidecarEnabled(),
+    rustSidecarFailed: eventStoreRustSidecarFailed,
+    rustSidecar: getEventStoreRustSidecarStats(),
     workerEnabled: isEventStoreWorkerEnabled(),
     workerFailed: eventStoreWorkerFailed,
     worker: getEventStoreWorkerStats(),
@@ -574,6 +667,45 @@ function eventStoreWorkerClient() {
   return eventStoreWorker;
 }
 
+function validateEventStoreRustSidecarHealth(health = {}) {
+  if (!health.ok) throw new Error("Event store Rust sidecar health check failed.");
+  if (health.protocolVersion !== EVENT_STORE_SIDECAR_PROTOCOL_VERSION) {
+    throw new Error(`Event store Rust sidecar protocol mismatch: ${health.protocolVersion || "unknown"}.`);
+  }
+  if (health.schemaReady !== true) {
+    throw new Error("Event store Rust sidecar schema is not ready.");
+  }
+  const supported = new Set(Array.isArray(health.supportedMethods) ? health.supportedMethods : []);
+  const missing = EVENT_STORE_CONTRACT_METHODS.filter((method) => !supported.has(method));
+  if (missing.length) {
+    throw new Error(`Event store Rust sidecar is missing method(s): ${missing.join(", ")}.`);
+  }
+}
+
+async function ensureEventStoreRustSidecarReady(client) {
+  if (eventStoreRustSidecarReady) return;
+  const health = await client.request("__health", [], { timeout: eventStoreRustSidecarTimeoutMs() });
+  validateEventStoreRustSidecarHealth(health);
+  eventStoreRustSidecarReady = true;
+}
+
+function recordEventStoreRustSidecarFailure(error) {
+  eventStoreRustSidecarStats.failures += 1;
+  eventStoreRustSidecarStats.fallbacks += 1;
+  eventStoreRustSidecarStats.lastFailureAt = nowIso();
+  eventStoreRustSidecarStats.lastError = error?.message || String(error);
+}
+
+async function closeEventStoreRustSidecar({ resetFailure = true } = {}) {
+  if (eventStoreRustSidecar) {
+    const client = eventStoreRustSidecar;
+    eventStoreRustSidecar = null;
+    await client.close().catch(() => {});
+  }
+  eventStoreRustSidecarReady = false;
+  if (resetFailure) eventStoreRustSidecarFailed = false;
+}
+
 function eventStoreSyncCall(method, callback) {
   const start = performance.now();
   try {
@@ -586,7 +718,27 @@ function eventStoreSyncCall(method, callback) {
   }
 }
 
-async function eventStoreWorkerCall(method, args, fallback) {
+async function eventStoreRustSidecarCall(method, args) {
+  const client = eventStoreRustSidecarClient();
+  if (!client) return { ok: false, attempted: false };
+
+  const start = performance.now();
+  try {
+    await ensureEventStoreRustSidecarReady(client);
+    const result = await client.request(method, args, { timeout: eventStoreRustSidecarTimeoutMs() });
+    eventStoreMetrics.record({ method, mode: "rust-sidecar", ok: true, durationMs: performance.now() - start });
+    return { ok: true, attempted: true, result };
+  } catch (error) {
+    eventStoreMetrics.record({ method, mode: "rust-sidecar", ok: false, durationMs: performance.now() - start, fallback: true });
+    recordEventStoreRustSidecarFailure(error);
+    eventStoreRustSidecarFailed = true;
+    await closeEventStoreRustSidecar({ resetFailure: false });
+    console.warn(`[eventStore] Rust sidecar failed; falling back: ${error.message}`);
+    return { ok: false, attempted: true, error };
+  }
+}
+
+async function eventStoreWorkerOrSyncCall(method, args, fallback) {
   const client = eventStoreWorkerClient();
   if (!client) {
     const start = performance.now();
@@ -624,6 +776,12 @@ async function eventStoreWorkerCall(method, args, fallback) {
   }
 }
 
+async function eventStoreWorkerCall(method, args, fallback) {
+  const rust = await eventStoreRustSidecarCall(method, args);
+  if (rust.ok) return rust.result;
+  return eventStoreWorkerOrSyncCall(method, args, fallback);
+}
+
 export async function closeEventStoreWorker() {
   if (!eventStoreWorker) return;
   await eventStoreWorker.close();
@@ -635,6 +793,7 @@ export async function drainEventStoreRuntime() {
   await flushTaskEventBatches();
   await flushToolEventBatches();
   await flushLiveCallEventBatches();
+  await closeEventStoreRustSidecar();
   await closeEventStoreWorker();
 }
 

@@ -124,6 +124,18 @@ export function createEventStoreSidecarClient({
     if (pending.size > 0) rejectPending(sidecarExitError(code, signal, stderr.trim()));
   });
 
+  function waitForExit(timeoutMs = 2000) {
+    if (terminated) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      timer.unref?.();
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
   function request(method, requestArgs = [], options = {}) {
     if (terminated) return Promise.reject(new Error("Event store sidecar is closed."));
     const pendingLimit = maxPendingRequestsValue(options.maxPendingRequests ?? maxPendingRequests);
@@ -164,6 +176,7 @@ export function createEventStoreSidecarClient({
     } catch {
       // The sidecar may already be exiting; kill below is the hard stop.
     }
+    await waitForExit(2000);
     terminated = true;
     try { child.stdin?.end(); } catch {}
     if (!child.killed) child.kill();

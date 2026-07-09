@@ -27,7 +27,106 @@ data class QaPair(
     val question: String = "",
     val answer: String = "",
     val agentState: String = "idle",
+    val correlationId: String = "",
 )
+
+object LiveCallQaReducer {
+    fun reduce(current: List<QaPair>, event: LiveCallEvent, maxPairs: Int = 20): List<QaPair> {
+        return when (event.type) {
+            "live_call.question.detected" -> appendQuestion(current, event)
+            "live_call.agent.thinking" -> markThinking(current, event)
+            "live_call.agent.delta" -> appendAnswer(current, event, "streaming")
+            "live_call.agent.done" -> finishAnswer(current, event)
+            "live_call.agent.error" -> appendAnswer(current, event.copy(text = event.error.ifBlank { event.text }), "error")
+            else -> current
+        }.takeLast(maxPairs)
+    }
+
+    private fun appendQuestion(current: List<QaPair>, event: LiveCallEvent): List<QaPair> {
+        val question = event.text.trim()
+        if (question.isBlank()) return current
+        return current + QaPair(
+            question = question,
+            agentState = "idle",
+            correlationId = correlationId(event).ifBlank { event.id.ifBlank { "cursor:${event.cursor}" } },
+        )
+    }
+
+    private fun markThinking(current: List<QaPair>, event: LiveCallEvent): List<QaPair> {
+        val question = event.question.ifBlank { event.text }.trim()
+        val index = findTargetIndex(current, event, question)
+        if (index < 0) return current + QaPair(
+            question = question,
+            agentState = "thinking",
+            correlationId = correlationId(event),
+        )
+        return current.replaceAt(index) { pair ->
+            pair.copy(
+                question = pair.question.ifBlank { question },
+                agentState = "thinking",
+                correlationId = pair.correlationId.ifBlank { correlationId(event) },
+            )
+        }
+    }
+
+    private fun appendAnswer(current: List<QaPair>, event: LiveCallEvent, state: String): List<QaPair> {
+        val clean = event.text.trim()
+        if (clean.isBlank()) return current
+        val index = findTargetIndex(current, event, event.question)
+        if (index < 0) return current + QaPair(
+            question = event.question,
+            answer = clean,
+            agentState = state,
+            correlationId = correlationId(event),
+        )
+        return current.replaceAt(index) { pair ->
+            val nextAnswer = if (pair.agentState == "streaming" && state == "streaming") pair.answer + clean else clean
+            pair.copy(
+                answer = nextAnswer,
+                agentState = state,
+                correlationId = pair.correlationId.ifBlank { correlationId(event) },
+            )
+        }
+    }
+
+    private fun finishAnswer(current: List<QaPair>, event: LiveCallEvent): List<QaPair> {
+        val clean = event.text.trim()
+        val index = findTargetIndex(current, event, event.question)
+        if (index < 0) return current + QaPair(
+            question = event.question,
+            answer = clean,
+            agentState = "done",
+            correlationId = correlationId(event),
+        )
+        return current.replaceAt(index) { pair ->
+            pair.copy(
+                answer = clean.ifBlank { pair.answer },
+                agentState = "done",
+                correlationId = pair.correlationId.ifBlank { correlationId(event) },
+            )
+        }
+    }
+
+    private fun findTargetIndex(current: List<QaPair>, event: LiveCallEvent, question: String): Int {
+        val correlationId = correlationId(event)
+        if (correlationId.isNotBlank()) {
+            current.indexOfLast { it.correlationId == correlationId }.takeIf { it >= 0 }?.let { return it }
+        }
+        val cleanQuestion = question.trim()
+        if (cleanQuestion.isNotBlank()) {
+            current.indexOfLast { it.question == cleanQuestion }.takeIf { it >= 0 }?.let { return it }
+        }
+        return current.indexOfLast { it.agentState != "done" }.takeIf { it >= 0 } ?: current.lastIndex
+    }
+
+    private fun correlationId(event: LiveCallEvent): String {
+        return event.questionId.ifBlank { event.taskId }
+    }
+
+    private inline fun List<QaPair>.replaceAt(index: Int, transform: (QaPair) -> QaPair): List<QaPair> {
+        return mapIndexed { currentIndex, pair -> if (currentIndex == index) transform(pair) else pair }
+    }
+}
 
 data class CallUiState(
     val sessions: List<Session> = emptyList(),
@@ -428,42 +527,7 @@ class CallViewModel : ViewModel() {
     }
 
     private fun reduceQaPairs(current: List<QaPair>, event: LiveCallEvent): List<QaPair> {
-        return when (event.type) {
-            "live_call.question.detected" -> current + QaPair(question = event.text, agentState = "idle")
-            "live_call.agent.thinking" -> markThinking(current, event.question.ifBlank { event.text })
-            "live_call.agent.delta" -> appendAnswer(current, event.text, "streaming")
-            "live_call.agent.done" -> finishAnswer(current, event.text)
-            "live_call.agent.error" -> appendAnswer(current, event.error.ifBlank { event.text }, "error")
-            else -> current
-        }.takeLast(MAX_QA_PAIRS)
-    }
-
-    private fun markThinking(current: List<QaPair>, question: String): List<QaPair> {
-        if (current.isEmpty()) return listOf(QaPair(question = question, agentState = "thinking"))
-        val last = current.last()
-        return if (last.agentState == "idle") {
-            current.dropLast(1) + last.copy(agentState = "thinking")
-        } else if (last.agentState == "done") {
-            current + QaPair(question = question.ifBlank { last.question }, agentState = "thinking")
-        } else {
-            current
-        }
-    }
-
-    private fun appendAnswer(current: List<QaPair>, text: String, state: String): List<QaPair> {
-        val clean = text.trim()
-        if (clean.isBlank()) return current
-        if (current.isEmpty()) return listOf(QaPair(answer = clean, agentState = state))
-        return current.dropLast(1) + current.last().let { last ->
-            if (last.agentState == "streaming") last.copy(answer = last.answer + clean, agentState = state)
-            else last.copy(answer = clean, agentState = state)
-        }
-    }
-
-    private fun finishAnswer(current: List<QaPair>, text: String): List<QaPair> {
-        val clean = text.trim()
-        if (current.isEmpty()) return listOf(QaPair(answer = clean, agentState = "done"))
-        return current.dropLast(1) + current.last().copy(answer = clean.ifBlank { current.last().answer }, agentState = "done")
+        return LiveCallQaReducer.reduce(current, event, MAX_QA_PAIRS)
     }
 
     private fun statusFromEvent(current: String, event: LiveCallEvent): String = when (event.type) {

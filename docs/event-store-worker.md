@@ -46,14 +46,18 @@ Task and tool event append paths still preserve the existing immediate cursor be
 
 ## Rust Sidecar Contract Smoke
 
-`src/eventStoreContract.js` now owns the shared JSON method allowlist and error envelope used by both the Node Worker and sidecar smoke fixture. `src/eventStoreSidecarClient.js` speaks the Rust-ready stdio JSONL shape:
+`src/eventStoreContract.js` now owns the shared JSON method allowlist, control method names, protocol version, and error envelope used by both the Node Worker and sidecar smoke fixture. `src/eventStoreSidecarClient.js` speaks the Rust-ready stdio JSONL shape:
 
 ```json
-{"id":1,"method":"insertTaskEvents","args":["task-id",[{"type":"stdout","text":"hello"}]]}
-{"id":1,"result":[1]}
+{"id":1,"method":"__health","args":[]}
+{"id":1,"result":{"ok":true,"protocolVersion":1,"implementation":"node-fixture"}}
+{"id":2,"method":"insertTaskEvents","args":["task-id",[{"type":"stdout","text":"hello"}]]}
+{"id":2,"result":[1]}
+{"id":3,"method":"stats","args":[]}
+{"id":3,"result":{"pending":0,"requests":3,"failures":0}}
 ```
 
-`test/eventStoreSidecarContract.test.js` runs that protocol against `test/fixtures/event-store-json-sidecar.js`, which reuses the SQLite event-store adapter as a stand-in for the future Rust process. This keeps the production path unchanged while locking the compatibility surface for append, replay, error envelopes, close, and pending-request accounting.
+`test/eventStoreSidecarContract.test.js` runs that protocol against `test/fixtures/event-store-json-sidecar.js`, which reuses the SQLite event-store adapter as a stand-in for the future Rust process. This keeps the production path unchanged while locking the compatibility surface for append, replay, health/status reporting, error envelopes, close, invalid JSON handling, timeout handling, and pending-request accounting.
 
 `GET /api/tasks/:id/events/catch-up` and `GET /api/live-calls/:id/events/catch-up` return the existing `items` array plus `nextCursor`, `hasMore`, and `limit`. Each route fetches `limit + 1` events internally to expose a cheap next-page signal without changing the item contract.
 

@@ -52,9 +52,11 @@ test("live call audio metrics count frames and oversized drops", () => {
     assert.equal(metrics.frames, 1);
     assert.equal(metrics.bytes, 320);
     assert.equal(metrics.droppedFrames, 1);
+    assert.equal(metrics.dropRate, 0.5);
     assert.equal(metrics.oversizedFrames, 1);
     assert.equal(sessionMetrics.frames, 1);
     assert.equal(sessionMetrics.bytes, 320);
+    assert.equal(sessionMetrics.dropRate, 0.5);
     assert.equal(sessionMetrics.oversizedFrames, 1);
   } finally {
     stopLiveCallSession(session.id, "test-cleanup");
@@ -83,9 +85,11 @@ test("live call audio drops frames when websocket backpressure is high", () => {
     assert.equal(metrics.frames, 0);
     assert.equal(metrics.bytes, 0);
     assert.equal(metrics.droppedFrames, 1);
+    assert.equal(metrics.dropRate, 1);
     assert.equal(metrics.backpressureFrames, 1);
     assert.equal(metrics.maxBufferedAmount, 2 * 1024 * 1024);
     assert.equal(sessionMetrics.backpressureFrames, 1);
+    assert.equal(sessionMetrics.dropRate, 1);
     assert.equal(sessionMetrics.maxBufferedAmount, 2 * 1024 * 1024);
     assert.equal(ws.sent.some((item) => item.type === "drop" && item.reason === "backpressure"), true);
   } finally {

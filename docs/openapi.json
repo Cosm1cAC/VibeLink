@@ -3086,7 +3086,7 @@
     "/api/live-calls/audio-metrics": {
       "get": {
         "summary": "Live call audio metrics",
-        "description": "Returns WebSocket audio stream counters including frames, drops, backpressure, acknowledgements, and per-session totals.",
+        "description": "Returns WebSocket audio stream counters including frames, drops, drop rate, backpressure, acknowledgements, and per-session totals.",
         "parameters": [
           {
             "name": "fields",

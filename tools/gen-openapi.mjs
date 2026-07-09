@@ -592,7 +592,7 @@ const paths = {
     { "201": { description: "Created" } }
   )),
   ...path("/api/live-calls/audio-metrics", get("Live call audio metrics",
-    "Returns WebSocket audio stream counters including frames, drops, backpressure, acknowledgements, and per-session totals.",
+    "Returns WebSocket audio stream counters including frames, drops, drop rate, backpressure, acknowledgements, and per-session totals.",
     { type: "object", properties: { metrics: { type: "object" } } }
   )),
   ...path("/api/live-calls/asr-metrics", get("Live call ASR metrics",

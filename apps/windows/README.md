@@ -30,11 +30,11 @@ The user should not need to run internal modes directly.
 
 ## Workspace tree scanner
 
-The scanner skips heavy directories such as `.git`, `node_modules`, `target`, and `.agent-mobile-terminal`. It also honors root and nested `.gitignore` basename rules for literal file names, simple `*` wildcard file patterns, and directory-only rules such as `logs/`.
+The scanner skips heavy directories such as `.git`, `node_modules`, `target`, and `.agent-mobile-terminal`. It also honors root and nested `.gitignore` basename rules, path rules, simple `*` wildcard patterns, `**` path segments, negation, and directory-only rules such as `logs/`.
 
 The JSON response includes a metadata `signature` for the scanned directory window. It also includes `truncated: true` when `--max-entries` prevents the scanner from returning every matching item. The Node bridge records the latest signature, Rust workspace-tree budget hits, and Rust scanner result cache hits/misses/evictions in runtime stats.
 
-Remaining migration work: full gitignore path semantics and moving the reusable scanner cache into a long-lived Rust sidecar/native scanner are still future Rust slices.
+Remaining migration work: moving the reusable scanner cache into a long-lived Rust sidecar/native scanner is still a future Rust slice.
 
 ## Build
 

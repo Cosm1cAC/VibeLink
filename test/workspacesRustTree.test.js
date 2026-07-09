@@ -173,9 +173,11 @@ test("getWorkspaceContext applies nested gitignore rules through real Rust scann
   const fixture = path.join(os.tmpdir(), `vibelink-rust-context-real-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
   fs.mkdirSync(path.join(fixture, "src", "private"), { recursive: true });
-  fs.writeFileSync(path.join(fixture, "src", ".gitignore"), "generated.tmp\nprivate/\n", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", ".gitignore"), "generated.tmp\n*.log\n!keep.log\nprivate/\n", "utf8");
   fs.writeFileSync(path.join(fixture, "src", "README.md"), "hello", "utf8");
   fs.writeFileSync(path.join(fixture, "src", "generated.tmp"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "debug.log"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "keep.log"), "kept", "utf8");
   fs.writeFileSync(path.join(fixture, "src", "private", "note.txt"), "ignored", "utf8");
 
   const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-context-real" });
@@ -196,7 +198,9 @@ test("getWorkspaceContext applies nested gitignore rules through real Rust scann
     const result = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["src"] });
     assert.equal(result.ok, true);
     assert.match(result.prompt, /file src\/README\.md/);
+    assert.match(result.prompt, /file src\/keep\.log/);
     assert.doesNotMatch(result.prompt, /generated\.tmp/);
+    assert.doesNotMatch(result.prompt, /debug\.log/);
     assert.doesNotMatch(result.prompt, /private\/note\.txt/);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);

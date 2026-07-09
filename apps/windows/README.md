@@ -32,7 +32,7 @@ The scanner skips heavy directories such as `.git`, `node_modules`, `target`, an
 
 The JSON response includes `truncated: true` when `--max-entries` prevents the scanner from returning every matching item. The Node bridge records that as a Rust workspace-tree budget hit in runtime stats.
 
-Remaining migration work: negation rules, full gitignore path semantics, and incremental cache metadata are still Node-side or future Rust slices.
+Remaining migration work: full gitignore path semantics and incremental cache metadata are still Node-side or future Rust slices.
 
 ## Build
 

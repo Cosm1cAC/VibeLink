@@ -212,6 +212,7 @@ struct WorkspaceIgnoreRules {
 struct WorkspaceIgnoreRule {
     pattern: String,
     directory_only: bool,
+    negated: bool,
 }
 
 impl WorkspaceIgnoreRules {
@@ -220,12 +221,16 @@ impl WorkspaceIgnoreRules {
     }
 
     fn is_ignored(&self, name: &str, is_dir: bool) -> bool {
-        self.rules.iter().any(|rule| {
+        let mut ignored = false;
+        for rule in &self.rules {
             if rule.directory_only && !is_dir {
-                return false;
+                continue;
             }
-            gitignore_basename_matches(&rule.pattern, name)
-        })
+            if gitignore_basename_matches(&rule.pattern, name) {
+                ignored = !rule.negated;
+            }
+        }
+        ignored
     }
 }
 
@@ -237,17 +242,27 @@ fn gitignore_rules_for_dir(dir: &Path) -> WorkspaceIgnoreRules {
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let directory_only = trimmed.ends_with('/');
-        let pattern = trimmed.trim_start_matches('/').trim_end_matches('/');
+        let negated = trimmed.starts_with('!');
+        let body = if negated {
+            trimmed[1..].trim()
+        } else {
+            trimmed
+        };
+        if body.is_empty() {
+            continue;
+        }
+        let directory_only = body.ends_with('/');
+        let pattern = body.trim_start_matches('/').trim_end_matches('/');
         if pattern.is_empty() || pattern.contains('/') {
             continue;
         }
         rules.rules.push(WorkspaceIgnoreRule {
             pattern: pattern.to_string(),
             directory_only,
+            negated,
         });
     }
 
@@ -626,6 +641,27 @@ mod tests {
 
         let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
         assert_eq!(names, vec!["README.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_honors_gitignore_negation_rules() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-gitignore-negation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".gitignore"), "*.log\n!keep.log\n").unwrap();
+        fs::write(root.join("README.md"), "hello").unwrap();
+        fs::write(root.join("debug.log"), "ignored").unwrap();
+        fs::write(root.join("keep.log"), "kept").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+
+        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["keep.log", "README.md"]);
 
         let _ = fs::remove_dir_all(&root);
     }

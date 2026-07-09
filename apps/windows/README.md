@@ -16,13 +16,21 @@ The default mode starts the bridge role automatically, waits for the HTTP API to
 vibelink.exe bridge
 vibelink.exe pair
 vibelink.exe doctor
+vibelink.exe workspace-tree --root C:\path\to\repo --dir src --depth 2
 ```
 
 - `bridge`: hosts the existing Node bridge in phase 1.
 - `pair`: creates a QR pairing session against a running bridge.
 - `doctor`: checks whether the bridge API is reachable.
+- `workspace-tree`: emits the Rust workspace scanner JSON contract used by the Node bridge when `VIBELINK_RUST_WORKSPACE_TREE=1` is enabled.
 
 The user should not need to run internal modes directly.
+
+## Workspace tree scanner
+
+The scanner skips heavy directories such as `.git`, `node_modules`, `target`, and `.agent-mobile-terminal`. It also honors root `.gitignore` basename rules for literal file names, simple `*` wildcard file patterns, and directory-only rules such as `logs/`.
+
+Remaining migration work: nested `.gitignore` files, negation rules, full gitignore path semantics, and incremental cache metadata are still Node-side or future Rust slices.
 
 ## Build
 
@@ -30,4 +38,6 @@ The user should not need to run internal modes directly.
 cargo build --release --manifest-path apps/windows/Cargo.toml
 ```
 
-Rust is not currently installed on the checked machine, so build verification is blocked until `rustc` and `cargo` are available.
+```powershell
+cargo test --manifest-path apps/windows/Cargo.toml
+```

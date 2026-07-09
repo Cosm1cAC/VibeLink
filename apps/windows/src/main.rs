@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::{
     env,
     net::UdpSocket,
@@ -137,7 +137,7 @@ fn list_workspace_tree(
     let mut queue = VecDeque::from([(target.clone(), 0usize)]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
-    let gitignore_dirs = root_gitignore_dirs(&root);
+    let ignore_rules = root_gitignore_rules(&root);
 
     while let Some((current, current_depth)) = queue.pop_front() {
         if items.len() >= max_entries {
@@ -157,7 +157,7 @@ fn list_workspace_tree(
             if file_type.is_dir() && IGNORED_WORKSPACE_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            if file_type.is_dir() && gitignore_dirs.contains(name.as_str()) {
+            if ignore_rules.is_ignored(&name, file_type.is_dir()) {
                 continue;
             }
             children.push((name, entry.path(), file_type.is_dir()));
@@ -194,29 +194,87 @@ fn list_workspace_tree(
     })
 }
 
-fn root_gitignore_dirs(root: &Path) -> HashSet<String> {
-    let mut dirs = HashSet::new();
+#[derive(Debug, Default)]
+struct WorkspaceIgnoreRules {
+    rules: Vec<WorkspaceIgnoreRule>,
+}
+
+#[derive(Debug)]
+struct WorkspaceIgnoreRule {
+    pattern: String,
+    directory_only: bool,
+}
+
+impl WorkspaceIgnoreRules {
+    fn is_ignored(&self, name: &str, is_dir: bool) -> bool {
+        self.rules.iter().any(|rule| {
+            if rule.directory_only && !is_dir {
+                return false;
+            }
+            gitignore_basename_matches(&rule.pattern, name)
+        })
+    }
+}
+
+fn root_gitignore_rules(root: &Path) -> WorkspaceIgnoreRules {
+    let mut rules = WorkspaceIgnoreRules::default();
     let Ok(content) = std::fs::read_to_string(root.join(".gitignore")) else {
-        return dirs;
+        return rules;
     };
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with('#')
-            || trimmed.starts_with('!')
-            || trimmed.contains('*')
-        {
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
             continue;
         }
+        let directory_only = trimmed.ends_with('/');
         let pattern = trimmed.trim_start_matches('/').trim_end_matches('/');
         if pattern.is_empty() || pattern.contains('/') {
             continue;
         }
-        dirs.insert(pattern.to_string());
+        rules.rules.push(WorkspaceIgnoreRule {
+            pattern: pattern.to_string(),
+            directory_only,
+        });
     }
 
-    dirs
+    rules
+}
+
+fn gitignore_basename_matches(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    if pattern == "*" {
+        return true;
+    }
+
+    let mut remaining = name;
+    let mut parts = pattern.split('*').peekable();
+    let mut first_part = true;
+
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            first_part = false;
+            continue;
+        }
+        if first_part && !pattern.starts_with('*') {
+            let Some(next_remaining) = remaining.strip_prefix(part) else {
+                return false;
+            };
+            remaining = next_remaining;
+        } else if parts.peek().is_none() && !pattern.ends_with('*') {
+            return remaining.ends_with(part);
+        } else {
+            let Some(index) = remaining.find(part) else {
+                return false;
+            };
+            remaining = &remaining[index + part.len()..];
+        }
+        first_part = false;
+    }
+
+    pattern.ends_with('*') || remaining.is_empty()
 }
 
 fn safe_workspace_child(root: &Path, child: &Path) -> Result<PathBuf> {
@@ -525,11 +583,36 @@ mod tests {
             .items
             .iter()
             .all(|item| !item.path.starts_with("node_modules")));
-        assert!(tree.items.iter().all(|item| !item.path.starts_with("target")));
+        assert!(tree
+            .items
+            .iter()
+            .all(|item| !item.path.starts_with("target")));
         assert!(tree
             .items
             .iter()
             .all(|item| !item.path.starts_with("tmp-cache")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_honors_root_gitignore_file_patterns() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-gitignore-files-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("logs")).unwrap();
+        fs::write(root.join(".gitignore"), "*.log\nsecrets.local\nlogs/\n").unwrap();
+        fs::write(root.join("README.md"), "hello").unwrap();
+        fs::write(root.join("debug.log"), "ignored").unwrap();
+        fs::write(root.join("secrets.local"), "ignored").unwrap();
+        fs::write(root.join("logs").join("debug.txt"), "ignored").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+
+        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["README.md"]);
 
         let _ = fs::remove_dir_all(&root);
     }

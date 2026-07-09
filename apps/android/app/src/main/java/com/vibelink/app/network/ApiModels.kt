@@ -187,6 +187,8 @@ data class AsrCheckpointInfo(
 
 data class LiveCallEvent(
     val question: String = "",
+    @SerializedName("questionId") val questionId: String = "",
+    @SerializedName("questionCursor") val questionCursor: Int = 0,
     val error: String = "",
     val id: String = "",
     val cursor: Int = 0,

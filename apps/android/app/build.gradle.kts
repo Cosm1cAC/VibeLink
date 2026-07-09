@@ -62,6 +62,9 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
+    // Unit tests
+    testImplementation(kotlin("test"))
+
     // DataStore (localStorage equivalent)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 

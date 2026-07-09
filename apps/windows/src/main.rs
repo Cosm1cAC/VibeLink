@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{
+    mpsc::{self, Receiver, RecvTimeoutError},
+    Arc, Mutex, MutexGuard, TryLockError,
+};
 use std::{
     env,
     hash::{Hash, Hasher},
@@ -171,7 +174,12 @@ struct McpStdioSession {
 }
 
 struct McpSidecarManager {
-    sessions: HashMap<String, McpStdioSession>,
+    sessions: HashMap<String, Arc<Mutex<McpStdioSession>>>,
+    active_requests: usize,
+    max_active_requests: usize,
+    max_active_observed: usize,
+    sidecar_backpressure_rejects: u64,
+    last_sidecar_backpressure_at: String,
 }
 
 const IGNORED_WORKSPACE_DIRS: &[&str] = &[
@@ -193,10 +201,22 @@ fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize)
 
 fn run_mcp_session_sidecar() -> Result<()> {
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut manager = McpSidecarManager {
-        sessions: HashMap::new(),
-    };
+    let manager = Arc::new(Mutex::new(McpSidecarManager::new()));
+    let (write_tx, write_rx) = mpsc::channel::<SidecarWrite>();
+    let writer = thread::spawn(move || -> Result<()> {
+        let mut stdout = io::stdout();
+        for message in write_rx {
+            match message {
+                SidecarWrite::Result { id, result } => {
+                    write_sidecar_result(&mut stdout, &id, result)?;
+                }
+                SidecarWrite::Error { id, message } => {
+                    write_sidecar_error(&mut stdout, &id, &message)?;
+                }
+            }
+        }
+        Ok(())
+    });
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -207,25 +227,97 @@ fn run_mcp_session_sidecar() -> Result<()> {
         let request: SidecarRequest = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(error) => {
-                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
+                write_tx.send(SidecarWrite::Error {
+                    id: Value::Null,
+                    message: error.to_string(),
+                })?;
                 continue;
             }
         };
 
         if request.method == "__close" {
-            manager.close_all();
-            write_sidecar_result(&mut stdout, &request.id, json!({ "ok": true }))?;
+            lock_mcp_manager(&manager)?.close_all();
+            write_tx.send(SidecarWrite::Result {
+                id: request.id,
+                result: json!({ "ok": true }),
+            })?;
             break;
         }
 
-        match manager.handle(&request.method, &request.args) {
-            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
-            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
+        match request.method.as_str() {
+            "stats" | "closeIdleSessions" | "closeAll" => {
+                let result = lock_mcp_manager(&manager)?.handle_control(&request.method, &request.args);
+                send_sidecar_result(&write_tx, request.id, result)?;
+            }
+            _ => {
+                let id = request.id;
+                let method = request.method;
+                let args = request.args;
+                let should_run = lock_mcp_manager(&manager)?.try_start_sidecar_request(&method);
+                if let Err(error) = should_run {
+                    write_tx.send(SidecarWrite::Error {
+                        id,
+                        message: format!("{error:#}"),
+                    })?;
+                    continue;
+                }
+
+                let manager_for_worker = Arc::clone(&manager);
+                let write_tx_for_worker = write_tx.clone();
+                thread::spawn(move || {
+                    let result = handle_mcp_sidecar_request(&manager_for_worker, &method, &args);
+                    if let Ok(mut manager) = lock_mcp_manager(&manager_for_worker) {
+                        manager.finish_sidecar_request();
+                    }
+                    let _ = send_sidecar_result(&write_tx_for_worker, id, result);
+                });
+            }
         }
     }
 
-    manager.close_all();
+    lock_mcp_manager(&manager)?.close_all();
+    drop(write_tx);
+    writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("MCP session sidecar writer thread panicked"))??;
     Ok(())
+}
+
+#[derive(Debug)]
+enum SidecarWrite {
+    Result { id: Value, result: Value },
+    Error { id: Value, message: String },
+}
+
+fn send_sidecar_result(
+    write_tx: &mpsc::Sender<SidecarWrite>,
+    id: Value,
+    result: Result<Value>,
+) -> Result<()> {
+    match result {
+        Ok(result) => write_tx.send(SidecarWrite::Result { id, result })?,
+        Err(error) => write_tx.send(SidecarWrite::Error {
+            id,
+            message: format!("{error:#}"),
+        })?,
+    }
+    Ok(())
+}
+
+fn lock_mcp_manager(
+    manager: &Arc<Mutex<McpSidecarManager>>,
+) -> Result<MutexGuard<'_, McpSidecarManager>> {
+    manager
+        .lock()
+        .map_err(|_| anyhow::anyhow!("MCP session sidecar manager lock was poisoned"))
+}
+
+fn lock_mcp_session(
+    session: &Arc<Mutex<McpStdioSession>>,
+) -> Result<MutexGuard<'_, McpStdioSession>> {
+    session
+        .lock()
+        .map_err(|_| anyhow::anyhow!("MCP stdio session lock was poisoned"))
 }
 
 fn write_sidecar_result(stdout: &mut io::Stdout, id: &Value, result: Value) -> Result<()> {
@@ -291,39 +383,83 @@ fn now_iso() -> String {
     datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+fn mcp_sidecar_max_active_requests() -> usize {
+    env::var("VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(64)
+}
+
+fn handle_mcp_sidecar_request(
+    manager: &Arc<Mutex<McpSidecarManager>>,
+    method: &str,
+    args: &[Value],
+) -> Result<Value> {
+    match method {
+        "probeStdioServer" => {
+            let server: McpServerConfig = sidecar_arg(args, 0)?;
+            let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+            let session = {
+                let mut manager = lock_mcp_manager(manager)?;
+                manager.session_for(server, &options)?
+            };
+            let mut session = lock_mcp_session(&session)?;
+            session.apply_options(&options);
+            let initialize = session.ensure_initialized()?;
+            let tools = session.list_tools()?;
+            Ok(json!({
+                "ok": true,
+                "transport": "stdio",
+                "protocolVersion": initialize.get("protocolVersion").and_then(Value::as_str).unwrap_or(""),
+                "serverInfo": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
+                "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
+                "tools": tools,
+                "stderr": ""
+            }))
+        }
+        "listTools" => {
+            let server: McpServerConfig = sidecar_arg(args, 0)?;
+            let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+            let session = {
+                let mut manager = lock_mcp_manager(manager)?;
+                manager.session_for(server, &options)?
+            };
+            let mut session = lock_mcp_session(&session)?;
+            session.apply_options(&options);
+            Ok(Value::Array(session.list_tools()?))
+        }
+        "callTool" => {
+            let server: McpServerConfig = sidecar_arg(args, 0)?;
+            let tool_name: String = sidecar_arg(args, 1)?;
+            let tool_arguments: Value = args.get(2).cloned().unwrap_or_else(|| json!({}));
+            let options: McpSidecarOptions = sidecar_arg_or_default(args, 3)?;
+            let session = {
+                let mut manager = lock_mcp_manager(manager)?;
+                manager.session_for(server, &options)?
+            };
+            let mut session = lock_mcp_session(&session)?;
+            session.apply_options(&options);
+            session.call_tool(&tool_name, tool_arguments)
+        }
+        _ => bail!("Unsupported MCP session sidecar method: {method}"),
+    }
+}
+
 impl McpSidecarManager {
-    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+    fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            active_requests: 0,
+            max_active_requests: mcp_sidecar_max_active_requests(),
+            max_active_observed: 0,
+            sidecar_backpressure_rejects: 0,
+            last_sidecar_backpressure_at: String::new(),
+        }
+    }
+
+    fn handle_control(&mut self, method: &str, args: &[Value]) -> Result<Value> {
         match method {
-            "probeStdioServer" => {
-                let server: McpServerConfig = sidecar_arg(args, 0)?;
-                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
-                let session = self.session_for(server, &options)?;
-                let initialize = session.ensure_initialized()?;
-                let tools = session.list_tools()?;
-                Ok(json!({
-                    "ok": true,
-                    "transport": "stdio",
-                    "protocolVersion": initialize.get("protocolVersion").and_then(Value::as_str).unwrap_or(""),
-                    "serverInfo": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
-                    "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
-                    "tools": tools,
-                    "stderr": ""
-                }))
-            }
-            "listTools" => {
-                let server: McpServerConfig = sidecar_arg(args, 0)?;
-                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
-                let session = self.session_for(server, &options)?;
-                Ok(Value::Array(session.list_tools()?))
-            }
-            "callTool" => {
-                let server: McpServerConfig = sidecar_arg(args, 0)?;
-                let tool_name: String = sidecar_arg(args, 1)?;
-                let tool_arguments: Value = args.get(2).cloned().unwrap_or_else(|| json!({}));
-                let options: McpSidecarOptions = sidecar_arg_or_default(args, 3)?;
-                let session = self.session_for(server, &options)?;
-                session.call_tool(&tool_name, tool_arguments)
-            }
             "closeIdleSessions" => {
                 let options: McpSidecarOptions = sidecar_arg_or_default(args, 0)?;
                 let closed = self.close_idle(options.max_idle_ms.unwrap_or(10 * 60 * 1000));
@@ -338,27 +474,49 @@ impl McpSidecarManager {
         }
     }
 
+    fn try_start_sidecar_request(&mut self, method: &str) -> Result<()> {
+        if self.active_requests >= self.max_active_requests {
+            self.sidecar_backpressure_rejects += 1;
+            self.last_sidecar_backpressure_at = now_iso();
+            bail!(
+                "MCP session sidecar backpressure: {method} rejected because {} request(s) are already active (max {}).",
+                self.active_requests,
+                self.max_active_requests
+            );
+        }
+        self.active_requests += 1;
+        self.max_active_observed = self.max_active_observed.max(self.active_requests);
+        Ok(())
+    }
+
+    fn finish_sidecar_request(&mut self) {
+        self.active_requests = self.active_requests.saturating_sub(1);
+    }
+
     fn session_for(
         &mut self,
         server: McpServerConfig,
         options: &McpSidecarOptions,
-    ) -> Result<&mut McpStdioSession> {
+    ) -> Result<Arc<Mutex<McpStdioSession>>> {
         let key = mcp_server_key(&server);
-        let replace = self
-            .sessions
-            .get_mut(&key)
-            .map(|session| session.is_closed())
-            .unwrap_or(true);
+        let replace = match self.sessions.get(&key) {
+            Some(session) => match session.try_lock() {
+                Ok(mut session) => session.is_closed(),
+                Err(TryLockError::WouldBlock) => false,
+                Err(TryLockError::Poisoned(_)) => true,
+            },
+            None => true,
+        };
         if replace {
-            self.sessions
-                .insert(key.clone(), McpStdioSession::spawn(server, options)?);
+            self.sessions.insert(
+                key.clone(),
+                Arc::new(Mutex::new(McpStdioSession::spawn(server, options)?)),
+            );
         }
-        let session = self
-            .sessions
-            .get_mut(&key)
-            .context("MCP session was not available after spawn")?;
-        session.apply_options(options);
-        Ok(session)
+        self.sessions
+            .get(&key)
+            .cloned()
+            .context("MCP session was not available after spawn")
     }
 
     fn close_idle(&mut self, max_idle_ms: u64) -> usize {
@@ -366,12 +524,17 @@ impl McpSidecarManager {
         let idle_keys: Vec<String> = self
             .sessions
             .iter()
-            .filter(|(_, session)| session.last_used.elapsed() >= max_idle)
-            .map(|(key, _)| key.clone())
+            .filter_map(|(key, session)| match session.try_lock() {
+                Ok(session) if session.last_used.elapsed() >= max_idle => Some(key.clone()),
+                _ => None,
+            })
             .collect();
         let closed = idle_keys.len();
         for key in idle_keys {
-            if let Some(mut session) = self.sessions.remove(&key) {
+            if let Some(session) = self.sessions.remove(&key) {
+                let Ok(mut session) = lock_mcp_session(&session) else {
+                    continue;
+                };
                 session.close();
             }
         }
@@ -379,13 +542,58 @@ impl McpSidecarManager {
     }
 
     fn close_all(&mut self) {
-        for (_, mut session) in self.sessions.drain() {
+        for (_, session) in self.sessions.drain() {
+            let Ok(mut session) = lock_mcp_session(&session) else {
+                continue;
+            };
             session.close();
         }
     }
 
     fn stats(&self) -> Value {
-        let items: Vec<Value> = self.sessions.values().map(McpStdioSession::stats).collect();
+        let items: Vec<Value> = self
+            .sessions
+            .values()
+            .map(|session| match session.try_lock() {
+                Ok(session) => session.stats(),
+                Err(TryLockError::WouldBlock) => json!({
+                    "id": "",
+                    "name": "",
+                    "closed": false,
+                    "busy": true,
+                    "pending": 1,
+                    "maxPendingRequests": 1,
+                    "maxPendingObserved": 1,
+                    "timeoutMs": 0,
+                    "requests": 0,
+                    "responses": 0,
+                    "failures": 0,
+                    "timeouts": 0,
+                    "backpressureRejects": 0,
+                    "toolsCached": false,
+                    "toolCount": 0,
+                    "startedAt": "",
+                    "lastUsedAt": "",
+                    "lastRequestAt": "",
+                    "lastResponseAt": "",
+                    "lastFailureAt": "",
+                    "lastBackpressureAt": "",
+                    "stderr": ""
+                }),
+                Err(TryLockError::Poisoned(_)) => json!({
+                    "id": "",
+                    "name": "",
+                    "closed": true,
+                    "statsUnavailable": true,
+                    "pending": 0,
+                    "requests": 0,
+                    "responses": 0,
+                    "failures": 1,
+                    "timeouts": 0,
+                    "backpressureRejects": 0
+                }),
+            })
+            .collect();
         let total_requests: u64 = items
             .iter()
             .map(|item| item.get("requests").and_then(Value::as_u64).unwrap_or(0))
@@ -414,7 +622,12 @@ impl McpSidecarManager {
         json!({
             "sessions": self.sessions.len(),
             "activeSessions": items.iter().filter(|item| item.get("closed").and_then(Value::as_bool) == Some(false)).count(),
-            "totalPending": 0,
+            "activeRequests": self.active_requests,
+            "maxActiveRequests": self.max_active_requests,
+            "maxActiveObserved": self.max_active_observed,
+            "sidecarBackpressureRejects": self.sidecar_backpressure_rejects,
+            "lastSidecarBackpressureAt": self.last_sidecar_backpressure_at,
+            "totalPending": self.active_requests,
             "totalRequests": total_requests,
             "totalResponses": total_responses,
             "totalFailures": total_failures,

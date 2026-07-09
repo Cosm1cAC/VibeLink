@@ -169,14 +169,14 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
-    fun applyGitAction(apiClient: ApiClient, action: String) {
+    fun applyGitAction(apiClient: ApiClient, action: String, message: String = "", title: String = "") {
         val workspaceId = _selectedWorkspaceId.value
         if (workspaceId.isBlank()) return
         viewModelScope.launch {
             _gitActionRunning.value = true
             _error.value = ""
             try {
-                apiClient.applyGitAction(workspaceId, action)
+                apiClient.applyGitAction(workspaceId, action, message = message, title = title)
                 loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
             } catch (error: Exception) {
                 _error.value = error.message ?: "Git action failed"
@@ -186,7 +186,7 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
-    fun runCommand(apiClient: ApiClient, command: String) {
+    fun runCommand(apiClient: ApiClient, command: String, kind: String = "command") {
         val workspaceId = _selectedWorkspaceId.value
         val trimmed = command.trim()
         if (workspaceId.isBlank() || trimmed.isBlank()) return
@@ -194,7 +194,7 @@ class WorkspaceViewModel : ViewModel() {
             _commandRunning.value = true
             _error.value = ""
             try {
-                _commandResult.value = apiClient.runCommand(workspaceId, trimmed)
+                _commandResult.value = apiClient.runCommand(workspaceId, trimmed, kind = kind)
                 loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
             } catch (error: Exception) {
                 _error.value = error.message ?: "Command failed"

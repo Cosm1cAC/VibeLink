@@ -134,14 +134,18 @@ fn list_workspace_tree(
     }
 
     let mut items = Vec::new();
-    let mut queue = VecDeque::from([(target.clone(), 0usize)]);
+    let mut queue = VecDeque::from([(target.clone(), 0usize, gitignore_rules_for_dir(&root))]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
-    let ignore_rules = root_gitignore_rules(&root);
 
-    while let Some((current, current_depth)) = queue.pop_front() {
+    while let Some((current, current_depth, inherited_rules)) = queue.pop_front() {
         if items.len() >= max_entries {
             break;
+        }
+
+        let mut ignore_rules = inherited_rules;
+        if current != root {
+            ignore_rules.extend(gitignore_rules_for_dir(&current));
         }
 
         let mut children = Vec::new();
@@ -182,7 +186,7 @@ fn list_workspace_tree(
                 updated_at: system_time_iso(metadata.modified().ok()),
             });
             if is_dir && current_depth + 1 < depth {
-                queue.push_back((full_path, current_depth + 1));
+                queue.push_back((full_path, current_depth + 1, ignore_rules.clone()));
             }
         }
     }
@@ -194,18 +198,22 @@ fn list_workspace_tree(
     })
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct WorkspaceIgnoreRules {
     rules: Vec<WorkspaceIgnoreRule>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct WorkspaceIgnoreRule {
     pattern: String,
     directory_only: bool,
 }
 
 impl WorkspaceIgnoreRules {
+    fn extend(&mut self, other: WorkspaceIgnoreRules) {
+        self.rules.extend(other.rules);
+    }
+
     fn is_ignored(&self, name: &str, is_dir: bool) -> bool {
         self.rules.iter().any(|rule| {
             if rule.directory_only && !is_dir {
@@ -216,9 +224,9 @@ impl WorkspaceIgnoreRules {
     }
 }
 
-fn root_gitignore_rules(root: &Path) -> WorkspaceIgnoreRules {
+fn gitignore_rules_for_dir(dir: &Path) -> WorkspaceIgnoreRules {
     let mut rules = WorkspaceIgnoreRules::default();
-    let Ok(content) = std::fs::read_to_string(root.join(".gitignore")) else {
+    let Ok(content) = std::fs::read_to_string(dir.join(".gitignore")) else {
         return rules;
     };
 
@@ -613,6 +621,31 @@ mod tests {
 
         let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
         assert_eq!(names, vec!["README.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_honors_nested_gitignore_rules() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-nested-gitignore-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src").join("private")).unwrap();
+        fs::write(
+            root.join("src").join(".gitignore"),
+            "generated.tmp\nprivate/\n",
+        )
+        .unwrap();
+        fs::write(root.join("src").join("README.md"), "hello").unwrap();
+        fs::write(root.join("src").join("generated.tmp"), "ignored").unwrap();
+        fs::write(root.join("src").join("private").join("note.txt"), "ignored").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 2, 20).unwrap();
+
+        let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(paths, vec!["src", "src/README.md"]);
 
         let _ = fs::remove_dir_all(&root);
     }

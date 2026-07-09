@@ -37,6 +37,10 @@ function rustSidecarClient(t, options = {}) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 test("MCP session JSON sidecar contract reuses stdio sessions for probe and calls", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-mcp-session-sidecar-"));
   const spawnLog = path.join(dir, "spawns.log");
@@ -242,6 +246,80 @@ test("Rust MCP session sidecar times out slow stdio requests and reports counter
 
     assert.equal(item.timeouts, 1);
     assert.equal(item.failures, 1);
+  } finally {
+    await client.close();
+  }
+});
+
+test("Rust MCP session sidecar serves stats while a tool call is in flight", async (t) => {
+  const client = rustSidecarClient(t);
+  const server = {
+    id: "fake-rust-sidecar-inflight-stats",
+    name: "fake-rust-sidecar-inflight-stats",
+    type: "stdio",
+    command: process.execPath,
+    env: { FAKE_MCP_RESPONSE_DELAY_MS: "500" },
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const slowCall = client.callTool(server, "echo", { q: "slow" }, { timeoutMs: 10000 });
+    await sleep(75);
+
+    const startedAt = Date.now();
+    const stats = await client.getSessionStats();
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.ok(elapsedMs < 300, `expected stats before slow call completed, got ${elapsedMs}ms`);
+    assert.ok(stats.activeRequests >= 1, `expected activeRequests >= 1, got ${stats.activeRequests}`);
+    assert.ok(stats.maxActiveObserved >= 1, `expected maxActiveObserved >= 1, got ${stats.maxActiveObserved}`);
+
+    const result = await slowCall;
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "slow" } });
+  } finally {
+    await client.close();
+  }
+});
+
+test("Rust MCP session sidecar rejects calls over the global active request cap", async (t) => {
+  const client = rustSidecarClient(t, {
+    env: {
+      ...process.env,
+      VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS: "1"
+    }
+  });
+  const slowServer = {
+    id: "fake-rust-sidecar-cap-a",
+    name: "fake-rust-sidecar-cap-a",
+    type: "stdio",
+    command: process.execPath,
+    env: { FAKE_MCP_RESPONSE_DELAY_MS: "500" },
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+  const secondServer = {
+    id: "fake-rust-sidecar-cap-b",
+    name: "fake-rust-sidecar-cap-b",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const slowCall = client.callTool(slowServer, "echo", { q: "slow" }, { timeoutMs: 10000 });
+    await sleep(75);
+
+    await assert.rejects(
+      client.callTool(secondServer, "echo", { q: "rejected" }, { timeoutMs: 10000 }),
+      /backpressure/i
+    );
+
+    const result = await slowCall;
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "slow" } });
+
+    const stats = await client.getSessionStats();
+    assert.equal(stats.sidecarBackpressureRejects, 1);
+    assert.equal(stats.maxActiveRequests, 1);
+    assert.ok(stats.maxActiveObserved >= 1);
   } finally {
     await client.close();
   }

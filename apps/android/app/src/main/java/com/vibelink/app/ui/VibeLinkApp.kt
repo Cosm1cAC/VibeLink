@@ -15,6 +15,7 @@ import com.vibelink.app.data.SettingsStore
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.ui.screens.*
+import kotlinx.coroutines.launch
 
 /**
  * Root composable for VibeLink Android.
@@ -37,6 +38,8 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
     val conversations by sessionListViewModel.conversations.collectAsState()
+    val promptHistory by settingsStore.promptHistory.collectAsState(initial = emptyList())
+    val appScope = rememberCoroutineScope()
 
     NavHost(navController = navController, startDestination = "login") {
         // 鈹€鈹€ Login 鈹€鈹€
@@ -118,6 +121,9 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 },
                 onOpenApprovals = { navController.navigate("settings") },
                 onOpenLiveCall = { navController.navigate("call") },
+                promptHistory = promptHistory,
+                onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
+                onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
             )
         }
 

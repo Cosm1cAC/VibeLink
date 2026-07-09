@@ -326,6 +326,18 @@ private fun ComposerBar(
                 AssistChip(onClick = {}, label = { Text("Codex Remote uses the current Codex Desktop settings") })
             }
 
+            if (!isDesktopRemote) {
+                Text("Quick commands", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(PromptCommandCatalog.commands, key = { it.id }) { command ->
+                        AssistChip(
+                            onClick = { onPromptChange(PromptCommandCatalog.applyCommand(prompt, command)) },
+                            label = { Text(command.label) },
+                        )
+                    }
+                }
+            }
+
             if (!isDesktopRemote && promptHistory.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),

@@ -107,6 +107,40 @@ test("getWorkspaceGitDiff refreshes when a nested tracked file changes", async (
   }
 });
 
+test("getWorkspaceGitDiff refreshes when tracked file content changes with stable mtime and size", async () => {
+  const previousTtl = process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS;
+  process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS = "60000";
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-git-cache-content-refresh-"));
+  const repo = path.join(tempRoot, "repo");
+  fs.mkdirSync(repo, { recursive: true });
+  git(repo, ["init", "-b", "main"]);
+  git(repo, ["config", "user.email", "test@example.com"]);
+  git(repo, ["config", "user.name", "VibeLink Test"]);
+  const filePath = path.join(repo, "README.md");
+  fs.writeFileSync(filePath, "base\n", "utf8");
+  git(repo, ["add", "README.md"]);
+  git(repo, ["commit", "-m", "initial"]);
+  fs.writeFileSync(filePath, "one!\n", "utf8");
+
+  const workspace = upsertWorkspace({ path: repo, allowedRoot: repo, title: "git-cache-content-refresh" });
+
+  try {
+    const first = await getWorkspaceGitDiff(workspace.id, { allowedRoots: [tempRoot] });
+    const firstStat = fs.statSync(filePath);
+    fs.writeFileSync(filePath, "two?\n", "utf8");
+    fs.utimesSync(filePath, firstStat.atime, firstStat.mtime);
+    const second = await getWorkspaceGitDiff(workspace.id, { allowedRoots: [tempRoot] });
+
+    assert.match(first.diff, /\+one!/);
+    assert.match(second.diff, /\+two\?/);
+    assert.doesNotMatch(second.diff, /\+one!/);
+  } finally {
+    if (previousTtl === undefined) delete process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS;
+    else process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS = previousTtl;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceGitStatus reuses a short-lived git status cache", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-git-status-cache-"));
   const repo = path.join(tempRoot, "repo");

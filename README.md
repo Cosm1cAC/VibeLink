@@ -166,7 +166,7 @@ npm run dev
 - Desktop 遥控：按需采样 Codex Desktop 可见状态，向 composer 输入并点击发送。
 - Android 原生端：支持 QR/Token 配对、会话搜索/归档/置顶/重命名/fork、新建/继续 Agent 任务、Codex Remote 发送/重试/清队列、Workspace 浏览与 Git 操作、Settings/Approvals、Live Call 会话恢复与实时问答。
 - 安全底座：allowed roots、workspace 绑定、设备 token、Host allowlist、公网模式提示。
-- 变更卡片：读取 workspace Git 状态和 diff，为移动端展示文件变更摘要。
+- 变更卡片：读取 workspace Git 状态和 diff，为移动端展示文件变更摘要；短时缓存会用 changed-file 内容签名失效，避免稳定 mtime/size 下复用旧 diff。
 
 ## Workspace（工作区）
 

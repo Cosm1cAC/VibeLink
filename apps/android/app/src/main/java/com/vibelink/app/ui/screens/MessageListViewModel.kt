@@ -10,6 +10,7 @@ import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.DesktopRemoteState
 import com.vibelink.app.network.DesktopRemoteTarget
 import com.vibelink.app.network.DesktopTranscriptEntry
+import com.vibelink.app.network.DesktopFocusResponse
 import com.vibelink.app.network.ProviderRegistryResponse
 import com.vibelink.app.network.TaskDetail
 import com.vibelink.app.network.TaskEvent
@@ -354,7 +355,16 @@ class MessageListViewModel : ViewModel() {
             null
         }
         if (target != null) {
-            runCatching { apiClient.focusDesktopConversation(target.desktopIndex ?: 0) }
+            val focusResult = runCatching { apiClient.focusDesktopConversation(target.desktopIndex ?: 0) }
+            val validation = DesktopRemoteSendPolicy.validateFocus(
+                target = target,
+                response = focusResult.getOrNull(),
+                failure = focusResult.exceptionOrNull(),
+            )
+            if (!validation.canSend) {
+                appendError(validation.message)
+                return
+            }
         }
         val result = apiClient.sendDesktopRemoteMessage(prompt, target)
         if (result.state != null) {
@@ -630,5 +640,36 @@ class MessageListViewModel : ViewModel() {
                 error.body.ifBlank { "HTTP ${error.statusCode}" }
             }
         }
+    }
+}
+
+data class DesktopFocusValidation(
+    val canSend: Boolean,
+    val message: String = "",
+)
+
+object DesktopRemoteSendPolicy {
+    fun validateFocus(
+        target: DesktopRemoteTarget?,
+        response: DesktopFocusResponse?,
+        failure: Throwable? = null,
+    ): DesktopFocusValidation {
+        if (target == null) return DesktopFocusValidation(canSend = true)
+        if (failure != null) {
+            return DesktopFocusValidation(
+                canSend = false,
+                message = "Blocked send: unable to confirm Codex Desktop conversation ${targetLabel(target)}. ${failure.message.orEmpty()}".trim(),
+            )
+        }
+        if (response?.ok == true) return DesktopFocusValidation(canSend = true)
+        val reason = response?.error?.ifBlank { response.action }?.ifBlank { "focus request failed" } ?: "focus request failed"
+        return DesktopFocusValidation(
+            canSend = false,
+            message = "Blocked send: unable to confirm Codex Desktop conversation ${targetLabel(target)}. $reason",
+        )
+    }
+
+    private fun targetLabel(target: DesktopRemoteTarget): String {
+        return target.desktopTitle.ifBlank { "#${target.desktopIndex ?: 0}" }
     }
 }

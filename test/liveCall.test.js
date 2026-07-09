@@ -7,6 +7,7 @@ import {
   pauseLiveCallSession,
   recordLiveCallTranscript,
   resumeLiveCallSession,
+  setLiveCallQuestionHook,
   stopLiveCallSession
 } from "../src/liveCall.js";
 import {
@@ -45,6 +46,31 @@ test("live call sessions preserve workspace and ASR metadata", () => {
 
   const stopped = stopLiveCallSession(session.id, "test-cleanup");
   assert.equal(stopped.status, "stopped");
+});
+
+test("live call question hook receives the stable question event", () => {
+  const session = createLiveCallSession({
+    title: "Question event correlation test",
+    source: "node-test",
+    asrProvider: "mock"
+  });
+  let hookEvent = null;
+  const teardown = setLiveCallQuestionHook(session.id, (_question, _session, event) => {
+    hookEvent = event;
+  });
+
+  recordLiveCallTranscript(session.id, {
+    text: "How should we explain this project?",
+    final: true,
+    speaker: "remote"
+  });
+
+  const questionEvent = listLiveCallEvents(session.id, { limit: 20 }).find((event) => event.type === "live_call.question.detected");
+  assert.equal(hookEvent?.id, questionEvent.id);
+  assert.equal(hookEvent?.cursor, questionEvent.cursor);
+
+  teardown();
+  stopLiveCallSession(session.id, "test-cleanup");
 });
 
 test("live call sessions support pause resume lifecycle events", () => {

@@ -2,12 +2,14 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::sync::{
+    atomic::{AtomicU64, Ordering},
     mpsc::{self, Receiver, RecvTimeoutError},
     Arc, Mutex, MutexGuard, TryLockError,
 };
@@ -66,6 +68,11 @@ enum Mode {
     },
     /// Run the MCP stdio session JSONL sidecar.
     McpSessionSidecar,
+    /// Run the event-store SQLite JSONL sidecar.
+    EventStoreSidecar {
+        #[arg(value_name = "DB_PATH")]
+        db_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -380,6 +387,956 @@ fn mcp_server_key(server: &McpServerConfig) -> String {
 
 fn now_iso() -> String {
     let datetime: DateTime<Utc> = std::time::SystemTime::now().into();
+    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+static EVENT_STORE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default, Deserialize)]
+struct EventStoreListTaskOptions {
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStoreListToolOptions {
+    #[serde(rename = "toolRunId")]
+    tool_run_id: Option<String>,
+    #[serde(rename = "workspaceId")]
+    workspace_id: Option<String>,
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStoreListLiveOptions {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStoreUnifiedOptions {
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
+    #[serde(rename = "liveCallSessionId")]
+    live_call_session_id: Option<String>,
+    #[serde(rename = "toolRunId")]
+    tool_run_id: Option<String>,
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStorePruneToolOptions {
+    before: Option<String>,
+    #[serde(rename = "keepLatest")]
+    keep_latest: Option<i64>,
+    #[serde(rename = "dryRun")]
+    dry_run: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStorePruneLiveOptions {
+    #[serde(rename = "retentionDays")]
+    retention_days: Option<i64>,
+    #[serde(rename = "keepLatest")]
+    keep_latest: Option<i64>,
+}
+
+struct EventStoreSidecar {
+    db: Connection,
+}
+
+#[derive(Clone)]
+struct EventStoreUnifiedItem {
+    cursor: i64,
+    event_id: String,
+    event_type: String,
+    kind: String,
+    at: String,
+    text: String,
+    session_id: String,
+    task_id: String,
+    tool_run_id: String,
+    turn_id: String,
+    block_id: String,
+}
+
+#[derive(Clone)]
+struct EventStoreReplayItem {
+    cursor: i64,
+    raw_cursor: i64,
+    event_id: String,
+    event_type: String,
+    kind: String,
+    at: String,
+    text: String,
+    session_id: String,
+    task_id: String,
+    tool_run_id: String,
+    turn_id: String,
+    block_id: String,
+}
+
+fn normalize_event_replay_limit(value: Option<i64>, default_limit: i64, max_limit: i64) -> i64 {
+    let fallback = default_limit.max(1).min(max_limit.max(1));
+    match value {
+        Some(value) if value > 0 => value.min(max_limit.max(1)),
+        _ => fallback,
+    }
+}
+
+fn clean_string(value: Option<&str>, max: usize) -> String {
+    value.unwrap_or("").trim().chars().take(max).collect()
+}
+
+fn event_string(event: &Value, key: &str) -> String {
+    event.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+fn event_payload_json(event: &Value) -> Result<String> {
+    Ok(serde_json::to_string(event.get("payload").unwrap_or(&Value::Null))?)
+}
+
+fn classify_task_event_kind(event: &Value) -> String {
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    match event_type {
+        "user_message" | "user" | "attachment" => "user".to_string(),
+        "assistant_message" | "assistant" => "assistant".to_string(),
+        "system" => "system".to_string(),
+        "error" => "error".to_string(),
+        "summarization" => "summary".to_string(),
+        "stderr" | "stdout" => "output".to_string(),
+        _ if event_type.starts_with("live_call.") => "live_call".to_string(),
+        _ if event_type.starts_with("approval.") => "approval".to_string(),
+        _ if event_type.starts_with("tool.") => "tool".to_string(),
+        _ => "system".to_string(),
+    }
+}
+
+fn generated_event_id(prefix: &str) -> String {
+    let counter = EVENT_STORE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}:{}:{counter}", now_iso())
+}
+
+fn set_json_string(value: &mut Value, key: &str, text: String) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(key.to_string(), Value::String(text));
+    }
+}
+
+fn encode_replay_cursor(cursor: i64, source_rank: i64) -> i64 {
+    (cursor.max(0) * 10) + source_rank
+}
+
+fn replay_cursor_parts(value: Option<i64>) -> (i64, i64) {
+    let cursor = value.unwrap_or(0).max(0);
+    (cursor / 10, cursor % 10)
+}
+
+fn run_event_store_sidecar(db_path: &Path) -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut sidecar = EventStoreSidecar::open(db_path)?;
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: SidecarRequest = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
+                continue;
+            }
+        };
+
+        if request.method == "__close" {
+            write_sidecar_result(&mut stdout, &request.id, Value::Bool(true))?;
+            break;
+        }
+
+        match sidecar.handle(&request.method, &request.args) {
+            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
+            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
+        }
+    }
+
+    Ok(())
+}
+
+impl EventStoreSidecar {
+    fn open(db_path: &Path) -> Result<Self> {
+        let db = Connection::open(db_path)
+            .with_context(|| format!("Failed to open event store database: {}", db_path.display()))?;
+        db.busy_timeout(Duration::from_millis(5000))?;
+        db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
+        Ok(Self { db })
+    }
+
+    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+        match method {
+            "insertTaskEvent" => {
+                let task_id: String = sidecar_arg(args, 0)?;
+                let event: Value = sidecar_arg(args, 1)?;
+                Ok(json!(self.insert_task_event(&task_id, &event)?))
+            }
+            "insertTaskEvents" => {
+                let task_id: String = sidecar_arg(args, 0)?;
+                let events: Vec<Value> = sidecar_arg_or_default(args, 1)?;
+                Ok(json!(self.insert_task_events(&task_id, &events)?))
+            }
+            "listTaskEvents" => {
+                let task_id: String = sidecar_arg(args, 0)?;
+                let options: EventStoreListTaskOptions = sidecar_arg_or_default(args, 1)?;
+                Ok(Value::Array(self.list_task_events(&task_id, &options)?))
+            }
+            "getTaskEventCount" => {
+                let task_id: String = sidecar_arg(args, 0)?;
+                Ok(json!(self.get_task_event_count(&task_id)?))
+            }
+            "insertToolEvent" => {
+                let tool_run_id: String = sidecar_arg(args, 0)?;
+                let event: Value = sidecar_arg(args, 1)?;
+                Ok(json!(self.insert_tool_event(&tool_run_id, &event)?))
+            }
+            "insertToolEvents" => {
+                let tool_run_id: String = sidecar_arg(args, 0)?;
+                let events: Vec<Value> = sidecar_arg_or_default(args, 1)?;
+                Ok(json!(self.insert_tool_events(&tool_run_id, &events)?))
+            }
+            "listToolEvents" => {
+                let options: EventStoreListToolOptions = sidecar_arg_or_default(args, 0)?;
+                Ok(Value::Array(self.list_tool_events(&options)?))
+            }
+            "getToolEventStats" => Ok(self.get_tool_event_stats()?),
+            "pruneToolEvents" => {
+                let options: EventStorePruneToolOptions = sidecar_arg_or_default(args, 0)?;
+                Ok(self.prune_tool_events(&options)?)
+            }
+            "insertLiveCallEvent" => {
+                let session_id: String = sidecar_arg(args, 0)?;
+                let event: Value = sidecar_arg(args, 1)?;
+                Ok(json!(self.insert_live_call_event(&session_id, &event)?))
+            }
+            "insertLiveCallEvents" => {
+                let session_id: String = sidecar_arg(args, 0)?;
+                let events: Vec<Value> = sidecar_arg_or_default(args, 1)?;
+                Ok(json!(self.insert_live_call_events(&session_id, &events)?))
+            }
+            "listLiveCallEvents" => {
+                let options: EventStoreListLiveOptions = sidecar_arg_or_default(args, 0)?;
+                Ok(Value::Array(self.list_live_call_events(&options)?))
+            }
+            "pruneLiveCallEvents" => {
+                let options: EventStorePruneLiveOptions = sidecar_arg_or_default(args, 0)?;
+                self.prune_live_call_events(&options)?;
+                Ok(Value::Null)
+            }
+            "listUnifiedEvents" => {
+                let options: EventStoreUnifiedOptions = sidecar_arg_or_default(args, 0)?;
+                Ok(Value::Array(self.list_unified_events(&options)?))
+            }
+            "replayWindow" => {
+                let options: EventStoreUnifiedOptions = sidecar_arg_or_default(args, 0)?;
+                Ok(self.replay_window(&options)?)
+            }
+            _ => bail!("Unsupported event store sidecar method: {method}"),
+        }
+    }
+
+    fn insert_task_event(&self, task_id: &str, event: &Value) -> Result<Option<i64>> {
+        let current = now_iso();
+        let event_at = event
+            .get("at")
+            .and_then(Value::as_str)
+            .unwrap_or(&current)
+            .to_string();
+        let event_id = match event.get("id").and_then(Value::as_str) {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => generated_event_id(task_id),
+        };
+        let event_kind = match event.get("kind").and_then(Value::as_str) {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => classify_task_event_kind(event),
+        };
+        let turn_id = event_string(event, "turnId");
+        let block_id = event_string(event, "blockId");
+        let mut event_json = event.clone();
+        if !event_json.is_object() {
+            event_json = json!({});
+        }
+        set_json_string(&mut event_json, "id", event_id.clone());
+        set_json_string(&mut event_json, "at", event_at.clone());
+        set_json_string(&mut event_json, "kind", event_kind.clone());
+        set_json_string(&mut event_json, "turnId", turn_id.clone());
+        set_json_string(&mut event_json, "blockId", block_id.clone());
+        let event_json_text = serde_json::to_string(&event_json)?;
+        let payload_json = event_payload_json(event)?;
+
+        self.db.execute(
+            "INSERT OR IGNORE INTO task_events (
+                task_id, event_id, event_type, event_at, text, payload_json, event_json,
+                created_at, event_kind, turn_id, block_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                task_id,
+                event_id,
+                event_string(event, "type"),
+                event_at,
+                event_string(event, "text"),
+                payload_json,
+                event_json_text,
+                current,
+                event_kind,
+                turn_id,
+                block_id
+            ],
+        )?;
+        let cursor = self
+            .db
+            .query_row(
+                "SELECT cursor FROM task_events WHERE task_id = ? AND event_id = ?",
+                params![task_id, event_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(cursor)
+    }
+
+    fn insert_task_events(&mut self, task_id: &str, events: &[Value]) -> Result<Vec<Option<i64>>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut cursors = Vec::with_capacity(events.len());
+        self.db.execute_batch("BEGIN IMMEDIATE")?;
+        for event in events {
+            match self.insert_task_event(task_id, event) {
+                Ok(cursor) => cursors.push(cursor),
+                Err(error) => {
+                    let _ = self.db.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+        }
+        self.db.execute_batch("COMMIT")?;
+        Ok(cursors)
+    }
+
+    fn list_task_events(&self, task_id: &str, options: &EventStoreListTaskOptions) -> Result<Vec<Value>> {
+        let mut statement = self.db.prepare(
+            "SELECT cursor, event_json FROM task_events WHERE task_id = ? AND cursor > ? ORDER BY cursor ASC LIMIT ?",
+        )?;
+        let rows = statement.query_map(
+            params![
+                task_id,
+                options.after.unwrap_or(0),
+                normalize_event_replay_limit(options.limit, 500, 5000)
+            ],
+            |row| {
+                let cursor: i64 = row.get(0)?;
+                let event_json: String = row.get(1)?;
+                Ok((cursor, event_json))
+            },
+        )?;
+        rows.map(|row| event_json_with_cursor(row?, false)).collect()
+    }
+
+    fn get_task_event_count(&self, task_id: &str) -> Result<i64> {
+        Ok(self.db.query_row(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
+            params![task_id],
+            |row| row.get::<_, i64>(0),
+        )?)
+    }
+
+    fn insert_tool_event(&self, tool_run_id: &str, event: &Value) -> Result<Option<i64>> {
+        let run = self
+            .db
+            .query_row(
+                "SELECT task_id, workspace_id FROM tool_runs WHERE id = ?",
+                params![tool_run_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((run_task_id, run_workspace_id)) = run else {
+            return Ok(None);
+        };
+        let current = now_iso();
+        let event_at = event
+            .get("at")
+            .and_then(Value::as_str)
+            .unwrap_or(&current)
+            .to_string();
+        let event_id = match event.get("id").and_then(Value::as_str) {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => generated_event_id(tool_run_id),
+        };
+        let task_id = match event.get("taskId").and_then(Value::as_str) {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => run_task_id.unwrap_or_default(),
+        };
+        let workspace_id = match event.get("workspaceId").and_then(Value::as_str) {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => run_workspace_id.unwrap_or_default(),
+        };
+        let mut event_json = event.clone();
+        if !event_json.is_object() {
+            event_json = json!({});
+        }
+        set_json_string(&mut event_json, "id", event_id.clone());
+        set_json_string(&mut event_json, "at", event_at.clone());
+        set_json_string(&mut event_json, "toolRunId", tool_run_id.to_string());
+        set_json_string(&mut event_json, "taskId", task_id.clone());
+        set_json_string(&mut event_json, "workspaceId", workspace_id.clone());
+        let event_type = clean_string(
+            event.get("type").and_then(Value::as_str).or(Some("tool.event")),
+            120,
+        );
+
+        self.db.execute(
+            "INSERT OR IGNORE INTO tool_events (
+                tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
+                text, payload_json, event_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                tool_run_id,
+                task_id,
+                workspace_id,
+                event_id,
+                event_type,
+                event_at,
+                event_string(event, "text"),
+                event_payload_json(event)?,
+                serde_json::to_string(&event_json)?,
+                current
+            ],
+        )?;
+        Ok(self
+            .db
+            .query_row(
+                "SELECT cursor FROM tool_events WHERE tool_run_id = ? AND event_id = ?",
+                params![tool_run_id, event_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?)
+    }
+
+    fn insert_tool_events(&mut self, tool_run_id: &str, events: &[Value]) -> Result<Vec<Option<i64>>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut cursors = Vec::with_capacity(events.len());
+        self.db.execute_batch("BEGIN IMMEDIATE")?;
+        for event in events {
+            match self.insert_tool_event(tool_run_id, event) {
+                Ok(cursor) => cursors.push(cursor),
+                Err(error) => {
+                    let _ = self.db.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+        }
+        self.db.execute_batch("COMMIT")?;
+        Ok(cursors)
+    }
+
+    fn list_tool_events(&self, options: &EventStoreListToolOptions) -> Result<Vec<Value>> {
+        let tool_run_id = clean_string(options.tool_run_id.as_deref(), 160);
+        let workspace_id = clean_string(options.workspace_id.as_deref(), 160);
+        let task_id = clean_string(options.task_id.as_deref(), 160);
+        let mut statement = self.db.prepare(
+            "SELECT cursor, event_json FROM tool_events
+             WHERE cursor > ?
+               AND (? = '' OR tool_run_id = ?)
+               AND (? = '' OR workspace_id = ?)
+               AND (? = '' OR task_id = ?)
+             ORDER BY cursor ASC LIMIT ?",
+        )?;
+        let rows = statement.query_map(
+            params![
+                options.after.unwrap_or(0),
+                tool_run_id,
+                tool_run_id,
+                workspace_id,
+                workspace_id,
+                task_id,
+                task_id,
+                normalize_event_replay_limit(options.limit, 500, 5000)
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| event_json_with_cursor(row?, false)).collect()
+    }
+
+    fn get_tool_event_stats(&self) -> Result<Value> {
+        let row = self.db.query_row(
+            "SELECT COUNT(*), MIN(cursor), MAX(cursor), MIN(event_at), MAX(event_at) FROM tool_events",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        Ok(json!({
+            "count": row.0,
+            "minCursor": row.1.unwrap_or(0),
+            "maxCursor": row.2.unwrap_or(0),
+            "oldestAt": row.3.unwrap_or_default(),
+            "newestAt": row.4.unwrap_or_default()
+        }))
+    }
+
+    fn prune_tool_events(&self, options: &EventStorePruneToolOptions) -> Result<Value> {
+        let cutoff = options.before.clone().unwrap_or_else(|| default_retention_cutoff(30));
+        let keep = options.keep_latest.unwrap_or(5000).max(0);
+        let dry_run = options.dry_run.unwrap_or(true);
+        let max_prunable_cursor = self
+            .db
+            .query_row(
+                "SELECT cursor FROM tool_events ORDER BY cursor DESC LIMIT 1 OFFSET ?",
+                params![keep],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let prunable = self.db.query_row(
+            "SELECT COUNT(*) FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)",
+            params![cutoff, max_prunable_cursor, max_prunable_cursor],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let deleted = if dry_run || prunable <= 0 {
+            0
+        } else {
+            self.db.execute(
+                "DELETE FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)",
+                params![cutoff, max_prunable_cursor, max_prunable_cursor],
+            )? as i64
+        };
+        Ok(json!({
+            "cutoff": cutoff,
+            "keepLatest": keep,
+            "maxPrunableCursor": max_prunable_cursor,
+            "prunable": prunable,
+            "deleted": deleted,
+            "dryRun": dry_run,
+            "stats": self.get_tool_event_stats()?
+        }))
+    }
+
+    fn insert_live_call_event(&self, session_id: &str, event: &Value) -> Result<Option<i64>> {
+        let exists = self
+            .db
+            .query_row("SELECT id FROM live_calls WHERE id = ?", params![session_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+        let current = now_iso();
+        let event_at = event
+            .get("at")
+            .and_then(Value::as_str)
+            .unwrap_or(&current)
+            .to_string();
+        let event_id = match event.get("id").and_then(Value::as_str) {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => generated_event_id(session_id),
+        };
+        let mut event_json = event.clone();
+        if !event_json.is_object() {
+            event_json = json!({});
+        }
+        set_json_string(&mut event_json, "id", event_id.clone());
+        set_json_string(&mut event_json, "at", event_at.clone());
+        set_json_string(&mut event_json, "sessionId", session_id.to_string());
+        let event_type = clean_string(
+            event.get("type").and_then(Value::as_str).or(Some("live_call.event")),
+            120,
+        );
+
+        self.db.execute(
+            "INSERT OR IGNORE INTO live_call_events (
+                session_id, event_id, event_type, event_at, text, payload_json, event_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                session_id,
+                event_id,
+                event_type,
+                event_at,
+                event_string(event, "text"),
+                event_payload_json(event)?,
+                serde_json::to_string(&event_json)?,
+                current
+            ],
+        )?;
+        Ok(self
+            .db
+            .query_row(
+                "SELECT cursor FROM live_call_events WHERE session_id = ? AND event_id = ?",
+                params![session_id, event_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?)
+    }
+
+    fn insert_live_call_events(&mut self, session_id: &str, events: &[Value]) -> Result<Vec<Option<i64>>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut cursors = Vec::with_capacity(events.len());
+        self.db.execute_batch("BEGIN IMMEDIATE")?;
+        for event in events {
+            match self.insert_live_call_event(session_id, event) {
+                Ok(cursor) => cursors.push(cursor),
+                Err(error) => {
+                    let _ = self.db.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+        }
+        self.db.execute_batch("COMMIT")?;
+        Ok(cursors)
+    }
+
+    fn list_live_call_events(&self, options: &EventStoreListLiveOptions) -> Result<Vec<Value>> {
+        let session_id = options.session_id.as_deref().unwrap_or("");
+        if session_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.db.prepare(
+            "SELECT cursor, event_json FROM live_call_events WHERE session_id = ? AND cursor > ? ORDER BY cursor ASC LIMIT ?",
+        )?;
+        let rows = statement.query_map(
+            params![
+                session_id,
+                options.after.unwrap_or(0),
+                normalize_event_replay_limit(options.limit, 500, 2000)
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| event_json_with_cursor(row?, false)).collect()
+    }
+
+    fn prune_live_call_events(&self, options: &EventStorePruneLiveOptions) -> Result<()> {
+        let cutoff = default_retention_cutoff(options.retention_days.unwrap_or(30));
+        let keep_latest = options.keep_latest.unwrap_or(5000).max(0);
+        self.db.execute(
+            "DELETE FROM live_call_events WHERE event_at < ? AND cursor NOT IN (
+                SELECT cursor FROM live_call_events WHERE session_id IN (SELECT id FROM live_calls) ORDER BY cursor DESC LIMIT ?
+            )",
+            params![cutoff, keep_latest],
+        )?;
+        Ok(())
+    }
+
+    fn list_unified_events(&self, options: &EventStoreUnifiedOptions) -> Result<Vec<Value>> {
+        let limit = normalize_event_replay_limit(options.limit, 200, 2000);
+        let mut items = self.collect_unified_items(options, options.after.unwrap_or(0), limit, false)?;
+        items.sort_by_key(|item| item.cursor);
+        Ok(items.into_iter().take(limit as usize).map(unified_item_json).collect())
+    }
+
+    fn replay_window(&self, options: &EventStoreUnifiedOptions) -> Result<Value> {
+        let limit = normalize_event_replay_limit(options.limit, 200, 2000);
+        let query_limit = limit + 1;
+        let items = self.collect_replay_items(options, query_limit)?;
+        let has_more = items.len() > limit as usize;
+        let window_items: Vec<EventStoreReplayItem> = items.into_iter().take(limit as usize).collect();
+        let next_cursor = window_items
+            .last()
+            .map(|item| item.cursor)
+            .unwrap_or_else(|| options.after.unwrap_or(0));
+        Ok(json!({
+            "items": window_items.iter().map(replay_item_json).collect::<Vec<Value>>(),
+            "nextCursor": next_cursor,
+            "hasMore": has_more,
+            "limit": limit
+        }))
+    }
+
+    fn collect_unified_items(
+        &self,
+        options: &EventStoreUnifiedOptions,
+        after: i64,
+        query_limit: i64,
+        include_equal: bool,
+    ) -> Result<Vec<EventStoreUnifiedItem>> {
+        let task_id = clean_string(options.task_id.as_deref(), 160);
+        let session_id = clean_string(options.live_call_session_id.as_deref(), 160);
+        let tool_run_id = clean_string(options.tool_run_id.as_deref(), 160);
+        let comparator = if include_equal { ">=" } else { ">" };
+        let mut results = Vec::new();
+
+        if options.live_call_session_id.is_none() && options.tool_run_id.is_none() {
+            let sql = format!(
+                "SELECT cursor, task_id, event_id, event_type, event_kind, turn_id, block_id, event_at, text
+                 FROM task_events WHERE (? = '' OR task_id = ?) AND cursor {comparator} ? ORDER BY cursor ASC LIMIT ?"
+            );
+            let mut statement = self.db.prepare(&sql)?;
+            let rows = statement.query_map(params![task_id, task_id, after, query_limit], |row| {
+                Ok(EventStoreUnifiedItem {
+                    cursor: row.get(0)?,
+                    task_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    event_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    event_type: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    kind: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    turn_id: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    block_id: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    at: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    text: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    session_id: String::new(),
+                    tool_run_id: String::new(),
+                })
+            })?;
+            for row in rows {
+                results.push(row?);
+            }
+        }
+
+        if options.live_call_session_id.is_none() {
+            let remaining = query_limit - results.len() as i64;
+            if remaining > 0 {
+                let sql = format!(
+                    "SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
+                     FROM tool_events
+                     WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor {comparator} ?
+                     ORDER BY cursor ASC LIMIT ?"
+                );
+                let mut statement = self.db.prepare(&sql)?;
+                let rows = statement.query_map(params![task_id, task_id, tool_run_id, tool_run_id, after, remaining], |row| {
+                    Ok(EventStoreUnifiedItem {
+                        cursor: row.get(0)?,
+                        task_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        tool_run_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        event_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        event_type: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                        text: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                        kind: "tool".to_string(),
+                        session_id: String::new(),
+                        turn_id: String::new(),
+                        block_id: String::new(),
+                    })
+                })?;
+                for row in rows {
+                    results.push(row?);
+                }
+            }
+        }
+
+        if options.task_id.is_none() && options.tool_run_id.is_none() {
+            let remaining = query_limit - results.len() as i64;
+            if remaining > 0 {
+                let sql = format!(
+                    "SELECT cursor, session_id, event_id, event_type, event_at, text
+                     FROM live_call_events WHERE (? = '' OR session_id = ?) AND cursor {comparator} ? ORDER BY cursor ASC LIMIT ?"
+                );
+                let mut statement = self.db.prepare(&sql)?;
+                let rows = statement.query_map(params![session_id, session_id, after, remaining], |row| {
+                    Ok(EventStoreUnifiedItem {
+                        cursor: row.get(0)?,
+                        session_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        event_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        event_type: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                        kind: "live_call".to_string(),
+                        task_id: String::new(),
+                        tool_run_id: String::new(),
+                        turn_id: String::new(),
+                        block_id: String::new(),
+                    })
+                })?;
+                for row in rows {
+                    results.push(row?);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn collect_replay_items(&self, options: &EventStoreUnifiedOptions, query_limit: i64) -> Result<Vec<EventStoreReplayItem>> {
+        let (raw_after, source_after) = replay_cursor_parts(options.after);
+        let mut items = Vec::new();
+        for source_rank in [1, 2, 3] {
+            let min_cursor = if source_rank > source_after { raw_after } else { raw_after + 1 };
+            match source_rank {
+                1 if options.live_call_session_id.is_none() && options.tool_run_id.is_none() => {
+                    for item in self.collect_unified_items(options, min_cursor, query_limit, true)? {
+                        if item.session_id.is_empty() && item.tool_run_id.is_empty() {
+                            items.push(replay_from_unified(item, source_rank));
+                        }
+                    }
+                }
+                2 if options.live_call_session_id.is_none() => {
+                    let mut tool_options = EventStoreUnifiedOptions {
+                        task_id: options.task_id.clone(),
+                        tool_run_id: options.tool_run_id.clone(),
+                        live_call_session_id: None,
+                        after: Some(min_cursor),
+                        limit: Some(query_limit),
+                    };
+                    let task_id_filter = tool_options.task_id.clone();
+                    let tool_run_filter = tool_options.tool_run_id.clone();
+                    let tool_rows = self.list_tool_rows(&mut tool_options, task_id_filter, tool_run_filter, min_cursor, query_limit)?;
+                    items.extend(tool_rows.into_iter().map(|item| replay_from_unified(item, source_rank)));
+                }
+                3 if options.task_id.is_none() && options.tool_run_id.is_none() => {
+                    let live_rows = self.list_live_rows(options.live_call_session_id.clone(), min_cursor, query_limit)?;
+                    items.extend(live_rows.into_iter().map(|item| replay_from_unified(item, source_rank)));
+                }
+                _ => {}
+            }
+        }
+        items.sort_by_key(|item| item.cursor);
+        Ok(items)
+    }
+
+    fn list_tool_rows(
+        &self,
+        _options: &mut EventStoreUnifiedOptions,
+        task_id: Option<String>,
+        tool_run_id: Option<String>,
+        min_cursor: i64,
+        query_limit: i64,
+    ) -> Result<Vec<EventStoreUnifiedItem>> {
+        let task_id = clean_string(task_id.as_deref(), 160);
+        let tool_run_id = clean_string(tool_run_id.as_deref(), 160);
+        let mut statement = self.db.prepare(
+            "SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
+             FROM tool_events WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor >= ? ORDER BY cursor ASC LIMIT ?",
+        )?;
+        let rows = statement.query_map(params![task_id, task_id, tool_run_id, tool_run_id, min_cursor, query_limit], |row| {
+            Ok(EventStoreUnifiedItem {
+                cursor: row.get(0)?,
+                task_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                tool_run_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                event_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                event_type: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                text: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                kind: "tool".to_string(),
+                session_id: String::new(),
+                turn_id: String::new(),
+                block_id: String::new(),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    fn list_live_rows(
+        &self,
+        session_id: Option<String>,
+        min_cursor: i64,
+        query_limit: i64,
+    ) -> Result<Vec<EventStoreUnifiedItem>> {
+        let session_id = clean_string(session_id.as_deref(), 160);
+        let mut statement = self.db.prepare(
+            "SELECT cursor, session_id, event_id, event_type, event_at, text
+             FROM live_call_events WHERE (? = '' OR session_id = ?) AND cursor >= ? ORDER BY cursor ASC LIMIT ?",
+        )?;
+        let rows = statement.query_map(params![session_id, session_id, min_cursor, query_limit], |row| {
+            Ok(EventStoreUnifiedItem {
+                cursor: row.get(0)?,
+                session_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                event_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                event_type: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                kind: "live_call".to_string(),
+                task_id: String::new(),
+                tool_run_id: String::new(),
+                turn_id: String::new(),
+                block_id: String::new(),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+}
+
+fn event_json_with_cursor((cursor, event_json): (i64, String), raw_cursor: bool) -> Result<Value> {
+    let mut value = serde_json::from_str::<Value>(&event_json).unwrap_or_else(|_| json!({}));
+    if !value.is_object() {
+        value = json!({});
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("cursor".to_string(), json!(cursor));
+        if raw_cursor {
+            object.insert("rawCursor".to_string(), json!(cursor));
+        }
+    }
+    Ok(value)
+}
+
+fn unified_item_json(item: EventStoreUnifiedItem) -> Value {
+    json!({
+        "cursor": item.cursor,
+        "eventId": item.event_id,
+        "type": item.event_type,
+        "kind": item.kind,
+        "at": item.at,
+        "text": item.text,
+        "sessionId": item.session_id,
+        "taskId": item.task_id,
+        "toolRunId": item.tool_run_id,
+        "turnId": item.turn_id,
+        "blockId": item.block_id
+    })
+}
+
+fn replay_from_unified(item: EventStoreUnifiedItem, source_rank: i64) -> EventStoreReplayItem {
+    EventStoreReplayItem {
+        cursor: encode_replay_cursor(item.cursor, source_rank),
+        raw_cursor: item.cursor,
+        event_id: item.event_id,
+        event_type: item.event_type,
+        kind: item.kind,
+        at: item.at,
+        text: item.text,
+        session_id: item.session_id,
+        task_id: item.task_id,
+        tool_run_id: item.tool_run_id,
+        turn_id: item.turn_id,
+        block_id: item.block_id,
+    }
+}
+
+fn replay_item_json(item: &EventStoreReplayItem) -> Value {
+    json!({
+        "cursor": item.cursor,
+        "rawCursor": item.raw_cursor,
+        "eventId": item.event_id,
+        "type": item.event_type,
+        "kind": item.kind,
+        "at": item.at,
+        "text": item.text,
+        "sessionId": item.session_id,
+        "taskId": item.task_id,
+        "toolRunId": item.tool_run_id,
+        "turnId": item.turn_id,
+        "blockId": item.block_id
+    })
+}
+
+fn default_retention_cutoff(days: i64) -> String {
+    let now = std::time::SystemTime::now();
+    let duration = Duration::from_secs(days.max(0) as u64 * 24 * 60 * 60);
+    let cutoff = now.checked_sub(duration).unwrap_or(now);
+    let datetime: DateTime<Utc> = cutoff.into();
     datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -1205,6 +2162,7 @@ fn run() -> Result<()> {
             max_entries,
         } => run_workspace_tree(&root, &dir, depth, max_entries),
         Mode::McpSessionSidecar => run_mcp_session_sidecar(),
+        Mode::EventStoreSidecar { db_path } => run_event_store_sidecar(&db_path),
     }
 }
 

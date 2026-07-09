@@ -14,7 +14,7 @@ function backpressureError(method, maxPendingRequests) {
   const error = new Error(
     `Event store sidecar backpressure: ${method} rejected because ${maxPendingRequests} request(s) are already pending.`
   );
-  error.code = "EEVENTSTOREBACKPRESSURE";
+  error.code = "EEVENTSTORESIDECARBACKPRESSURE";
   error.maxPendingRequests = maxPendingRequests;
   return error;
 }
@@ -30,14 +30,16 @@ export function createEventStoreSidecarClient({
   args = [],
   cwd = process.cwd(),
   env = process.env,
+  dbPath = "",
   timeoutMs = 10000,
   maxPendingRequests = maxPendingRequestsValue()
 } = {}) {
   if (!command) throw new TypeError("createEventStoreSidecarClient requires command.");
+  const childEnv = dbPath ? { ...env, VIBELINK_EVENT_STORE_DB_PATH: dbPath } : env;
 
   const child = spawn(command, Array.isArray(args) ? args : [], {
     cwd,
-    env,
+    env: childEnv,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"]
   });
@@ -46,6 +48,10 @@ export function createEventStoreSidecarClient({
   let terminated = false;
   let stdout = "";
   let stderr = "";
+  let resolveExit;
+  const exited = new Promise((resolve) => {
+    resolveExit = resolve;
+  });
 
   function rejectPending(error) {
     for (const { reject, timer } of pending.values()) {
@@ -91,11 +97,13 @@ export function createEventStoreSidecarClient({
   child.on("error", (error) => {
     terminated = true;
     rejectPending(error);
+    resolveExit?.();
   });
 
   child.on("exit", (code, signal) => {
     terminated = true;
     if (pending.size > 0) rejectPending(sidecarExitError(code, signal, stderr.trim()));
+    resolveExit?.();
   });
 
   function request(method, requestArgs = [], options = {}) {
@@ -121,15 +129,26 @@ export function createEventStoreSidecarClient({
   }
 
   async function close() {
-    if (terminated) return;
+    if (terminated) {
+      await exited;
+      return;
+    }
     try {
       await request("__close", [], { timeout: 2000 });
     } catch {
       // The sidecar may already be exiting; kill below is the hard stop.
     }
-    terminated = true;
     try { child.stdin?.end(); } catch {}
-    if (!child.killed) child.kill();
+    const timedOut = Symbol("timeout");
+    const result = await Promise.race([
+      exited.then(() => null),
+      new Promise((resolve) => setTimeout(() => resolve(timedOut), 1000))
+    ]);
+    if (result === timedOut && !child.killed) {
+      child.kill();
+      await exited;
+    }
+    terminated = true;
   }
 
   return {

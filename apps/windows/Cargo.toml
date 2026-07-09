@@ -18,3 +18,4 @@ serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 ureq = { version = "2.10", features = ["json"] }
 urlencoding = "2.1"
+rusqlite = { version = "0.32", features = ["bundled"] }

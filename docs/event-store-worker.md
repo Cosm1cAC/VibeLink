@@ -53,7 +53,9 @@ Task and tool event append paths still preserve the existing immediate cursor be
 {"id":1,"result":[1]}
 ```
 
-`test/eventStoreSidecarContract.test.js` runs that protocol against `test/fixtures/event-store-json-sidecar.js`, which reuses the SQLite event-store adapter as a stand-in for the future Rust process. This keeps the production path unchanged while locking the compatibility surface for append, replay, error envelopes, close, and pending-request accounting.
+`test/eventStoreSidecarContract.test.js` runs that protocol against `test/fixtures/event-store-json-sidecar.js`, which reuses the SQLite event-store adapter, and the real Rust `apps/windows` `event-store-sidecar` subcommand. This keeps the production path unchanged while locking the compatibility surface for append, replay, error envelopes, close, and pending-request accounting.
+
+The Rust sidecar currently accepts a SQLite database path as a positional argument and implements the existing JSONL contract for task, tool, live-call, unified replay, and bounded replay-window methods. It is still a compatibility/data-plane smoke path, not the default runtime route; production traffic continues to use the synchronous adapter or Node Worker until sidecar metrics and packaging costs are measured.
 
 `GET /api/tasks/:id/events/catch-up` and `GET /api/live-calls/:id/events/catch-up` return the existing `items` array plus `nextCursor`, `hasMore`, and `limit`. Each route fetches `limit + 1` events internally to expose a cheap next-page signal without changing the item contract.
 
@@ -72,4 +74,4 @@ It also includes `eventStore.metrics`, grouped by contract method, with request 
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.
 - Window large task/live-call replay paths where callers still request broad history.
 - Add high-frequency event burst smoke tests around the runtime stall and batch metrics.
-- Wire the JSONL sidecar client to a real Rust sidecar/native module once the Worker boundary is stable.
+- Add runtime routing and metrics comparisons for the Rust event-store sidecar before considering default enablement.

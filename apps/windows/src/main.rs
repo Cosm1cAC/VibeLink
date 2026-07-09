@@ -2,14 +2,17 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::{self, BufRead, BufReader, Write};
 use std::{
     env,
     hash::{Hash, Hasher},
     net::UdpSocket,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -57,6 +60,8 @@ enum Mode {
         #[arg(long = "max-entries", default_value_t = 240)]
         max_entries: usize,
     },
+    /// Run the MCP stdio session JSONL sidecar.
+    McpSessionSidecar,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +107,70 @@ struct WorkspaceTreeItem {
     updated_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SidecarRequest {
+    #[serde(default)]
+    id: Value,
+    method: String,
+    #[serde(default)]
+    args: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct McpServerConfig {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct McpSidecarOptions {
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+    #[serde(rename = "maxIdleMs")]
+    max_idle_ms: Option<u64>,
+    #[serde(rename = "maxPendingRequests")]
+    max_pending_requests: Option<usize>,
+    timeout: Option<u64>,
+}
+
+struct McpStdioSession {
+    server: McpServerConfig,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+    initialized: Option<Value>,
+    tools: Option<Vec<Value>>,
+    started_at: String,
+    last_used_at: String,
+    last_request_at: String,
+    last_response_at: String,
+    last_failure_at: String,
+    last_backpressure_at: String,
+    requests: u64,
+    responses: u64,
+    failures: u64,
+    timeouts: u64,
+    backpressure_rejects: u64,
+    timeout_ms: u64,
+    max_pending_requests: usize,
+    last_used: Instant,
+}
+
+struct McpSidecarManager {
+    sessions: HashMap<String, McpStdioSession>,
+}
+
 const IGNORED_WORKSPACE_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -117,6 +186,420 @@ fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize)
     let tree = list_workspace_tree(root, dir, depth, max_entries)?;
     println!("{}", serde_json::to_string_pretty(&tree)?);
     Ok(())
+}
+
+fn run_mcp_session_sidecar() -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut manager = McpSidecarManager {
+        sessions: HashMap::new(),
+    };
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: SidecarRequest = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
+                continue;
+            }
+        };
+
+        if request.method == "__close" {
+            manager.close_all();
+            write_sidecar_result(&mut stdout, &request.id, json!({ "ok": true }))?;
+            break;
+        }
+
+        match manager.handle(&request.method, &request.args) {
+            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
+            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
+        }
+    }
+
+    manager.close_all();
+    Ok(())
+}
+
+fn write_sidecar_result(stdout: &mut io::Stdout, id: &Value, result: Value) -> Result<()> {
+    writeln!(stdout, "{}", json!({ "id": id, "result": result }))?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn write_sidecar_error(stdout: &mut io::Stdout, id: &Value, message: &str) -> Result<()> {
+    writeln!(
+        stdout,
+        "{}",
+        json!({
+            "id": id,
+            "error": {
+                "name": "Error",
+                "message": message,
+                "stack": "",
+                "code": ""
+            }
+        })
+    )?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn sidecar_arg<T: DeserializeOwned>(args: &[Value], index: usize) -> Result<T> {
+    let value = args
+        .get(index)
+        .cloned()
+        .with_context(|| format!("Missing MCP session sidecar arg {index}"))?;
+    Ok(serde_json::from_value(value)?)
+}
+
+fn sidecar_arg_or_default<T: DeserializeOwned + Default>(
+    args: &[Value],
+    index: usize,
+) -> Result<T> {
+    match args.get(index) {
+        Some(value) if !value.is_null() => Ok(serde_json::from_value(value.clone())?),
+        _ => Ok(T::default()),
+    }
+}
+
+fn mcp_server_key(server: &McpServerConfig) -> String {
+    let mut env = BTreeMap::new();
+    for (key, value) in &server.env {
+        env.insert(key, value);
+    }
+    serde_json::to_string(&json!({
+        "id": server.id,
+        "name": server.name,
+        "command": server.command,
+        "args": server.args,
+        "cwd": server.cwd,
+        "env": env
+    }))
+    .unwrap_or_default()
+}
+
+fn now_iso() -> String {
+    let datetime: DateTime<Utc> = std::time::SystemTime::now().into();
+    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+impl McpSidecarManager {
+    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+        match method {
+            "probeStdioServer" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+                let session = self.session_for(server, &options)?;
+                let initialize = session.ensure_initialized()?;
+                let tools = session.list_tools()?;
+                Ok(json!({
+                    "ok": true,
+                    "transport": "stdio",
+                    "protocolVersion": initialize.get("protocolVersion").and_then(Value::as_str).unwrap_or(""),
+                    "serverInfo": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
+                    "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
+                    "tools": tools,
+                    "stderr": ""
+                }))
+            }
+            "listTools" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+                let session = self.session_for(server, &options)?;
+                Ok(Value::Array(session.list_tools()?))
+            }
+            "callTool" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let tool_name: String = sidecar_arg(args, 1)?;
+                let tool_arguments: Value = args.get(2).cloned().unwrap_or_else(|| json!({}));
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 3)?;
+                let session = self.session_for(server, &options)?;
+                session.call_tool(&tool_name, tool_arguments)
+            }
+            "closeIdleSessions" => {
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 0)?;
+                let closed = self.close_idle(options.max_idle_ms.unwrap_or(10 * 60 * 1000));
+                Ok(json!({ "closed": closed, "remaining": self.sessions.len() }))
+            }
+            "closeAll" => {
+                self.close_all();
+                Ok(json!({ "ok": true }))
+            }
+            "stats" => Ok(self.stats()),
+            _ => bail!("Unsupported MCP session sidecar method: {method}"),
+        }
+    }
+
+    fn session_for(
+        &mut self,
+        server: McpServerConfig,
+        options: &McpSidecarOptions,
+    ) -> Result<&mut McpStdioSession> {
+        let key = mcp_server_key(&server);
+        let replace = self
+            .sessions
+            .get_mut(&key)
+            .map(|session| session.is_closed())
+            .unwrap_or(true);
+        if replace {
+            self.sessions
+                .insert(key.clone(), McpStdioSession::spawn(server, options)?);
+        }
+        self.sessions
+            .get_mut(&key)
+            .context("MCP session was not available after spawn")
+    }
+
+    fn close_idle(&mut self, max_idle_ms: u64) -> usize {
+        let max_idle = Duration::from_millis(max_idle_ms);
+        let idle_keys: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.last_used.elapsed() >= max_idle)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let closed = idle_keys.len();
+        for key in idle_keys {
+            if let Some(mut session) = self.sessions.remove(&key) {
+                session.close();
+            }
+        }
+        closed
+    }
+
+    fn close_all(&mut self) {
+        for (_, mut session) in self.sessions.drain() {
+            session.close();
+        }
+    }
+
+    fn stats(&self) -> Value {
+        let items: Vec<Value> = self.sessions.values().map(McpStdioSession::stats).collect();
+        json!({
+            "sessions": self.sessions.len(),
+            "activeSessions": items.iter().filter(|item| item.get("closed").and_then(Value::as_bool) == Some(false)).count(),
+            "totalPending": 0,
+            "items": items
+        })
+    }
+}
+
+impl McpStdioSession {
+    fn spawn(server: McpServerConfig, options: &McpSidecarOptions) -> Result<Self> {
+        if server.command.trim().is_empty() {
+            bail!("MCP stdio server command is empty.");
+        }
+
+        let mut command = Command::new(&server.command);
+        command.args(&server.args);
+        if !server.cwd.trim().is_empty() {
+            command.current_dir(&server.cwd);
+        }
+        for (key, value) in &server.env {
+            command.env(key, value);
+        }
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("Failed to spawn MCP stdio server: {}", server.command))?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("MCP stdio server stdin was not piped")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("MCP stdio server stdout was not piped")?;
+        let now = now_iso();
+        let timeout_ms = options.timeout_ms.or(options.timeout).unwrap_or(10_000);
+        let max_pending_requests = options.max_pending_requests.unwrap_or(1).max(1);
+
+        Ok(Self {
+            server,
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+            initialized: None,
+            tools: None,
+            started_at: now.clone(),
+            last_used_at: now,
+            last_request_at: String::new(),
+            last_response_at: String::new(),
+            last_failure_at: String::new(),
+            last_backpressure_at: String::new(),
+            requests: 0,
+            responses: 0,
+            failures: 0,
+            timeouts: 0,
+            backpressure_rejects: 0,
+            timeout_ms,
+            max_pending_requests,
+            last_used: Instant::now(),
+        })
+    }
+
+    fn ensure_initialized(&mut self) -> Result<Value> {
+        if let Some(value) = &self.initialized {
+            return Ok(value.clone());
+        }
+        let result = self.request(
+            "initialize",
+            Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "vibelink-rust",
+                    "version": "0.1.0"
+                }
+            })),
+        )?;
+        self.notify("notifications/initialized", None)?;
+        self.initialized = Some(result.clone());
+        Ok(result)
+    }
+
+    fn list_tools(&mut self) -> Result<Vec<Value>> {
+        self.ensure_initialized()?;
+        if let Some(tools) = &self.tools {
+            let tools = tools.clone();
+            self.touch();
+            return Ok(tools);
+        }
+        let result = self.request("tools/list", None)?;
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.tools = Some(tools.clone());
+        Ok(tools)
+    }
+
+    fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
+        self.ensure_initialized()?;
+        self.request(
+            "tools/call",
+            Some(json!({
+                "name": name,
+                "arguments": arguments
+            })),
+        )
+    }
+
+    fn notify(&mut self, method: &str, params: Option<Value>) -> Result<()> {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        });
+        writeln!(self.stdin, "{}", message)?;
+        self.stdin.flush()?;
+        self.touch();
+        Ok(())
+    }
+
+    fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        writeln!(self.stdin, "{}", message)?;
+        self.stdin.flush()?;
+        self.requests += 1;
+        self.last_request_at = now_iso();
+        self.touch();
+
+        loop {
+            let mut line = String::new();
+            let read = self.stdout.read_line(&mut line)?;
+            if read == 0 {
+                self.failures += 1;
+                self.last_failure_at = now_iso();
+                bail!("MCP stdio session exited before replying to {method}");
+            }
+            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                self.failures += 1;
+                self.last_failure_at = now_iso();
+                bail!(
+                    "{}",
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("MCP stdio request failed")
+                );
+            }
+            self.responses += 1;
+            self.last_response_at = now_iso();
+            self.touch();
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    fn touch(&mut self) {
+        self.last_used = Instant::now();
+        self.last_used_at = now_iso();
+    }
+
+    fn is_closed(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
+    fn close(&mut self) {
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn stats(&self) -> Value {
+        json!({
+            "id": if self.server.id.is_empty() { &self.server.name } else { &self.server.id },
+            "name": if self.server.name.is_empty() { &self.server.id } else { &self.server.name },
+            "closed": false,
+            "pending": 0,
+            "maxPendingRequests": self.max_pending_requests,
+            "timeoutMs": self.timeout_ms,
+            "requests": self.requests,
+            "responses": self.responses,
+            "failures": self.failures,
+            "timeouts": self.timeouts,
+            "backpressureRejects": self.backpressure_rejects,
+            "toolsCached": self.tools.is_some(),
+            "toolCount": self.tools.as_ref().map(Vec::len).unwrap_or(0),
+            "startedAt": self.started_at,
+            "lastUsedAt": self.last_used_at,
+            "lastRequestAt": self.last_request_at,
+            "lastResponseAt": self.last_response_at,
+            "lastFailureAt": self.last_failure_at,
+            "lastBackpressureAt": self.last_backpressure_at,
+            "stderr": ""
+        })
+    }
 }
 
 fn list_workspace_tree(
@@ -412,6 +895,7 @@ fn run() -> Result<()> {
             depth,
             max_entries,
         } => run_workspace_tree(&root, &dir, depth, max_entries),
+        Mode::McpSessionSidecar => run_mcp_session_sidecar(),
     }
 }
 

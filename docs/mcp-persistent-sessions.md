@@ -19,7 +19,7 @@ The Node manager already covers:
 - idle session pruning
 - runtime health counters exposed through MCP status
 
-## Rust Sidecar Contract Smoke
+## Rust Sidecar Contract
 
 `src/mcpSessionContract.js` owns the shared method allowlist and error envelope for the Rust-ready sidecar contract. `src/mcpSessionSidecarClient.js` speaks a stdio JSONL shape:
 
@@ -37,11 +37,12 @@ The current contract methods are:
 - `closeAll`
 - `stats`
 
-`test/mcpSessionSidecarContract.test.js` runs that protocol against `test/fixtures/mcp-session-json-sidecar.js`, which adapts the existing Node session manager as a stand-in for the future Rust process. This keeps the production MCP path unchanged while locking compatibility for session reuse, tool-cache behavior, tool calls, stats, error envelopes, close, and sidecar pending-request backpressure.
+`test/mcpSessionSidecarContract.test.js` runs that protocol against both `test/fixtures/mcp-session-json-sidecar.js`, which adapts the existing Node session manager, and the real Rust `apps/windows` `mcp-session-sidecar` subcommand. This keeps the production MCP path unchanged while locking compatibility for session reuse, tool-cache behavior, tool calls, stats, error envelopes, close, and sidecar pending-request backpressure.
+
+The Rust sidecar currently implements a synchronous stdio session pool with initialize reuse, cached `tools/list`, `tools/call`, idle close, close-all, and stats. It is ready for opt-in runtime routing but is not yet the default MCP data plane.
 
 ## Next Slices
 
-- Implement a real Rust sidecar/native module that satisfies the JSONL contract.
 - Add an opt-in runtime flag that routes stdio MCP probe/call paths through the sidecar client with Node fallback.
-- Mirror Node manager restart, timeout, and backpressure counters in the Rust sidecar stats payload.
+- Expand Rust-side timeout, restart, and backpressure counters to match the Node manager under high concurrency.
 - Add high-concurrency smoke tests for multiple MCP servers and slow tool calls before turning the sidecar on by default.

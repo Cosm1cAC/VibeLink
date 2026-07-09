@@ -39,10 +39,14 @@ The current contract methods are:
 
 `test/mcpSessionSidecarContract.test.js` runs that protocol against both `test/fixtures/mcp-session-json-sidecar.js`, which adapts the existing Node session manager, and the real Rust `apps/windows` `mcp-session-sidecar` subcommand. This keeps the production MCP path unchanged while locking compatibility for session reuse, tool-cache behavior, tool calls, stats, error envelopes, close, and sidecar pending-request backpressure.
 
-The Rust sidecar currently implements a synchronous stdio session pool with initialize reuse, cached `tools/list`, `tools/call`, idle close, close-all, and stats. It is ready for opt-in runtime routing but is not yet the default MCP data plane.
+The Rust sidecar currently implements a synchronous stdio session pool with initialize reuse, cached `tools/list`, `tools/call`, idle close, close-all, and stats. When `VIBELINK_MCP_RUST_SIDECAR=1` is enabled, stdio MCP probe and tool-call paths route through `src/mcpSessionSidecarClient.js`. If the sidecar fails to start or reply, the runtime records a fallback counter, closes the failed sidecar client, and falls back to the existing Node stdio path.
+
+Optional runtime overrides:
+
+- `VIBELINK_MCP_RUST_SIDECAR_COMMAND`: sidecar executable path.
+- `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`: JSON array of sidecar arguments. Defaults to `["mcp-session-sidecar"]`.
 
 ## Next Slices
 
-- Add an opt-in runtime flag that routes stdio MCP probe/call paths through the sidecar client with Node fallback.
 - Expand Rust-side timeout, restart, and backpressure counters to match the Node manager under high concurrency.
 - Add high-concurrency smoke tests for multiple MCP servers and slow tool calls before turning the sidecar on by default.

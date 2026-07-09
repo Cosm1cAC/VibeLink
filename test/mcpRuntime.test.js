@@ -16,6 +16,11 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+function restoreEnv(name, previous) {
+  if (previous === undefined) delete process.env[name];
+  else process.env[name] = previous;
+}
+
 test("configuredMcpServers includes an auto-discovered codebase-memory server", () => {
   const home = "C:\\Users\\Ada";
   const localAppData = path.join(home, "AppData", "Local");
@@ -75,6 +80,140 @@ test("callMcpTool executes a stdio MCP tools/call request", async () => {
   assert.equal(result.server.name, "fake");
   assert.equal(result.toolName, "echo");
   assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "hello" } });
+});
+
+test("callMcpTool routes stdio calls through the Rust sidecar when enabled", async () => {
+  const previousRustFlag = process.env.VIBELINK_MCP_RUST_SIDECAR;
+  const previousCommand = process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND;
+  const previousArgs = process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON;
+  const previousPersistentFlag = process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  const spawnLog = path.join(os.tmpdir(), `vibelink-rust-sidecar-runtime-spawns-${Date.now()}.log`);
+  process.env.VIBELINK_MCP_RUST_SIDECAR = "1";
+  process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND = process.execPath;
+  process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON = JSON.stringify([path.join(__dirname, "fixtures", "mcp-session-json-sidecar.js")]);
+  delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  const settings = {
+    mcp: {
+      servers: [
+        {
+          id: "fake-rust-runtime",
+          name: "fake-rust-runtime",
+          type: "stdio",
+          command: process.execPath,
+          args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")],
+          env: { FAKE_MCP_SPAWN_LOG: spawnLog }
+        }
+      ]
+    }
+  };
+
+  try {
+    const first = await callMcpTool(settings, { serverId: "fake-rust-runtime", toolName: "echo", arguments: { q: "one" } }, { timeoutMs: 5000 });
+    const second = await callMcpTool(settings, { serverId: "fake-rust-runtime", toolName: "echo", arguments: { q: "two" } }, { timeoutMs: 5000 });
+    const spawns = fs.readFileSync(spawnLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(spawns.length, 1);
+    assert.equal(mcpStatus(settings).rustSidecar.enabled, true);
+  } finally {
+    await closePersistentMcpSessions();
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR", previousRustFlag);
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR_COMMAND", previousCommand);
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON", previousArgs);
+    restoreEnv("VIBELINK_MCP_PERSISTENT_SESSIONS", previousPersistentFlag);
+    fs.rmSync(spawnLog, { force: true });
+  }
+});
+
+test("probeMcpServer routes stdio probes through the Rust sidecar when enabled", async () => {
+  const previousRustFlag = process.env.VIBELINK_MCP_RUST_SIDECAR;
+  const previousCommand = process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND;
+  const previousArgs = process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON;
+  const previousPersistentFlag = process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  const spawnLog = path.join(os.tmpdir(), `vibelink-rust-sidecar-runtime-probe-spawns-${Date.now()}.log`);
+  const methodLog = path.join(os.tmpdir(), `vibelink-rust-sidecar-runtime-probe-methods-${Date.now()}.log`);
+  process.env.VIBELINK_MCP_RUST_SIDECAR = "1";
+  process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND = process.execPath;
+  process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON = JSON.stringify([path.join(__dirname, "fixtures", "mcp-session-json-sidecar.js")]);
+  delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  const server = {
+    id: "fake-rust-probe-runtime",
+    name: "fake-rust-probe-runtime",
+    type: "stdio",
+    command: process.execPath,
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")],
+    env: {
+      FAKE_MCP_SPAWN_LOG: spawnLog,
+      FAKE_MCP_METHOD_LOG: methodLog
+    }
+  };
+
+  try {
+    const first = await probeMcpServer(server, { timeoutMs: 5000 });
+    const second = await probeMcpServer(server, { timeoutMs: 5000 });
+    const spawns = fs.readFileSync(spawnLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
+    const methods = fs.readFileSync(methodLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.deepEqual(second.tools.map((tool) => tool.name), ["echo"]);
+    assert.equal(spawns.length, 1);
+    assert.equal(methods.filter((method) => method === "tools/list").length, 1);
+  } finally {
+    await closePersistentMcpSessions();
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR", previousRustFlag);
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR_COMMAND", previousCommand);
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON", previousArgs);
+    restoreEnv("VIBELINK_MCP_PERSISTENT_SESSIONS", previousPersistentFlag);
+    fs.rmSync(spawnLog, { force: true });
+    fs.rmSync(methodLog, { force: true });
+  }
+});
+
+test("callMcpTool falls back to Node stdio when the Rust sidecar fails", async () => {
+  const previousRustFlag = process.env.VIBELINK_MCP_RUST_SIDECAR;
+  const previousCommand = process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND;
+  const previousArgs = process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON;
+  const previousPersistentFlag = process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  const spawnLog = path.join(os.tmpdir(), `vibelink-rust-sidecar-fallback-spawns-${Date.now()}.log`);
+  process.env.VIBELINK_MCP_RUST_SIDECAR = "1";
+  process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND = process.execPath;
+  process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON = JSON.stringify(["-e", "process.exit(42)"]);
+  delete process.env.VIBELINK_MCP_PERSISTENT_SESSIONS;
+  const settings = {
+    mcp: {
+      servers: [
+        {
+          id: "fake-rust-fallback-runtime",
+          name: "fake-rust-fallback-runtime",
+          type: "stdio",
+          command: process.execPath,
+          args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")],
+          env: { FAKE_MCP_SPAWN_LOG: spawnLog }
+        }
+      ]
+    }
+  };
+
+  try {
+    const before = mcpStatus(settings).rustSidecar;
+    const result = await callMcpTool(settings, { serverId: "fake-rust-fallback-runtime", toolName: "echo", arguments: { q: "fallback" } }, { timeoutMs: 5000 });
+    const after = mcpStatus(settings).rustSidecar;
+    const spawns = fs.readFileSync(spawnLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "fallback" } });
+    assert.equal(spawns.length, 1);
+    assert.equal(after.fallbacks, before.fallbacks + 1);
+  } finally {
+    await closePersistentMcpSessions();
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR", previousRustFlag);
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR_COMMAND", previousCommand);
+    restoreEnv("VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON", previousArgs);
+    restoreEnv("VIBELINK_MCP_PERSISTENT_SESSIONS", previousPersistentFlag);
+    fs.rmSync(spawnLog, { force: true });
+  }
 });
 
 test("callMcpTool reuses a persistent stdio MCP session when enabled", async () => {

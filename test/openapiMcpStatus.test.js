@@ -12,6 +12,8 @@ test("OpenAPI documents MCP persistent session health counters", () => {
   const sessionItem = properties?.persistentSessions?.properties?.items?.items?.properties;
 
   assert.ok(properties?.persistentSessions, "missing persistentSessions schema");
+  assert.ok(properties?.rustSidecar, "missing rustSidecar schema");
+  assert.ok(properties?.rustSidecar?.properties?.fallbacks, "missing Rust sidecar fallback counter");
   assert.ok(sessionItem?.requests, "missing per-session requests counter");
   assert.ok(sessionItem?.responses, "missing per-session responses counter");
   assert.ok(sessionItem?.failures, "missing per-session failures counter");

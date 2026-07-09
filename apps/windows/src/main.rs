@@ -85,6 +85,7 @@ struct PairingSession {
 struct WorkspaceTree {
     ok: bool,
     dir: String,
+    truncated: bool,
     items: Vec<WorkspaceTreeItem>,
 }
 
@@ -134,12 +135,14 @@ fn list_workspace_tree(
     }
 
     let mut items = Vec::new();
+    let mut truncated = false;
     let mut queue = VecDeque::from([(target.clone(), 0usize, gitignore_rules_for_dir(&root))]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
 
     while let Some((current, current_depth, inherited_rules)) = queue.pop_front() {
         if items.len() >= max_entries {
+            truncated = true;
             break;
         }
 
@@ -174,6 +177,7 @@ fn list_workspace_tree(
 
         for (name, full_path, is_dir) in children {
             if items.len() >= max_entries {
+                truncated = true;
                 break;
             }
             let metadata = std::fs::metadata(&full_path)?;
@@ -194,6 +198,7 @@ fn list_workspace_tree(
     Ok(WorkspaceTree {
         ok: true,
         dir: slash_path(target.strip_prefix(&root).unwrap_or(Path::new(""))),
+        truncated,
         items,
     })
 }
@@ -646,6 +651,26 @@ mod tests {
 
         let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
         assert_eq!(paths, vec!["src", "src/README.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_marks_truncated_when_max_entries_is_reached() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-truncated-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+        fs::write(root.join("c.txt"), "c").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 1, 2).unwrap();
+
+        assert_eq!(tree.items.len(), 2);
+        assert!(tree.truncated);
 
         let _ = fs::remove_dir_all(&root);
     }

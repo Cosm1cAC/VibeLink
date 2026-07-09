@@ -30,6 +30,8 @@ The user should not need to run internal modes directly.
 
 The scanner skips heavy directories such as `.git`, `node_modules`, `target`, and `.agent-mobile-terminal`. It also honors root and nested `.gitignore` basename rules for literal file names, simple `*` wildcard file patterns, and directory-only rules such as `logs/`.
 
+The JSON response includes `truncated: true` when `--max-entries` prevents the scanner from returning every matching item. The Node bridge records that as a Rust workspace-tree budget hit in runtime stats.
+
 Remaining migration work: negation rules, full gitignore path semantics, and incremental cache metadata are still Node-side or future Rust slices.
 
 ## Build

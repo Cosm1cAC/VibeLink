@@ -26,6 +26,16 @@ function writeRustScannerStub(dir) {
   return scanner;
 }
 
+function writeRustScannerBudgetStub(dir) {
+  const scanner = path.join(dir, "rust-scanner-budget-stub.mjs");
+  fs.writeFileSync(
+    scanner,
+    `process.stdout.write(JSON.stringify({ ok: true, dir: "", truncated: true, items: [{ name: "one.txt", path: "one.txt", type: "file", size: 1, updatedAt: "2026-01-01T00:00:00.000Z" }] }));\n`,
+    "utf8"
+  );
+  return scanner;
+}
+
 function cargoPath() {
   if (process.platform === "win32") {
     const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
@@ -93,6 +103,37 @@ test("getWorkspaceTree falls back to Node scanner when Rust scanner fails", asyn
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceTree tracks Rust scanner budget hits", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-budget-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-budget" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const scanner = writeRustScannerBudgetStub(fixture);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.items.map((item) => item.name), ["one.txt"]);
+    assert.equal(after.budgetHits, before.budgetHits + 1);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 });

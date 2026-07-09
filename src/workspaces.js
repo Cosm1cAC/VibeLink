@@ -17,7 +17,7 @@ const workspaceTreeCache = new Map();
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const workspaceContextFileCache = new Map();
 const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
-const rustWorkspaceTreeStats = { hits: 0, misses: 0 };
+const rustWorkspaceTreeStats = { hits: 0, misses: 0, budgetHits: 0 };
 const textExtensions = new Set([
   ".txt",
   ".md",
@@ -214,7 +214,8 @@ export function getWorkspaceRuntimeStats() {
     rustWorkspaceTree: {
       enabled: rustWorkspaceTreeEnabled(),
       hits: rustWorkspaceTreeStats.hits,
-      misses: rustWorkspaceTreeStats.misses
+      misses: rustWorkspaceTreeStats.misses,
+      budgetHits: rustWorkspaceTreeStats.budgetHits
     }
   };
 }
@@ -492,6 +493,7 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
     const parsed = JSON.parse(stdout);
     if (Array.isArray(parsed.items)) {
       rustWorkspaceTreeStats.hits += 1;
+      if (parsed.truncated) rustWorkspaceTreeStats.budgetHits += 1;
       return parsed.items;
     }
     rustWorkspaceTreeStats.misses += 1;

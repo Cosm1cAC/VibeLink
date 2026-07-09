@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -464,6 +465,7 @@ private fun MessageBubble(
         "system" -> "System"
         else -> message.role
     }
+    val codeBlocks = remember(message.text) { MessageContentUtils.extractCodeBlocks(message.text) }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -483,6 +485,14 @@ private fun MessageBubble(
                         color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Row {
+                        if (codeBlocks.isNotEmpty()) {
+                            IconButton(
+                                onClick = { copyMessage(context, codeBlocks.joinToString("\n\n"), "Code copied") },
+                                modifier = Modifier.size(40.dp),
+                            ) {
+                                Icon(Icons.Default.Code, contentDescription = "Copy code blocks", modifier = Modifier.size(18.dp))
+                            }
+                        }
                         if (message.text.isNotBlank()) {
                             IconButton(
                                 onClick = { copyMessage(context, message.text) },
@@ -598,10 +608,10 @@ private fun ChatEmptyState(
     }
 }
 
-private fun copyMessage(context: Context, text: String) {
+private fun copyMessage(context: Context, text: String, toast: String = "Copied") {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("VibeLink message", text))
-    Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
 }
 
 @Composable

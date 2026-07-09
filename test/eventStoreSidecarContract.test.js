@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,34 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createEventStoreSidecarClient } from "../src/eventStoreSidecarClient.js";
+
+function cargoPath() {
+  if (process.platform === "win32") {
+    const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
+    return result.status === 0 ? String(result.stdout || "").split(/\r?\n/).find(Boolean) || "" : "";
+  }
+  const result = spawnSync("sh", ["-lc", "command -v cargo"], { encoding: "utf8", windowsHide: true });
+  return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
+}
+
+function rustSidecarClient(t, dbPath, options = {}) {
+  const cargo = cargoPath();
+  if (!cargo) t.skip("cargo is not available");
+  return createEventStoreSidecarClient({
+    command: cargo,
+    args: [
+      "run",
+      "--quiet",
+      "--manifest-path",
+      path.join(process.cwd(), "apps", "windows", "Cargo.toml"),
+      "--",
+      "event-store-sidecar",
+      dbPath
+    ],
+    timeoutMs: 10000,
+    ...options
+  });
+}
 
 function createSidecarDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-event-store-sidecar-"));
@@ -104,6 +133,54 @@ test("event store JSON sidecar contract handles append and replay requests", asy
     });
     await client.insertLiveCallEvent("session-sidecar", {
       id: "live-event-sidecar",
+      at: "2026-01-01T00:00:03.000Z",
+      type: "live_call.transcript.final",
+      text: "live"
+    });
+
+    assert.equal(taskCursors.length, 2);
+    assert.ok(taskCursors[0] < taskCursors[1]);
+    assert.deepEqual((await client.listTaskEvents("task-sidecar", { after: 0, limit: 10 })).map((event) => event.text), ["task one", "task two"]);
+    assert.deepEqual((await client.listUnifiedEvents({ after: 0, limit: 10 })).map((event) => event.kind), ["output", "tool", "live_call", "assistant"]);
+    assert.equal((await client.replayWindow({ after: 0, limit: 2 })).hasMore, true);
+    await assert.rejects(
+      client.request("missingMethod", []),
+      /Unsupported event store sidecar method: missingMethod/
+    );
+    assert.equal(client.stats().pending, 0);
+  } finally {
+    await client.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("event store JSON sidecar contract works against the Rust sidecar", async (t) => {
+  const { dir, dbPath } = createSidecarDb();
+  const client = rustSidecarClient(t, dbPath);
+
+  try {
+    const taskCursors = await client.insertTaskEvents("task-sidecar", [
+      {
+        id: "task-event-rust-sidecar-1",
+        at: "2026-01-01T00:00:00.000Z",
+        type: "stdout",
+        text: "task one"
+      },
+      {
+        id: "task-event-rust-sidecar-2",
+        at: "2026-01-01T00:00:01.000Z",
+        type: "assistant",
+        text: "task two"
+      }
+    ]);
+    await client.insertToolEvent("tool-sidecar", {
+      id: "tool-event-rust-sidecar",
+      at: "2026-01-01T00:00:02.000Z",
+      type: "tool.stdout",
+      text: "tool"
+    });
+    await client.insertLiveCallEvent("session-sidecar", {
+      id: "live-event-rust-sidecar",
       at: "2026-01-01T00:00:03.000Z",
       type: "live_call.transcript.final",
       text: "live"

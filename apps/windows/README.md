@@ -18,6 +18,7 @@ vibelink.exe pair
 vibelink.exe doctor
 vibelink.exe workspace-tree --root C:\path\to\repo --dir src --depth 2
 vibelink.exe mcp-session-sidecar
+vibelink.exe event-store-sidecar C:\path\to\mobile-agent.sqlite
 ```
 
 - `bridge`: hosts the existing Node bridge in phase 1.
@@ -25,6 +26,7 @@ vibelink.exe mcp-session-sidecar
 - `doctor`: checks whether the bridge API is reachable.
 - `workspace-tree`: emits the Rust workspace scanner JSON contract used by the Node bridge when `VIBELINK_RUST_WORKSPACE_TREE=1` is enabled.
 - `mcp-session-sidecar`: serves the MCP persistent session JSONL contract for Rust-side stdio session reuse experiments, including bounded active-request scheduling and sidecar-level backpressure metrics.
+- `event-store-sidecar`: serves the event-store SQLite JSONL contract for Rust data-plane compatibility smoke tests.
 
 The user should not need to run internal modes directly.
 

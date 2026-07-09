@@ -36,6 +36,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
+    val conversations by sessionListViewModel.conversations.collectAsState()
 
     NavHost(navController = navController, startDestination = "login") {
         // 鈹€鈹€ Login 鈹€鈹€
@@ -59,7 +60,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 viewModel = sessionListViewModel,
                 onSelectConversation = { conversation ->
                     pendingConversation = conversation
-                    navController.navigate("messageList/${conversation.key.replace("/", "~")}")
+                    navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
                 },
                 onNewConversation = {
                     val conversation = ConversationItem(
@@ -70,7 +71,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                         status = "new",
                     )
                     pendingConversation = conversation
-                    navController.navigate("messageList/${conversation.key}")
+                    navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
                 },
                 onLogout = {
                     navController.navigate("login") {
@@ -94,8 +95,18 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             route = "messageList/{conversationKey}",
             arguments = listOf(navArgument("conversationKey") { type = NavType.StringType }),
         ) { backStackEntry ->
-            val key = backStackEntry.arguments?.getString("conversationKey")?.replace("~", "/") ?: ""
-            val conversation = pendingConversation
+            val routeKey = backStackEntry.arguments?.getString("conversationKey") ?: ""
+            val conversation = ConversationRoute.restoreConversation(
+                routeKey = routeKey,
+                pending = pendingConversation,
+                conversations = conversations,
+            )
+
+            LaunchedEffect(routeKey, conversation?.key, conversations.size) {
+                if (conversation == null && routeKey.isNotBlank() && conversations.isEmpty()) {
+                    sessionListViewModel.load(apiClient, isRefresh = true)
+                }
+            }
 
             MessageListScreen(
                 apiClient = apiClient,
@@ -105,6 +116,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                     pendingConversation = null
                     navController.popBackStack()
                 },
+                onOpenApprovals = { navController.navigate("settings") },
             )
         }
 
@@ -147,6 +159,6 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             preview = text.take(160),
         )
         pendingConversation = conversation
-        navController.navigate("messageList/${conversation.key}")
+        navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
     }
 }

@@ -3,6 +3,8 @@ package com.vibelink.app.ui.screens
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ApiException
 import com.vibelink.app.network.ChatMessage
@@ -13,6 +15,7 @@ import com.vibelink.app.network.DesktopTranscriptEntry
 import com.vibelink.app.network.DesktopFocusResponse
 import com.vibelink.app.network.ProviderRegistryResponse
 import com.vibelink.app.network.TaskDetail
+import com.vibelink.app.network.TaskCreateResponse
 import com.vibelink.app.network.TaskEvent
 import com.vibelink.app.network.ToolCallSummary
 import com.vibelink.app.network.ToolEvent
@@ -165,7 +168,7 @@ class MessageListViewModel : ViewModel() {
                     else -> createOrResumeTask(apiClient, conversation, trimmed, agent, model, reasoningEffort, cwd)
                 }
             } catch (error: ApiException) {
-                appendError(apiErrorMessage(error))
+                appendError(TaskApprovalHandoff.messageFor(error))
             } catch (error: Exception) {
                 appendError(error.message ?: "Failed to send prompt")
             } finally {
@@ -317,6 +320,10 @@ class MessageListViewModel : ViewModel() {
             sessionId = resumeSessionId,
             reasoningEffort = reasoningEffort.trim(),
         )
+        TaskApprovalHandoff.noticeFromResponse(response)?.let { notice ->
+            appendError(notice.message)
+            return
+        }
         if (response.id.isBlank()) {
             appendError(response.error.ifBlank { "Task was created but no task id was returned." })
             return
@@ -633,13 +640,43 @@ class MessageListViewModel : ViewModel() {
             else -> "Chat"
         }
 
-        private fun apiErrorMessage(error: ApiException): String {
-            return if (error.statusCode == 428) {
-                "Approval required. Open Settings > Approvals to approve this task, then refresh the chat."
-            } else {
-                error.body.ifBlank { "HTTP ${error.statusCode}" }
-            }
+    }
+}
+
+data class ApprovalNotice(
+    val approvalId: String,
+    val message: String,
+)
+
+object TaskApprovalHandoff {
+    fun noticeFromResponse(response: TaskCreateResponse): ApprovalNotice? {
+        val approvalId = response.approvalId.ifBlank { response.approval?.id.orEmpty() }
+        if (approvalId.isBlank()) return null
+        return ApprovalNotice(approvalId, approvalMessage(approvalId, response.error))
+    }
+
+    fun messageFor(error: ApiException): String {
+        if (error.statusCode != 428) return error.body.ifBlank { "HTTP ${error.statusCode}" }
+        val json = parseObject(error.body)
+        val approvalId = stringMember(json, "approvalId").ifBlank {
+            stringMember(json?.getAsJsonObject("approval"), "id")
         }
+        val reason = stringMember(json, "error")
+        return approvalMessage(approvalId, reason)
+    }
+
+    private fun approvalMessage(approvalId: String, reason: String): String {
+        val idSuffix = if (approvalId.isBlank()) "" else " ($approvalId)"
+        val reasonPrefix = reason.ifBlank { "This action needs approval." }
+        return "$reasonPrefix Approval required$idSuffix. Open Settings > Approvals, approve it, then retry this prompt."
+    }
+
+    private fun parseObject(raw: String): JsonObject? {
+        return runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
+    }
+
+    private fun stringMember(json: JsonObject?, key: String): String {
+        return runCatching { json?.get(key)?.takeIf { !it.isJsonNull }?.asString.orEmpty() }.getOrDefault("")
     }
 }
 

@@ -72,6 +72,7 @@ fun MessageListScreen(
     viewModel: MessageListViewModel,
     conversation: ConversationItem?,
     onBack: () -> Unit,
+    onOpenApprovals: () -> Unit = {},
 ) {
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -221,7 +222,7 @@ fun MessageListScreen(
                     ) {
                         if (error.isNotBlank()) {
                             item {
-                                ErrorBanner(error)
+                                ErrorBanner(error, onOpenApprovals = onOpenApprovals)
                             }
                         }
                         itemsIndexed(messages, key = { index, message -> "$index:${message.role}:${message.text.hashCode()}:${message.toolCalls.size}" }) { _, message ->
@@ -428,14 +429,21 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun ErrorBanner(message: String) {
+private fun ErrorBanner(message: String, onOpenApprovals: () -> Unit) {
+    val approvalRequired = message.contains("Approval required", ignoreCase = true)
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        Text(
-            text = message,
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            color = MaterialTheme.colorScheme.onErrorContainer,
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (approvalRequired) {
+                OutlinedButton(onClick = onOpenApprovals, modifier = Modifier.fillMaxWidth()) {
+                    Text("Open approvals")
+                }
+            }
+        }
     }
 }
 

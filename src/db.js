@@ -7,7 +7,6 @@ import { dataDir } from "./config.js";
 import { createEventStoreBatcher } from "./eventStoreBatcher.js";
 import { DEFAULT_EVENT_REPLAY_LIMIT, createSqliteEventStore, normalizeEventReplayLimit } from "./eventStore.js";
 import { createEventStoreMetrics } from "./eventStoreMetrics.js";
-import { createEventStoreSidecarClient } from "./eventStoreSidecarClient.js";
 import { createEventStoreWorkerClient } from "./eventStoreWorkerClient.js";
 
 const dbPath = path.join(dataDir, "mobile-agent.sqlite");
@@ -418,8 +417,6 @@ function sqliteEventStore() {
 
 let eventStoreWorker = null;
 let eventStoreWorkerFailed = false;
-let eventStoreSidecar = null;
-let eventStoreSidecarFailed = false;
 let taskEventAppendBatcher = null;
 let toolEventAppendBatcher = null;
 let liveCallEventAppendBatcher = null;
@@ -427,10 +424,6 @@ const eventStoreMetrics = createEventStoreMetrics();
 
 export function isEventStoreWorkerEnabled() {
   return process.env.VIBELINK_EVENT_STORE_WORKER === "1";
-}
-
-export function isEventStoreSidecarEnabled() {
-  return process.env.VIBELINK_EVENT_STORE_SIDECAR === "1";
 }
 
 export function isEventStoreBatchAppendEnabled() {
@@ -446,7 +439,6 @@ export function isTaskEventBatchAppendEnabled() {
 }
 
 export function eventStoreMode() {
-  if (isEventStoreSidecarEnabled()) return eventStoreSidecarFailed ? "sync-fallback" : "sidecar";
   if (!isEventStoreWorkerEnabled()) return "sync";
   return eventStoreWorkerFailed ? "sync-fallback" : "worker";
 }
@@ -455,26 +447,6 @@ function eventStoreWorkerMaxPendingRequests() {
   const value = Number(process.env.VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS);
   if (Number.isFinite(value) && value > 0) return Math.floor(value);
   return 128;
-}
-
-function eventStoreSidecarMaxPendingRequests() {
-  const value = Number(process.env.VIBELINK_EVENT_STORE_SIDECAR_MAX_PENDING_REQUESTS);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
-  return 128;
-}
-
-function eventStoreSidecarArgs() {
-  if (!process.env.VIBELINK_EVENT_STORE_SIDECAR_ARGS_JSON) return [];
-  try {
-    const parsed = JSON.parse(process.env.VIBELINK_EVENT_STORE_SIDECAR_ARGS_JSON);
-    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
-  } catch {
-    return [];
-  }
-}
-
-function eventStoreSidecarCommand() {
-  return String(process.env.VIBELINK_EVENT_STORE_SIDECAR_BIN || "").trim();
 }
 
 function getEventStoreWorkerStats() {
@@ -488,26 +460,11 @@ function getEventStoreWorkerStats() {
   };
 }
 
-function getEventStoreSidecarStats() {
-  const stats = eventStoreSidecar?.stats?.();
-  return {
-    enabled: isEventStoreSidecarEnabled(),
-    configured: Boolean(eventStoreSidecarCommand()),
-    active: Boolean(eventStoreSidecar),
-    failed: eventStoreSidecarFailed,
-    pending: stats?.pending ?? 0,
-    maxPendingRequests: stats?.maxPendingRequests ?? eventStoreSidecarMaxPendingRequests()
-  };
-}
-
 export function getEventStoreRuntimeStats() {
   return {
     mode: eventStoreMode(),
     workerEnabled: isEventStoreWorkerEnabled(),
     workerFailed: eventStoreWorkerFailed,
-    sidecarEnabled: isEventStoreSidecarEnabled(),
-    sidecarFailed: eventStoreSidecarFailed,
-    sidecar: getEventStoreSidecarStats(),
     worker: getEventStoreWorkerStats(),
     taskBatchAppend: getTaskEventBatchAppendStats(),
     batchAppend: getToolEventBatchAppendStats(),
@@ -568,11 +525,7 @@ function getTaskEventBatchAppendStats() {
     maxBatchSize: 0,
     lastFlushDurationMs: 0,
     avgFlushDurationMs: 0,
-    lastFlushAt: "",
-    failures: 0,
-    failedEvents: 0,
-    lastFailureAt: "",
-    lastFailureMessage: ""
+    lastFlushAt: ""
   };
   return {
     enabled: isTaskEventBatchAppendEnabled(),
@@ -589,11 +542,7 @@ function getToolEventBatchAppendStats() {
     maxBatchSize: 0,
     lastFlushDurationMs: 0,
     avgFlushDurationMs: 0,
-    lastFlushAt: "",
-    failures: 0,
-    failedEvents: 0,
-    lastFailureAt: "",
-    lastFailureMessage: ""
+    lastFlushAt: ""
   };
   return {
     enabled: isEventStoreBatchAppendEnabled(),
@@ -610,11 +559,7 @@ function getLiveCallEventBatchAppendStats() {
     maxBatchSize: 0,
     lastFlushDurationMs: 0,
     avgFlushDurationMs: 0,
-    lastFlushAt: "",
-    failures: 0,
-    failedEvents: 0,
-    lastFailureAt: "",
-    lastFailureMessage: ""
+    lastFlushAt: ""
   };
   return {
     enabled: isLiveCallEventBatchAppendEnabled(),
@@ -627,34 +572,6 @@ function eventStoreWorkerClient() {
   initDb();
   if (!eventStoreWorker) eventStoreWorker = createEventStoreWorkerClient({ dbPath });
   return eventStoreWorker;
-}
-
-function eventStoreSidecarClient() {
-  if (!isEventStoreSidecarEnabled() || eventStoreSidecarFailed) return null;
-  const command = eventStoreSidecarCommand();
-  if (!command) {
-    eventStoreSidecarFailed = true;
-    return null;
-  }
-  initDb();
-  if (!eventStoreSidecar) {
-    eventStoreSidecar = createEventStoreSidecarClient({
-      command,
-      args: eventStoreSidecarArgs(),
-      dbPath,
-      maxPendingRequests: eventStoreSidecarMaxPendingRequests()
-    });
-  }
-  return eventStoreSidecar;
-}
-
-function eventStoreAsyncClient() {
-  if (isEventStoreSidecarEnabled()) {
-    const client = eventStoreSidecarClient();
-    return client ? { client, mode: "sidecar", kind: "sidecar" } : null;
-  }
-  const client = eventStoreWorkerClient();
-  return client ? { client, mode: "worker", kind: "worker" } : null;
 }
 
 function eventStoreSyncCall(method, callback) {
@@ -670,8 +587,8 @@ function eventStoreSyncCall(method, callback) {
 }
 
 async function eventStoreWorkerCall(method, args, fallback) {
-  const selected = eventStoreAsyncClient();
-  if (!selected) {
+  const client = eventStoreWorkerClient();
+  if (!client) {
     const start = performance.now();
     try {
       const result = await fallback();
@@ -683,25 +600,18 @@ async function eventStoreWorkerCall(method, args, fallback) {
     }
   }
 
-  const asyncStart = performance.now();
+  const workerStart = performance.now();
   try {
-    const result = await selected.client.request(method, args);
-    eventStoreMetrics.record({ method, mode: selected.mode, ok: true, durationMs: performance.now() - asyncStart });
+    const result = await client.request(method, args);
+    eventStoreMetrics.record({ method, mode: "worker", ok: true, durationMs: performance.now() - workerStart });
     return result;
   } catch (error) {
-    eventStoreMetrics.record({ method, mode: selected.mode, ok: false, durationMs: performance.now() - asyncStart, fallback: true });
-    if (selected.kind === "sidecar") {
-      eventStoreSidecarFailed = true;
-      const failedSidecar = eventStoreSidecar;
-      eventStoreSidecar = null;
-      failedSidecar?.close().catch(() => {});
-    } else {
-      eventStoreWorkerFailed = true;
-      const failedWorker = eventStoreWorker;
-      eventStoreWorker = null;
-      failedWorker?.close().catch(() => {});
-    }
-    console.warn(`[eventStore] ${selected.kind} failed; falling back to sync SQLite: ${error.message}`);
+    eventStoreMetrics.record({ method, mode: "worker", ok: false, durationMs: performance.now() - workerStart, fallback: true });
+    eventStoreWorkerFailed = true;
+    const failedWorker = eventStoreWorker;
+    eventStoreWorker = null;
+    failedWorker?.close().catch(() => {});
+    console.warn(`[eventStore] worker failed; falling back to sync SQLite: ${error.message}`);
     const fallbackStart = performance.now();
     try {
       const result = await fallback();
@@ -721,21 +631,10 @@ export async function closeEventStoreWorker() {
   eventStoreWorkerFailed = false;
 }
 
-export async function closeEventStoreSidecar() {
-  if (!eventStoreSidecar) {
-    eventStoreSidecarFailed = false;
-    return;
-  }
-  await eventStoreSidecar.close();
-  eventStoreSidecar = null;
-  eventStoreSidecarFailed = false;
-}
-
 export async function drainEventStoreRuntime() {
   await flushTaskEventBatches();
   await flushToolEventBatches();
   await flushLiveCallEventBatches();
-  await closeEventStoreSidecar();
   await closeEventStoreWorker();
 }
 

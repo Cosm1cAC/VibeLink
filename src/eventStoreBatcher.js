@@ -24,10 +24,6 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize
   let totalEvents = 0;
   let totalFlushDurationMs = 0;
   let lastFlushDurationMs = 0;
-  let failures = 0;
-  let failedEvents = 0;
-  let lastFailureAt = "";
-  let lastFailureMessage = "";
   const batchSizeLimit = Number.isFinite(Number(maxBatchSize)) ? Math.max(0, Number(maxBatchSize)) : 0;
 
   function clearTimer() {
@@ -82,10 +78,6 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize
           const results = await flushBatch(key, group.map((item) => item.event));
           group.forEach((item, index) => item.resolve(Array.isArray(results) ? results[index] : results));
         } catch (error) {
-          failures += 1;
-          failedEvents += group.length;
-          lastFailureAt = new Date().toISOString();
-          lastFailureMessage = String(error?.message || error || "flush failed").slice(0, 500);
           group.forEach((item) => item.reject(error));
         }
       }
@@ -115,11 +107,7 @@ export function createEventStoreBatcher({ flushBatch, delayMs = 50, maxBatchSize
       maxBatchSize: maxObservedBatchSize,
       lastFlushDurationMs,
       avgFlushDurationMs: flushes > 0 ? roundMs(totalFlushDurationMs / flushes) : 0,
-      lastFlushAt,
-      failures,
-      failedEvents,
-      lastFailureAt,
-      lastFailureMessage
+      lastFlushAt
     };
   }
 

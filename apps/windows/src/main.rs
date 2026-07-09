@@ -2,15 +2,20 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::{self, BufRead, BufReader, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::{
     env,
+    hash::{Hash, Hasher},
     net::UdpSocket,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
@@ -56,6 +61,8 @@ enum Mode {
         #[arg(long = "max-entries", default_value_t = 240)]
         max_entries: usize,
     },
+    /// Run the MCP stdio session JSONL sidecar.
+    McpSessionSidecar,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +92,8 @@ struct PairingSession {
 struct WorkspaceTree {
     ok: bool,
     dir: String,
+    truncated: bool,
+    signature: String,
     items: Vec<WorkspaceTreeItem>,
 }
 
@@ -97,6 +106,72 @@ struct WorkspaceTreeItem {
     size: u64,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SidecarRequest {
+    #[serde(default)]
+    id: Value,
+    method: String,
+    #[serde(default)]
+    args: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct McpServerConfig {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct McpSidecarOptions {
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+    #[serde(rename = "maxIdleMs")]
+    max_idle_ms: Option<u64>,
+    #[serde(rename = "maxPendingRequests")]
+    max_pending_requests: Option<usize>,
+    timeout: Option<u64>,
+}
+
+struct McpStdioSession {
+    server: McpServerConfig,
+    child: Child,
+    stdin: ChildStdin,
+    stdout_rx: Receiver<Value>,
+    closed: bool,
+    next_id: u64,
+    initialized: Option<Value>,
+    tools: Option<Vec<Value>>,
+    started_at: String,
+    last_used_at: String,
+    last_request_at: String,
+    last_response_at: String,
+    last_failure_at: String,
+    last_backpressure_at: String,
+    requests: u64,
+    responses: u64,
+    failures: u64,
+    timeouts: u64,
+    backpressure_rejects: u64,
+    timeout_ms: u64,
+    max_pending_requests: usize,
+    max_pending_observed: usize,
+    last_used: Instant,
+}
+
+struct McpSidecarManager {
+    sessions: HashMap<String, McpStdioSession>,
 }
 
 const IGNORED_WORKSPACE_DIRS: &[&str] = &[
@@ -114,6 +189,513 @@ fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize)
     let tree = list_workspace_tree(root, dir, depth, max_entries)?;
     println!("{}", serde_json::to_string_pretty(&tree)?);
     Ok(())
+}
+
+fn run_mcp_session_sidecar() -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut manager = McpSidecarManager {
+        sessions: HashMap::new(),
+    };
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: SidecarRequest = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
+                continue;
+            }
+        };
+
+        if request.method == "__close" {
+            manager.close_all();
+            write_sidecar_result(&mut stdout, &request.id, json!({ "ok": true }))?;
+            break;
+        }
+
+        match manager.handle(&request.method, &request.args) {
+            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
+            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
+        }
+    }
+
+    manager.close_all();
+    Ok(())
+}
+
+fn write_sidecar_result(stdout: &mut io::Stdout, id: &Value, result: Value) -> Result<()> {
+    writeln!(stdout, "{}", json!({ "id": id, "result": result }))?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn write_sidecar_error(stdout: &mut io::Stdout, id: &Value, message: &str) -> Result<()> {
+    writeln!(
+        stdout,
+        "{}",
+        json!({
+            "id": id,
+            "error": {
+                "name": "Error",
+                "message": message,
+                "stack": "",
+                "code": ""
+            }
+        })
+    )?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn sidecar_arg<T: DeserializeOwned>(args: &[Value], index: usize) -> Result<T> {
+    let value = args
+        .get(index)
+        .cloned()
+        .with_context(|| format!("Missing MCP session sidecar arg {index}"))?;
+    Ok(serde_json::from_value(value)?)
+}
+
+fn sidecar_arg_or_default<T: DeserializeOwned + Default>(
+    args: &[Value],
+    index: usize,
+) -> Result<T> {
+    match args.get(index) {
+        Some(value) if !value.is_null() => Ok(serde_json::from_value(value.clone())?),
+        _ => Ok(T::default()),
+    }
+}
+
+fn mcp_server_key(server: &McpServerConfig) -> String {
+    let mut env = BTreeMap::new();
+    for (key, value) in &server.env {
+        env.insert(key, value);
+    }
+    serde_json::to_string(&json!({
+        "id": server.id,
+        "name": server.name,
+        "command": server.command,
+        "args": server.args,
+        "cwd": server.cwd,
+        "env": env
+    }))
+    .unwrap_or_default()
+}
+
+fn now_iso() -> String {
+    let datetime: DateTime<Utc> = std::time::SystemTime::now().into();
+    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+impl McpSidecarManager {
+    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+        match method {
+            "probeStdioServer" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+                let session = self.session_for(server, &options)?;
+                let initialize = session.ensure_initialized()?;
+                let tools = session.list_tools()?;
+                Ok(json!({
+                    "ok": true,
+                    "transport": "stdio",
+                    "protocolVersion": initialize.get("protocolVersion").and_then(Value::as_str).unwrap_or(""),
+                    "serverInfo": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
+                    "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
+                    "tools": tools,
+                    "stderr": ""
+                }))
+            }
+            "listTools" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+                let session = self.session_for(server, &options)?;
+                Ok(Value::Array(session.list_tools()?))
+            }
+            "callTool" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let tool_name: String = sidecar_arg(args, 1)?;
+                let tool_arguments: Value = args.get(2).cloned().unwrap_or_else(|| json!({}));
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 3)?;
+                let session = self.session_for(server, &options)?;
+                session.call_tool(&tool_name, tool_arguments)
+            }
+            "closeIdleSessions" => {
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 0)?;
+                let closed = self.close_idle(options.max_idle_ms.unwrap_or(10 * 60 * 1000));
+                Ok(json!({ "closed": closed, "remaining": self.sessions.len() }))
+            }
+            "closeAll" => {
+                self.close_all();
+                Ok(json!({ "ok": true }))
+            }
+            "stats" => Ok(self.stats()),
+            _ => bail!("Unsupported MCP session sidecar method: {method}"),
+        }
+    }
+
+    fn session_for(
+        &mut self,
+        server: McpServerConfig,
+        options: &McpSidecarOptions,
+    ) -> Result<&mut McpStdioSession> {
+        let key = mcp_server_key(&server);
+        let replace = self
+            .sessions
+            .get_mut(&key)
+            .map(|session| session.is_closed())
+            .unwrap_or(true);
+        if replace {
+            self.sessions
+                .insert(key.clone(), McpStdioSession::spawn(server, options)?);
+        }
+        let session = self
+            .sessions
+            .get_mut(&key)
+            .context("MCP session was not available after spawn")?;
+        session.apply_options(options);
+        Ok(session)
+    }
+
+    fn close_idle(&mut self, max_idle_ms: u64) -> usize {
+        let max_idle = Duration::from_millis(max_idle_ms);
+        let idle_keys: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.last_used.elapsed() >= max_idle)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let closed = idle_keys.len();
+        for key in idle_keys {
+            if let Some(mut session) = self.sessions.remove(&key) {
+                session.close();
+            }
+        }
+        closed
+    }
+
+    fn close_all(&mut self) {
+        for (_, mut session) in self.sessions.drain() {
+            session.close();
+        }
+    }
+
+    fn stats(&self) -> Value {
+        let items: Vec<Value> = self.sessions.values().map(McpStdioSession::stats).collect();
+        let total_requests: u64 = items
+            .iter()
+            .map(|item| item.get("requests").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_responses: u64 = items
+            .iter()
+            .map(|item| item.get("responses").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_failures: u64 = items
+            .iter()
+            .map(|item| item.get("failures").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_timeouts: u64 = items
+            .iter()
+            .map(|item| item.get("timeouts").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_backpressure_rejects: u64 = items
+            .iter()
+            .map(|item| item.get("backpressureRejects").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let max_pending_observed = items
+            .iter()
+            .filter_map(|item| item.get("maxPendingObserved").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0);
+        json!({
+            "sessions": self.sessions.len(),
+            "activeSessions": items.iter().filter(|item| item.get("closed").and_then(Value::as_bool) == Some(false)).count(),
+            "totalPending": 0,
+            "totalRequests": total_requests,
+            "totalResponses": total_responses,
+            "totalFailures": total_failures,
+            "totalTimeouts": total_timeouts,
+            "totalBackpressureRejects": total_backpressure_rejects,
+            "maxPendingObserved": max_pending_observed,
+            "items": items
+        })
+    }
+}
+
+impl McpStdioSession {
+    fn spawn(server: McpServerConfig, options: &McpSidecarOptions) -> Result<Self> {
+        if server.command.trim().is_empty() {
+            bail!("MCP stdio server command is empty.");
+        }
+
+        let mut command = Command::new(&server.command);
+        command.args(&server.args);
+        if !server.cwd.trim().is_empty() {
+            command.current_dir(&server.cwd);
+        }
+        for (key, value) in &server.env {
+            command.env(key, value);
+        }
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("Failed to spawn MCP stdio server: {}", server.command))?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("MCP stdio server stdin was not piped")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("MCP stdio server stdout was not piped")?;
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+                    continue;
+                };
+                if stdout_tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let now = now_iso();
+        let timeout_ms = options.timeout_ms.or(options.timeout).unwrap_or(10_000);
+        let max_pending_requests = options.max_pending_requests.unwrap_or(1).max(1);
+
+        Ok(Self {
+            server,
+            child,
+            stdin,
+            stdout_rx,
+            closed: false,
+            next_id: 1,
+            initialized: None,
+            tools: None,
+            started_at: now.clone(),
+            last_used_at: now,
+            last_request_at: String::new(),
+            last_response_at: String::new(),
+            last_failure_at: String::new(),
+            last_backpressure_at: String::new(),
+            requests: 0,
+            responses: 0,
+            failures: 0,
+            timeouts: 0,
+            backpressure_rejects: 0,
+            timeout_ms,
+            max_pending_requests,
+            max_pending_observed: 0,
+            last_used: Instant::now(),
+        })
+    }
+
+    fn ensure_initialized(&mut self) -> Result<Value> {
+        if let Some(value) = &self.initialized {
+            return Ok(value.clone());
+        }
+        let result = self.request(
+            "initialize",
+            Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "vibelink-rust",
+                    "version": "0.1.0"
+                }
+            })),
+        )?;
+        self.notify("notifications/initialized", None)?;
+        self.initialized = Some(result.clone());
+        Ok(result)
+    }
+
+    fn apply_options(&mut self, options: &McpSidecarOptions) {
+        if let Some(timeout_ms) = options.timeout_ms.or(options.timeout) {
+            self.timeout_ms = timeout_ms.max(1);
+        }
+        if let Some(max_pending_requests) = options.max_pending_requests {
+            self.max_pending_requests = max_pending_requests.max(1);
+        }
+    }
+
+    fn list_tools(&mut self) -> Result<Vec<Value>> {
+        self.ensure_initialized()?;
+        if let Some(tools) = &self.tools {
+            let tools = tools.clone();
+            self.touch();
+            return Ok(tools);
+        }
+        let result = self.request("tools/list", None)?;
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.tools = Some(tools.clone());
+        Ok(tools)
+    }
+
+    fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
+        self.ensure_initialized()?;
+        self.request(
+            "tools/call",
+            Some(json!({
+                "name": name,
+                "arguments": arguments
+            })),
+        )
+    }
+
+    fn notify(&mut self, method: &str, params: Option<Value>) -> Result<()> {
+        if self.closed {
+            bail!("MCP stdio session is closed.");
+        }
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        });
+        if let Err(error) = writeln!(self.stdin, "{}", message).and_then(|_| self.stdin.flush()) {
+            self.mark_failed();
+            return Err(error).context("Failed to write MCP stdio notification");
+        }
+        self.touch();
+        Ok(())
+    }
+
+    fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value> {
+        if self.closed {
+            bail!("MCP stdio session is closed.");
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        if let Err(error) = writeln!(self.stdin, "{}", message).and_then(|_| self.stdin.flush()) {
+            self.mark_failed();
+            return Err(error).context(format!("Failed to write MCP stdio request: {method}"));
+        }
+        self.requests += 1;
+        self.max_pending_observed = self.max_pending_observed.max(1);
+        self.last_request_at = now_iso();
+        self.touch();
+
+        loop {
+            let message = match self
+                .stdout_rx
+                .recv_timeout(Duration::from_millis(self.timeout_ms.max(1)))
+            {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.timeouts += 1;
+                    self.mark_failed();
+                    bail!(
+                        "MCP stdio request timed out: {method} after {}ms",
+                        self.timeout_ms
+                    );
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.mark_failed();
+                    bail!("MCP stdio session exited before replying to {method}");
+                }
+            };
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                self.mark_failed();
+                bail!(
+                    "{}",
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("MCP stdio request failed")
+                );
+            }
+            self.responses += 1;
+            self.last_response_at = now_iso();
+            self.touch();
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    fn touch(&mut self) {
+        self.last_used = Instant::now();
+        self.last_used_at = now_iso();
+    }
+
+    fn mark_failed(&mut self) {
+        self.failures += 1;
+        self.last_failure_at = now_iso();
+        self.closed = true;
+        let _ = self.child.kill();
+    }
+
+    fn is_closed(&mut self) -> bool {
+        if self.closed {
+            return true;
+        }
+        match self.child.try_wait() {
+            Ok(Some(_)) => {
+                self.closed = true;
+                true
+            }
+            Ok(None) => false,
+            Err(_) => {
+                self.closed = true;
+                true
+            }
+        }
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn stats(&self) -> Value {
+        json!({
+            "id": if self.server.id.is_empty() { &self.server.name } else { &self.server.id },
+            "name": if self.server.name.is_empty() { &self.server.id } else { &self.server.name },
+            "closed": self.closed,
+            "pending": 0,
+            "maxPendingRequests": self.max_pending_requests,
+            "maxPendingObserved": self.max_pending_observed,
+            "timeoutMs": self.timeout_ms,
+            "requests": self.requests,
+            "responses": self.responses,
+            "failures": self.failures,
+            "timeouts": self.timeouts,
+            "backpressureRejects": self.backpressure_rejects,
+            "toolsCached": self.tools.is_some(),
+            "toolCount": self.tools.as_ref().map(Vec::len).unwrap_or(0),
+            "startedAt": self.started_at,
+            "lastUsedAt": self.last_used_at,
+            "lastRequestAt": self.last_request_at,
+            "lastResponseAt": self.last_response_at,
+            "lastFailureAt": self.last_failure_at,
+            "lastBackpressureAt": self.last_backpressure_at,
+            "stderr": ""
+        })
+    }
 }
 
 fn list_workspace_tree(
@@ -134,14 +716,27 @@ fn list_workspace_tree(
     }
 
     let mut items = Vec::new();
-    let mut queue = VecDeque::from([(target.clone(), 0usize)]);
+    let mut signature_parts = Vec::new();
+    let mut truncated = false;
+    let mut queue = VecDeque::from([(target.clone(), 0usize, gitignore_rules_for_dir(&root))]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
-    let gitignore_dirs = root_gitignore_dirs(&root);
 
-    while let Some((current, current_depth)) = queue.pop_front() {
+    while let Some((current, current_depth, inherited_rules)) = queue.pop_front() {
         if items.len() >= max_entries {
+            truncated = true;
             break;
+        }
+
+        let mut ignore_rules = inherited_rules;
+        signature_parts.push(metadata_signature_part("dir", &root, &current));
+        signature_parts.push(metadata_signature_part(
+            "gitignore",
+            &root,
+            &current.join(".gitignore"),
+        ));
+        if current != root {
+            ignore_rules.extend(gitignore_rules_for_dir(&current));
         }
 
         let mut children = Vec::new();
@@ -157,7 +752,7 @@ fn list_workspace_tree(
             if file_type.is_dir() && IGNORED_WORKSPACE_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            if file_type.is_dir() && gitignore_dirs.contains(name.as_str()) {
+            if ignore_rules.is_ignored(&name, file_type.is_dir()) {
                 continue;
             }
             children.push((name, entry.path(), file_type.is_dir()));
@@ -170,10 +765,12 @@ fn list_workspace_tree(
 
         for (name, full_path, is_dir) in children {
             if items.len() >= max_entries {
+                truncated = true;
                 break;
             }
             let metadata = std::fs::metadata(&full_path)?;
             let rel = slash_path(full_path.strip_prefix(&root).unwrap_or(&full_path));
+            signature_parts.push(metadata_signature_part("entry", &root, &full_path));
             items.push(WorkspaceTreeItem {
                 name,
                 path: rel,
@@ -182,7 +779,7 @@ fn list_workspace_tree(
                 updated_at: system_time_iso(metadata.modified().ok()),
             });
             if is_dir && current_depth + 1 < depth {
-                queue.push_back((full_path, current_depth + 1));
+                queue.push_back((full_path, current_depth + 1, ignore_rules.clone()));
             }
         }
     }
@@ -190,33 +787,159 @@ fn list_workspace_tree(
     Ok(WorkspaceTree {
         ok: true,
         dir: slash_path(target.strip_prefix(&root).unwrap_or(Path::new(""))),
+        truncated,
+        signature: scan_signature(&signature_parts),
         items,
     })
 }
 
-fn root_gitignore_dirs(root: &Path) -> HashSet<String> {
-    let mut dirs = HashSet::new();
-    let Ok(content) = std::fs::read_to_string(root.join(".gitignore")) else {
-        return dirs;
+fn metadata_signature_part(kind: &str, root: &Path, path: &Path) -> String {
+    let rel = slash_path(path.strip_prefix(root).unwrap_or(path));
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let modified_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            format!(
+                "{kind}:{rel}:{}:{}:{modified_ms}",
+                if metadata.is_dir() { "d" } else { "f" },
+                metadata.len()
+            )
+        }
+        Err(_) => format!("{kind}:{rel}:missing"),
+    }
+}
+
+fn scan_signature(parts: &[String]) -> String {
+    let mut hasher = Fnv64::default();
+    for part in parts {
+        part.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+#[derive(Default)]
+struct Fnv64(u64);
+
+impl Hasher for Fnv64 {
+    fn write(&mut self, bytes: &[u8]) {
+        if self.0 == 0 {
+            self.0 = 0xcbf29ce484222325;
+        }
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct WorkspaceIgnoreRules {
+    rules: Vec<WorkspaceIgnoreRule>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceIgnoreRule {
+    pattern: String,
+    directory_only: bool,
+    negated: bool,
+}
+
+impl WorkspaceIgnoreRules {
+    fn extend(&mut self, other: WorkspaceIgnoreRules) {
+        self.rules.extend(other.rules);
+    }
+
+    fn is_ignored(&self, name: &str, is_dir: bool) -> bool {
+        let mut ignored = false;
+        for rule in &self.rules {
+            if rule.directory_only && !is_dir {
+                continue;
+            }
+            if gitignore_basename_matches(&rule.pattern, name) {
+                ignored = !rule.negated;
+            }
+        }
+        ignored
+    }
+}
+
+fn gitignore_rules_for_dir(dir: &Path) -> WorkspaceIgnoreRules {
+    let mut rules = WorkspaceIgnoreRules::default();
+    let Ok(content) = std::fs::read_to_string(dir.join(".gitignore")) else {
+        return rules;
     };
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with('#')
-            || trimmed.starts_with('!')
-            || trimmed.contains('*')
-        {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let pattern = trimmed.trim_start_matches('/').trim_end_matches('/');
+        let negated = trimmed.starts_with('!');
+        let body = if negated {
+            trimmed[1..].trim()
+        } else {
+            trimmed
+        };
+        if body.is_empty() {
+            continue;
+        }
+        let directory_only = body.ends_with('/');
+        let pattern = body.trim_start_matches('/').trim_end_matches('/');
         if pattern.is_empty() || pattern.contains('/') {
             continue;
         }
-        dirs.insert(pattern.to_string());
+        rules.rules.push(WorkspaceIgnoreRule {
+            pattern: pattern.to_string(),
+            directory_only,
+            negated,
+        });
     }
 
-    dirs
+    rules
+}
+
+fn gitignore_basename_matches(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    if pattern == "*" {
+        return true;
+    }
+
+    let mut remaining = name;
+    let mut parts = pattern.split('*').peekable();
+    let mut first_part = true;
+
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            first_part = false;
+            continue;
+        }
+        if first_part && !pattern.starts_with('*') {
+            let Some(next_remaining) = remaining.strip_prefix(part) else {
+                return false;
+            };
+            remaining = next_remaining;
+        } else if parts.peek().is_none() && !pattern.ends_with('*') {
+            return remaining.ends_with(part);
+        } else {
+            let Some(index) = remaining.find(part) else {
+                return false;
+            };
+            remaining = &remaining[index + part.len()..];
+        }
+        first_part = false;
+    }
+
+    pattern.ends_with('*') || remaining.is_empty()
 }
 
 fn safe_workspace_child(root: &Path, child: &Path) -> Result<PathBuf> {
@@ -268,6 +991,7 @@ fn run() -> Result<()> {
             depth,
             max_entries,
         } => run_workspace_tree(&root, &dir, depth, max_entries),
+        Mode::McpSessionSidecar => run_mcp_session_sidecar(),
     }
 }
 
@@ -525,11 +1249,122 @@ mod tests {
             .items
             .iter()
             .all(|item| !item.path.starts_with("node_modules")));
-        assert!(tree.items.iter().all(|item| !item.path.starts_with("target")));
+        assert!(tree
+            .items
+            .iter()
+            .all(|item| !item.path.starts_with("target")));
         assert!(tree
             .items
             .iter()
             .all(|item| !item.path.starts_with("tmp-cache")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_honors_root_gitignore_file_patterns() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-gitignore-files-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("logs")).unwrap();
+        fs::write(root.join(".gitignore"), "*.log\nsecrets.local\nlogs/\n").unwrap();
+        fs::write(root.join("README.md"), "hello").unwrap();
+        fs::write(root.join("debug.log"), "ignored").unwrap();
+        fs::write(root.join("secrets.local"), "ignored").unwrap();
+        fs::write(root.join("logs").join("debug.txt"), "ignored").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+
+        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["README.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_honors_gitignore_negation_rules() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-gitignore-negation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".gitignore"), "*.log\n!keep.log\n").unwrap();
+        fs::write(root.join("README.md"), "hello").unwrap();
+        fs::write(root.join("debug.log"), "ignored").unwrap();
+        fs::write(root.join("keep.log"), "kept").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+
+        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["keep.log", "README.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_honors_nested_gitignore_rules() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-nested-gitignore-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src").join("private")).unwrap();
+        fs::write(
+            root.join("src").join(".gitignore"),
+            "generated.tmp\nprivate/\n",
+        )
+        .unwrap();
+        fs::write(root.join("src").join("README.md"), "hello").unwrap();
+        fs::write(root.join("src").join("generated.tmp"), "ignored").unwrap();
+        fs::write(root.join("src").join("private").join("note.txt"), "ignored").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 2, 20).unwrap();
+
+        let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(paths, vec!["src", "src/README.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_marks_truncated_when_max_entries_is_reached() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-truncated-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+        fs::write(root.join("c.txt"), "c").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 1, 2).unwrap();
+
+        assert_eq!(tree.items.len(), 2);
+        assert!(tree.truncated);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_signature_changes_when_metadata_changes() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-signature-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("README.md"), "hello").unwrap();
+
+        let first = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+        fs::write(root.join("README.md"), "hello with more bytes").unwrap();
+        let second = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+
+        assert!(!first.signature.is_empty());
+        assert_ne!(first.signature, second.signature);
 
         let _ = fs::remove_dir_all(&root);
     }

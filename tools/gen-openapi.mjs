@@ -259,6 +259,28 @@ const paths = {
               }
             }
           }
+        },
+        rustSidecar: {
+          type: "object",
+          properties: {
+            enabled: { type: "boolean" },
+            command: { type: "string" },
+            args: { type: "array", items: { type: "string" } },
+            starts: { type: "integer" },
+            failures: { type: "integer" },
+            fallbacks: { type: "integer" },
+            lastFailureAt: { type: "string" },
+            lastError: { type: "string" },
+            client: {
+              type: "object",
+              properties: {
+                pending: { type: "integer" },
+                maxPendingRequests: { type: "integer" },
+                terminated: { type: "boolean" },
+                stderr: { type: "string" }
+              }
+            }
+          }
         }
       }
     }

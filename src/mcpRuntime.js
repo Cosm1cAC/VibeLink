@@ -1,12 +1,22 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { storeMcpTools, getCachedMcpTools } from "./db.js";
 import { codebaseMemoryServerConfig, mergeCodebaseMemoryServer, withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 import { createMcpSessionManager } from "./mcpSessionManager.js";
+import { createMcpSessionSidecarClient } from "./mcpSessionSidecarClient.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const MAX_TOOL_DESCRIPTION = 2048;
 const MAX_STDIO_BUFFER = 1024 * 1024;
 let persistentMcpSessions = null;
+let rustMcpSidecar = null;
+const rustMcpSidecarStats = {
+  starts: 0,
+  failures: 0,
+  fallbacks: 0,
+  lastFailureAt: "",
+  lastError: ""
+};
 
 function nowIso() {
   return new Date().toISOString();
@@ -128,28 +138,100 @@ export function isMcpPersistentSessionsEnabled() {
   return process.env.VIBELINK_MCP_PERSISTENT_SESSIONS === "1";
 }
 
+export function isMcpRustSidecarEnabled() {
+  return process.env.VIBELINK_MCP_RUST_SIDECAR === "1";
+}
+
 function mcpSessionManager() {
   if (!persistentMcpSessions) persistentMcpSessions = createMcpSessionManager();
   return persistentMcpSessions;
 }
 
+function mcpRustSidecarCommand() {
+  if (process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND) return process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND;
+  return path.join(
+    process.cwd(),
+    "apps",
+    "windows",
+    "target",
+    "debug",
+    process.platform === "win32" ? "vibelink.exe" : "vibelink"
+  );
+}
+
+function mcpRustSidecarArgs() {
+  if (!process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON) return ["mcp-session-sidecar"];
+  try {
+    const parsed = JSON.parse(process.env.VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON);
+    return Array.isArray(parsed) ? parsed.map(String) : ["mcp-session-sidecar"];
+  } catch {
+    return ["mcp-session-sidecar"];
+  }
+}
+
+function mcpRustSidecarClient(timeoutMs = 10000) {
+  if (!rustMcpSidecar) {
+    rustMcpSidecar = createMcpSessionSidecarClient({
+      command: mcpRustSidecarCommand(),
+      args: mcpRustSidecarArgs(),
+      timeoutMs
+    });
+    rustMcpSidecarStats.starts += 1;
+  }
+  return rustMcpSidecar;
+}
+
+async function closeRustMcpSidecar() {
+  if (!rustMcpSidecar) return;
+  const client = rustMcpSidecar;
+  rustMcpSidecar = null;
+  await client.close().catch(() => {});
+}
+
 export async function closePersistentMcpSessions() {
-  if (!persistentMcpSessions) return;
-  await persistentMcpSessions.closeAll();
-  persistentMcpSessions = null;
+  if (persistentMcpSessions) {
+    await persistentMcpSessions.closeAll();
+    persistentMcpSessions = null;
+  }
+  await closeRustMcpSidecar();
 }
 
 export async function closeIdlePersistentMcpSessions(options = {}) {
-  if (!persistentMcpSessions) return { closed: 0, remaining: 0 };
-  const result = await persistentMcpSessions.closeIdleSessions(options);
-  if (result.remaining === 0) persistentMcpSessions = null;
-  return result;
+  let closed = 0;
+  let remaining = 0;
+  if (persistentMcpSessions) {
+    const result = await persistentMcpSessions.closeIdleSessions(options);
+    closed += Number(result.closed || 0);
+    remaining += Number(result.remaining || 0);
+    if (result.remaining === 0) persistentMcpSessions = null;
+  }
+  if (rustMcpSidecar) {
+    const result = await rustMcpSidecar.closeIdleSessions(options).catch(() => ({ closed: 0, remaining: 0 }));
+    closed += Number(result.closed || 0);
+    remaining += Number(result.remaining || 0);
+    if (result.remaining === 0) await closeRustMcpSidecar();
+  }
+  return { closed, remaining };
 }
 
 export function getPersistentMcpSessionStats() {
   return {
     enabled: isMcpPersistentSessionsEnabled(),
     ...(persistentMcpSessions?.stats() || { sessions: 0 })
+  };
+}
+
+export function getMcpRustSidecarStats() {
+  return {
+    enabled: isMcpRustSidecarEnabled(),
+    command: isMcpRustSidecarEnabled() ? mcpRustSidecarCommand() : "",
+    args: isMcpRustSidecarEnabled() ? mcpRustSidecarArgs() : [],
+    starts: rustMcpSidecarStats.starts,
+    failures: rustMcpSidecarStats.failures,
+    fallbacks: rustMcpSidecarStats.fallbacks,
+    lastFailureAt: rustMcpSidecarStats.lastFailureAt,
+    lastError: rustMcpSidecarStats.lastError,
+    client: rustMcpSidecar?.stats() || { pending: 0, terminated: true }
   };
 }
 
@@ -374,6 +456,21 @@ async function probePersistentStdioServer(server, timeoutMs, emitProgress) {
   };
 }
 
+async function probeRustSidecarStdioServer(server, timeoutMs, emitProgress) {
+  emitProgress?.({ phase: "rust-sidecar.probe", serverId: server.id, name: server.name });
+  const result = await mcpRustSidecarClient(timeoutMs).probeStdioServer(server, { timeoutMs });
+  return {
+    ok: true,
+    transport: "stdio",
+    sidecar: "rust",
+    protocolVersion: result.protocolVersion || "",
+    serverInfo: result.serverInfo || null,
+    capabilities: result.capabilities || null,
+    tools: (Array.isArray(result.tools) ? result.tools : []).map((tool) => normalizeTool(server.name, tool)),
+    stderr: result.stderr || ""
+  };
+}
+
 async function callStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
   if (!server.command) throw new Error("MCP stdio server command is empty.");
   let nextId = 1;
@@ -469,6 +566,53 @@ async function callPersistentStdioTool(server, toolName, toolArguments, timeoutM
   return { result, stderr: session.stats().stderr || "" };
 }
 
+async function callRustSidecarStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
+  emitProgress?.({ phase: "rust-sidecar.call", serverId: server.id, name: server.name, toolName });
+  const result = await mcpRustSidecarClient(timeoutMs).callTool(server, toolName, toolArguments || {}, { timeoutMs });
+  return { result, stderr: mcpRustSidecarClient(timeoutMs).stats().stderr || "", sidecar: "rust" };
+}
+
+function recordRustSidecarFailure(error) {
+  rustMcpSidecarStats.failures += 1;
+  rustMcpSidecarStats.fallbacks += 1;
+  rustMcpSidecarStats.lastFailureAt = nowIso();
+  rustMcpSidecarStats.lastError = compact(error?.message || error, 1000);
+}
+
+async function fallbackProbeStdioServer(server, timeoutMs, emitProgress) {
+  return isMcpPersistentSessionsEnabled()
+    ? probePersistentStdioServer(server, timeoutMs, emitProgress)
+    : probeStdioServer(server, timeoutMs, emitProgress);
+}
+
+async function fallbackCallStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
+  return isMcpPersistentSessionsEnabled()
+    ? callPersistentStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress)
+    : callStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress);
+}
+
+async function probeConfiguredStdioServer(server, timeoutMs, emitProgress) {
+  if (!isMcpRustSidecarEnabled()) return fallbackProbeStdioServer(server, timeoutMs, emitProgress);
+  try {
+    return await probeRustSidecarStdioServer(server, timeoutMs, emitProgress);
+  } catch (error) {
+    recordRustSidecarFailure(error);
+    await closeRustMcpSidecar();
+    return fallbackProbeStdioServer(server, timeoutMs, emitProgress);
+  }
+}
+
+async function callConfiguredStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
+  if (!isMcpRustSidecarEnabled()) return fallbackCallStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress);
+  try {
+    return await callRustSidecarStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress);
+  } catch (error) {
+    recordRustSidecarFailure(error);
+    await closeRustMcpSidecar();
+    return fallbackCallStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress);
+  }
+}
+
 export async function probeMcpServer(server = {}, { timeoutMs = 10000, emitProgress = null } = {}) {
   const startedAt = nowIso();
   const normalized = {
@@ -492,9 +636,7 @@ export async function probeMcpServer(server = {}, { timeoutMs = 10000, emitProgr
 
   try {
     const result = normalized.type === "stdio"
-      ? isMcpPersistentSessionsEnabled()
-        ? await probePersistentStdioServer(normalized, timeoutMs, emitProgress)
-        : await probeStdioServer(normalized, timeoutMs, emitProgress)
+      ? await probeConfiguredStdioServer(normalized, timeoutMs, emitProgress)
       : await probeHttpServer(normalized, timeoutMs, emitProgress);
     return {
       ...result,
@@ -592,9 +734,7 @@ export async function callMcpTool(settings = {}, call = {}, { timeoutMs = 0, emi
   try {
     emitProgress?.({ phase: "tool.call.start", serverId: server.id, name: server.name, toolName });
     const resultEnvelope = server.type === "stdio"
-      ? isMcpPersistentSessionsEnabled()
-        ? await callPersistentStdioTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress)
-        : await callStdioTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress)
+      ? await callConfiguredStdioTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress)
       : { result: await callHttpTool(server, toolName, call.arguments || call.args || {}, effectiveTimeout, emitProgress) };
     const result = resultEnvelope.result || {};
     const content = Array.isArray(result.content) ? result.content : [];
@@ -643,6 +783,7 @@ export function mcpStatus(settings = {}) {
     servers,
     cachedTools: cachedCount,
     persistentSessions: getPersistentMcpSessionStats(),
+    rustSidecar: getMcpRustSidecarStats(),
     probeTimeoutMs: settings.mcp?.probeTimeoutMs || 10000
   };
 }

@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
-import { once } from "node:events";
-import readline from "node:readline";
+
+import { eventStoreErrorFromPayload } from "./eventStoreContract.js";
+
+const MAX_STDIO_BUFFER = 1024 * 1024;
 
 function maxPendingRequestsValue(value = process.env.VIBELINK_EVENT_STORE_SIDECAR_MAX_PENDING_REQUESTS) {
   const parsed = Number(value);
@@ -12,120 +14,132 @@ function backpressureError(method, maxPendingRequests) {
   const error = new Error(
     `Event store sidecar backpressure: ${method} rejected because ${maxPendingRequests} request(s) are already pending.`
   );
-  error.code = "EEVENTSTORESIDECARBACKPRESSURE";
+  error.code = "EEVENTSTOREBACKPRESSURE";
   error.maxPendingRequests = maxPendingRequests;
   return error;
 }
 
-function sidecarError(payload = {}) {
-  const error = new Error(payload.message || "Event store sidecar request failed.");
-  error.name = payload.name || "Error";
-  if (payload.stack) error.stack = payload.stack;
-  if (payload.code) error.code = payload.code;
-  return error;
-}
-
-function splitCommand(command, args = []) {
-  if (Array.isArray(args) && args.length > 0) return { command, args };
-  return { command, args: [] };
+function sidecarExitError(code, signal, stderr) {
+  const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+  const suffix = stderr ? ` Stderr: ${stderr}` : "";
+  return new Error(`Event store sidecar exited before replying (${reason}).${suffix}`);
 }
 
 export function createEventStoreSidecarClient({
-  command = process.env.VIBELINK_EVENT_STORE_SIDECAR_BIN,
+  command,
   args = [],
-  dbPath,
+  cwd = process.cwd(),
+  env = process.env,
   timeoutMs = 10000,
-  maxPendingRequests = maxPendingRequestsValue(),
-  env = process.env
+  maxPendingRequests = maxPendingRequestsValue()
 } = {}) {
   if (!command) throw new TypeError("createEventStoreSidecarClient requires command.");
-  if (!dbPath) throw new TypeError("createEventStoreSidecarClient requires dbPath.");
 
-  const commandSpec = splitCommand(command, args);
-  const child = spawn(commandSpec.command, commandSpec.args, {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...env, VIBELINK_EVENT_STORE_DB_PATH: dbPath }
+  const child = spawn(command, Array.isArray(args) ? args : [], {
+    cwd,
+    env,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"]
   });
   const pending = new Map();
   let nextId = 1;
-  let closed = false;
+  let terminated = false;
+  let stdout = "";
   let stderr = "";
 
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk) => {
-    stderr = `${stderr}${chunk}`.slice(-4000);
-  });
-
-  const reader = readline.createInterface({ input: child.stdout });
-  reader.on("line", (line) => {
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      return;
-    }
-    const request = pending.get(message.id);
-    if (!request) return;
-    pending.delete(message.id);
-    clearTimeout(request.timer);
-    if (message.error) request.reject(sidecarError(message.error));
-    else request.resolve(message.result);
-  });
-
   function rejectPending(error) {
-    for (const request of pending.values()) {
-      clearTimeout(request.timer);
-      request.reject(error);
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
     }
     pending.clear();
   }
 
-  child.on("error", (error) => {
-    closed = true;
-    rejectPending(error);
-  });
+  function resolveMessage(message = {}) {
+    const request = pending.get(message.id);
+    if (!request) return;
+    pending.delete(message.id);
+    clearTimeout(request.timer);
+    if (message.error) request.reject(eventStoreErrorFromPayload(message.error));
+    else request.resolve(message.result);
+  }
 
-  child.on("exit", (code) => {
-    closed = true;
-    if (pending.size > 0) {
-      rejectPending(new Error(`Event store sidecar exited before replying (code ${code}). ${stderr}`.trim()));
+  child.stdout?.on("data", (chunk) => {
+    stdout += chunk.toString();
+    if (stdout.length > MAX_STDIO_BUFFER) stdout = stdout.slice(-MAX_STDIO_BUFFER);
+    let newline = stdout.indexOf("\n");
+    while (newline >= 0) {
+      const line = stdout.slice(0, newline).trim();
+      stdout = stdout.slice(newline + 1);
+      if (line) {
+        try {
+          resolveMessage(JSON.parse(line));
+        } catch (error) {
+          error.message = `Event store sidecar returned invalid JSON: ${error.message}`;
+          rejectPending(error);
+        }
+      }
+      newline = stdout.indexOf("\n");
     }
   });
 
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString();
+    if (stderr.length > MAX_STDIO_BUFFER) stderr = stderr.slice(-MAX_STDIO_BUFFER);
+  });
+
+  child.on("error", (error) => {
+    terminated = true;
+    rejectPending(error);
+  });
+
+  child.on("exit", (code, signal) => {
+    terminated = true;
+    if (pending.size > 0) rejectPending(sidecarExitError(code, signal, stderr.trim()));
+  });
+
   function request(method, requestArgs = [], options = {}) {
-    if (closed) return Promise.reject(new Error("Event store sidecar is closed."));
+    if (terminated) return Promise.reject(new Error("Event store sidecar is closed."));
     const pendingLimit = maxPendingRequestsValue(options.maxPendingRequests ?? maxPendingRequests);
     if (pending.size >= pendingLimit) return Promise.reject(backpressureError(method, pendingLimit));
     const timeout = Math.max(1, Number(options.timeout || timeoutMs));
     const id = nextId++;
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`Event store sidecar request timed out: ${method}`));
       }, timeout);
       pending.set(id, { resolve, reject, timer });
-      child.stdin.write(`${JSON.stringify({ id, method, args: requestArgs })}\n`, "utf8", (error) => {
+      child.stdin.write(`${JSON.stringify({ id, method, args: Array.isArray(requestArgs) ? requestArgs : [] })}\n`, "utf8", (error) => {
         if (!error) return;
-        clearTimeout(timer);
         pending.delete(id);
+        clearTimeout(timer);
         reject(error);
       });
     });
   }
 
   async function close() {
-    if (closed) return;
+    if (terminated) return;
     try {
       await request("__close", [], { timeout: 2000 });
-    } catch {}
-    closed = true;
-    child.kill();
-    await once(child, "exit").catch(() => {});
+    } catch {
+      // The sidecar may already be exiting; kill below is the hard stop.
+    }
+    terminated = true;
+    try { child.stdin?.end(); } catch {}
+    if (!child.killed) child.kill();
   }
 
   return {
     request,
-    stats: () => ({ pending: pending.size, maxPendingRequests: maxPendingRequestsValue(maxPendingRequests), terminated: closed, stderr }),
+    stats: () => ({
+      pending: pending.size,
+      maxPendingRequests: maxPendingRequestsValue(maxPendingRequests),
+      terminated,
+      stderr: stderr.trim()
+    }),
     insertTaskEvent: (taskId, event) => request("insertTaskEvent", [taskId, event]),
     insertTaskEvents: (taskId, events) => request("insertTaskEvents", [taskId, events]),
     listTaskEvents: (taskId, options) => request("listTaskEvents", [taskId, options]),

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +24,15 @@ function writeRustScannerStub(dir) {
     "utf8"
   );
   return scanner;
+}
+
+function cargoPath() {
+  if (process.platform === "win32") {
+    const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
+    return result.status === 0 ? String(result.stdout || "").split(/\r?\n/).find(Boolean) || "" : "";
+  }
+  const result = spawnSync("sh", ["-lc", "command -v cargo"], { encoding: "utf8", windowsHide: true });
+  return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
 }
 
 test("getWorkspaceTree uses Rust scanner when explicitly enabled", async () => {
@@ -107,6 +117,46 @@ test("getWorkspaceContext uses Rust scanner for directory samples when enabled",
     assert.equal(result.ok, true);
     assert.match(result.prompt, /file src\/from-rust\.txt/);
     assert.doesNotMatch(result.prompt, /file src\/local\.txt/);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceContext applies nested gitignore rules through real Rust scanner", async (t) => {
+  const cargo = cargoPath();
+  if (!cargo) t.skip("cargo is not available");
+
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-context-real-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "src", "private"), { recursive: true });
+  fs.writeFileSync(path.join(fixture, "src", ".gitignore"), "generated.tmp\nprivate/\n", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "README.md"), "hello", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "generated.tmp"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "private", "note.txt"), "ignored", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-context-real" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = cargo;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([
+    "run",
+    "--quiet",
+    "--manifest-path",
+    path.join(process.cwd(), "apps", "windows", "Cargo.toml"),
+    "--"
+  ]);
+
+  try {
+    const result = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["src"] });
+    assert.equal(result.ok, true);
+    assert.match(result.prompt, /file src\/README\.md/);
+    assert.doesNotMatch(result.prompt, /generated\.tmp/);
+    assert.doesNotMatch(result.prompt, /private\/note\.txt/);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);

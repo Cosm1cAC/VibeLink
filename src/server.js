@@ -121,10 +121,11 @@ ensureDefaultWorkspaces(settings);
 restoreTasks();
 const restoredLiveCallSessions = restoreLiveCallSessions();
 for (const sessionId of restoredLiveCallSessions) {
-  setLiveCallQuestionHook(sessionId, (question, sess) => {
+  setLiveCallQuestionHook(sessionId, (question, sess, questionEvent) => {
     dispatchLiveCallQuestion({
       sessionId: sess.id,
       question,
+      questionEvent,
       history: collectLiveCallHistory(sess),
       settings
     }).catch((error) => console.error("[liveCallAgent] dispatch failed:", error.message));
@@ -2168,10 +2169,11 @@ async function routeApi(request, response, url) {
     });
     audit(request, url, auth, { type: "live_call.create", success: true, target: session.id, meta: { source: session.source } });
     if (session?.id) {
-      setLiveCallQuestionHook(session.id, (question, sess) => {
+      setLiveCallQuestionHook(session.id, (question, sess, questionEvent) => {
         dispatchLiveCallQuestion({
           sessionId: sess.id,
           question,
+          questionEvent,
           history: collectLiveCallHistory(sess),
           settings,
           agent: body.agent || "claude",

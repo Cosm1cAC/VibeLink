@@ -29,6 +29,20 @@ import kotlinx.coroutines.launch
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 
+data class PendingPromptRetry(
+    val prompt: String,
+    val agent: String,
+    val model: String = "",
+    val reasoningEffort: String = "",
+    val cwd: String = "",
+)
+
+data class PendingApprovalState(
+    val approvalId: String,
+    val message: String,
+    val retry: PendingPromptRetry? = null,
+)
+
 class MessageListViewModel : ViewModel() {
 
     private val gson = Gson()
@@ -63,6 +77,9 @@ class MessageListViewModel : ViewModel() {
     private val _providerRegistry = MutableStateFlow(ProviderRegistryResponse())
     val providerRegistry: StateFlow<ProviderRegistryResponse> = _providerRegistry.asStateFlow()
 
+    private val _pendingApproval = MutableStateFlow<PendingApprovalState?>(null)
+    val pendingApproval: StateFlow<PendingApprovalState?> = _pendingApproval.asStateFlow()
+
     private var taskEventSource: EventSource? = null
     private var toolEventSource: EventSource? = null
     private var pollJob: Job? = null
@@ -87,6 +104,7 @@ class MessageListViewModel : ViewModel() {
             _running.value = false
             _sending.value = false
             _currentTaskId.value = if (conversation.kind == "task") conversation.id else ""
+            _pendingApproval.value = null
             _remoteReady.value = false
             _remoteStatus.value = ""
             _title.value = conversation.title.ifBlank { titleForKind(conversation.kind) }
@@ -148,6 +166,7 @@ class MessageListViewModel : ViewModel() {
         val conversation = activeConversation ?: return
         val trimmed = prompt.trim()
         if (trimmed.isBlank() || _sending.value) return
+        val retry = PendingPromptRetry(trimmed, agent, model, reasoningEffort, cwd)
 
         viewModelScope.launch {
             _sending.value = true
@@ -163,9 +182,40 @@ class MessageListViewModel : ViewModel() {
                     else -> createOrResumeTask(apiClient, conversation, trimmed, agent, model, reasoningEffort, cwd)
                 }
             } catch (error: ApiException) {
-                appendError(TaskApprovalHandoff.messageFor(error))
+                val notice = TaskApprovalHandoff.noticeFromException(error)
+                if (notice != null) appendApprovalNotice(notice, retry)
+                else appendError(TaskApprovalHandoff.messageFor(error))
             } catch (error: Exception) {
                 appendError(error.message ?: "Failed to send prompt")
+            } finally {
+                _sending.value = false
+            }
+        }
+    }
+
+    fun retryPendingApproval(apiClient: ApiClient) {
+        val retry = _pendingApproval.value?.retry ?: return
+        val conversation = activeConversation ?: return
+        if (_sending.value) return
+        viewModelScope.launch {
+            _sending.value = true
+            _error.value = ""
+            try {
+                createOrResumeTask(
+                    apiClient = apiClient,
+                    conversation = conversation,
+                    prompt = retry.prompt,
+                    agent = retry.agent,
+                    model = retry.model,
+                    reasoningEffort = retry.reasoningEffort,
+                    cwdOverride = retry.cwd,
+                )
+            } catch (error: ApiException) {
+                val notice = TaskApprovalHandoff.noticeFromException(error)
+                if (notice != null) appendApprovalNotice(notice, retry)
+                else appendError(TaskApprovalHandoff.messageFor(error))
+            } catch (error: Exception) {
+                appendError(error.message ?: "Failed to retry prompt")
             } finally {
                 _sending.value = false
             }
@@ -305,10 +355,12 @@ class MessageListViewModel : ViewModel() {
             else -> ""
         }
         val mode = if (resumeSessionId.isNotBlank()) "resume" else "new"
+        val resolvedAgent = agent.ifBlank { conversation.provider.ifBlank { "codex" } }
+        val resolvedCwd = cwdOverride.ifBlank { conversation.cwd }
         val response = apiClient.createTask(
             prompt = prompt,
-            cwd = cwdOverride.ifBlank { conversation.cwd },
-            agent = agent.ifBlank { conversation.provider.ifBlank { "codex" } },
+            cwd = resolvedCwd,
+            agent = resolvedAgent,
             model = model.trim(),
             title = conversation.title.ifBlank { prompt.take(80) },
             mode = mode,
@@ -316,13 +368,17 @@ class MessageListViewModel : ViewModel() {
             reasoningEffort = reasoningEffort.trim(),
         )
         TaskApprovalHandoff.noticeFromResponse(response)?.let { notice ->
-            appendError(notice.message)
+            appendApprovalNotice(
+                notice,
+                PendingPromptRetry(prompt, resolvedAgent, model, reasoningEffort, resolvedCwd),
+            )
             return
         }
         if (response.id.isBlank()) {
             appendError(response.error.ifBlank { "Task was created but no task id was returned." })
             return
         }
+        _pendingApproval.value = null
         _currentTaskId.value = response.id
         _running.value = true
         val nextConversation = conversation.copy(
@@ -454,6 +510,11 @@ class MessageListViewModel : ViewModel() {
         if (text.isBlank()) return
         _messages.value = appendDisplayMessages(_messages.value, ChatMessage(role = "error", text = text))
         _error.value = text
+    }
+
+    private fun appendApprovalNotice(notice: ApprovalNotice, retry: PendingPromptRetry?) {
+        _pendingApproval.value = PendingApprovalState(notice.approvalId, notice.message, retry)
+        appendError(notice.message)
     }
 
     companion object {
@@ -701,14 +762,18 @@ object TaskApprovalHandoff {
         return ApprovalNotice(approvalId, approvalMessage(approvalId, response.error))
     }
 
-    fun messageFor(error: ApiException): String {
-        if (error.statusCode != 428) return error.body.ifBlank { "HTTP ${error.statusCode}" }
+    fun noticeFromException(error: ApiException): ApprovalNotice? {
+        if (error.statusCode != 428) return null
         val json = parseObject(error.body)
         val approvalId = stringMember(json, "approvalId").ifBlank {
             stringMember(json?.getAsJsonObject("approval"), "id")
         }
         val reason = stringMember(json, "error")
-        return approvalMessage(approvalId, reason)
+        return ApprovalNotice(approvalId, approvalMessage(approvalId, reason))
+    }
+
+    fun messageFor(error: ApiException): String {
+        return noticeFromException(error)?.message ?: error.body.ifBlank { "HTTP ${error.statusCode}" }
     }
 
     private fun approvalMessage(approvalId: String, reason: String): String {

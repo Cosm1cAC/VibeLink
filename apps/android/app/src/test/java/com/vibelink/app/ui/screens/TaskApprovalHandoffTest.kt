@@ -9,10 +9,12 @@ import kotlin.test.assertNotNull
 class TaskApprovalHandoffTest {
     @Test
     fun extractsApprovalIdFromHttp428Body() {
-        val message = TaskApprovalHandoff.messageFor(
-            ApiException(428, "{\"error\":\"requires explicit approval\",\"approvalId\":\"ap-123\"}"),
-        )
+        val error = ApiException(428, "{\"error\":\"requires explicit approval\",\"approvalId\":\"ap-123\"}")
+        val notice = TaskApprovalHandoff.noticeFromException(error)
+        val message = TaskApprovalHandoff.messageFor(error)
 
+        assertNotNull(notice)
+        assertContains(notice.message, "ap-123")
         assertContains(message, "ap-123")
         assertContains(message, "Settings > Approvals")
         assertContains(message, "retry")

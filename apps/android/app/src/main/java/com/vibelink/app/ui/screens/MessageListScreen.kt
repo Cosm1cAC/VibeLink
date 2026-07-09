@@ -73,7 +73,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ChatMessage
-import com.vibelink.app.ui.screens.PendingApprovalState
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.ProviderDefinition
 import com.vibelink.app.network.ProviderRegistryResponse
@@ -90,6 +89,9 @@ fun MessageListScreen(
     onBack: () -> Unit,
     onOpenApprovals: () -> Unit = {},
     onOpenLiveCall: () -> Unit = {},
+    promptHistory: List<String> = emptyList(),
+    onRememberPrompt: (String) -> Unit = {},
+    onClearPromptHistory: () -> Unit = {},
 ) {
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -194,11 +196,15 @@ fun MessageListScreen(
                     providers = selectableProviders,
                     onToggleOptions = { showOptions = !showOptions },
                     onOpenLiveCall = onOpenLiveCall,
+                    promptHistory = promptHistory,
+                    onUseHistoryPrompt = { prompt = it },
+                    onClearPromptHistory = onClearPromptHistory,
                     running = running,
                     sending = sending,
                     canSend = canSend,
                     onSend = {
                         val text = prompt
+                        onRememberPrompt(text)
                         prompt = ""
                         viewModel.sendPrompt(
                             apiClient = apiClient,
@@ -291,6 +297,9 @@ private fun ComposerBar(
     providers: List<ProviderDefinition>,
     onToggleOptions: () -> Unit,
     onOpenLiveCall: () -> Unit,
+    promptHistory: List<String>,
+    onUseHistoryPrompt: (String) -> Unit,
+    onClearPromptHistory: () -> Unit,
     running: Boolean,
     sending: Boolean,
     canSend: Boolean,
@@ -315,6 +324,25 @@ private fun ComposerBar(
                 }
             } else {
                 AssistChip(onClick = {}, label = { Text("Codex Remote uses the current Codex Desktop settings") })
+            }
+
+            if (!isDesktopRemote && promptHistory.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Recent prompts", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = onClearPromptHistory) { Text("Clear") }
+                }
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(promptHistory.take(6), key = { it }) { item ->
+                        AssistChip(
+                            onClick = { onUseHistoryPrompt(item) },
+                            label = { Text(item, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        )
+                    }
+                }
             }
 
             if (showOptions && !isDesktopRemote) {

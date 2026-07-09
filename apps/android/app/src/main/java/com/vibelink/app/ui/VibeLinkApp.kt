@@ -117,6 +117,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                     navController.popBackStack()
                 },
                 onOpenApprovals = { navController.navigate("settings") },
+                onOpenLiveCall = { navController.navigate("call") },
             )
         }
 

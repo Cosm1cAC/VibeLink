@@ -95,12 +95,7 @@ class MessageListViewModel : ViewModel() {
                 loadProviderRegistry(apiClient)
                 when (conversation.kind) {
                     "new" -> {
-                        _messages.value = listOf(
-                            ChatMessage(
-                                role = "system",
-                                text = "Start a VibeLink Agent task. You can choose Codex, Claude, Doubao, or GLM before sending.",
-                            ),
-                        )
+                        _messages.value = emptyList()
                     }
                     "desktop" -> loadDesktopRemote(apiClient, seq, fresh = true)
                     "task" -> loadTask(apiClient, conversation, seq)
@@ -508,7 +503,16 @@ class MessageListViewModel : ViewModel() {
         fun mergeMessages(current: List<ChatMessage>, incoming: List<ChatMessage>): List<ChatMessage> {
             if (current.isEmpty()) return incoming
             if (incoming.isEmpty()) return current
-            return current + incoming
+            val merged = current.toMutableList()
+            for (message in incoming) {
+                val last = merged.lastOrNull()
+                if (last != null && canMergeAssistantText(last, message)) {
+                    merged[merged.lastIndex] = last.copy(text = listOf(last.text, message.text).filter { it.isNotBlank() }.joinToString(""))
+                } else {
+                    merged += message
+                }
+            }
+            return merged
         }
 
         fun appendDisplayMessages(current: List<ChatMessage>, message: ChatMessage): List<ChatMessage> {
@@ -517,6 +521,15 @@ class MessageListViewModel : ViewModel() {
                     (it.text.startsWith("Start a VibeLink Agent task") || it.text == "No messages in this history.")
             }
             return seed + message
+        }
+
+        private fun canMergeAssistantText(previous: ChatMessage, next: ChatMessage): Boolean {
+            return previous.role == "assistant" &&
+                next.role == "assistant" &&
+                previous.toolCalls.isEmpty() &&
+                next.toolCalls.isEmpty() &&
+                previous.text.isNotBlank() &&
+                next.text.isNotBlank()
         }
 
         fun toolCallFromEvents(runId: String, events: List<ToolEvent>): ToolCallSummary {

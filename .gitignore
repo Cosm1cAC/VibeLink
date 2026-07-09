@@ -18,7 +18,8 @@ apps/android/gradlew.bat
 *.idsig
 public/assets/
 reference/
-tools/whisper-cpp/models/*.bin
+tools/whisper-cpp/bin/
+tools/whisper-cpp/models/
 tools/whisper-cpp/source/
 tools/whisper-cpp/build/
 apps/windows/target/

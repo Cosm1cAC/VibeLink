@@ -60,3 +60,7 @@ gh issue list --repo owner/repo --json number,title --jq '.[] | "\(.number): \(.
 | gh CLI | agent-reach | Git 操作 |
 | zread | my-mcp-tools | 读仓库内容 |
 | context7 | my-mcp-tools | 查技术文档 |
+
+### Remote Git publishing fallback
+
+When `git push` to GitHub fails because HTTPS to `github.com` is reset or blocked, check `gh auth status` and use `gh api` against `api.github.com` before giving up. For committed local changes, create Git blobs/trees/commits through the Git Database API, then create or patch `refs/heads/<branch>` with `gh api`. Treat `gh` as the preferred authenticated GitHub control plane for repository publishing, PRs, Actions, and API recovery workflows.

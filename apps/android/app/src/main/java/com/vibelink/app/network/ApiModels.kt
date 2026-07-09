@@ -418,6 +418,15 @@ data class CommandResult(
     val stdout: String = "",
     val stderr: String = "",
     @SerializedName("exitCode") val exitCode: Int = 0,
+    val test: TestSummary? = null,
+)
+
+data class TestSummary(
+    val ok: Boolean = false,
+    val passed: Int = 0,
+    val failed: Int = 0,
+    val failures: List<String> = emptyList(),
+    val log: String = "",
 )
 
 

@@ -500,6 +500,10 @@ data class ConversationItem(
 data class ChatMessage(
     val role: String = "",         // "user" | "assistant" | "system" | "error"
     val text: String = "",
+    val id: String = "",
+    @SerializedName("turnId") val turnId: String = "",
+    @SerializedName("taskId") val taskId: String = "",
+    val streaming: Boolean = false,
     val toolCalls: List<ToolCallSummary> = emptyList(),
     @SerializedName("toolCallCount") val toolCallCount: Int = 0,
 )

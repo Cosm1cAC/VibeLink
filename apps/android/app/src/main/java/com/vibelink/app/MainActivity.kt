@@ -1,6 +1,9 @@
 package com.vibelink.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,7 +18,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val sharedText = intent?.takeIf { it.action == Intent.ACTION_SEND }?.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+        requestNotificationPermissionIfNeeded()
+        val sharedText = sharedContentText(intent)
         setContent {
             VibeLinkTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -26,5 +30,26 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
+    }
+
+    private fun sharedContentText(intent: Intent?): String {
+        if (intent?.action != Intent.ACTION_SEND) return ""
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().trim()
+        val stream = intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+        val type = intent.type.orEmpty()
+        return listOfNotNull(
+            text.takeIf { it.isNotBlank() },
+            stream?.let { uri -> "Shared ${type.ifBlank { "file" }}: $uri" },
+        ).joinToString("\n")
+    }
+
+    companion object {
+        private const val REQUEST_POST_NOTIFICATIONS = 7102
     }
 }

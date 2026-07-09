@@ -154,6 +154,8 @@
 
 ## 架构
 
+Rust 化热路径的权威状态表见 `docs/rust-migration-status.md`。这里仅记录产品/架构差异；Rust slice 的 `planned` / `contract` / `opt-in` / `canary` / `default-on` 状态以该表和 `docs/rust-migration-status.json` 为准。
+
 | 状态 | 差异点 | 当前情况 | 优先级 |
 | --- | --- | --- | --- |
 | partial | 事件可靠性 | task、live call 事件已有 cursor、catch-up、SSE、去重和本地 cursor；desktop observation 改为按需采样记录，默认不常驻推送。还缺 ack、保留策略、压缩和重放边界测试。 | P0 |

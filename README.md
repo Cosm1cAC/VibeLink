@@ -126,6 +126,16 @@ VibeLink 的长期性能方向是混合架构：Node bridge 继续负责 HTTP AP
 - **Slice 3：MCP persistent sessions**：保留现有 JSON-RPC 语义，新增 long-lived stdio session manager、请求队列、超时、重启和背压；当前已有 Node manager、JSONL sidecar contract、Rust `mcp-session-sidecar` 子命令和 opt-in runtime sidecar routing。
 - **Slice 4：Audio pipeline**：以 live call ring buffer、level meter 和 backpressure 为第一批低延迟 Rust 化目标。
 
+### 状态与推进
+
+Rust 化状态以 `docs/rust-migration-status.json` 为机器可读事实源，`docs/rust-migration-status.md` 为人工可读表格。推进任一 slice 前先运行：
+
+```bash
+npm run rust:migration:check
+```
+
+当前口径：Workspace tree 和 MCP session sidecar 是真实 Rust 实现但仍为 opt-in；Event store 只有 Worker 边界和 JSONL sidecar contract，真实 Rust sidecar 尚未落地；Audio pipeline 与 Compression adapter 仍是 bounded planned slice。
+
 ### 接入原则
 
 - Rust 模块以小型、可测试的 vertical slice 进入；每个 slice 提供稳定 JSON contract。

@@ -417,6 +417,7 @@ function sqliteEventStore() {
 
 let eventStoreWorker = null;
 let eventStoreWorkerFailed = false;
+let taskEventAppendBatcher = null;
 let toolEventAppendBatcher = null;
 let liveCallEventAppendBatcher = null;
 const eventStoreMetrics = createEventStoreMetrics();
@@ -431,6 +432,10 @@ export function isEventStoreBatchAppendEnabled() {
 
 export function isLiveCallEventBatchAppendEnabled() {
   return process.env.VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND === "1";
+}
+
+export function isTaskEventBatchAppendEnabled() {
+  return process.env.VIBELINK_EVENT_STORE_BATCH_TASK_APPEND === "1";
 }
 
 export function eventStoreMode() {
@@ -461,6 +466,7 @@ export function getEventStoreRuntimeStats() {
     workerEnabled: isEventStoreWorkerEnabled(),
     workerFailed: eventStoreWorkerFailed,
     worker: getEventStoreWorkerStats(),
+    taskBatchAppend: getTaskEventBatchAppendStats(),
     batchAppend: getToolEventBatchAppendStats(),
     liveCallBatchAppend: getLiveCallEventBatchAppendStats(),
     metrics: eventStoreMetrics.snapshot()
@@ -488,6 +494,17 @@ function toolEventBatcher() {
   return toolEventAppendBatcher;
 }
 
+function taskEventBatcher() {
+  if (!taskEventAppendBatcher) {
+    taskEventAppendBatcher = createEventStoreBatcher({
+      delayMs: eventStoreBatchDelayMs(),
+      maxBatchSize: eventStoreBatchMaxSize(),
+      flushBatch: (taskId, events) => insertTaskEventsAsync(taskId, events)
+    });
+  }
+  return taskEventAppendBatcher;
+}
+
 function liveCallEventBatcher() {
   if (!liveCallEventAppendBatcher) {
     liveCallEventAppendBatcher = createEventStoreBatcher({
@@ -497,6 +514,23 @@ function liveCallEventBatcher() {
     });
   }
   return liveCallEventAppendBatcher;
+}
+
+function getTaskEventBatchAppendStats() {
+  const stats = taskEventAppendBatcher?.stats() || {
+    pending: 0,
+    flushes: 0,
+    totalEvents: 0,
+    avgBatchSize: 0,
+    maxBatchSize: 0,
+    lastFlushDurationMs: 0,
+    avgFlushDurationMs: 0,
+    lastFlushAt: ""
+  };
+  return {
+    enabled: isTaskEventBatchAppendEnabled(),
+    ...stats
+  };
 }
 
 function getToolEventBatchAppendStats() {
@@ -598,6 +632,7 @@ export async function closeEventStoreWorker() {
 }
 
 export async function drainEventStoreRuntime() {
+  await flushTaskEventBatches();
   await flushToolEventBatches();
   await flushLiveCallEventBatches();
   await closeEventStoreWorker();
@@ -1055,6 +1090,16 @@ export async function insertTaskEventsAsync(taskId, events = []) {
     [taskId, events],
     () => sqliteEventStore().insertTaskEvents(taskId, events)
   );
+}
+
+export async function insertTaskEventBatchedAsync(taskId, event = {}) {
+  if (!isTaskEventBatchAppendEnabled()) return insertTaskEvent(taskId, event);
+  return taskEventBatcher().enqueue(cleanString(taskId, 160), event);
+}
+
+export async function flushTaskEventBatches() {
+  if (!taskEventAppendBatcher) return [];
+  return taskEventAppendBatcher.flushNow();
 }
 
 export function listTaskEvents(taskId, { after = 0, limit = DEFAULT_EVENT_REPLAY_LIMIT } = {}) {

@@ -38,7 +38,7 @@ Current worker-backed API paths:
 - `POST /api/tool-events/prune`
 - scheduled tool-event auto-prune
 
-Tool event appends can also be queued and flushed in batches when `VIBELINK_EVENT_STORE_BATCH_APPEND=1` is enabled. Live-call event persistence has a separate opt-in batcher behind `VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND=1`; it preserves the in-memory live-call cursor and SSE fan-out path while delaying only SQLite persistence until flush. Both batchers record flush duration and batch-size metrics so high-frequency stdout, transcript, and audio-level writes can be compared before and after worker or Rust-sidecar experiments.
+Tool event appends can also be queued and flushed in batches when `VIBELINK_EVENT_STORE_BATCH_APPEND=1` is enabled. Live-call event persistence has a separate opt-in batcher behind `VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND=1`; it preserves the in-memory live-call cursor and SSE fan-out path while delaying only SQLite persistence until flush. Task event persistence also has a lower-level experiment switch, `VIBELINK_EVENT_STORE_BATCH_TASK_APPEND=1`, for DB contract and worker/Rust-sidecar comparisons; the live agent SSE path still uses synchronous task-event persistence so event cursors remain immediate. All batchers record flush duration and batch-size metrics so high-frequency stdout, transcript, audio-level, and task-event writes can be compared before and after worker or Rust-sidecar experiments.
 
 The worker client applies a pending-request cap before posting work to the thread. Set `VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS` to tune the limit; rejected requests fail fast with `EEVENTSTOREBACKPRESSURE` so callers can fall back or surface overload clearly.
 
@@ -54,7 +54,7 @@ Task and tool event append paths still preserve the existing immediate cursor be
 - `worker`: worker flag is enabled and no failure has occurred
 - `sync-fallback`: worker flag is enabled but a worker request failed
 
-It also includes `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, mode counts, and slow sync-call stalls. Set `VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS` to tune the stall threshold for local hardware or CI; the default is 50ms. The same response includes tool-event batch metrics, live-call event batch metrics, and tool-event SSE replay metrics. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
+It also includes `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, mode counts, and slow sync-call stalls. Set `VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS` to tune the stall threshold for local hardware or CI; the default is 50ms. The same response includes task-event batch metrics, tool-event batch metrics, live-call event batch metrics, and tool-event SSE replay metrics. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
 
 ## Next Slices
 

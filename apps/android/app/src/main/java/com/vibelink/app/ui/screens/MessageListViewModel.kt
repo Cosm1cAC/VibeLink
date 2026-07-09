@@ -442,16 +442,7 @@ class MessageListViewModel : ViewModel() {
             toolCallFromEvents(runId, events)
         }.sortedBy { it.cursor }
         if (toolCalls.isEmpty()) return
-        val toolMessage = ChatMessage(
-            role = "assistant",
-            text = "",
-            toolCalls = toolCalls,
-            toolCallCount = toolCalls.size,
-        )
-        val withoutPreviousToolSync = _messages.value.filterNot {
-            it.text.isBlank() && it.toolCalls.isNotEmpty()
-        }
-        _messages.value = withoutPreviousToolSync + toolMessage
+        _messages.value = attachToolCallsToActiveAssistant(_messages.value, toolCalls)
     }
 
     private fun appendSystem(text: String) {
@@ -469,9 +460,16 @@ class MessageListViewModel : ViewModel() {
         fun messagesFromEvents(events: List<TaskEvent>): List<ChatMessage> {
             return events.mapNotNull { event ->
                 val role = taskEventRole(event)
-                val text = event.text.trim()
+                val rawText = event.text
+                val text = if (role == "assistant") rawText else rawText.trim()
                 if (text.isBlank() || role == "debug") return@mapNotNull null
-                ChatMessage(role = role, text = text)
+                ChatMessage(
+                    role = role,
+                    text = text,
+                    id = event.id.ifBlank { "event:${event.cursor}:${event.type}" },
+                    turnId = event.id.ifBlank { "event:${event.cursor}" },
+                    streaming = role == "assistant",
+                )
             }
         }
 
@@ -501,18 +499,44 @@ class MessageListViewModel : ViewModel() {
         }
 
         fun mergeMessages(current: List<ChatMessage>, incoming: List<ChatMessage>): List<ChatMessage> {
-            if (current.isEmpty()) return incoming
             if (incoming.isEmpty()) return current
             val merged = current.toMutableList()
             for (message in incoming) {
                 val last = merged.lastOrNull()
                 if (last != null && canMergeAssistantText(last, message)) {
-                    merged[merged.lastIndex] = last.copy(text = listOf(last.text, message.text).filter { it.isNotBlank() }.joinToString(""))
+                    merged[merged.lastIndex] = last.copy(
+                        text = listOf(last.text, message.text).filter { it.isNotBlank() }.joinToString(""),
+                        streaming = last.streaming || message.streaming,
+                        turnId = last.turnId.ifBlank { message.turnId },
+                        taskId = last.taskId.ifBlank { message.taskId },
+                    )
                 } else {
                     merged += message
                 }
             }
             return merged
+        }
+
+        fun attachToolCallsToActiveAssistant(current: List<ChatMessage>, toolCalls: List<ToolCallSummary>): List<ChatMessage> {
+            if (toolCalls.isEmpty()) return current
+            val withoutPreviousToolSync = current.filterNot { it.text.isBlank() && it.toolCalls.isNotEmpty() }
+            val targetIndex = withoutPreviousToolSync.indexOfLast { message ->
+                message.role == "assistant" && (message.text.isNotBlank() || message.streaming || message.toolCalls.isNotEmpty())
+            }
+            if (targetIndex < 0) {
+                return withoutPreviousToolSync + ChatMessage(
+                    role = "assistant",
+                    id = "tools:${toolCalls.joinToString(",") { it.id }}",
+                    toolCalls = toolCalls,
+                    toolCallCount = toolCalls.size,
+                )
+            }
+            return withoutPreviousToolSync.mapIndexed { index, message ->
+                if (index != targetIndex) message else {
+                    val mergedCalls = mergeToolCalls(message.toolCalls, toolCalls)
+                    message.copy(toolCalls = mergedCalls, toolCallCount = mergedCalls.size)
+                }
+            }
         }
 
         fun appendDisplayMessages(current: List<ChatMessage>, message: ChatMessage): List<ChatMessage> {
@@ -530,6 +554,15 @@ class MessageListViewModel : ViewModel() {
                 next.toolCalls.isEmpty() &&
                 previous.text.isNotBlank() &&
                 next.text.isNotBlank()
+        }
+
+        private fun mergeToolCalls(existing: List<ToolCallSummary>, incoming: List<ToolCallSummary>): List<ToolCallSummary> {
+            val byId = linkedMapOf<String, ToolCallSummary>()
+            (existing + incoming).forEachIndexed { index, tool ->
+                val key = tool.id.ifBlank { "tool:$index:${tool.name}:${tool.cursor}" }
+                byId[key] = tool
+            }
+            return byId.values.sortedBy { it.cursor }
         }
 
         fun toolCallFromEvents(runId: String, events: List<ToolEvent>): ToolCallSummary {

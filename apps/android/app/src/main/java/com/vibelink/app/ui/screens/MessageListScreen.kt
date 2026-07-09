@@ -100,7 +100,9 @@ fun MessageListScreen(
     val remoteStatus by viewModel.remoteStatus.collectAsState()
     val providerRegistry by viewModel.providerRegistry.collectAsState()
 
-    var prompt by remember(conversation?.key) { mutableStateOf("") }
+    var prompt by remember(conversation?.key) {
+        mutableStateOf(if (conversation?.key?.startsWith("share:") == true) conversation.preview else "")
+    }
     var activeAgent by remember(conversation?.key) { mutableStateOf(conversation?.provider?.takeIf { it.isNotBlank() } ?: "codex") }
     var model by remember(conversation?.key) { mutableStateOf("") }
     var reasoningEffort by remember(conversation?.key) { mutableStateOf("") }

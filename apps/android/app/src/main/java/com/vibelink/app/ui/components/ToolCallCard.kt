@@ -53,6 +53,7 @@ fun ToolCallCard(
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(tool.status == "started" || tool.status == "running") }
+    var showFullPayload by remember(tool.id, tool.cursor) { mutableStateOf(false) }
     val isRunning = tool.status == "started" || tool.status == "running"
     val statusColor = when (tool.status) {
         "completed", "done" -> MaterialTheme.colorScheme.primary
@@ -151,12 +152,13 @@ fun ToolCallCard(
                     if (tool.input != null && tool.input.isNotEmpty()) {
                         val inputStr = formatToolPayload(tool.input)
                         if (inputStr.isNotBlank()) {
+                            val truncated = inputStr.length > PAYLOAD_PREVIEW_CHARS && !showFullPayload
                             Surface(
                                 color = MaterialTheme.colorScheme.surfaceVariant,
                                 shape = RoundedCornerShape(6.dp),
                             ) {
                                 Text(
-                                    text = inputStr,
+                                    text = if (truncated) inputStr.take(PAYLOAD_PREVIEW_CHARS) else inputStr,
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 11.sp,
@@ -165,17 +167,19 @@ fun ToolCallCard(
                                         .padding(8.dp),
                                 )
                             }
+                            if (truncated) PayloadToggle { showFullPayload = true }
                         }
                     }
 
                     // Output
                     if (tool.output.isNotBlank()) {
+                        val truncated = tool.output.length > PAYLOAD_PREVIEW_CHARS && !showFullPayload
                         Surface(
                             color = MaterialTheme.colorScheme.surfaceVariant,
                             shape = RoundedCornerShape(6.dp),
                         ) {
                             Text(
-                                text = tool.output,
+                                text = if (truncated) tool.output.take(PAYLOAD_PREVIEW_CHARS) else tool.output,
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
@@ -185,6 +189,7 @@ fun ToolCallCard(
                                     .padding(8.dp),
                             )
                         }
+                        if (truncated) PayloadToggle { showFullPayload = true }
                     }
 
                     // Output events
@@ -215,6 +220,13 @@ fun ToolCallCard(
     }
 }
 
+@Composable
+private fun PayloadToggle(onClick: () -> Unit) {
+    TextButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)) {
+        Text("Show full payload")
+    }
+}
+
 /**
  * Format tool payload to a human-readable string.
  */
@@ -227,3 +239,5 @@ private fun formatToolPayload(payload: Map<String, Any?>?): String {
         payload.toString()
     }
 }
+
+private const val PAYLOAD_PREVIEW_CHARS = 4000

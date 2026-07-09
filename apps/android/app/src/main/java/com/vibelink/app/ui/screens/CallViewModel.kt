@@ -150,7 +150,7 @@ data class CallUiState(
     val asrProviders: List<AsrProviderInfo> = emptyList(),
     val asrCheckpoints: List<AsrCheckpointInfo> = emptyList(),
     val asrRecoveryStatus: String = "",
-    val deviceHint: String = "Android mic streams PCM to the bridge; server normalizes to 16 kHz mono before ASR.",
+    val deviceHint: String = "Foreground microphone capture can continue in the background; Live Call events catch up when the screen resumes.",
 )
 
 class CallViewModel : ViewModel() {

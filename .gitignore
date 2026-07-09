@@ -1,4 +1,5 @@
 .agent-mobile-terminal/
+.codebase-memory/
 .tmp/
 node_modules/
 npm-debug.log*

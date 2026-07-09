@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -93,5 +94,40 @@ test("batched tool event flush uses worker append when both flags are enabled", 
     await drainEventStoreRuntime();
     restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
     restoreEnv("VIBELINK_EVENT_STORE_BATCH_APPEND", previousBatchFlag);
+  }
+});
+test("db async tool event append uses sidecar when enabled", async () => {
+  const previousSidecarFlag = process.env.VIBELINK_EVENT_STORE_SIDECAR;
+  const previousSidecarBin = process.env.VIBELINK_EVENT_STORE_SIDECAR_BIN;
+  const previousSidecarArgs = process.env.VIBELINK_EVENT_STORE_SIDECAR_ARGS_JSON;
+  const previousWorkerFlag = process.env.VIBELINK_EVENT_STORE_WORKER;
+  process.env.VIBELINK_EVENT_STORE_SIDECAR = "1";
+  process.env.VIBELINK_EVENT_STORE_SIDECAR_BIN = process.execPath;
+  process.env.VIBELINK_EVENT_STORE_SIDECAR_ARGS_JSON = JSON.stringify([path.join("test", "fixtures", "fake-event-store-sidecar.js")]);
+  delete process.env.VIBELINK_EVENT_STORE_WORKER;
+  try {
+    const run = createToolRun({
+      id: `sidecar-append-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+
+    const cursors = await insertToolEventsAsync(run.id, [
+      { id: `${run.id}:event-1`, type: "tool.stdout", text: "one" },
+      { id: `${run.id}:event-2`, type: "tool.stdout", text: "two" }
+    ]);
+
+    assert.equal(cursors.length, 2);
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((event) => event.text), ["one", "two"]);
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.mode, "sidecar");
+    assert.equal(stats.sidecar.active, true);
+    assert.equal(stats.metrics.methods.insertToolEvents.modeCounts.sidecar >= 1, true);
+  } finally {
+    await drainEventStoreRuntime();
+    restoreEnv("VIBELINK_EVENT_STORE_SIDECAR", previousSidecarFlag);
+    restoreEnv("VIBELINK_EVENT_STORE_SIDECAR_BIN", previousSidecarBin);
+    restoreEnv("VIBELINK_EVENT_STORE_SIDECAR_ARGS_JSON", previousSidecarArgs);
+    restoreEnv("VIBELINK_EVENT_STORE_WORKER", previousWorkerFlag);
   }
 });

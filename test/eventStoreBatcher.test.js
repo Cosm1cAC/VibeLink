@@ -72,3 +72,28 @@ test("event store batcher records flush latency and average batch size", async (
   assert.equal(typeof stats.lastFlushDurationMs, "number");
   assert.equal(typeof stats.avgFlushDurationMs, "number");
 });
+
+test("event store batcher records failed flush metrics", async () => {
+  const batcher = createEventStoreBatcher({
+    delayMs: 0,
+    flushBatch: async () => {
+      throw new Error("flush boom");
+    }
+  });
+
+  const first = batcher.enqueue("task:failure", { id: "a" });
+  const second = batcher.enqueue("task:failure", { id: "b" });
+  const firstRejected = assert.rejects(first, /flush boom/);
+  const secondRejected = assert.rejects(second, /flush boom/);
+
+  await batcher.flushNow();
+  await Promise.all([firstRejected, secondRejected]);
+
+  const stats = batcher.stats();
+  assert.equal(stats.flushes, 1);
+  assert.equal(stats.totalEvents, 2);
+  assert.equal(stats.failures, 1);
+  assert.equal(stats.failedEvents, 2);
+  assert.match(stats.lastFailureMessage, /flush boom/);
+  assert.equal(typeof stats.lastFailureAt, "string");
+});

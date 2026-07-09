@@ -525,7 +525,11 @@ function getTaskEventBatchAppendStats() {
     maxBatchSize: 0,
     lastFlushDurationMs: 0,
     avgFlushDurationMs: 0,
-    lastFlushAt: ""
+    lastFlushAt: "",
+    failures: 0,
+    failedEvents: 0,
+    lastFailureAt: "",
+    lastFailureMessage: ""
   };
   return {
     enabled: isTaskEventBatchAppendEnabled(),
@@ -542,7 +546,11 @@ function getToolEventBatchAppendStats() {
     maxBatchSize: 0,
     lastFlushDurationMs: 0,
     avgFlushDurationMs: 0,
-    lastFlushAt: ""
+    lastFlushAt: "",
+    failures: 0,
+    failedEvents: 0,
+    lastFailureAt: "",
+    lastFailureMessage: ""
   };
   return {
     enabled: isEventStoreBatchAppendEnabled(),
@@ -559,7 +567,11 @@ function getLiveCallEventBatchAppendStats() {
     maxBatchSize: 0,
     lastFlushDurationMs: 0,
     avgFlushDurationMs: 0,
-    lastFlushAt: ""
+    lastFlushAt: "",
+    failures: 0,
+    failedEvents: 0,
+    lastFailureAt: "",
+    lastFailureMessage: ""
   };
   return {
     enabled: isLiveCallEventBatchAppendEnabled(),

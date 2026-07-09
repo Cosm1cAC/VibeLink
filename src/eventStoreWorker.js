@@ -1,33 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
+import { EVENT_STORE_CONTRACT_METHODS, serializeEventStoreError } from "./eventStoreContract.js";
 import { createSqliteEventStore } from "./eventStore.js";
 
-const methods = new Set([
-  "insertTaskEvent",
-  "insertTaskEvents",
-  "listTaskEvents",
-  "getTaskEventCount",
-  "insertToolEvent",
-  "insertToolEvents",
-  "listToolEvents",
-  "getToolEventStats",
-  "pruneToolEvents",
-  "insertLiveCallEvent",
-  "insertLiveCallEvents",
-  "listLiveCallEvents",
-  "pruneLiveCallEvents",
-  "listUnifiedEvents",
-  "replayWindow"
-]);
-
-function serializeError(error) {
-  return {
-    name: error?.name || "Error",
-    message: error?.message || String(error),
-    stack: error?.stack || "",
-    code: error?.code || ""
-  };
-}
+const methods = new Set(EVENT_STORE_CONTRACT_METHODS);
 
 if (!parentPort) {
   throw new Error("eventStoreWorker must run inside a Worker thread.");
@@ -64,6 +40,6 @@ parentPort.on("message", (message = {}) => {
     const result = store[method](...(Array.isArray(args) ? args : []));
     parentPort.postMessage({ id, result });
   } catch (error) {
-    parentPort.postMessage({ id, error: serializeError(error) });
+    parentPort.postMessage({ id, error: serializeEventStoreError(error) });
   }
 });

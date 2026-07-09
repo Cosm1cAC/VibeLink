@@ -44,6 +44,17 @@ The worker client applies a pending-request cap before posting work to the threa
 
 Task and tool event append paths still preserve the existing immediate cursor behavior unless their specific async or batch flags are enabled. If the worker fails, VibeLink logs one warning and falls back to the synchronous SQLite adapter.
 
+## Rust Sidecar Contract Smoke
+
+`src/eventStoreContract.js` now owns the shared JSON method allowlist and error envelope used by both the Node Worker and sidecar smoke fixture. `src/eventStoreSidecarClient.js` speaks the Rust-ready stdio JSONL shape:
+
+```json
+{"id":1,"method":"insertTaskEvents","args":["task-id",[{"type":"stdout","text":"hello"}]]}
+{"id":1,"result":[1]}
+```
+
+`test/eventStoreSidecarContract.test.js` runs that protocol against `test/fixtures/event-store-json-sidecar.js`, which reuses the SQLite event-store adapter as a stand-in for the future Rust process. This keeps the production path unchanged while locking the compatibility surface for append, replay, error envelopes, close, and pending-request accounting.
+
 `GET /api/tasks/:id/events/catch-up` and `GET /api/live-calls/:id/events/catch-up` return the existing `items` array plus `nextCursor`, `hasMore`, and `limit`. Each route fetches `limit + 1` events internally to expose a cheap next-page signal without changing the item contract.
 
 `GET /api/events/unified` uses the bounded `replayWindow` contract. It returns the existing `items` array plus `nextCursor`, `hasMore`, and `limit` so callers can page through a recent replay window instead of forcing one large cross-table JSON replay. The cursor is opaque to clients and remains compatible with task, tool, and live-call filters.
@@ -61,4 +72,4 @@ It also includes `eventStore.metrics`, grouped by contract method, with request 
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.
 - Window large task/live-call replay paths where callers still request broad history.
 - Add high-frequency event burst smoke tests around the runtime stall and batch metrics.
-- Reuse the same JSON method contract for a Rust sidecar/native module once the Worker boundary is stable.
+- Wire the JSONL sidecar client to a real Rust sidecar/native module once the Worker boundary is stable.

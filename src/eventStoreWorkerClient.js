@@ -1,12 +1,6 @@
 import { Worker } from "node:worker_threads";
 
-function workerError(payload = {}) {
-  const error = new Error(payload.message || "Event store worker request failed.");
-  error.name = payload.name || "Error";
-  if (payload.stack) error.stack = payload.stack;
-  if (payload.code) error.code = payload.code;
-  return error;
-}
+import { eventStoreErrorFromPayload } from "./eventStoreContract.js";
 
 function maxPendingRequestsValue(value = process.env.VIBELINK_EVENT_STORE_WORKER_MAX_PENDING_REQUESTS) {
   const parsed = Number(value);
@@ -49,7 +43,7 @@ export function createEventStoreWorkerClient({
     if (!request) return;
     pending.delete(message.id);
     clearTimeout(request.timer);
-    if (message.error) request.reject(workerError(message.error));
+    if (message.error) request.reject(eventStoreErrorFromPayload(message.error));
     else request.resolve(message.result);
   });
 

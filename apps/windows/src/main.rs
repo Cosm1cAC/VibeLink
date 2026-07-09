@@ -166,6 +166,7 @@ struct McpStdioSession {
     backpressure_rejects: u64,
     timeout_ms: u64,
     max_pending_requests: usize,
+    max_pending_observed: usize,
     last_used: Instant,
 }
 
@@ -385,10 +386,41 @@ impl McpSidecarManager {
 
     fn stats(&self) -> Value {
         let items: Vec<Value> = self.sessions.values().map(McpStdioSession::stats).collect();
+        let total_requests: u64 = items
+            .iter()
+            .map(|item| item.get("requests").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_responses: u64 = items
+            .iter()
+            .map(|item| item.get("responses").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_failures: u64 = items
+            .iter()
+            .map(|item| item.get("failures").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_timeouts: u64 = items
+            .iter()
+            .map(|item| item.get("timeouts").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let total_backpressure_rejects: u64 = items
+            .iter()
+            .map(|item| item.get("backpressureRejects").and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        let max_pending_observed = items
+            .iter()
+            .filter_map(|item| item.get("maxPendingObserved").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0);
         json!({
             "sessions": self.sessions.len(),
             "activeSessions": items.iter().filter(|item| item.get("closed").and_then(Value::as_bool) == Some(false)).count(),
             "totalPending": 0,
+            "totalRequests": total_requests,
+            "totalResponses": total_responses,
+            "totalFailures": total_failures,
+            "totalTimeouts": total_timeouts,
+            "totalBackpressureRejects": total_backpressure_rejects,
+            "maxPendingObserved": max_pending_observed,
             "items": items
         })
     }
@@ -464,6 +496,7 @@ impl McpStdioSession {
             backpressure_rejects: 0,
             timeout_ms,
             max_pending_requests,
+            max_pending_observed: 0,
             last_used: Instant::now(),
         })
     }
@@ -559,6 +592,7 @@ impl McpStdioSession {
             return Err(error).context(format!("Failed to write MCP stdio request: {method}"));
         }
         self.requests += 1;
+        self.max_pending_observed = self.max_pending_observed.max(1);
         self.last_request_at = now_iso();
         self.touch();
 
@@ -644,6 +678,7 @@ impl McpStdioSession {
             "closed": self.closed,
             "pending": 0,
             "maxPendingRequests": self.max_pending_requests,
+            "maxPendingObserved": self.max_pending_observed,
             "timeoutMs": self.timeout_ms,
             "requests": self.requests,
             "responses": self.responses,

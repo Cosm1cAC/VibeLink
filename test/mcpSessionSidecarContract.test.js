@@ -158,6 +158,68 @@ test("Rust MCP session sidecar handles a burst of queued tool calls", async (t) 
   }
 });
 
+test("Rust MCP session sidecar reports multi-server burst metrics", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-rust-mcp-session-multi-burst-"));
+  const firstSpawnLog = path.join(dir, "first-spawns.log");
+  const secondSpawnLog = path.join(dir, "second-spawns.log");
+  const client = rustSidecarClient(t, { maxPendingRequests: 32 });
+  const firstServer = {
+    id: "fake-rust-sidecar-multi-a",
+    name: "fake-rust-sidecar-multi-a",
+    type: "stdio",
+    command: process.execPath,
+    env: {
+      FAKE_MCP_SPAWN_LOG: firstSpawnLog,
+      FAKE_MCP_RESPONSE_DELAY_MS: "5"
+    },
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+  const secondServer = {
+    id: "fake-rust-sidecar-multi-b",
+    name: "fake-rust-sidecar-multi-b",
+    type: "stdio",
+    command: process.execPath,
+    env: {
+      FAKE_MCP_SPAWN_LOG: secondSpawnLog,
+      FAKE_MCP_RESPONSE_DELAY_MS: "5"
+    },
+    args: [path.join(__dirname, "fixtures", "fake-mcp-server.js")]
+  };
+
+  try {
+    const calls = [];
+    for (let index = 0; index < 6; index += 1) {
+      calls.push(client.callTool(firstServer, "echo", { server: "a", index }, { timeoutMs: 10000 }));
+      calls.push(client.callTool(secondServer, "echo", { server: "b", index }, { timeoutMs: 10000 }));
+    }
+
+    const results = await Promise.all(calls);
+    const stats = await client.getSessionStats();
+    const first = stats.items.find((entry) => entry.id === "fake-rust-sidecar-multi-a");
+    const second = stats.items.find((entry) => entry.id === "fake-rust-sidecar-multi-b");
+    const firstSpawns = fs.readFileSync(firstSpawnLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
+    const secondSpawns = fs.readFileSync(secondSpawnLog, "utf8").trim().split(/\r?\n/).filter(Boolean);
+
+    assert.equal(results.length, 12);
+    assert.equal(stats.sessions, 2);
+    assert.equal(stats.activeSessions, 2);
+    assert.equal(stats.totalRequests >= 14, true);
+    assert.equal(stats.totalResponses >= 14, true);
+    assert.equal(stats.totalFailures, 0);
+    assert.equal(stats.totalTimeouts, 0);
+    assert.equal(stats.totalBackpressureRejects, 0);
+    assert.equal(first.requests >= 7, true);
+    assert.equal(second.requests >= 7, true);
+    assert.equal(first.maxPendingObserved >= 1, true);
+    assert.equal(second.maxPendingObserved >= 1, true);
+    assert.equal(firstSpawns.length, 1);
+    assert.equal(secondSpawns.length, 1);
+  } finally {
+    await client.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("Rust MCP session sidecar times out slow stdio requests and reports counters", async (t) => {
   const client = rustSidecarClient(t, { timeoutMs: 1000 });
   const server = {
@@ -237,9 +299,19 @@ test("MCP session sidecar client rejects requests above the pending cap", async 
       client.callTool(server, "echo", { q: "second" }, { timeoutMs: 5000 }),
       (error) => error.code === "EMCPSESSIONBACKPRESSURE"
     );
+    const rejectedStats = client.stats();
+    assert.equal(rejectedStats.pending, 1);
+    assert.equal(rejectedStats.requests, 1);
+    assert.equal(rejectedStats.backpressureRejects, 1);
+    assert.equal(rejectedStats.maxPendingObserved, 1);
+    assert.equal(Boolean(rejectedStats.lastBackpressureAt), true);
     const result = await first;
+    const finalStats = client.stats();
 
     assert.deepEqual(JSON.parse(result.content[0].text), { name: "echo", arguments: { q: "first" } });
+    assert.equal(finalStats.pending, 0);
+    assert.equal(finalStats.responses, 1);
+    assert.equal(finalStats.failures, 0);
   } finally {
     await client.close();
   }

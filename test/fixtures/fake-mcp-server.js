@@ -59,6 +59,16 @@ rl.on("line", (line) => {
   }
 
   if (message.method === "tools/call") {
+    if (process.env.FAKE_MCP_EXIT_ON_TOOL_CALL_ONCE_FILE) {
+      if (!fs.existsSync(process.env.FAKE_MCP_EXIT_ON_TOOL_CALL_ONCE_FILE)) {
+        try {
+          fs.writeFileSync(process.env.FAKE_MCP_EXIT_ON_TOOL_CALL_ONCE_FILE, "exited\n", "utf8");
+        } catch {
+          // Test instrumentation should not affect server behavior.
+        }
+        process.exit(17);
+      }
+    }
     if (process.env.FAKE_MCP_EXIT_ON_TOOL_CALL === "1") {
       process.exit(17);
     }

@@ -7,12 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::{
     env,
     hash::{Hash, Hasher},
     net::UdpSocket,
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -147,7 +148,8 @@ struct McpStdioSession {
     server: McpServerConfig,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout_rx: Receiver<Value>,
+    closed: bool,
     next_id: u64,
     initialized: Option<Value>,
     tools: Option<Vec<Value>>,
@@ -350,9 +352,12 @@ impl McpSidecarManager {
             self.sessions
                 .insert(key.clone(), McpStdioSession::spawn(server, options)?);
         }
-        self.sessions
+        let session = self
+            .sessions
             .get_mut(&key)
-            .context("MCP session was not available after spawn")
+            .context("MCP session was not available after spawn")?;
+        session.apply_options(options);
+        Ok(session)
     }
 
     fn close_idle(&mut self, max_idle_ms: u64) -> usize {
@@ -421,6 +426,18 @@ impl McpStdioSession {
             .stdout
             .take()
             .context("MCP stdio server stdout was not piped")?;
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+                    continue;
+                };
+                if stdout_tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
         let now = now_iso();
         let timeout_ms = options.timeout_ms.or(options.timeout).unwrap_or(10_000);
         let max_pending_requests = options.max_pending_requests.unwrap_or(1).max(1);
@@ -429,7 +446,8 @@ impl McpStdioSession {
             server,
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            stdout_rx,
+            closed: false,
             next_id: 1,
             initialized: None,
             tools: None,
@@ -470,6 +488,15 @@ impl McpStdioSession {
         Ok(result)
     }
 
+    fn apply_options(&mut self, options: &McpSidecarOptions) {
+        if let Some(timeout_ms) = options.timeout_ms.or(options.timeout) {
+            self.timeout_ms = timeout_ms.max(1);
+        }
+        if let Some(max_pending_requests) = options.max_pending_requests {
+            self.max_pending_requests = max_pending_requests.max(1);
+        }
+    }
+
     fn list_tools(&mut self) -> Result<Vec<Value>> {
         self.ensure_initialized()?;
         if let Some(tools) = &self.tools {
@@ -499,18 +526,26 @@ impl McpStdioSession {
     }
 
     fn notify(&mut self, method: &str, params: Option<Value>) -> Result<()> {
+        if self.closed {
+            bail!("MCP stdio session is closed.");
+        }
         let message = json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params
         });
-        writeln!(self.stdin, "{}", message)?;
-        self.stdin.flush()?;
+        if let Err(error) = writeln!(self.stdin, "{}", message).and_then(|_| self.stdin.flush()) {
+            self.mark_failed();
+            return Err(error).context("Failed to write MCP stdio notification");
+        }
         self.touch();
         Ok(())
     }
 
     fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value> {
+        if self.closed {
+            bail!("MCP stdio session is closed.");
+        }
         let id = self.next_id;
         self.next_id += 1;
         let message = json!({
@@ -519,29 +554,38 @@ impl McpStdioSession {
             "method": method,
             "params": params
         });
-        writeln!(self.stdin, "{}", message)?;
-        self.stdin.flush()?;
+        if let Err(error) = writeln!(self.stdin, "{}", message).and_then(|_| self.stdin.flush()) {
+            self.mark_failed();
+            return Err(error).context(format!("Failed to write MCP stdio request: {method}"));
+        }
         self.requests += 1;
         self.last_request_at = now_iso();
         self.touch();
 
         loop {
-            let mut line = String::new();
-            let read = self.stdout.read_line(&mut line)?;
-            if read == 0 {
-                self.failures += 1;
-                self.last_failure_at = now_iso();
-                bail!("MCP stdio session exited before replying to {method}");
-            }
-            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
+            let message = match self
+                .stdout_rx
+                .recv_timeout(Duration::from_millis(self.timeout_ms.max(1)))
+            {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.timeouts += 1;
+                    self.mark_failed();
+                    bail!(
+                        "MCP stdio request timed out: {method} after {}ms",
+                        self.timeout_ms
+                    );
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.mark_failed();
+                    bail!("MCP stdio session exited before replying to {method}");
+                }
             };
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
             if let Some(error) = message.get("error") {
-                self.failures += 1;
-                self.last_failure_at = now_iso();
+                self.mark_failed();
                 bail!(
                     "{}",
                     error
@@ -562,15 +606,32 @@ impl McpStdioSession {
         self.last_used_at = now_iso();
     }
 
+    fn mark_failed(&mut self) {
+        self.failures += 1;
+        self.last_failure_at = now_iso();
+        self.closed = true;
+        let _ = self.child.kill();
+    }
+
     fn is_closed(&mut self) -> bool {
+        if self.closed {
+            return true;
+        }
         match self.child.try_wait() {
-            Ok(Some(_)) => true,
+            Ok(Some(_)) => {
+                self.closed = true;
+                true
+            }
             Ok(None) => false,
-            Err(_) => true,
+            Err(_) => {
+                self.closed = true;
+                true
+            }
         }
     }
 
     fn close(&mut self) {
+        self.closed = true;
         let _ = self.stdin.flush();
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -580,7 +641,7 @@ impl McpStdioSession {
         json!({
             "id": if self.server.id.is_empty() { &self.server.name } else { &self.server.id },
             "name": if self.server.name.is_empty() { &self.server.id } else { &self.server.name },
-            "closed": false,
+            "closed": self.closed,
             "pending": 0,
             "maxPendingRequests": self.max_pending_requests,
             "timeoutMs": self.timeout_ms,

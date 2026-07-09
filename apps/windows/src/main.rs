@@ -404,7 +404,11 @@ impl McpSidecarManager {
             .sum();
         let total_backpressure_rejects: u64 = items
             .iter()
-            .map(|item| item.get("backpressureRejects").and_then(Value::as_u64).unwrap_or(0))
+            .map(|item| {
+                item.get("backpressureRejects")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            })
             .sum();
         let max_pending_observed = items
             .iter()
@@ -718,7 +722,11 @@ fn list_workspace_tree(
     let mut items = Vec::new();
     let mut signature_parts = Vec::new();
     let mut truncated = false;
-    let mut queue = VecDeque::from([(target.clone(), 0usize, gitignore_rules_for_dir(&root))]);
+    let mut queue = VecDeque::from([(
+        target.clone(),
+        0usize,
+        gitignore_rules_for_dir(&root, &root),
+    )]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
 
@@ -736,7 +744,7 @@ fn list_workspace_tree(
             &current.join(".gitignore"),
         ));
         if current != root {
-            ignore_rules.extend(gitignore_rules_for_dir(&current));
+            ignore_rules.extend(gitignore_rules_for_dir(&root, &current));
         }
 
         let mut children = Vec::new();
@@ -752,10 +760,12 @@ fn list_workspace_tree(
             if file_type.is_dir() && IGNORED_WORKSPACE_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            if ignore_rules.is_ignored(&name, file_type.is_dir()) {
+            let full_path = entry.path();
+            let rel = slash_path(full_path.strip_prefix(&root).unwrap_or(&full_path));
+            if ignore_rules.is_ignored(&name, &rel, file_type.is_dir()) {
                 continue;
             }
-            children.push((name, entry.path(), file_type.is_dir()));
+            children.push((name, full_path, file_type.is_dir()));
         }
 
         children.sort_by(|a, b| {
@@ -848,6 +858,7 @@ struct WorkspaceIgnoreRules {
 #[derive(Clone, Debug)]
 struct WorkspaceIgnoreRule {
     pattern: String,
+    match_path: bool,
     directory_only: bool,
     negated: bool,
 }
@@ -857,13 +868,18 @@ impl WorkspaceIgnoreRules {
         self.rules.extend(other.rules);
     }
 
-    fn is_ignored(&self, name: &str, is_dir: bool) -> bool {
+    fn is_ignored(&self, name: &str, rel_path: &str, is_dir: bool) -> bool {
         let mut ignored = false;
         for rule in &self.rules {
             if rule.directory_only && !is_dir {
                 continue;
             }
-            if gitignore_basename_matches(&rule.pattern, name) {
+            let matches = if rule.match_path {
+                gitignore_path_matches(&rule.pattern, rel_path)
+            } else {
+                gitignore_basename_matches(&rule.pattern, name)
+            };
+            if matches {
                 ignored = !rule.negated;
             }
         }
@@ -871,11 +887,12 @@ impl WorkspaceIgnoreRules {
     }
 }
 
-fn gitignore_rules_for_dir(dir: &Path) -> WorkspaceIgnoreRules {
+fn gitignore_rules_for_dir(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
     let mut rules = WorkspaceIgnoreRules::default();
     let Ok(content) = std::fs::read_to_string(dir.join(".gitignore")) else {
         return rules;
     };
+    let base = slash_path(dir.strip_prefix(root).unwrap_or(Path::new("")));
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -892,18 +909,38 @@ fn gitignore_rules_for_dir(dir: &Path) -> WorkspaceIgnoreRules {
             continue;
         }
         let directory_only = body.ends_with('/');
+        let anchored = body.starts_with('/');
         let pattern = body.trim_start_matches('/').trim_end_matches('/');
-        if pattern.is_empty() || pattern.contains('/') {
+        if pattern.is_empty() {
             continue;
         }
+        let match_path = anchored || pattern.contains('/');
+        let pattern = if match_path && !base.is_empty() {
+            format!("{base}/{pattern}")
+        } else {
+            pattern.to_string()
+        };
         rules.rules.push(WorkspaceIgnoreRule {
-            pattern: pattern.to_string(),
+            pattern,
+            match_path,
             directory_only,
             negated,
         });
     }
 
     rules
+}
+
+fn gitignore_path_matches(pattern: &str, path: &str) -> bool {
+    let pattern_parts: Vec<_> = pattern.split('/').collect();
+    let path_parts: Vec<_> = path.split('/').collect();
+    if pattern_parts.len() != path_parts.len() {
+        return false;
+    }
+    pattern_parts
+        .iter()
+        .zip(path_parts.iter())
+        .all(|(pattern_part, path_part)| gitignore_basename_matches(pattern_part, path_part))
 }
 
 fn gitignore_basename_matches(pattern: &str, name: &str) -> bool {
@@ -1325,6 +1362,45 @@ mod tests {
 
         let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
         assert_eq!(paths, vec!["src", "src/README.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_honors_gitignore_path_patterns() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-gitignore-paths-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src").join("generated")).unwrap();
+        fs::write(
+            root.join(".gitignore"),
+            "src/generated/*.tmp\n!src/generated/keep.tmp\n",
+        )
+        .unwrap();
+        fs::write(root.join("src").join("app.rs"), "fn main() {}").unwrap();
+        fs::write(
+            root.join("src").join("generated").join("noise.tmp"),
+            "ignored",
+        )
+        .unwrap();
+        fs::write(root.join("src").join("generated").join("keep.tmp"), "kept").unwrap();
+        fs::write(root.join("src").join("generated").join("note.txt"), "kept").unwrap();
+
+        let tree = list_workspace_tree(&root, Path::new(""), 3, 20).unwrap();
+
+        let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "src",
+                "src/generated",
+                "src/app.rs",
+                "src/generated/keep.tmp",
+                "src/generated/note.txt",
+            ]
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

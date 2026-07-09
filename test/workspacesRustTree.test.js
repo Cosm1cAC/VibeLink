@@ -46,6 +46,19 @@ function writeRustScannerSignatureStub(dir) {
   return scanner;
 }
 
+function writeRustScannerCacheStub(dir) {
+  const scanner = path.join(dir, "rust-scanner-cache-stub.mjs");
+  const log = path.join(dir, "rust-scanner-cache-calls.log");
+  fs.writeFileSync(
+    scanner,
+    `import fs from "node:fs";\n` +
+      `fs.appendFileSync(${JSON.stringify(log)}, "scan\\n", "utf8");\n` +
+      `process.stdout.write(JSON.stringify({ ok: true, dir: "", signature: "stable-signature", items: [{ name: "cached.txt", path: "cached.txt", type: "file", size: 1, updatedAt: "2026-01-01T00:00:00.000Z" }] }));\n`,
+    "utf8"
+  );
+  return { scanner, log };
+}
+
 function cargoPath() {
   if (process.platform === "win32") {
     const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
@@ -174,6 +187,78 @@ test("getWorkspaceTree records Rust scanner metadata signature", async () => {
     restoreEnv("VIBELINK_RUST_BIN", previousBin);
     restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
     fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceTree reuses unchanged Rust scanner results by signature", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-cache-${process.pid}`);
+  const helperDir = path.join(os.tmpdir(), `vibelink-rust-tree-cache-helper-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.rmSync(helperDir, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.mkdirSync(helperDir, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-cache" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const { scanner, log } = writeRustScannerCacheStub(helperDir);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const first = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const second = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const calls = fs.readFileSync(log, "utf8").trim().split(/\r?\n/).filter(Boolean);
+
+    assert.equal(first.ok, true);
+    assert.deepEqual(second.items, first.items);
+    assert.equal(calls.length, 1);
+    assert.equal(after.cacheHits, before.cacheHits + 1);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+    fs.rmSync(helperDir, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceTree refreshes Rust scanner cache when metadata changes", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-cache-refresh-${process.pid}`);
+  const helperDir = path.join(os.tmpdir(), `vibelink-rust-tree-cache-refresh-helper-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.rmSync(helperDir, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.mkdirSync(helperDir, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-cache-refresh" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const { scanner, log } = writeRustScannerCacheStub(helperDir);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    fs.writeFileSync(path.join(fixture, "README.md"), "hello with more bytes", "utf8");
+    await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const calls = fs.readFileSync(log, "utf8").trim().split(/\r?\n/).filter(Boolean);
+
+    assert.equal(calls.length, 2);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+    fs.rmSync(helperDir, { recursive: true, force: true });
   }
 });
 
@@ -317,6 +402,32 @@ test("getWorkspaceTree reuses unchanged Node scanner results", async () => {
     assert.equal(first.ok, true);
     assert.deepEqual(second.items, first.items);
     assert.equal(after.cacheHits, before.cacheHits + 1);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceTree refreshes Node scanner cache when file metadata changes", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-tree-cache-file-refresh-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "tree-cache-file-refresh" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+
+  try {
+    const first = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    fs.writeFileSync(path.join(fixture, "README.md"), "hello with more bytes", "utf8");
+    const second = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const firstReadme = first.items.find((item) => item.path === "README.md");
+    const secondReadme = second.items.find((item) => item.path === "README.md");
+
+    assert.equal(first.ok, true);
+    assert.equal(firstReadme.size, 5);
+    assert.equal(secondReadme.size, 21);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     fs.rmSync(fixture, { recursive: true, force: true });

@@ -71,12 +71,15 @@ function publicMetrics(metrics) {
   const avgInterFrameMs = metrics.interFrameSamples
     ? metrics.totalInterFrameMs / metrics.interFrameSamples
     : 0;
+  const totalFrames = metrics.frames + metrics.droppedFrames;
+  const dropRate = totalFrames > 0 ? metrics.droppedFrames / totalFrames : 0;
   return {
     connections: metrics.connections,
     activeConnections: metrics.activeConnections,
     frames: metrics.frames,
     bytes: metrics.bytes,
     droppedFrames: metrics.droppedFrames,
+    dropRate: Number(dropRate.toFixed(4)),
     oversizedFrames: metrics.oversizedFrames,
     backpressureFrames: metrics.backpressureFrames,
     errors: metrics.errors,

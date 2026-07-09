@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::{
     env,
+    hash::{Hash, Hasher},
     net::UdpSocket,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
@@ -86,6 +87,7 @@ struct WorkspaceTree {
     ok: bool,
     dir: String,
     truncated: bool,
+    signature: String,
     items: Vec<WorkspaceTreeItem>,
 }
 
@@ -135,6 +137,7 @@ fn list_workspace_tree(
     }
 
     let mut items = Vec::new();
+    let mut signature_parts = Vec::new();
     let mut truncated = false;
     let mut queue = VecDeque::from([(target.clone(), 0usize, gitignore_rules_for_dir(&root))]);
     let max_entries = max_entries.max(1);
@@ -147,6 +150,12 @@ fn list_workspace_tree(
         }
 
         let mut ignore_rules = inherited_rules;
+        signature_parts.push(metadata_signature_part("dir", &root, &current));
+        signature_parts.push(metadata_signature_part(
+            "gitignore",
+            &root,
+            &current.join(".gitignore"),
+        ));
         if current != root {
             ignore_rules.extend(gitignore_rules_for_dir(&current));
         }
@@ -182,6 +191,7 @@ fn list_workspace_tree(
             }
             let metadata = std::fs::metadata(&full_path)?;
             let rel = slash_path(full_path.strip_prefix(&root).unwrap_or(&full_path));
+            signature_parts.push(metadata_signature_part("entry", &root, &full_path));
             items.push(WorkspaceTreeItem {
                 name,
                 path: rel,
@@ -199,8 +209,56 @@ fn list_workspace_tree(
         ok: true,
         dir: slash_path(target.strip_prefix(&root).unwrap_or(Path::new(""))),
         truncated,
+        signature: scan_signature(&signature_parts),
         items,
     })
+}
+
+fn metadata_signature_part(kind: &str, root: &Path, path: &Path) -> String {
+    let rel = slash_path(path.strip_prefix(root).unwrap_or(path));
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let modified_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            format!(
+                "{kind}:{rel}:{}:{}:{modified_ms}",
+                if metadata.is_dir() { "d" } else { "f" },
+                metadata.len()
+            )
+        }
+        Err(_) => format!("{kind}:{rel}:missing"),
+    }
+}
+
+fn scan_signature(parts: &[String]) -> String {
+    let mut hasher = Fnv64::default();
+    for part in parts {
+        part.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+#[derive(Default)]
+struct Fnv64(u64);
+
+impl Hasher for Fnv64 {
+    fn write(&mut self, bytes: &[u8]) {
+        if self.0 == 0 {
+            self.0 = 0xcbf29ce484222325;
+        }
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -707,6 +765,26 @@ mod tests {
 
         assert_eq!(tree.items.len(), 2);
         assert!(tree.truncated);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_signature_changes_when_metadata_changes() {
+        let root = env::temp_dir().join(format!(
+            "vibelink-workspace-tree-signature-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("README.md"), "hello").unwrap();
+
+        let first = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+        fs::write(root.join("README.md"), "hello with more bytes").unwrap();
+        let second = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
+
+        assert!(!first.signature.is_empty());
+        assert_ne!(first.signature, second.signature);
 
         let _ = fs::remove_dir_all(&root);
     }

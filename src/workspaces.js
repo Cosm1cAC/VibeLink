@@ -17,7 +17,7 @@ const workspaceTreeCache = new Map();
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const workspaceContextFileCache = new Map();
 const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
-const rustWorkspaceTreeStats = { hits: 0, misses: 0, budgetHits: 0 };
+const rustWorkspaceTreeStats = { hits: 0, misses: 0, budgetHits: 0, lastSignature: "" };
 const textExtensions = new Set([
   ".txt",
   ".md",
@@ -215,7 +215,8 @@ export function getWorkspaceRuntimeStats() {
       enabled: rustWorkspaceTreeEnabled(),
       hits: rustWorkspaceTreeStats.hits,
       misses: rustWorkspaceTreeStats.misses,
-      budgetHits: rustWorkspaceTreeStats.budgetHits
+      budgetHits: rustWorkspaceTreeStats.budgetHits,
+      lastSignature: rustWorkspaceTreeStats.lastSignature
     }
   };
 }
@@ -494,6 +495,7 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
     if (Array.isArray(parsed.items)) {
       rustWorkspaceTreeStats.hits += 1;
       if (parsed.truncated) rustWorkspaceTreeStats.budgetHits += 1;
+      if (typeof parsed.signature === "string") rustWorkspaceTreeStats.lastSignature = parsed.signature;
       return parsed.items;
     }
     rustWorkspaceTreeStats.misses += 1;

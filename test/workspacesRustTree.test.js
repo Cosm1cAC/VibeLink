@@ -36,6 +36,16 @@ function writeRustScannerBudgetStub(dir) {
   return scanner;
 }
 
+function writeRustScannerSignatureStub(dir) {
+  const scanner = path.join(dir, "rust-scanner-signature-stub.mjs");
+  fs.writeFileSync(
+    scanner,
+    `process.stdout.write(JSON.stringify({ ok: true, dir: "", signature: "sig-from-rust", items: [{ name: "one.txt", path: "one.txt", type: "file", size: 1, updatedAt: "2026-01-01T00:00:00.000Z" }] }));\n`,
+    "utf8"
+  );
+  return scanner;
+}
+
 function cargoPath() {
   if (process.platform === "win32") {
     const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
@@ -130,6 +140,35 @@ test("getWorkspaceTree tracks Rust scanner budget hits", async () => {
     assert.equal(result.ok, true);
     assert.deepEqual(result.items.map((item) => item.name), ["one.txt"]);
     assert.equal(after.budgetHits, before.budgetHits + 1);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceTree records Rust scanner metadata signature", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-signature-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-signature" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const scanner = writeRustScannerSignatureStub(fixture);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const stats = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
+    assert.equal(result.ok, true);
+    assert.equal(stats.lastSignature, "sig-from-rust");
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);

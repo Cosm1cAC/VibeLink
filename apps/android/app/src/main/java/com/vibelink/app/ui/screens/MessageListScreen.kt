@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ChatMessage
+import com.vibelink.app.ui.screens.PendingApprovalState
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.ProviderDefinition
 import com.vibelink.app.network.ProviderRegistryResponse
@@ -99,6 +100,7 @@ fun MessageListScreen(
     val currentTaskId by viewModel.currentTaskId.collectAsState()
     val remoteStatus by viewModel.remoteStatus.collectAsState()
     val providerRegistry by viewModel.providerRegistry.collectAsState()
+    val pendingApproval by viewModel.pendingApproval.collectAsState()
 
     var prompt by remember(conversation?.key) {
         mutableStateOf(if (conversation?.key?.startsWith("share:") == true) conversation.preview else "")
@@ -238,7 +240,16 @@ fun MessageListScreen(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        if (error.isNotBlank()) {
+                        pendingApproval?.let { approval ->
+                            item {
+                                ApprovalRequiredCard(
+                                    approval = approval,
+                                    onOpenApprovals = onOpenApprovals,
+                                    onRetry = { viewModel.retryPendingApproval(apiClient) },
+                                )
+                            }
+                        }
+                        if (error.isNotBlank() && pendingApproval == null) {
                             item {
                                 ErrorBanner(error, onOpenApprovals = onOpenApprovals)
                             }
@@ -551,6 +562,31 @@ private fun copyMessage(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("VibeLink message", text))
     Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+}
+
+@Composable
+private fun ApprovalRequiredCard(
+    approval: PendingApprovalState,
+    onOpenApprovals: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = approval.message,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onOpenApprovals, modifier = Modifier.weight(1f)) {
+                    Text("Open approvals")
+                }
+                OutlinedButton(onClick = onRetry, modifier = Modifier.weight(1f), enabled = approval.retry != null) {
+                    Text("Retry")
+                }
+            }
+        }
+    }
 }
 
 @Composable

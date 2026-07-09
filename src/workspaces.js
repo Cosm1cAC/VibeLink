@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
@@ -80,10 +81,20 @@ function gitSummaryCacheKey(cwd = "") {
   return path.resolve(cwd || "").toLowerCase();
 }
 
-function statSignature(targetPath) {
+function fileContentSignature(targetPath, stat) {
+  if (!stat.isFile()) return "";
+  try {
+    return crypto.createHash("sha1").update(fs.readFileSync(targetPath)).digest("hex").slice(0, 16);
+  } catch {
+    return "";
+  }
+}
+
+function statSignature(targetPath, { contentHash = false } = {}) {
   try {
     const stat = fs.statSync(targetPath);
-    return `${Math.trunc(stat.mtimeMs)}:${stat.size}`;
+    const base = `${Math.trunc(stat.mtimeMs)}:${Math.trunc(stat.ctimeMs)}:${stat.size}`;
+    return contentHash ? `${base}:${fileContentSignature(targetPath, stat)}` : base;
   } catch {
     return "missing";
   }
@@ -122,7 +133,7 @@ async function gitChangedFilesSignature(cwd) {
     .map((file) => file.path)
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b));
-  return files.map((filePath) => `${filePath}:${statSignature(path.join(cwd, filePath))}`).join("|");
+  return files.map((filePath) => `${filePath}:${statSignature(path.join(cwd, filePath), { contentHash: true })}`).join("|");
 }
 
 async function gitSummaryCacheSignature(cwd) {

@@ -104,7 +104,17 @@ The representative 2026-07-10 local release canary passed with:
 npm run event-store:canary -- --output .tmp/event-store-canary-final.json
 ```
 
-That run measured 10,800 append events across task, tool, and live-call paths. Append averages were `insertTaskEvents` sync 7.9ms vs Rust 4.2ms, `insertToolEvents` sync 10.9ms vs Rust 5.8ms, and `insertLiveCallEvents` sync 7.4ms vs Rust 4.7ms, with 0 fallback, 0 sidecar failures, 0 pending requests after drain, and 0 backpressure rejects. The `.tmp` output is a local evidence artifact and is not committed.
+That run measured 10,800 append events across task, tool, and live-call paths. Append averages were `insertTaskEvents` sync 7.9ms vs Rust 4.2ms, `insertToolEvents` sync 10.9ms vs Rust 5.8ms, and `insertLiveCallEvents` sync 7.4ms vs Rust 4.7ms, with 0 fallback, 0 sidecar failures, 0 pending requests after drain, and 0 backpressure rejects. Run performance canaries serially; concurrent SQLite canaries can distort latency. The `.tmp` output is a local evidence artifact and is not committed.
+
+`npm run event-store:runtime-canary` runs the same canary one layer higher through the production `src/db.js` runtime router and batchers. It sets `VIBELINK_DATA_DIR` to a temporary directory, enables `VIBELINK_EVENT_STORE_RUST_SIDECAR=auto`, enables task/tool/live-call batch append flags, preflights sidecar readiness, and then verifies `getEventStoreRuntimeStats()` rather than only direct sidecar timings.
+
+The representative 2026-07-10 runtime canary passed with:
+
+```bash
+npm run event-store:runtime-canary -- --output .tmp/event-store-runtime-canary-final.json
+```
+
+That run queued 7,200 task/tool/live-call append events through the runtime batchers. Runtime append metrics were `insertTaskEvents` 24 Rust calls at 37.8ms average, `insertToolEvents` 24 Rust calls at 38.1ms average, and `insertLiveCallEvents` 24 Rust calls at 31.6ms average, with runtime mode `rust-sidecar`, 0 fallback, 0 failures, 0 sync stalls, 0 pending requests after drain, and 0 backpressure rejects.
 
 ## Next Slices
 

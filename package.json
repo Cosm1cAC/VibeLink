@@ -29,6 +29,7 @@
         "rust:test": "cargo test --manifest-path apps/windows/Cargo.toml",
         "test:event-store": "node --test test/eventStoreContract.test.js test/eventStoreWorker.test.js test/eventStoreWorkerAppend.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js test/eventStoreBatchAppend.test.js test/eventStoreBatcher.test.js test/eventStoreMetrics.test.js",
         "event-store:canary": "node tools/event-store/canary.mjs",
+        "event-store:runtime-canary": "node tools/event-store/runtime-canary.mjs",
         "test:rust-sidecars": "node --test test/workspacesRustTree.test.js test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js"
     },
     "dependencies": {

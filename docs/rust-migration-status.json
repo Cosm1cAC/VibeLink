@@ -35,7 +35,7 @@
       "title": "Persistent MCP stdio sessions",
       "priority": "P1",
       "status": "opt-in",
-      "rollout": "manual flag or auto readiness mode",
+      "rollout": "manual flag only",
       "featureFlags": [
         { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
         { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
@@ -64,7 +64,7 @@
       "title": "Event store append/replay sidecar",
       "priority": "P0",
       "status": "opt-in",
-      "rollout": "manual flag only",
+      "rollout": "manual flag or auto readiness mode",
       "featureFlags": [
         { "name": "VIBELINK_EVENT_STORE_WORKER", "requiredInCode": true },
         { "name": "VIBELINK_EVENT_STORE_BATCH_APPEND", "requiredInCode": true },

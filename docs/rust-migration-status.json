@@ -8,7 +8,7 @@
       "title": "Workspace tree scanner",
       "priority": "P1",
       "status": "opt-in",
-      "rollout": "manual flag only",
+      "rollout": "manual flag plus auto safe-detection",
       "featureFlags": [
         { "name": "VIBELINK_RUST_WORKSPACE_TREE", "requiredInCode": true },
         { "name": "VIBELINK_RUST_BIN", "requiredInCode": true },
@@ -17,8 +17,8 @@
       "nodeEntry": "src/workspaces.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink workspace-tree",
-      "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails.",
-      "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks hits, misses, cache, budget hits, and last signature.",
+      "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails. VIBELINK_RUST_WORKSPACE_TREE=auto skips a missing binary without marking a Rust failure.",
+      "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks mode, auto/available state, command, hits, misses, fallbacks, failures, cache, budget hits, last signature, and last error.",
       "tests": [
         "test/workspacesRustTree.test.js"
       ],
@@ -26,9 +26,9 @@
         "README.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node-side cache reuse.",
-      "nextAction": "Add auto mode, parity gates, fallback counters, lastError stats, and an explicit long-lived scanner/cache plan before canary.",
-      "promotionGate": "Can move to canary only after Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback."
+      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, Node-side cache reuse, auto safe-detection, and fallback/error runtime stats.",
+      "nextAction": "Finish the remaining Node/Rust parity gates and document the explicit long-lived scanner/cache limitations before canary.",
+      "promotionGate": "Can move to canary only after remaining Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback, with any long-lived scanner/cache limitation listed as a blocker."
     },
     {
       "id": "mcp-session-sidecar",
@@ -94,9 +94,9 @@
         "docs/event-store-worker.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, local and runtime canary harnesses, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
-      "nextAction": "Run limited real-session canaries with runtime stats capture, keep fallback-rate/latency/stall checks green, and wire the local plus runtime canaries into release or CI status before broader default exposure.",
-      "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across representative runtime sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
+      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, local/runtime/server canary harnesses, CI canary status wiring, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
+      "nextAction": "Run limited human-driven real-session canaries with runtime stats capture before broader default exposure.",
+      "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across automated and human-driven representative runtime sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
     },
     {
       "id": "audio-pipeline",

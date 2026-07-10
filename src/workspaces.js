@@ -21,11 +21,14 @@ const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions
 const rustWorkspaceTreeStats = {
   hits: 0,
   misses: 0,
+  fallbacks: 0,
+  failures: 0,
   budgetHits: 0,
   cacheHits: 0,
   cacheMisses: 0,
   cacheEvictions: 0,
-  lastSignature: ""
+  lastSignature: "",
+  lastError: ""
 };
 const textExtensions = new Set([
   ".txt",
@@ -188,6 +191,9 @@ function capGitCache(cache, stats) {
 }
 
 export function getWorkspaceRuntimeStats() {
+  const rustTreeMode = rustWorkspaceTreeMode();
+  const rustTreeCommand = rustWorkspaceTreeCommand();
+  const rustTreeEnabled = rustTreeMode !== "off";
   return {
     gitSummaryCache: {
       entries: gitSummaryCache.size,
@@ -221,16 +227,23 @@ export function getWorkspaceRuntimeStats() {
       maxEntries: workspaceContextFileCacheMaxEntries()
     },
     rustWorkspaceTree: {
-      enabled: rustWorkspaceTreeEnabled(),
+      enabled: rustTreeEnabled,
+      mode: rustTreeMode,
+      auto: rustTreeMode === "auto",
+      command: rustTreeEnabled ? rustTreeCommand : "",
+      available: rustTreeEnabled && rustWorkspaceTreeCommandAvailable(rustTreeCommand),
       hits: rustWorkspaceTreeStats.hits,
       misses: rustWorkspaceTreeStats.misses,
+      fallbacks: rustWorkspaceTreeStats.fallbacks,
+      failures: rustWorkspaceTreeStats.failures,
       budgetHits: rustWorkspaceTreeStats.budgetHits,
       cacheHits: rustWorkspaceTreeStats.cacheHits,
       cacheMisses: rustWorkspaceTreeStats.cacheMisses,
       cacheEvictions: rustWorkspaceTreeStats.cacheEvictions,
       entries: rustWorkspaceTreeCache.size,
       maxEntries: workspaceTreeCacheMaxEntries(),
-      lastSignature: rustWorkspaceTreeStats.lastSignature
+      lastSignature: rustWorkspaceTreeStats.lastSignature,
+      lastError: rustWorkspaceTreeStats.lastError
     }
   };
 }
@@ -545,8 +558,11 @@ function workspaceTreeDirectoryVersion(dir, root, depth, maxEntries) {
   return parts.join("|");
 }
 
-function rustWorkspaceTreeEnabled() {
-  return /^(1|true|yes|on)$/i.test(process.env.VIBELINK_RUST_WORKSPACE_TREE || "");
+function rustWorkspaceTreeMode() {
+  const value = String(process.env.VIBELINK_RUST_WORKSPACE_TREE || "").trim();
+  if (/^auto$/i.test(value)) return "auto";
+  if (/^(1|true|yes|on)$/i.test(value)) return "manual";
+  return "off";
 }
 
 function rustWorkspaceTreeCommand() {
@@ -562,6 +578,22 @@ function rustWorkspaceTreeBaseArgs() {
   } catch {
     return [];
   }
+}
+
+function rustWorkspaceTreeCommandAvailable(command) {
+  return Boolean(command && fs.existsSync(command));
+}
+
+function rustWorkspaceTreeErrorMessage(error) {
+  const detail = String(error?.stderr || error?.stdout || error?.message || error || "unknown error").trim();
+  return detail.length > 500 ? `${detail.slice(0, 500)}...` : detail;
+}
+
+function recordRustWorkspaceTreeFallback(message) {
+  rustWorkspaceTreeStats.misses += 1;
+  rustWorkspaceTreeStats.fallbacks += 1;
+  rustWorkspaceTreeStats.failures += 1;
+  rustWorkspaceTreeStats.lastError = message;
 }
 
 function rustWorkspaceTreeCacheKey(dir, root, depth, maxEntries, command, baseArgs) {
@@ -590,10 +622,16 @@ function cacheRustWorkspaceTree(cacheKey, signature, items) {
 }
 
 async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
-  if (!rustWorkspaceTreeEnabled()) return null;
+  const mode = rustWorkspaceTreeMode();
+  if (mode === "off") return null;
   const command = rustWorkspaceTreeCommand();
-  if (!fs.existsSync(command)) {
-    rustWorkspaceTreeStats.misses += 1;
+  if (!rustWorkspaceTreeCommandAvailable(command)) {
+    if (mode === "manual") {
+      recordRustWorkspaceTreeFallback(`Rust workspace-tree command not found: ${command}`);
+    } else {
+      rustWorkspaceTreeStats.misses += 1;
+      rustWorkspaceTreeStats.lastError = "";
+    }
     return null;
   }
   const baseArgs = rustWorkspaceTreeBaseArgs();
@@ -602,6 +640,7 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
   if (cached) {
     rustWorkspaceTreeStats.cacheHits += 1;
     rustWorkspaceTreeStats.lastSignature = cached.signature;
+    rustWorkspaceTreeStats.lastError = "";
     return cloneWorkspaceTreeItems(cached.items);
   }
   rustWorkspaceTreeStats.cacheMisses += 1;
@@ -622,13 +661,14 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
       rustWorkspaceTreeStats.hits += 1;
       if (parsed.truncated) rustWorkspaceTreeStats.budgetHits += 1;
       if (typeof parsed.signature === "string") rustWorkspaceTreeStats.lastSignature = parsed.signature;
+      rustWorkspaceTreeStats.lastError = "";
       cacheRustWorkspaceTree(cacheKey, parsed.signature, parsed.items);
       return cloneWorkspaceTreeItems(parsed.items);
     }
-    rustWorkspaceTreeStats.misses += 1;
+    recordRustWorkspaceTreeFallback("Rust workspace-tree returned invalid payload.");
     return null;
-  } catch {
-    rustWorkspaceTreeStats.misses += 1;
+  } catch (error) {
+    recordRustWorkspaceTreeFallback(`Rust workspace-tree failed: ${rustWorkspaceTreeErrorMessage(error)}`);
     return null;
   }
 }

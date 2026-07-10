@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::{
     env,
     hash::{Hash, Hasher},
@@ -180,6 +182,13 @@ struct McpSidecarManager {
     sessions: HashMap<String, McpStdioSession>,
 }
 
+struct McpSidecarRuntimeStats {
+    active_requests: AtomicUsize,
+    max_active_observed: AtomicUsize,
+    backpressure_rejects: AtomicUsize,
+    max_active_requests: usize,
+}
+
 struct EventStoreSidecar {
     db: Connection,
     started_at: String,
@@ -249,10 +258,12 @@ fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize)
 
 fn run_mcp_session_sidecar() -> Result<()> {
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut manager = McpSidecarManager {
+    let stdout = Arc::new(Mutex::new(io::stdout()));
+    let manager = Arc::new(Mutex::new(McpSidecarManager {
         sessions: HashMap::new(),
-    };
+    }));
+    let runtime = Arc::new(McpSidecarRuntimeStats::from_env());
+    let mut workers = Vec::new();
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -263,24 +274,71 @@ fn run_mcp_session_sidecar() -> Result<()> {
         let request: SidecarRequest = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(error) => {
+                let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
                 write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
                 continue;
             }
         };
 
         if request.method == "__close" {
+            let mut manager = manager.lock().expect("MCP sidecar manager lock poisoned");
             manager.close_all();
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
             write_sidecar_result(&mut stdout, &request.id, json!({ "ok": true }))?;
             break;
         }
 
-        match manager.handle(&request.method, &request.args) {
-            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
-            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
+        if request.method == "stats" {
+            let result = match manager.try_lock() {
+                Ok(manager) => manager.stats_with_runtime(&runtime),
+                Err(TryLockError::WouldBlock) => McpSidecarManager::busy_stats(&runtime),
+                Err(TryLockError::Poisoned(_)) => McpSidecarManager::busy_stats(&runtime),
+            };
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
+            write_sidecar_result(&mut stdout, &request.id, result)?;
+            continue;
         }
+
+        if !runtime.try_acquire() {
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
+            write_sidecar_error(
+                &mut stdout,
+                &request.id,
+                &format!(
+                    "MCP session sidecar backpressure: {} rejected because {} request(s) are already active.",
+                    request.method, runtime.max_active_requests
+                ),
+            )?;
+            continue;
+        }
+
+        let manager = Arc::clone(&manager);
+        let stdout = Arc::clone(&stdout);
+        let runtime = Arc::clone(&runtime);
+        workers.push(thread::spawn(move || {
+            let result = {
+                let mut manager = manager.lock().expect("MCP sidecar manager lock poisoned");
+                manager.handle(&request.method, &request.args)
+            };
+            runtime.release();
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
+            match result {
+                Ok(result) => write_sidecar_result(&mut stdout, &request.id, result),
+                Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}")),
+            }
+        }));
     }
 
-    manager.close_all();
+    for worker in workers {
+        let result = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("MCP sidecar worker thread panicked"))?;
+        result?;
+    }
+    manager
+        .lock()
+        .expect("MCP sidecar manager lock poisoned")
+        .close_all();
     Ok(())
 }
 
@@ -1115,6 +1173,21 @@ fn unified_live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
 }
 
 impl McpSidecarManager {
+    fn busy_stats(runtime: &McpSidecarRuntimeStats) -> Value {
+        runtime.apply(json!({
+            "sessions": 0,
+            "activeSessions": 0,
+            "totalPending": 0,
+            "totalRequests": 0,
+            "totalResponses": 0,
+            "totalFailures": 0,
+            "totalTimeouts": 0,
+            "totalBackpressureRejects": 0,
+            "maxPendingObserved": 0,
+            "items": []
+        }))
+    }
+
     fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
         match method {
             "probeStdioServer" => {
@@ -1250,6 +1323,85 @@ impl McpSidecarManager {
             "maxPendingObserved": max_pending_observed,
             "items": items
         })
+    }
+
+    fn stats_with_runtime(&self, runtime: &McpSidecarRuntimeStats) -> Value {
+        runtime.apply(self.stats())
+    }
+}
+
+impl McpSidecarRuntimeStats {
+    fn from_env() -> Self {
+        let max_active_requests = env::var("VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(64);
+        Self {
+            active_requests: AtomicUsize::new(0),
+            max_active_observed: AtomicUsize::new(0),
+            backpressure_rejects: AtomicUsize::new(0),
+            max_active_requests,
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        loop {
+            let current = self.active_requests.load(Ordering::SeqCst);
+            if current >= self.max_active_requests {
+                self.backpressure_rejects.fetch_add(1, Ordering::SeqCst);
+                return false;
+            }
+            if self
+                .active_requests
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.record_max_active(current + 1);
+                return true;
+            }
+        }
+    }
+
+    fn release(&self) {
+        self.active_requests.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn record_max_active(&self, observed: usize) {
+        let mut current = self.max_active_observed.load(Ordering::SeqCst);
+        while observed > current {
+            match self.max_active_observed.compare_exchange(
+                current,
+                observed,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    fn apply(&self, mut value: Value) -> Value {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "activeRequests".to_string(),
+                json!(self.active_requests.load(Ordering::SeqCst)),
+            );
+            object.insert(
+                "maxActiveObserved".to_string(),
+                json!(self.max_active_observed.load(Ordering::SeqCst)),
+            );
+            object.insert(
+                "sidecarBackpressureRejects".to_string(),
+                json!(self.backpressure_rejects.load(Ordering::SeqCst)),
+            );
+            object.insert(
+                "maxActiveRequests".to_string(),
+                json!(self.max_active_requests),
+            );
+        }
+        value
     }
 }
 

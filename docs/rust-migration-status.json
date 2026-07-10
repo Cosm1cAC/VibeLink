@@ -40,6 +40,7 @@
         { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
         { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
         { "name": "VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
+        { "name": "VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS", "requiredInCode": true },
         { "name": "VIBELINK_MCP_PERSISTENT_SESSIONS", "requiredInCode": true }
       ],
       "nodeEntry": "src/mcpRuntime.js",
@@ -55,7 +56,7 @@
         "docs/mcp-persistent-sessions.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node manager, JSONL sidecar client, real Rust mcp-session-sidecar command, opt-in runtime routing, contract tests, burst tests, timeout tests, and crash-replacement tests exist.",
+      "currentState": "Node manager, JSONL sidecar client, real Rust mcp-session-sidecar command, opt-in runtime routing, contract tests, burst tests, timeout tests, crash-replacement tests, in-flight stats, and sidecar-level active-request backpressure exist.",
       "nextAction": "Add auto mode, health readiness checks, promotion thresholds, and docs for spawn-reduction and fallback-rate gates before canary/default-on.",
       "promotionGate": "Can move to canary only after auto mode validates command/health readiness and tests cover spawn failure, tool-call failure, timeout, invalid JSON, and fallback without task-visible failure."
     },

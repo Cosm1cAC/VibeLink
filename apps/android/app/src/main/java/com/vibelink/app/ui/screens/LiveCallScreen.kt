@@ -60,6 +60,7 @@ import com.vibelink.app.network.AsrCheckpointInfo
 import com.vibelink.app.network.AsrProviderInfo
 import com.vibelink.app.network.ProviderDefinition
 import com.vibelink.app.network.Session
+import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.components.LevelIndicator
 import com.vibelink.app.ui.components.QaCard
 import com.vibelink.app.ui.components.TranscriptFeed
@@ -77,7 +78,8 @@ fun CallScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
-    var transcriptInput by remember { mutableStateOf("Please introduce yourself and your strongest recent project?") }
+    val strings = LocalAppStrings.current
+    var transcriptInput by remember(strings.defaultTranscriptPrompt) { mutableStateOf(strings.defaultTranscriptPrompt) }
     var speaker by remember { mutableStateOf("remote") }
     var finalTranscript by remember { mutableStateOf(true) }
     var permissionMessage by remember { mutableStateOf("") }
@@ -89,7 +91,7 @@ fun CallScreen(
             permissionMessage = ""
             viewModel.startAudio(context, apiClient)
         } else {
-            permissionMessage = "Microphone permission was denied."
+            permissionMessage = strings.microphonePermissionDenied
         }
     }
 
@@ -106,7 +108,7 @@ fun CallScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Live Call Assistant", style = MaterialTheme.typography.titleMedium)
+                        Text(strings.liveCallAssistant, style = MaterialTheme.typography.titleMedium)
                         Text(
                             state.statusText,
                             style = MaterialTheme.typography.labelSmall,
@@ -118,13 +120,13 @@ fun CallScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
                     }
                 },
                 actions = {
                     IconButton(onClick = { viewModel.load(apiClient) }) {
                         if (state.refreshing) CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        else Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
                     }
                 },
             )
@@ -202,7 +204,7 @@ fun CallScreen(
                 item {
                     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Manual transcript", style = MaterialTheme.typography.labelMedium)
+                            Text(strings.manualTranscript, style = MaterialTheme.typography.labelMedium)
                             OutlinedTextField(
                                 value = transcriptInput,
                                 onValueChange = { transcriptInput = it },
@@ -215,14 +217,14 @@ fun CallScreen(
                                     FilterChip(
                                         selected = speaker == value,
                                         onClick = { speaker = value },
-                                        label = { Text(value) },
+                                        label = { Text(strings.speakerLabel(value)) },
                                     )
                                 }
                                 item {
                                     FilterChip(
                                         selected = finalTranscript,
                                         onClick = { finalTranscript = !finalTranscript },
-                                        label = { Text(if (finalTranscript) "final" else "partial") },
+                                        label = { Text(if (finalTranscript) strings.finalTranscript else strings.partialTranscript) },
                                     )
                                 }
                             }
@@ -232,7 +234,7 @@ fun CallScreen(
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Icon(Icons.Default.Send, contentDescription = null)
-                                Text("Send transcript")
+                                Text(strings.sendTranscript)
                             }
                         }
                     }
@@ -242,9 +244,9 @@ fun CallScreen(
             item {
                 Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Audio levels", style = MaterialTheme.typography.labelMedium)
-                        LevelIndicator("Remote", state.remoteLevel)
-                        LevelIndicator("Local", state.localLevel)
+                        Text(strings.audioLevels, style = MaterialTheme.typography.labelMedium)
+                        LevelIndicator(strings.remote, state.remoteLevel)
+                        LevelIndicator(strings.local, state.localLevel)
                     }
                 }
             }
@@ -255,7 +257,7 @@ fun CallScreen(
 
             if (state.qaPairs.isNotEmpty()) {
                 item {
-                    Text("Q&A", style = MaterialTheme.typography.titleSmall)
+                    Text(strings.qa, style = MaterialTheme.typography.titleSmall)
                 }
                 items(state.qaPairs) { pair ->
                     QaCard(pair.question, pair.answer, pair.agentState)
@@ -271,23 +273,28 @@ private fun SessionStrip(
     selectedId: String,
     onSelect: (Session) -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Sessions", style = MaterialTheme.typography.labelMedium)
+            Text(strings.sessions, style = MaterialTheme.typography.labelMedium)
             if (sessions.isEmpty()) {
                 Text(
-                    "No Live Call sessions yet.",
+                    strings.noLiveCallSessions,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(sessions, key = { it.id }) { session ->
+                        val title = session.title.ifBlank { strings.liveCall }
+                        val status = strings.liveCallSessionStatus(session.status)
                         AssistChip(
                             onClick = { onSelect(session) },
                             label = {
                                 Text(
-                                    "${session.title.ifBlank { "Live Call" }} · ${session.status}",
+                                    listOf(title, status)
+                                        .filter { it.isNotBlank() }
+                                        .joinToString(" · "),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -298,7 +305,7 @@ private fun SessionStrip(
                 }
                 selectedId.takeIf { it.isNotBlank() }?.let {
                     Text(
-                        "Selected ${it.take(8)}",
+                        strings.selectedShortId(it),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -319,9 +326,10 @@ private fun AssistantOptions(
     asrProvider: String,
     onAsrProviderChange: (String) -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Assistant", style = MaterialTheme.typography.labelMedium)
+            Text(strings.assistant, style = MaterialTheme.typography.labelMedium)
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(providers.ifEmpty { fallbackLiveCallProviders() }, key = { it.id }) { option ->
                     FilterChip(
@@ -336,16 +344,16 @@ private fun AssistantOptions(
                 value = model,
                 onValueChange = onModelChange,
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("Model override") },
+                label = { Text(strings.modelOverride) },
                 singleLine = true,
             )
             OutlinedTextField(
                 value = asrProvider,
                 onValueChange = onAsrProviderChange,
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("ASR provider") },
+                label = { Text(strings.asrProvider) },
                 singleLine = true,
-                placeholder = { Text("mock / whisper / provider id") },
+                placeholder = { Text(strings.asrProviderPlaceholder) },
             )
             if (asrProviders.isNotEmpty()) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -380,6 +388,7 @@ private fun AsrDiagnosticsCard(
     onRecover: () -> Unit,
     recoverEnabled: Boolean,
 ) {
+    val strings = LocalAppStrings.current
     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
@@ -388,26 +397,26 @@ private fun AsrDiagnosticsCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("ASR diagnostics", style = MaterialTheme.typography.labelMedium)
+                    Text(strings.asrDiagnostics, style = MaterialTheme.typography.labelMedium)
                     Text(
-                        "16 kHz mono normalization + VAD segmentation before provider.",
+                        strings.asrPipelineHint,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 OutlinedButton(onClick = onRefresh) {
                     Icon(Icons.Default.Refresh, contentDescription = null)
-                    Text("Refresh")
+                    Text(strings.refresh)
                 }
             }
             Text(deviceHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
             if (providers.isEmpty()) {
-                Text("No ASR provider diagnostics loaded.", style = MaterialTheme.typography.bodySmall)
+                Text(strings.noAsrDiagnostics, style = MaterialTheme.typography.bodySmall)
             } else {
                 providers.forEach { provider ->
-                    val readyText = if (provider.available) "ready" else "unavailable"
-                    val activeText = if (provider.active) " · active" else ""
+                    val readyText = if (provider.available) strings.ready else strings.unavailable
+                    val activeText = if (provider.active) strings.activeSuffix else ""
                     val diag = provider.diagnostics.orEmpty()
                     Text(
                         "${provider.label.ifBlank { provider.id }}: $readyText$activeText",
@@ -425,10 +434,10 @@ private fun AsrDiagnosticsCard(
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(onClick = onRecover, enabled = recoverEnabled) {
-                    Text("Recover")
+                    Text(strings.recover)
                 }
                 Text(
-                    "${checkpoints.size} checkpoint(s)",
+                    strings.checkpoints(checkpoints.size),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -438,7 +447,7 @@ private fun AsrDiagnosticsCard(
             }
             checkpoints.take(3).forEach { checkpoint ->
                 Text(
-                    "${checkpoint.channel}: ${formatBytes(checkpoint.bytes)} · ${checkpoint.provider.ifBlank { "provider pending" }} · ${checkpoint.segmentCount} segment(s)",
+                    "${checkpoint.channel}: ${formatBytes(checkpoint.bytes)} · ${checkpoint.provider.ifBlank { strings.providerPending }} · ${strings.segments(checkpoint.segmentCount)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -453,6 +462,7 @@ private fun AsrDiagnosticsCard(
 private fun RecordingFilesCard(context: android.content.Context) {
     var recordings by remember { mutableStateOf(loadRecordingFiles(context)) }
     var message by remember { mutableStateOf("") }
+    val strings = LocalAppStrings.current
 
     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -462,19 +472,19 @@ private fun RecordingFilesCard(context: android.content.Context) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column {
-                    Text("Recordings", style = MaterialTheme.typography.labelMedium)
+                    Text(strings.recordings, style = MaterialTheme.typography.labelMedium)
                     Text(
-                        "${recordings.size} local PCM files",
+                        strings.localPcmFiles(recordings.size),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 OutlinedButton(onClick = {
                     recordings = loadRecordingFiles(context)
-                    message = "Recording list refreshed."
+                    message = strings.recordingListRefreshed
                 }) {
                     Icon(Icons.Default.Refresh, contentDescription = null)
-                    Text("Refresh")
+                    Text(strings.refresh)
                 }
             }
 
@@ -488,7 +498,7 @@ private fun RecordingFilesCard(context: android.content.Context) {
 
             if (recordings.isEmpty()) {
                 Text(
-                    "No recordings saved yet.",
+                    strings.noRecordings,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -514,19 +524,19 @@ private fun RecordingFilesCard(context: android.content.Context) {
                         }
                         OutlinedButton(onClick = {
                             message = if (file.delete()) {
-                                "Deleted ${file.name}."
+                                strings.deleted(file.name)
                             } else {
-                                "Could not delete ${file.name}."
+                                strings.couldNotDelete(file.name)
                             }
                             recordings = loadRecordingFiles(context)
                         }) {
-                            Text("Delete")
+                            Text(strings.delete)
                         }
                     }
                 }
                 if (recordings.size > 6) {
                     Text(
-                        "Showing latest 6 of ${recordings.size}.",
+                        strings.showingLatestRecordings(recordings.size),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -554,6 +564,7 @@ private fun formatModified(timestamp: Long): String =
 
 @Composable
 private fun StatusCard(state: CallUiState, workspaceId: String) {
+    val strings = LocalAppStrings.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
@@ -563,7 +574,7 @@ private fun StatusCard(state: CallUiState, workspaceId: String) {
             Text(state.statusText, style = MaterialTheme.typography.bodyMedium)
             if (state.sessionId.isNotBlank()) {
                 Text(
-                    text = "Session ${state.sessionId}",
+                    text = strings.sessionId(state.sessionId),
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -573,7 +584,7 @@ private fun StatusCard(state: CallUiState, workspaceId: String) {
                 Text(state.audioStatus, style = MaterialTheme.typography.bodySmall)
             }
             if (workspaceId.isNotBlank()) {
-                Text("Workspace bound", style = MaterialTheme.typography.labelSmall)
+                Text(strings.workspaceBound, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
@@ -589,31 +600,32 @@ private fun ControlCard(
     onStartMic: () -> Unit,
     onStopMic: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onCreate, enabled = !state.loading, modifier = Modifier.weight(1f)) {
                     if (state.loading) CircularProgressIndicator(strokeWidth = 2.dp) else Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Text("Create")
+                    Text(strings.create)
                 }
                 OutlinedButton(onClick = onStopSession, enabled = state.sessionActive, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Default.Stop, contentDescription = null)
-                    Text("Stop")
+                    Text(strings.stop)
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = onPauseSession, enabled = state.sessionActive, modifier = Modifier.weight(1f)) {
-                    Text("Pause")
+                    Text(strings.pause)
                 }
                 OutlinedButton(onClick = onResumeSession, enabled = state.sessionActive, modifier = Modifier.weight(1f)) {
-                    Text("Resume")
+                    Text(strings.resume)
                 }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onStartMic, enabled = state.sessionActive && !state.audioRunning, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Default.Mic, contentDescription = null)
-                    Text("Start mic")
+                    Text(strings.startMic)
                 }
                 OutlinedButton(
                     onClick = onStopMic,
@@ -621,7 +633,7 @@ private fun ControlCard(
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(Icons.Default.MicOff, contentDescription = null)
-                    Text("Stop mic")
+                    Text(strings.stopMic)
                 }
             }
         }

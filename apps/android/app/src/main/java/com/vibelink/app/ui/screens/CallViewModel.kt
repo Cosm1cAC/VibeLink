@@ -140,7 +140,7 @@ data class CallUiState(
     val qaPairs: List<QaPair> = emptyList(),
     val remoteLevel: Double = 0.0,
     val localLevel: Double = 0.0,
-    val statusText: String = "Ready",
+    val statusText: String = "就绪",
     val errorText: String = "",
     val loading: Boolean = false,
     val refreshing: Boolean = false,
@@ -150,7 +150,7 @@ data class CallUiState(
     val asrProviders: List<AsrProviderInfo> = emptyList(),
     val asrCheckpoints: List<AsrCheckpointInfo> = emptyList(),
     val asrRecoveryStatus: String = "",
-    val deviceHint: String = "Foreground microphone capture can continue in the background; Live Call events catch up when the screen resumes.",
+    val deviceHint: String = "前台麦克风采集可在后台继续运行；页面恢复后会自动补齐实时通话事件。",
 )
 
 class CallViewModel : ViewModel() {
@@ -185,7 +185,7 @@ class CallViewModel : ViewModel() {
                         sessionId = selected?.id.orEmpty(),
                         sessionTitle = selected?.title.orEmpty(),
                         sessionActive = selected?.status != "stopped" && selected != null,
-                        statusText = selected?.let { statusFromSession(it) } ?: "Ready",
+                        statusText = selected?.let { statusFromSession(it) } ?: "就绪",
                     )
                 }
                 _uiState.value.sessionId.takeIf { it.isNotBlank() }?.let { selectSession(apiClient, it) }
@@ -194,7 +194,7 @@ class CallViewModel : ViewModel() {
                     it.copy(
                         loading = false,
                         refreshing = false,
-                        errorText = error.message ?: "Failed to load Live Call sessions",
+                        errorText = error.message ?: "加载实时通话会话失败",
                     )
                 }
             }
@@ -230,7 +230,7 @@ class CallViewModel : ViewModel() {
                     qaPairs = emptyList(),
                     remoteLevel = selected?.remote?.rms ?: 0.0,
                     localLevel = selected?.local?.rms ?: 0.0,
-                    statusText = selected?.let { statusFromSession(it) } ?: "Loading session",
+                    statusText = selected?.let { statusFromSession(it) } ?: "正在加载会话",
                     errorText = "",
                     refreshing = true,
                 )
@@ -244,7 +244,7 @@ class CallViewModel : ViewModel() {
                 _uiState.update { it.copy(refreshing = false, asrCheckpoints = checkpoints) }
             } catch (error: Exception) {
                 _uiState.update {
-                    it.copy(refreshing = false, errorText = error.message ?: "Failed to load Live Call events")
+                    it.copy(refreshing = false, errorText = error.message ?: "加载实时通话事件失败")
                 }
             }
         }
@@ -264,14 +264,14 @@ class CallViewModel : ViewModel() {
                 it.copy(
                     loading = true,
                     errorText = "",
-                    statusText = "Creating Live Call",
+                    statusText = "正在创建实时通话",
                     events = emptyList(),
                     qaPairs = emptyList(),
                 )
             }
             try {
                 val session = apiClient.createSession(
-                    title = "Live Call",
+                    title = "实时通话",
                     source = "android",
                     workspaceId = workspaceId,
                     asrProvider = asrProvider,
@@ -279,7 +279,7 @@ class CallViewModel : ViewModel() {
                     model = model,
                 )
                 if (session == null) {
-                    _uiState.update { it.copy(loading = false, errorText = "Bridge returned an empty session") }
+                    _uiState.update { it.copy(loading = false, errorText = "Bridge 返回了空会话") }
                     return@launch
                 }
                 val sessions = apiClient.listSessions()
@@ -290,7 +290,7 @@ class CallViewModel : ViewModel() {
                         sessionTitle = session.title,
                         sessionActive = true,
                         loading = false,
-                        statusText = "Live Call ${session.id.take(8)} ready",
+                        statusText = "实时通话 ${session.id.take(8)} 已就绪",
                         errorText = "",
                     )
                 }
@@ -300,8 +300,8 @@ class CallViewModel : ViewModel() {
                     it.copy(
                         loading = false,
                         sessionActive = false,
-                        statusText = "Ready",
-                        errorText = error.message ?: "Failed to create Live Call",
+                        statusText = "就绪",
+                        errorText = error.message ?: "创建实时通话失败",
                     )
                 }
             }
@@ -323,12 +323,12 @@ class CallViewModel : ViewModel() {
                         sessions = sessions,
                         sessionActive = false,
                         audioRunning = false,
-                        statusText = "Stopped",
+                        statusText = "已停止",
                         audioStatus = "",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(errorText = error.message ?: "Failed to stop Live Call") }
+                _uiState.update { it.copy(errorText = error.message ?: "停止实时通话失败") }
             }
         }
     }
@@ -346,13 +346,13 @@ class CallViewModel : ViewModel() {
                     _uiState.update {
                         it.copy(
                             sessionActive = session?.status != "stopped",
-                            statusText = "Paused",
-                            audioStatus = "Paused",
+                            statusText = "已暂停",
+                            audioStatus = "已暂停",
                             errorText = "",
                         )
                     }
                 }
-                .onFailure { error -> _uiState.update { it.copy(errorText = error.message ?: "Failed to pause Live Call") } }
+                .onFailure { error -> _uiState.update { it.copy(errorText = error.message ?: "暂停实时通话失败") } }
         }
     }
 
@@ -369,13 +369,13 @@ class CallViewModel : ViewModel() {
                     _uiState.update {
                         it.copy(
                             sessionActive = session?.status != "stopped",
-                            statusText = "Resumed",
-                            audioStatus = "Resumed",
+                            statusText = "已继续",
+                            audioStatus = "已继续",
                             errorText = "",
                         )
                     }
                 }
-                .onFailure { error -> _uiState.update { it.copy(errorText = error.message ?: "Failed to resume Live Call") } }
+                .onFailure { error -> _uiState.update { it.copy(errorText = error.message ?: "继续实时通话失败") } }
         }
     }
 
@@ -392,7 +392,7 @@ class CallViewModel : ViewModel() {
                 it.copy(
                     asrProviders = providers,
                     asrCheckpoints = checkpoints,
-                    asrRecoveryStatus = "ASR diagnostics refreshed.",
+                    asrRecoveryStatus = "ASR 诊断已刷新。",
                     errorText = "",
                 )
             }
@@ -408,13 +408,13 @@ class CallViewModel : ViewModel() {
                     _uiState.update {
                         it.copy(
                             asrCheckpoints = checkpoints,
-                            asrRecoveryStatus = "Recovery event emitted for ${checkpoints.size} checkpoint(s).",
+                            asrRecoveryStatus = "已为 ${checkpoints.size} 个检查点发送恢复事件。",
                             errorText = "",
                         )
                     }
                 }
                 .onFailure { error ->
-                    _uiState.update { it.copy(errorText = error.message ?: "Failed to recover ASR checkpoints") }
+                    _uiState.update { it.copy(errorText = error.message ?: "恢复 ASR 检查点失败") }
                 }
         }
     }
@@ -423,12 +423,14 @@ class CallViewModel : ViewModel() {
         val sessionId = _uiState.value.sessionId
         val trimmed = text.trim()
         if (sessionId.isBlank() || trimmed.isBlank()) return
+        val agent = _uiState.value.agent
+        val model = _uiState.value.model
         viewModelScope.launch {
             try {
-                apiClient.sendTranscript(sessionId, trimmed, final, speaker)
-                _uiState.update { it.copy(statusText = if (final) "Transcript sent" else "Partial transcript sent", errorText = "") }
+                apiClient.sendTranscript(sessionId, trimmed, final, speaker, agent, model)
+                _uiState.update { it.copy(statusText = if (final) "转录已发送" else "临时转录已发送", errorText = "") }
             } catch (error: Exception) {
-                _uiState.update { it.copy(errorText = error.message ?: "Failed to send transcript") }
+                _uiState.update { it.copy(errorText = error.message ?: "发送转录失败") }
             }
         }
     }
@@ -436,7 +438,7 @@ class CallViewModel : ViewModel() {
     fun startAudio(context: Context, apiClient: ApiClient) {
         val sessionId = _uiState.value.sessionId
         if (sessionId.isBlank()) {
-            _uiState.update { it.copy(errorText = "Create or select a Live Call first.") }
+            _uiState.update { it.copy(errorText = "请先创建或选择实时通话。") }
             return
         }
         if (audioStreamer?.isRunning == true) return
@@ -446,12 +448,12 @@ class CallViewModel : ViewModel() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.applicationContext.startForegroundService(intent)
             else context.applicationContext.startService(intent)
         }.onSuccess {
-            _uiState.update { it.copy(audioRunning = true, audioStatus = "Background microphone service started", errorText = "") }
+            _uiState.update { it.copy(audioRunning = true, audioStatus = "后台麦克风服务已启动", errorText = "") }
             return
         }
         val streamer = LiveCallAudioStreamer(apiClient, viewModelScope)
         audioStreamer = streamer
-        _uiState.update { it.copy(audioRunning = true, audioStatus = "Starting microphone", errorText = "") }
+        _uiState.update { it.copy(audioRunning = true, audioStatus = "正在启动麦克风", errorText = "") }
         streamer.start(
             context = context.applicationContext,
             sessionId = sessionId,
@@ -485,13 +487,13 @@ class CallViewModel : ViewModel() {
                         val event = gson.fromJson(data, LiveCallEvent::class.java)
                         applyEvent(event)
                     } catch (error: Exception) {
-                        _uiState.update { it.copy(errorText = error.message ?: "Failed to parse Live Call event") }
+                        _uiState.update { it.copy(errorText = error.message ?: "解析实时通话事件失败") }
                     }
                 }
 
                 override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                     _uiState.update {
-                        it.copy(errorText = t?.message ?: "Live Call event stream disconnected")
+                        it.copy(errorText = t?.message ?: "实时通话事件流已断开")
                     }
                 }
             },
@@ -531,19 +533,19 @@ class CallViewModel : ViewModel() {
     }
 
     private fun statusFromEvent(current: String, event: LiveCallEvent): String = when (event.type) {
-        "live_call.started" -> "Live Call started"
-        "live_call.audio_stream.connected" -> "Audio stream connected"
-        "live_call.audio_stream.disconnected" -> "Audio stream disconnected"
-        "live_call.asr.provider" -> "ASR provider selected"
-        "live_call.audio_segment" -> "Speech segment ready"
-        "live_call.audio_checkpoint.recovered" -> "ASR checkpoint recovered"
-        "live_call.transcript.partial" -> "Listening"
-        "live_call.transcript.final" -> "Transcript received"
-        "live_call.question.detected" -> "Question detected"
-        "live_call.agent.thinking" -> "Assistant thinking"
-        "live_call.agent.delta" -> "Assistant answering"
-        "live_call.agent.done" -> "Assistant answer ready"
-        "live_call.stopped" -> "Stopped"
+        "live_call.started" -> "实时通话已开始"
+        "live_call.audio_stream.connected" -> "音频流已连接"
+        "live_call.audio_stream.disconnected" -> "音频流已断开"
+        "live_call.asr.provider" -> "已选择 ASR 提供方"
+        "live_call.audio_segment" -> "语音片段已就绪"
+        "live_call.audio_checkpoint.recovered" -> "ASR 检查点已恢复"
+        "live_call.transcript.partial" -> "正在聆听"
+        "live_call.transcript.final" -> "已收到转录"
+        "live_call.question.detected" -> "检测到问题"
+        "live_call.agent.thinking" -> "助手正在思考"
+        "live_call.agent.delta" -> "助手正在回答"
+        "live_call.agent.done" -> "助手回答已就绪"
+        "live_call.stopped" -> "已停止"
         else -> current
     }
 
@@ -559,9 +561,9 @@ class CallViewModel : ViewModel() {
 
         private fun statusFromSession(session: Session): String {
             return when (session.status) {
-                "stopped" -> "Stopped"
-                "ready", "active" -> "Live Call ${session.id.take(8)} ready"
-                else -> session.status.ifBlank { "Ready" }
+                "stopped" -> "已停止"
+                "ready", "active" -> "实时通话 ${session.id.take(8)} 已就绪"
+                else -> session.status.ifBlank { "就绪" }
             }
         }
 

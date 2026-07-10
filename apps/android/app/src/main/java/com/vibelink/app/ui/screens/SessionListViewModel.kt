@@ -61,7 +61,7 @@ class SessionListViewModel : ViewModel() {
                 _allConversations.value = buildConversationItems(histories, tasks, threadState, desktop)
                 applyFilters()
             } catch (error: Exception) {
-                _error.value = error.message ?: "Failed to load conversations"
+                _error.value = error.message ?: "加载会话失败"
             } finally {
                 _loading.value = false
                 _refreshing.value = false
@@ -95,14 +95,14 @@ class SessionListViewModel : ViewModel() {
                 }
                 applyFilters()
             } catch (error: Exception) {
-                _error.value = error.message ?: "Failed to update conversation"
+                _error.value = error.message ?: "更新会话失败"
             }
         }
     }
 
     fun forkConversation(apiClient: ApiClient, item: ConversationItem, title: String) {
         if (item.kind == "desktop" || item.kind == "new") return
-        val cleanTitle = title.trim().ifBlank { "${item.title} fork" }
+        val cleanTitle = title.trim().ifBlank { "${item.title} 分叉" }
         viewModelScope.launch {
             _error.value = ""
             try {
@@ -118,7 +118,7 @@ class SessionListViewModel : ViewModel() {
                 _allConversations.value = sortManaged(_allConversations.value + forkItem)
                 applyFilters()
             } catch (error: Exception) {
-                _error.value = error.message ?: "Failed to fork conversation"
+                _error.value = error.message ?: "分叉会话失败"
             }
         }
     }
@@ -159,7 +159,7 @@ class SessionListViewModel : ViewModel() {
                 kind = if (staleCompletedTask) "history" else "task",
                 id = task.id,
                 provider = task.agent,
-                title = history?.title?.ifBlank { task.title } ?: task.title.ifBlank { "${providerLabel(task.agent)} task" },
+                title = history?.title?.ifBlank { task.title } ?: task.title.ifBlank { "${providerLabel(task.agent)} 任务" },
                 cwd = task.cwd.ifBlank { history?.projectPath.orEmpty() },
                 status = if (staleCompletedTask) "history" else task.status,
                 updatedAt = latestOf(task.updatedAt, history?.updatedAt),
@@ -241,12 +241,12 @@ class SessionListViewModel : ViewModel() {
         val desktopSnapshot = desktop
         val ready = desktopSnapshot?.ready == true
         val running = active || pendingCount > 0 || desktopSnapshot?.sidebarHasRunning == true
-        val title = desktopSnapshot?.windowTitle?.ifBlank { "Codex Desktop Remote" } ?: "Codex Desktop Remote"
+        val title = desktopSnapshot?.windowTitle?.ifBlank { "Codex Desktop 远程" } ?: "Codex Desktop 远程"
         val preview = when {
             ready && pendingCount > 0 -> "$pendingCount queued message(s)"
             ready -> "Connected. Tap to sync the visible Codex transcript."
             desktopSnapshot?.found == true -> desktopSnapshot.reason.ifBlank { "Codex window found but composer is not ready." }
-            else -> desktopSnapshot?.reason?.ifBlank { "Codex Desktop is not connected." } ?: "Codex Desktop is not connected."
+            else -> desktopReasonLabel(desktopSnapshot?.reason)
         }
         return ConversationItem(
             key = "desktop:current",
@@ -317,11 +317,22 @@ class SessionListViewModel : ViewModel() {
         }
 
         private fun desktopStatusText(value: DesktopRemoteState?): String {
-            val desktop = value?.desktop ?: return "Codex Remote: not checked"
+            val desktop = value?.desktop ?: return "Codex 远程：未检查"
             return when {
-                desktop.ready -> "Codex Remote: ready"
-                desktop.found -> "Codex Remote: ${desktop.reason.ifBlank { "window found" }}"
-                else -> "Codex Remote: not connected"
+                desktop.ready -> "Codex 远程：已就绪"
+                desktop.found -> "Codex 远程：${desktopReasonLabel(desktop.reason.ifBlank { "window found" })}"
+                else -> "Codex 远程：未连接"
+            }
+        }
+
+        private fun desktopReasonLabel(reason: String?): String {
+            val value = reason.orEmpty()
+            return when {
+                value.isBlank() -> "Codex Desktop 未连接。"
+                value.equals("window found", ignoreCase = true) -> "已找到窗口"
+                value.contains("window was not found", ignoreCase = true) -> "未找到 Codex Desktop 窗口。"
+                value.contains("not connected", ignoreCase = true) -> "Codex Desktop 未连接。"
+                else -> value
             }
         }
 

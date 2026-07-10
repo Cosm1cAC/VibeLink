@@ -55,19 +55,25 @@ test("live call question hook receives the stable question event", () => {
     asrProvider: "mock"
   });
   let hookEvent = null;
-  const teardown = setLiveCallQuestionHook(session.id, (_question, _session, event) => {
+  let hookBody = null;
+  const teardown = setLiveCallQuestionHook(session.id, (_question, _session, event, body) => {
     hookEvent = event;
+    hookBody = body;
   });
 
   recordLiveCallTranscript(session.id, {
     text: "How should we explain this project?",
     final: true,
-    speaker: "remote"
+    speaker: "remote",
+    agent: "codex",
+    model: "gpt-5.5"
   });
 
   const questionEvent = listLiveCallEvents(session.id, { limit: 20 }).find((event) => event.type === "live_call.question.detected");
   assert.equal(hookEvent?.id, questionEvent.id);
   assert.equal(hookEvent?.cursor, questionEvent.cursor);
+  assert.equal(hookBody?.agent, "codex");
+  assert.equal(hookBody?.model, "gpt-5.5");
 
   teardown();
   stopLiveCallSession(session.id, "test-cleanup");

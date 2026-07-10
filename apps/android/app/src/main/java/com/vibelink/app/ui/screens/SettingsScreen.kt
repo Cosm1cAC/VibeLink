@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.vibelink.app.data.AppLanguage
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.AuditLogItem
 import com.vibelink.app.network.ApprovalRequestItem
@@ -66,6 +67,7 @@ import com.vibelink.app.network.SecuritySettings
 import com.vibelink.app.network.SettingsPatchRequest
 import com.vibelink.app.network.ToolEventStatsResponse
 import com.vibelink.app.network.ToolEventsPruneResponse
+import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.google.gson.GsonBuilder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -131,7 +133,7 @@ class SettingsViewModel : ViewModel() {
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(loading = false, error = error.message ?: "Failed to load settings") }
+                _uiState.update { it.copy(loading = false, error = error.message ?: "加载设置失败") }
             }
         }
     }
@@ -145,11 +147,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         settings = result.settings ?: it.settings,
                         saving = false,
-                        notice = "Settings saved.",
+                        notice = "设置已保存。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(saving = false, error = error.message ?: "Failed to save settings") }
+                _uiState.update { it.copy(saving = false, error = error.message ?: "保存设置失败") }
             }
         }
     }
@@ -161,17 +163,17 @@ class SettingsViewModel : ViewModel() {
                 apiClient.decideApproval(
                     approvalId = approvalId,
                     approve = approve,
-                    reason = if (approve) "Approved from Android." else "Denied from Android.",
+                    reason = if (approve) "已在 Android 端批准。" else "已在 Android 端拒绝。",
                 )
                 val approvals = apiClient.listApprovals(status = "pending", limit = 50)
                 _uiState.update {
                     it.copy(
                         approvals = approvals,
-                        notice = if (approve) "Approval accepted." else "Approval denied.",
+                        notice = if (approve) "审批已批准。" else "审批已拒绝。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(error = error.message ?: "Approval decision failed") }
+                _uiState.update { it.copy(error = error.message ?: "审批操作失败") }
             }
         }
     }
@@ -185,11 +187,11 @@ class SettingsViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         pairingSessions = pairings,
-                        notice = if (approve) "Pairing approved." else "Pairing denied.",
+                        notice = if (approve) "配对已批准。" else "配对已拒绝。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(error = error.message ?: "Pairing decision failed") }
+                _uiState.update { it.copy(error = error.message ?: "配对操作失败") }
             }
         }
     }
@@ -204,11 +206,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         devices = devices.items,
                         currentDeviceId = devices.currentDeviceId,
-                        notice = "Device revoked.",
+                        notice = "设备已撤销。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(error = error.message ?: "Device revoke failed") }
+                _uiState.update { it.copy(error = error.message ?: "撤销设备失败") }
             }
         }
     }
@@ -223,11 +225,11 @@ class SettingsViewModel : ViewModel() {
                         mcpProbe = result,
                         mcpStatus = apiClient.getMcpStatus(),
                         adminBusy = "",
-                        notice = if (result.ok) "MCP probe completed." else "MCP probe found issues.",
+                        notice = if (result.ok) "MCP 探测已完成。" else "MCP 探测发现问题。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "MCP probe failed") }
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "MCP 探测失败") }
             }
         }
     }
@@ -243,11 +245,11 @@ class SettingsViewModel : ViewModel() {
                         toolEventPrune = result,
                         toolEventStats = stats,
                         adminBusy = "",
-                        notice = if (dryRun) "Tool-event prune preview ready." else "Tool events pruned.",
+                        notice = if (dryRun) "工具事件清理预览已就绪。" else "工具事件已清理。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Tool-event prune failed") }
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "工具事件清理失败") }
             }
         }
     }
@@ -261,11 +263,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         settingsExportText = settingsJson.toJson(exported),
                         adminBusy = "",
-                        notice = "Settings export ready.",
+                        notice = "设置导出已就绪。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Settings export failed") }
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "设置导出失败") }
             }
         }
     }
@@ -280,11 +282,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         settingsImportPreview = preview.changedKeys,
                         adminBusy = "",
-                        notice = "Import preview ready.",
+                        notice = "导入预览已就绪。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Settings import preview failed") }
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "设置导入预览失败") }
             }
         }
     }
@@ -300,12 +302,12 @@ class SettingsViewModel : ViewModel() {
                         settings = imported.settings ?: it.settings,
                         settingsImportPreview = imported.changedKeys,
                         adminBusy = "",
-                        notice = "Settings imported.",
+                        notice = "设置已导入。",
                     )
                 }
                 load(apiClient)
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Settings import failed") }
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "设置导入失败") }
             }
         }
     }
@@ -321,11 +323,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         pushSubscriptions = subscriptions,
                         adminBusy = "",
-                        notice = "Native push token registered.",
+                        notice = "原生推送 Token 已注册。",
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Native push registration failed") }
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "原生推送注册失败") }
             }
         }
     }
@@ -338,10 +340,13 @@ private val settingsJson = GsonBuilder().setPrettyPrinting().create()
 fun SettingsScreen(
     apiClient: ApiClient,
     viewModel: SettingsViewModel,
+    language: AppLanguage,
+    onLanguageChange: (AppLanguage) -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.uiState.collectAsState()
     val settings = state.settings
+    val strings = LocalAppStrings.current
 
     var defaultCwd by remember { mutableStateOf("") }
     var codexCommand by remember { mutableStateOf("auto") }
@@ -407,16 +412,16 @@ fun SettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Settings") },
+                title = { Text(strings.settings) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
                     }
                 },
                 actions = {
                     IconButton(onClick = { viewModel.load(apiClient) }) {
                         if (state.loading) CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        else Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
                     }
                     IconButton(
                         onClick = {
@@ -463,7 +468,7 @@ fun SettingsScreen(
                         enabled = !state.saving,
                     ) {
                         if (state.saving) CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Default.Save, contentDescription = "Save settings")
+                        else Icon(Icons.Default.Save, contentDescription = strings.save)
                     }
                 },
             )
@@ -486,12 +491,30 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = "Runtime") {
+                        SectionCard(title = strings.language) {
+                            Text(strings.displayLanguage, style = MaterialTheme.typography.labelMedium)
+                            Spacer(Modifier.height(8.dp))
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(listOf(AppLanguage.Chinese, AppLanguage.English)) { option ->
+                                    FilterChip(
+                                        selected = language == option,
+                                        onClick = { onLanguageChange(option) },
+                                        label = {
+                                            Text(if (option == AppLanguage.Chinese) strings.chinese else strings.english)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = strings.text("运行时", "Runtime")) {
                             OutlinedTextField(
                                 value = defaultCwd,
                                 onValueChange = { defaultCwd = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Default working directory") },
+                                label = { Text(strings.text("默认工作目录", "Default working directory")) },
                                 singleLine = true,
                             )
                             Spacer(Modifier.height(8.dp))
@@ -499,7 +522,7 @@ fun SettingsScreen(
                                 value = codexCommand,
                                 onValueChange = { codexCommand = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Codex command") },
+                                label = { Text(strings.text("Codex 命令", "Codex command")) },
                                 singleLine = true,
                             )
                             Spacer(Modifier.height(8.dp))
@@ -507,19 +530,19 @@ fun SettingsScreen(
                                 value = claudeCommand,
                                 onValueChange = { claudeCommand = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Claude command") },
+                                label = { Text(strings.text("Claude 命令", "Claude command")) },
                                 singleLine = true,
                             )
                         }
                     }
 
                     item {
-                        SectionCard(title = "Doubao Bridge") {
+                        SectionCard(title = strings.text("豆包桥接", "Doubao Bridge")) {
                             OutlinedTextField(
                                 value = doubaoCommand,
                                 onValueChange = { doubaoCommand = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Doubao command") },
+                                label = { Text(strings.text("豆包命令", "Doubao command")) },
                                 singleLine = true,
                             )
                             Spacer(Modifier.height(8.dp))
@@ -527,7 +550,7 @@ fun SettingsScreen(
                                 value = doubaoEndpoint,
                                 onValueChange = { doubaoEndpoint = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("CDP endpoint") },
+                                label = { Text(strings.text("CDP 端点", "CDP endpoint")) },
                                 singleLine = true,
                             )
                             Spacer(Modifier.height(8.dp))
@@ -535,15 +558,15 @@ fun SettingsScreen(
                                 value = doubaoUrl,
                                 onValueChange = { doubaoUrl = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Doubao URL") },
+                                label = { Text(strings.text("豆包 URL", "Doubao URL")) },
                                 singleLine = true,
                             )
                         }
                     }
 
                     item {
-                        SectionCard(title = "Agent Security") {
-                            Text("Sandbox", style = MaterialTheme.typography.labelMedium)
+                        SectionCard(title = strings.text("智能体安全", "Agent Security")) {
+                            Text(strings.text("沙盒", "Sandbox"), style = MaterialTheme.typography.labelMedium)
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(sandboxOptions) { value ->
                                     FilterChip(
@@ -554,7 +577,7 @@ fun SettingsScreen(
                                 }
                             }
                             Spacer(Modifier.height(10.dp))
-                            Text("Approval policy", style = MaterialTheme.typography.labelMedium)
+                            Text(strings.text("审批策略", "Approval policy"), style = MaterialTheme.typography.labelMedium)
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(approvalOptions) { value ->
                                     FilterChip(
@@ -564,15 +587,15 @@ fun SettingsScreen(
                                     )
                                 }
                             }
-                            ToggleRow("Allow network access", networkAccess) { networkAccess = it }
-                            ToggleRow("Require trusted workspace", requireTrustedWorkspace) { requireTrustedWorkspace = it }
-                            ToggleRow("Require dangerous-command approval", requireDangerousApproval) { requireDangerousApproval = it }
+                            ToggleRow(strings.text("允许网络访问", "Allow network access"), networkAccess) { networkAccess = it }
+                            ToggleRow(strings.text("要求可信工作区", "Require trusted workspace"), requireTrustedWorkspace) { requireTrustedWorkspace = it }
+                            ToggleRow(strings.text("危险命令需要审批", "Require dangerous-command approval"), requireDangerousApproval) { requireDangerousApproval = it }
                             Spacer(Modifier.height(8.dp))
                             OutlinedTextField(
                                 value = trustedWorkspaces,
                                 onValueChange = { trustedWorkspaces = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Trusted workspaces") },
+                                label = { Text(strings.text("可信工作区", "Trusted workspaces")) },
                                 minLines = 2,
                                 maxLines = 5,
                                 singleLine = false,
@@ -581,30 +604,30 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = "Access & Notifications") {
+                        SectionCard(title = strings.text("访问与通知", "Access & Notifications")) {
                             OutlinedTextField(
                                 value = hostAllowlist,
                                 onValueChange = { hostAllowlist = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Host allowlist") },
+                                label = { Text(strings.text("主机允许列表", "Host allowlist")) },
                                 minLines = 2,
                                 maxLines = 5,
                                 singleLine = false,
                             )
-                            ToggleRow("Allow Cloudflare tunnel hosts", allowTryCloudflare) { allowTryCloudflare = it }
-                            ToggleRow("Allow legacy token login", allowLegacyPairingTokenLogin) { allowLegacyPairingTokenLogin = it }
+                            ToggleRow(strings.text("允许 Cloudflare Tunnel 主机", "Allow Cloudflare tunnel hosts"), allowTryCloudflare) { allowTryCloudflare = it }
+                            ToggleRow(strings.text("允许旧 Token 登录", "Allow legacy token login"), allowLegacyPairingTokenLogin) { allowLegacyPairingTokenLogin = it }
                             Spacer(Modifier.height(8.dp))
                             OutlinedTextField(
                                 value = notificationEmail,
                                 onValueChange = { notificationEmail = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text(if (settings?.notificationEmailConfigured == true) "Notification email saved; leave blank to keep" else "Notification email") },
+                                label = { Text(if (settings?.notificationEmailConfigured == true) strings.text("通知邮箱已保存；留空则保留", "Notification email saved; leave blank to keep") else strings.text("通知邮箱", "Notification email")) },
                                 singleLine = true,
                             )
                             Spacer(Modifier.height(8.dp))
                             CloudflareCard(state.cloudflare)
                             Spacer(Modifier.height(10.dp))
-                            Text("Native push", style = MaterialTheme.typography.labelMedium)
+                            Text(strings.text("原生推送", "Native push"), style = MaterialTheme.typography.labelMedium)
                             Spacer(Modifier.height(6.dp))
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(listOf("fcm", "none")) { value ->
@@ -620,7 +643,7 @@ fun SettingsScreen(
                                 value = nativePushProjectId,
                                 onValueChange = { nativePushProjectId = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("FCM project id") },
+                                label = { Text(strings.text("FCM 项目 ID", "FCM project id")) },
                                 singleLine = true,
                             )
                             Spacer(Modifier.height(8.dp))
@@ -628,7 +651,7 @@ fun SettingsScreen(
                                 value = nativePushServiceAccountJson,
                                 onValueChange = { nativePushServiceAccountJson = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text(if (settings?.nativePush?.configured == true) "FCM service account saved; leave blank to keep" else "FCM service account JSON") },
+                                label = { Text(if (settings?.nativePush?.configured == true) strings.text("FCM 服务账号已保存；留空则保留", "FCM service account saved; leave blank to keep") else strings.text("FCM 服务账号 JSON", "FCM service account JSON")) },
                                 minLines = 2,
                                 maxLines = 5,
                                 singleLine = false,
@@ -657,21 +680,21 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = "API Keys") {
+                        SectionCard(title = strings.text("API 密钥", "API Keys")) {
                             KeyField(
-                                label = if (settings?.hasOpenAIKey == true) "OpenAI key saved; leave blank to keep" else "OpenAI key",
+                                label = if (settings?.hasOpenAIKey == true) strings.text("OpenAI 密钥已保存；留空则保留", "OpenAI key saved; leave blank to keep") else strings.text("OpenAI 密钥", "OpenAI key"),
                                 value = openAiKey,
                                 onValueChange = { openAiKey = it },
                             )
                             Spacer(Modifier.height(8.dp))
                             KeyField(
-                                label = if (settings?.hasAnthropicKey == true) "Anthropic key saved; leave blank to keep" else "Anthropic key",
+                                label = if (settings?.hasAnthropicKey == true) strings.text("Anthropic 密钥已保存；留空则保留", "Anthropic key saved; leave blank to keep") else strings.text("Anthropic 密钥", "Anthropic key"),
                                 value = anthropicKey,
                                 onValueChange = { anthropicKey = it },
                             )
                             Spacer(Modifier.height(8.dp))
                             KeyField(
-                                label = if (settings?.hasZhipuKey == true) "Zhipu key saved; leave blank to keep" else "Zhipu key",
+                                label = if (settings?.hasZhipuKey == true) strings.text("智谱密钥已保存；留空则保留", "Zhipu key saved; leave blank to keep") else strings.text("智谱密钥", "Zhipu key"),
                                 value = zhipuKey,
                                 onValueChange = { zhipuKey = it },
                             )
@@ -679,10 +702,10 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = "Pending Approvals") {
+                        SectionCard(title = strings.text("待审批", "Pending Approvals")) {
                             if (state.approvals.isEmpty()) {
                                 Text(
-                                    "No pending approvals.",
+                                    strings.text("暂无待审批请求。", "No pending approvals."),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -701,9 +724,9 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = "Devices & Pairing") {
+                        SectionCard(title = strings.text("设备与配对", "Devices & Pairing")) {
                             if (state.devices.isEmpty()) {
-                                MutedText("No paired devices are registered.")
+                                MutedText(strings.text("暂无已注册的配对设备。", "No paired devices are registered."))
                             } else {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     state.devices.take(8).forEach { device ->
@@ -716,10 +739,10 @@ fun SettingsScreen(
                                 }
                             }
                             Spacer(Modifier.height(10.dp))
-                            Text("Pairing requests", style = MaterialTheme.typography.labelMedium)
+                            Text(strings.text("配对请求", "Pairing requests"), style = MaterialTheme.typography.labelMedium)
                             Spacer(Modifier.height(6.dp))
                             if (state.pairingSessions.isEmpty()) {
-                                MutedText("No pending pairing sessions.")
+                                MutedText(strings.text("暂无待处理配对会话。", "No pending pairing sessions."))
                             } else {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     state.pairingSessions.take(5).forEach { session ->
@@ -735,7 +758,7 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = "MCP & Diagnostics") {
+                        SectionCard(title = strings.text("MCP 与诊断", "MCP & Diagnostics")) {
                             Text(
                                 "${state.mcpStatus.enabled}/${state.mcpStatus.configured} MCP servers enabled / ${state.mcpStatus.cachedTools} cached tools",
                                 style = MaterialTheme.typography.bodySmall,
@@ -754,7 +777,7 @@ fun SettingsScreen(
                                 value = mcpProbeTimeout,
                                 onValueChange = { mcpProbeTimeout = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("MCP probe timeout ms") },
+                                label = { Text(strings.text("MCP 探测超时（毫秒）", "MCP probe timeout ms")) },
                                 singleLine = true,
                             )
                             Spacer(Modifier.height(8.dp))
@@ -762,7 +785,7 @@ fun SettingsScreen(
                                 onClick = { viewModel.probeMcp(apiClient, intFromText(mcpProbeTimeout, 10000)) },
                                 enabled = state.adminBusy.isBlank(),
                                 modifier = Modifier.fillMaxWidth(),
-                            ) { Text(if (state.adminBusy == "mcp") "Probing" else "Probe MCP") }
+                            ) { Text(if (state.adminBusy == "mcp") strings.text("探测中", "Probing") else strings.text("探测 MCP", "Probe MCP")) }
                             state.mcpProbe?.let { probe ->
                                 Spacer(Modifier.height(8.dp))
                                 McpProbeSummary(probe)
@@ -784,20 +807,20 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = "Tool Event Retention") {
+                        SectionCard(title = strings.text("工具事件保留", "Tool Event Retention")) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 OutlinedTextField(
                                     value = toolRetentionDays,
                                     onValueChange = { toolRetentionDays = it },
                                     modifier = Modifier.weight(1f),
-                                    label = { Text("Days") },
+                                    label = { Text(strings.text("天数", "Days")) },
                                     singleLine = true,
                                 )
                                 OutlinedTextField(
                                     value = toolKeepLatest,
                                     onValueChange = { toolKeepLatest = it },
                                     modifier = Modifier.weight(1f),
-                                    label = { Text("Keep latest") },
+                                    label = { Text(strings.text("保留最新", "Keep latest")) },
                                     singleLine = true,
                                 )
                             }
@@ -806,10 +829,10 @@ fun SettingsScreen(
                                 value = toolPruneInterval,
                                 onValueChange = { toolPruneInterval = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Auto-prune interval minutes") },
+                                label = { Text(strings.text("自动清理间隔（分钟）", "Auto-prune interval minutes")) },
                                 singleLine = true,
                             )
-                            ToggleRow("Auto prune old tool events", toolAutoPrune) { toolAutoPrune = it }
+                            ToggleRow(strings.text("自动清理旧工具事件", "Auto prune old tool events"), toolAutoPrune) { toolAutoPrune = it }
                             ToolEventStatsCard(state.toolEventStats, state.toolEventPrune)
                             Spacer(Modifier.height(8.dp))
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -817,32 +840,32 @@ fun SettingsScreen(
                                     OutlinedButton(
                                         onClick = { viewModel.pruneToolEvents(apiClient, dryRun = true, keepLatest = intFromText(toolKeepLatest, 5000)) },
                                         enabled = state.adminBusy.isBlank(),
-                                    ) { Text(if (state.adminBusy == "prune-preview") "Checking" else "Preview prune") }
+                                    ) { Text(if (state.adminBusy == "prune-preview") strings.text("检查中", "Checking") else strings.text("预览清理", "Preview prune")) }
                                 }
                                 item {
                                     OutlinedButton(
                                         onClick = { viewModel.pruneToolEvents(apiClient, dryRun = false, keepLatest = intFromText(toolKeepLatest, 5000)) },
                                         enabled = state.adminBusy.isBlank(),
-                                    ) { Text(if (state.adminBusy == "prune") "Pruning" else "Prune now") }
+                                    ) { Text(if (state.adminBusy == "prune") strings.text("清理中", "Pruning") else strings.text("立即清理", "Prune now")) }
                                 }
                             }
                         }
                     }
 
                     item {
-                        SectionCard(title = "Settings Import / Export") {
+                        SectionCard(title = strings.text("设置导入 / 导出", "Settings Import / Export")) {
                             Button(
                                 onClick = { viewModel.exportSettings(apiClient) },
                                 enabled = state.adminBusy.isBlank(),
                                 modifier = Modifier.fillMaxWidth(),
-                            ) { Text(if (state.adminBusy == "settings-export") "Exporting" else "Export settings") }
+                            ) { Text(if (state.adminBusy == "settings-export") strings.text("导出中", "Exporting") else strings.text("导出设置", "Export settings")) }
                             if (state.settingsExportText.isNotBlank()) {
                                 Spacer(Modifier.height(8.dp))
                                 OutlinedTextField(
                                     value = state.settingsExportText,
                                     onValueChange = {},
                                     modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("Export JSON") },
+                                    label = { Text(strings.text("导出 JSON", "Export JSON")) },
                                     minLines = 4,
                                     maxLines = 8,
                                     singleLine = false,
@@ -854,14 +877,14 @@ fun SettingsScreen(
                                 value = settingsImportText,
                                 onValueChange = { settingsImportText = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Import JSON") },
+                                label = { Text(strings.text("导入 JSON", "Import JSON")) },
                                 minLines = 4,
                                 maxLines = 8,
                                 singleLine = false,
                             )
                             if (state.settingsImportPreview.isNotEmpty()) {
                                 Spacer(Modifier.height(6.dp))
-                                MutedText("Changes: ${state.settingsImportPreview.joinToString(", ")}")
+                                MutedText(strings.text("变更：", "Changes: ") + state.settingsImportPreview.joinToString(", "))
                             }
                             Spacer(Modifier.height(8.dp))
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -869,22 +892,22 @@ fun SettingsScreen(
                                     OutlinedButton(
                                         onClick = { viewModel.previewImportSettings(apiClient, settingsImportText) },
                                         enabled = state.adminBusy.isBlank() && settingsImportText.trim().isNotBlank(),
-                                    ) { Text(if (state.adminBusy == "settings-import-preview") "Checking" else "Preview import") }
+                                    ) { Text(if (state.adminBusy == "settings-import-preview") strings.text("检查中", "Checking") else strings.text("预览导入", "Preview import")) }
                                 }
                                 item {
                                     Button(
                                         onClick = { viewModel.applyImportSettings(apiClient, settingsImportText) },
                                         enabled = state.adminBusy.isBlank() && settingsImportText.trim().isNotBlank(),
-                                    ) { Text(if (state.adminBusy == "settings-import") "Importing" else "Import") }
+                                    ) { Text(if (state.adminBusy == "settings-import") strings.text("导入中", "Importing") else strings.text("导入", "Import")) }
                                 }
                             }
                         }
                     }
 
                     item {
-                        SectionCard(title = "Audit Log") {
+                        SectionCard(title = strings.text("审计日志", "Audit Log")) {
                             if (state.auditLogs.isEmpty()) {
-                                MutedText("No audit entries yet.")
+                                MutedText(strings.text("暂无审计条目。", "No audit entries yet."))
                             } else {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     state.auditLogs.take(8).forEach { item -> AuditLogRow(item) }
@@ -939,13 +962,14 @@ private fun ApprovalCard(
     onApprove: () -> Unit,
     onDeny: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Card(
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                approval.title.ifBlank { approval.kind.ifBlank { "Approval" } },
+                approval.title.ifBlank { approval.kind.ifBlank { strings.text("审批", "Approval") } },
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -965,11 +989,11 @@ private fun ApprovalCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onApprove) {
                     Icon(Icons.Default.Check, contentDescription = null)
-                    Text("Approve")
+                    Text(strings.text("批准", "Approve"))
                 }
                 OutlinedButton(onClick = onDeny) {
                     Icon(Icons.Default.Close, contentDescription = null)
-                    Text("Deny")
+                    Text(strings.text("拒绝", "Deny"))
                 }
             }
         }
@@ -982,6 +1006,7 @@ private fun DeviceCard(
     currentDeviceId: String,
     onRevoke: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Card(
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -996,25 +1021,25 @@ private fun DeviceCard(
                     modifier = Modifier.weight(1f),
                 )
                 if (device.id == currentDeviceId) {
-                    Text("current", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    Text(strings.text("当前", "current"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 }
                 val revoked = device.revokedAt.isNotBlank()
                 Text(
                     text = when {
-                        revoked -> "revoked"
-                        device.expired -> "expired"
-                        else -> "active"
+                        revoked -> strings.text("已撤销", "revoked")
+                        device.expired -> strings.text("已过期", "expired")
+                        else -> strings.text("活跃", "active")
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = if (revoked || device.expired) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 )
             }
-            MutedText(listOf(device.lastSeenAt.ifBlank { "never seen" }, device.expiresAt.ifBlank { "no expiry" }).joinToString(" / "))
+            MutedText(listOf(device.lastSeenAt.ifBlank { strings.text("从未在线", "never seen") }, device.expiresAt.ifBlank { strings.text("无过期时间", "no expiry") }).joinToString(" / "))
             OutlinedButton(
                 onClick = onRevoke,
                 enabled = device.id != currentDeviceId && device.revokedAt.isBlank(),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Revoke") }
+            ) { Text(strings.text("撤销", "Revoke")) }
         }
     }
 }
@@ -1025,16 +1050,17 @@ private fun PairingSessionCard(
     onApprove: () -> Unit,
     onDeny: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Card(
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(session.label.ifBlank { session.id.take(8) }, style = MaterialTheme.typography.bodyMedium)
-            MutedText(session.status.ifBlank { "pending" })
+            MutedText(session.status.ifBlank { strings.text("待处理", "pending") })
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onApprove, modifier = Modifier.weight(1f)) { Text("Approve") }
-                OutlinedButton(onClick = onDeny, modifier = Modifier.weight(1f)) { Text("Deny") }
+                Button(onClick = onApprove, modifier = Modifier.weight(1f)) { Text(strings.text("批准", "Approve")) }
+                OutlinedButton(onClick = onDeny, modifier = Modifier.weight(1f)) { Text(strings.text("拒绝", "Deny")) }
             }
         }
     }
@@ -1042,10 +1068,11 @@ private fun PairingSessionCard(
 
 @Composable
 private fun McpServerRow(name: String, type: String, enabled: Boolean) {
+    val strings = LocalAppStrings.current
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(name, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(type.ifBlank { "stdio" }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(if (enabled) "enabled" else "disabled", style = MaterialTheme.typography.labelSmall, color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(if (enabled) strings.text("已启用", "enabled") else strings.text("已停用", "disabled"), style = MaterialTheme.typography.labelSmall, color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

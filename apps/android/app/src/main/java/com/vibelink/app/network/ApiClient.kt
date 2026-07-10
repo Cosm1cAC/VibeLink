@@ -288,8 +288,15 @@ class ApiClient(
         return gson.fromJson(json, CreateSessionResponse::class.java).session
     }
 
-    suspend fun sendTranscript(sessionId: String, text: String, final: Boolean = true, speaker: String = "remote") {
-        post("/api/live-calls/$sessionId/transcript", TranscriptBody(text, final, speaker))
+    suspend fun sendTranscript(
+        sessionId: String,
+        text: String,
+        final: Boolean = true,
+        speaker: String = "remote",
+        agent: String = "",
+        model: String = "",
+    ) {
+        post("/api/live-calls/$sessionId/transcript", TranscriptBody(text, final, speaker, agent, model))
     }
 
     suspend fun sendLevel(sessionId: String, channel: String = "remote", rms: Double = 0.0, peak: Double = 0.0) {

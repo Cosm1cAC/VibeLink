@@ -267,7 +267,7 @@ export function recordLiveCallTranscript(id, body = {}) {
     // duplicate questions.
     if (session.questionDetectedHook) {
       try {
-        session.questionDetectedHook(text, session, questionEvent);
+        session.questionDetectedHook(text, session, questionEvent, body);
       } catch (error) {
         console.error("[liveCall] question hook failed:", error.message);
       }

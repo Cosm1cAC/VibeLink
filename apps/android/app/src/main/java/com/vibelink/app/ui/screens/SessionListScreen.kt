@@ -62,6 +62,8 @@ import androidx.compose.ui.unit.dp
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.ThreadPatch
+import com.vibelink.app.ui.i18n.AppStrings
+import com.vibelink.app.ui.i18n.LocalAppStrings
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,6 +84,7 @@ fun SessionListScreen(
     val loading by viewModel.loading.collectAsState()
     val refreshing by viewModel.refreshing.collectAsState()
     val error by viewModel.error.collectAsState()
+    val strings = LocalAppStrings.current
 
     var topMenuOpen by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<ConversationItem?>(null) }
@@ -97,8 +100,13 @@ fun SessionListScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text("VibeLink", style = MaterialTheme.typography.titleMedium)
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            strings.brandName,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Clip,
+                        )
                         Text(
                             text = desktopStatus,
                             style = MaterialTheme.typography.labelSmall,
@@ -110,38 +118,53 @@ fun SessionListScreen(
                 },
                 actions = {
                     IconButton(onClick = onNewConversation) {
-                        Icon(Icons.Default.Add, contentDescription = "New chat")
+                        Icon(Icons.Default.Add, contentDescription = strings.newChat)
                     }
                     IconButton(onClick = { viewModel.load(apiClient, isRefresh = true) }) {
                         if (refreshing) {
                             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                         } else {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                            Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
                         }
-                    }
-                    IconButton(onClick = onOpenLiveCall) {
-                        Icon(Icons.Default.Chat, contentDescription = "Live Call")
-                    }
-                    IconButton(onClick = onOpenWorkspace) {
-                        Icon(Icons.Default.Folder, contentDescription = "Workspace")
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
                     Box {
                         IconButton(onClick = { topMenuOpen = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                            Icon(Icons.Default.MoreVert, contentDescription = strings.more)
                         }
                         DropdownMenu(expanded = topMenuOpen, onDismissRequest = { topMenuOpen = false }) {
                             DropdownMenuItem(
-                                text = { Text(if (showArchived) "Show active chats" else "Show archived") },
+                                text = { Text(strings.liveCall) },
+                                leadingIcon = { Icon(Icons.Default.Chat, contentDescription = null) },
+                                onClick = {
+                                    topMenuOpen = false
+                                    onOpenLiveCall()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(strings.workspace) },
+                                leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                                onClick = {
+                                    topMenuOpen = false
+                                    onOpenWorkspace()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(strings.settings) },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                onClick = {
+                                    topMenuOpen = false
+                                    onOpenSettings()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (showArchived) strings.showActiveChats else strings.showArchivedChats) },
                                 onClick = {
                                     topMenuOpen = false
                                     viewModel.setShowArchived(!showArchived)
                                 },
                             )
                             DropdownMenuItem(
-                                text = { Text("Log out") },
+                                text = { Text(strings.logout) },
                                 onClick = {
                                     topMenuOpen = false
                                     onLogout()
@@ -165,7 +188,7 @@ fun SessionListScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                label = { Text("Search chats") },
+                label = { Text(strings.searchChats) },
                 singleLine = true,
             )
 
@@ -178,7 +201,7 @@ fun SessionListScreen(
             ) {
                 AssistChip(
                     onClick = { viewModel.setShowArchived(!showArchived) },
-                    label = { Text(if (showArchived) "Archived" else "Active") },
+                    label = { Text(if (showArchived) strings.archived else strings.active) },
                     leadingIcon = {
                         Icon(
                             imageVector = if (showArchived) Icons.Default.Unarchive else Icons.Default.Archive,
@@ -189,7 +212,7 @@ fun SessionListScreen(
                 )
                 AssistChip(
                     onClick = { viewModel.load(apiClient, isRefresh = true) },
-                    label = { Text("Sync now") },
+                    label = { Text(strings.syncNow) },
                 )
             }
 
@@ -200,18 +223,18 @@ fun SessionListScreen(
                     }
                     error.isNotBlank() && conversations.isEmpty() -> {
                         EmptyOrErrorState(
-                            title = "Could not load chats",
+                            title = strings.couldNotLoadChats,
                             body = error,
-                            actionText = "Retry",
+                            actionText = strings.retry,
                             onAction = { viewModel.load(apiClient) },
                             modifier = Modifier.align(Alignment.Center),
                         )
                     }
                     conversations.isEmpty() -> {
                         EmptyOrErrorState(
-                            title = if (showArchived) "No archived chats" else "No chats yet",
-                            body = if (showArchived) "Archived conversations will appear here." else "Start a VibeLink Agent task or sync Codex Remote.",
-                            actionText = "New chat",
+                            title = if (showArchived) strings.noArchivedChats else strings.noChatsYet,
+                            body = if (showArchived) strings.archivedChatsHint else strings.emptyChatsHint,
+                            actionText = strings.newChat,
                             onAction = onNewConversation,
                             modifier = Modifier.align(Alignment.Center),
                         )
@@ -238,7 +261,7 @@ fun SessionListScreen(
                                     },
                                     onFork = {
                                         forkTarget = item
-                                        forkText = "${item.title} fork"
+                                        forkText = "${item.title} ${strings.fork}"
                                     },
                                 )
                             }
@@ -255,10 +278,10 @@ fun SessionListScreen(
 
     renameTarget?.let { target ->
         TextInputDialog(
-            title = "Rename chat",
+            title = strings.renameChat,
             value = renameText,
             onValueChange = { renameText = it },
-            confirmText = "Save",
+            confirmText = strings.save,
             onDismiss = { renameTarget = null },
             onConfirm = {
                 viewModel.patchConversation(apiClient, target, ThreadPatch(title = renameText.trim()))
@@ -269,10 +292,10 @@ fun SessionListScreen(
 
     forkTarget?.let { target ->
         TextInputDialog(
-            title = "Fork chat",
+            title = strings.forkChat,
             value = forkText,
             onValueChange = { forkText = it },
-            confirmText = "Fork",
+            confirmText = strings.fork,
             onDismiss = { forkTarget = null },
             onConfirm = {
                 viewModel.forkConversation(apiClient, target, forkText)
@@ -293,6 +316,7 @@ private fun ConversationCard(
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val strings = LocalAppStrings.current
     val isRunning = item.status == "running"
     val statusColor = when (item.status) {
         "running" -> MaterialTheme.colorScheme.secondary
@@ -300,7 +324,7 @@ private fun ConversationCard(
         "desktop" -> MaterialTheme.colorScheme.tertiary
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val providerLabel = providerLabel(item)
+    val providerLabel = providerLabel(item, strings)
 
     Card(
         modifier = modifier
@@ -323,7 +347,7 @@ private fun ConversationCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = item.title.ifBlank { "Untitled chat" },
+                        text = item.title.ifBlank { strings.untitledChat },
                         style = MaterialTheme.typography.bodyLarge,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -342,13 +366,13 @@ private fun ConversationCard(
                 if (item.pinned) {
                     Icon(
                         Icons.Default.PushPin,
-                        contentDescription = "Pinned",
+                        contentDescription = strings.pinned,
                         tint = MaterialTheme.colorScheme.secondary,
                         modifier = Modifier.size(16.dp),
                     )
                 }
                 Text(
-                    text = statusLabel(item),
+                    text = statusLabel(item, strings),
                     style = MaterialTheme.typography.labelSmall,
                     color = statusColor,
                     fontFamily = FontFamily.Monospace,
@@ -356,11 +380,11 @@ private fun ConversationCard(
                 if (item.kind != "desktop") {
                     Box {
                         IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(36.dp)) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Chat actions")
+                            Icon(Icons.Default.MoreVert, contentDescription = strings.chatActions)
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
-                                text = { Text("Rename") },
+                                text = { Text(strings.rename) },
                                 leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
@@ -368,7 +392,7 @@ private fun ConversationCard(
                                 },
                             )
                             DropdownMenuItem(
-                                text = { Text(if (item.pinned) "Unpin" else "Pin") },
+                                text = { Text(if (item.pinned) strings.unpin else strings.pin) },
                                 leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
@@ -376,7 +400,7 @@ private fun ConversationCard(
                                 },
                             )
                             DropdownMenuItem(
-                                text = { Text("Fork") },
+                                text = { Text(strings.fork) },
                                 leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
@@ -384,7 +408,7 @@ private fun ConversationCard(
                                 },
                             )
                             DropdownMenuItem(
-                                text = { Text(if (item.archived) "Restore" else "Archive") },
+                                text = { Text(if (item.archived) strings.restore else strings.archive) },
                                 leadingIcon = {
                                     Icon(
                                         if (item.archived) Icons.Default.Unarchive else Icons.Default.Archive,
@@ -403,9 +427,9 @@ private fun ConversationCard(
 
             val preview = item.preview.ifBlank {
                 when {
-                    item.desktopLinked -> "Linked to visible Codex Desktop conversation."
-                    item.kind == "fork" -> "Forked from ${item.sourceId.ifBlank { "source chat" }}."
-                    isRunning -> "Running now."
+                    item.desktopLinked -> strings.linkedDesktopConversation
+                    item.kind == "fork" -> strings.forkedFrom(item.sourceId.ifBlank { strings.sourceChat })
+                    isRunning -> strings.runningNow
                     else -> ""
                 }
             }
@@ -420,7 +444,7 @@ private fun ConversationCard(
                 )
             }
 
-            val timeAgo = formatTimeAgo(item.updatedAt)
+            val timeAgo = formatTimeAgo(item.updatedAt, strings)
             if (timeAgo.isNotBlank() || item.desktopTitle.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -450,6 +474,7 @@ private fun TextInputDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -467,7 +492,7 @@ private fun TextInputDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(strings.cancel) }
         },
     )
 }
@@ -497,25 +522,17 @@ private fun EmptyOrErrorState(
     }
 }
 
-private fun providerLabel(item: ConversationItem): String = when (item.provider) {
-    "codex" -> if (item.kind == "desktop") "Codex Remote" else "Codex"
+private fun providerLabel(item: ConversationItem, strings: AppStrings): String = when (item.provider) {
+    "codex" -> if (item.kind == "desktop") strings.codexRemoteLabel() else "Codex"
     "claude" -> "Claude"
     "doubao" -> "Doubao"
     "zhipu" -> "GLM"
-    else -> item.provider.ifBlank { "Agent" }
+    else -> item.provider.ifBlank { strings.agentLabel() }
 }
 
-private fun statusLabel(item: ConversationItem): String = when (item.status) {
-    "running" -> "running"
-    "failed", "error" -> "error"
-    "history" -> "history"
-    "fork" -> "fork"
-    "desktop" -> "remote"
-    "completed" -> "done"
-    else -> item.status.ifBlank { item.kind }
-}
+private fun statusLabel(item: ConversationItem, strings: AppStrings): String = strings.statusLabel(item.status, item.kind)
 
-private fun formatTimeAgo(iso: String?): String {
+private fun formatTimeAgo(iso: String?, strings: AppStrings): String {
     if (iso.isNullOrBlank()) return ""
     val instant = try {
         java.time.Instant.parse(iso)
@@ -523,12 +540,11 @@ private fun formatTimeAgo(iso: String?): String {
         return ""
     }
     val diff = java.time.Duration.between(instant, java.time.Instant.now())
+    val minutes = diff.toMinutes()
+    val hours = diff.toHours()
+    val days = diff.toDays()
     return when {
-        diff.isNegative -> "now"
-        diff.toMinutes() < 1 -> "now"
-        diff.toMinutes() < 60 -> "${diff.toMinutes()}m"
-        diff.toHours() < 24 -> "${diff.toHours()}h"
-        diff.toDays() < 7 -> "${diff.toDays()}d"
-        else -> "${diff.toDays() / 7}w"
+        diff.isNegative -> strings.timeAgo(0, 0, 0)
+        else -> strings.timeAgo(minutes, hours, days)
     }
 }

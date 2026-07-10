@@ -141,18 +141,19 @@ function textFromAgentEvent(event) {
     if (typeof payload.text === "string") return payload.text;
     return "";
   }
-  if (event.type === "stdout" || event.type === "stderr") {
-    return event.text || "";
-  }
   return "";
 }
+
+export const __testInternals = {
+  textFromAgentEvent
+};
 
 /**
  * Try to dispatch a VibeLink Agent task for a detected question.
  * No-ops if the session is missing, the agent is disabled, or the question
  * is too close to the previous one (debounce).
  */
-export async function dispatchLiveCallQuestion({ sessionId, question, questionEvent = null, history, settings, agent = "claude", model = "" }) {
+export async function dispatchLiveCallQuestion({ sessionId, question, questionEvent = null, history, settings, agent = "codex", model = "" }) {
   if (!isLiveCallAgentEnabled()) return null;
   const session = getInMemorySession(sessionId);
   if (!session) return null;

@@ -33,11 +33,11 @@ class LiveCallAudioService : Service() {
             ACTION_START -> startStreaming(intent)
             ACTION_PAUSE -> {
                 streamer?.pause()
-                updateNotification("Paused")
+                updateNotification("已暂停")
             }
             ACTION_RESUME -> {
                 streamer?.resume()
-                updateNotification("Recording")
+                updateNotification("录音中")
             }
             ACTION_STOP -> stopSelf()
         }
@@ -47,6 +47,7 @@ class LiveCallAudioService : Service() {
     override fun onDestroy() {
         streamer?.stop()
         streamer = null
+        removeNotification()
         super.onDestroy()
     }
 
@@ -59,7 +60,7 @@ class LiveCallAudioService : Service() {
             return
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("Connecting"))
+        startForeground(NOTIFICATION_ID, buildNotification("正在连接"))
         val apiClient = ApiClient(baseUrl = baseUrl, token = token)
         val file = recordingFile(sessionId)
         val nextStreamer = LiveCallAudioStreamer(apiClient, scope)
@@ -69,7 +70,7 @@ class LiveCallAudioService : Service() {
             context = applicationContext,
             sessionId = sessionId,
             onStatus = { updateNotification(it) },
-            onError = { updateNotification("Error: $it") },
+            onError = { updateNotification("错误：$it") },
             recordingFile = file,
         )
     }
@@ -87,15 +88,25 @@ class LiveCallAudioService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Live Call Assistant")
+            .setContentTitle("实时通话助手")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setContentIntent(openIntent)
-            .addAction(android.R.drawable.ic_media_pause, "Pause", serviceIntent(ACTION_PAUSE, 1))
-            .addAction(android.R.drawable.ic_media_play, "Resume", serviceIntent(ACTION_RESUME, 2))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", serviceIntent(ACTION_STOP, 3))
+            .addAction(android.R.drawable.ic_media_pause, "暂停", serviceIntent(ACTION_PAUSE, 1))
+            .addAction(android.R.drawable.ic_media_play, "继续", serviceIntent(ACTION_RESUME, 2))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", serviceIntent(ACTION_STOP, 3))
             .build()
+    }
+
+    private fun removeNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
     }
 
     private fun serviceIntent(action: String, requestCode: Int): PendingIntent {
@@ -111,7 +122,7 @@ class LiveCallAudioService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "Live Call Assistant", NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(CHANNEL_ID, "实时通话助手", NotificationManager.IMPORTANCE_LOW),
         )
     }
 

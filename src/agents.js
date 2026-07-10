@@ -379,6 +379,20 @@ function quotedPromptArgs(template, prompt) {
   return splitCommandLine(safeTemplate).map((item) => (item === placeholder ? prompt : item));
 }
 
+function codexApprovalPolicy(value = "") {
+  return value === "strict" ? "untrusted" : value;
+}
+
+function codexGlobalArgs(payload, settings, policy) {
+  const args = ["-C", payload.cwd || settings.defaultCwd || process.cwd()];
+  if (payload.model) args.push("-m", payload.model);
+  if (payload.reasoningEffort) args.push("-c", `model_reasoning_effort="${payload.reasoningEffort}"`);
+  if (policy.sandboxMode) args.push("--sandbox", policy.sandboxMode);
+  if (policy.approvalPolicy) args.push("--ask-for-approval", codexApprovalPolicy(policy.approvalPolicy));
+  args.push("-c", `sandbox_network_access=${policy.networkAccess ? "true" : "false"}`);
+  return args;
+}
+
 function claudeArgs(payload, settings) {
   const args = ["--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
 
@@ -416,26 +430,16 @@ function codexArgs(payload, settings) {
     return args.map((arg) => arg.replaceAll("{sessionId}", payload.sessionId || ""));
   }
 
-  const common = ["-C", payload.cwd || settings.defaultCwd || process.cwd()];
-  if (payload.model) common.push("-m", payload.model);
-  if (payload.reasoningEffort) common.push("-c", `model_reasoning_effort="${payload.reasoningEffort}"`);
-  if (policy.sandboxMode) common.push("--sandbox", policy.sandboxMode);
-  if (policy.approvalPolicy) common.push("--ask-for-approval", policy.approvalPolicy);
-  common.push("-c", `sandbox_network_access=${policy.networkAccess ? "true" : "false"}`);
+  const globalArgs = codexGlobalArgs(payload, settings, policy);
 
   if (payload.mode === "resume" && payload.sessionId) {
-    const resumeArgs = ["exec", "resume", "--json"];
-    if (payload.model) resumeArgs.push("-m", payload.model);
-    if (payload.reasoningEffort) resumeArgs.push("-c", `model_reasoning_effort="${payload.reasoningEffort}"`);
-    if (policy.sandboxMode) resumeArgs.push("--sandbox", policy.sandboxMode);
-    if (policy.approvalPolicy) resumeArgs.push("--ask-for-approval", policy.approvalPolicy);
-    resumeArgs.push("-c", `sandbox_network_access=${policy.networkAccess ? "true" : "false"}`);
+    const resumeArgs = [...globalArgs, "exec", "resume", "--json"];
     resumeArgs.push("--skip-git-repo-check");
     resumeArgs.push(payload.sessionId, payload.prompt || "");
     return resumeArgs;
   }
 
-  return ["exec", "--json", ...common, payload.prompt || ""];
+  return [...globalArgs, "exec", "--json", payload.prompt || ""];
 }
 
 function taskAgent(value = "") {

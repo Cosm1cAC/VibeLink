@@ -11,9 +11,12 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.navigation.navDeepLink
+import com.vibelink.app.data.AppLanguage
 import com.vibelink.app.data.SettingsStore
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ConversationItem
+import com.vibelink.app.ui.i18n.LocalAppStrings
+import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.ui.screens.*
 import kotlinx.coroutines.launch
 
@@ -39,8 +42,11 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
     val conversations by sessionListViewModel.conversations.collectAsState()
     val promptHistory by settingsStore.promptHistory.collectAsState(initial = emptyList())
+    val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
+    val appStrings = remember(appLanguage) { appStringsFor(appLanguage) }
     val appScope = rememberCoroutineScope()
 
+    CompositionLocalProvider(LocalAppStrings provides appStrings) {
     NavHost(navController = navController, startDestination = "login") {
         // 鈹€鈹€ Login 鈹€鈹€
         composable("login") {
@@ -70,7 +76,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                         key = "new:${System.currentTimeMillis()}",
                         kind = "new",
                         provider = "codex",
-                        title = "New VibeLink Agent task",
+                        title = appStrings.newChat,
                         status = "new",
                     )
                     pendingConversation = conversation
@@ -153,6 +159,10 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             SettingsScreen(
                 apiClient = apiClient,
                 viewModel = settingsViewModel,
+                language = appLanguage,
+                onLanguageChange = { language ->
+                    appScope.launch { settingsStore.setAppLanguage(language) }
+                },
                 onBack = { navController.popBackStack() },
             )
         }
@@ -165,11 +175,12 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             key = "share:${System.currentTimeMillis()}",
             kind = "new",
             provider = "codex",
-            title = "Shared to VibeLink",
+            title = appStrings.brandName,
             status = "new",
             preview = text.take(160),
         )
         pendingConversation = conversation
         navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
+    }
     }
 }

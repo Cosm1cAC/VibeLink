@@ -474,6 +474,8 @@ data class TranscriptBody(
     val text: String,
     val final: Boolean = true,
     val speaker: String = "remote",
+    val agent: String = "",
+    val model: String = "",
 )
 
 // ── History (sessions) ──

@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.data.SettingsStore
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.ui.i18n.LocalAppStrings
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -45,6 +46,7 @@ fun LoginScreen(
     var status by remember { mutableStateOf("Loading saved connection") }
     var loading by remember { mutableStateOf(false) }
     var scannerOpen by remember { mutableStateOf(false) }
+    val strings = LocalAppStrings.current
     val scope = rememberCoroutineScope()
 
     suspend fun persistLogin(url: String, token: String) {
@@ -61,7 +63,7 @@ fun LoginScreen(
         val session = uri.getQueryParameter("session").orEmpty()
         val code = uri.getQueryParameter("code").orEmpty()
         if (uri.scheme != "vibelink" || uri.host != "pair" || server.isBlank() || session.isBlank() || code.isBlank()) {
-            status = "Invalid VibeLink pairing QR."
+            status = strings.invalidPairingQr
             return false
         }
 
@@ -70,7 +72,7 @@ fun LoginScreen(
         settingsStore.setBridgeUrl(server)
         pairingSessionId = session
         pairingCode = code
-        status = "Scanned pairing QR. Confirm this device in VibeLink, then keep this screen open."
+        status = "已扫描配对二维码。请在 VibeLink 中确认此设备，并保持本页打开。"
         return true
     }
 
@@ -82,7 +84,7 @@ fun LoginScreen(
         bridgeUrl = settingsStore.bridgeUrl.first()
         val savedToken = settingsStore.getTokenSync()
         if (savedToken.isBlank()) {
-            status = "Scan the VibeLink QR code or enter a pairing token."
+            status = strings.scanPairingHint
             return@LaunchedEffect
         }
 
@@ -90,9 +92,9 @@ fun LoginScreen(
         apiClient.token = savedToken
         try {
             if (apiClient.checkStatus().ok) onLoginSuccess()
-            else status = "Saved connection is unavailable."
+            else status = "已保存连接不可用。"
         } catch (error: Exception) {
-            status = "Saved token could not connect: ${error.message}"
+            status = "已保存 Token 连接失败：${error.message}"
             apiClient.token = ""
         }
     }
@@ -104,7 +106,7 @@ fun LoginScreen(
             try {
                 val current = apiClient.getPairingSession(pairingSessionId).session
                 val currentStatus = current?.status ?: "unknown"
-                status = "Pairing status: $currentStatus. Code: $pairingCode"
+                status = "配对状态：$currentStatus。验证码：$pairingCode"
                 if (current?.status == "approved") {
                     val claim = apiClient.claimPairingSession(pairingSessionId, pairingCode, "VibeLink Android")
                     if (claim.token.isNotBlank()) {
@@ -114,7 +116,7 @@ fun LoginScreen(
                 }
                 if (current?.status == "denied" || current?.status == "expired") pairingSessionId = ""
             } catch (error: Exception) {
-                status = "Pairing check failed: ${error.message}"
+                status = "配对检查失败：${error.message}"
             }
         }
     }
@@ -127,13 +129,13 @@ fun LoginScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Bridge connection", style = MaterialTheme.typography.titleMedium)
+            Text(strings.bridgeConnection, style = MaterialTheme.typography.titleMedium)
 
             Button(
                 onClick = { scannerOpen = !scannerOpen },
                 enabled = !loading,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (scannerOpen) "Close scanner" else "Scan QR code") }
+            ) { Text(if (scannerOpen) strings.closeScanner else strings.scanQrCode) }
 
             if (scannerOpen) {
                 PairingQrScanner(
@@ -148,7 +150,7 @@ fun LoginScreen(
             OutlinedTextField(
                 value = bridgeUrl,
                 onValueChange = { bridgeUrl = it },
-                label = { Text("Bridge URL") },
+                label = { Text(strings.bridgeUrl) },
                 placeholder = { Text("http://192.168.1.10:8787") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -157,8 +159,8 @@ fun LoginScreen(
             OutlinedTextField(
                 value = pairingToken,
                 onValueChange = { pairingToken = it },
-                label = { Text("Pairing token") },
-                placeholder = { Text("Legacy token from bridge settings") },
+                label = { Text(strings.pairingToken) },
+                placeholder = { Text(strings.legacyTokenPlaceholder) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -167,7 +169,7 @@ fun LoginScreen(
                 onClick = {
                     scope.launch {
                         loading = true
-                        status = "Connecting"
+                        status = "正在连接"
                         val url = bridgeUrl.trim().trimEnd('/')
                         apiClient.baseUrl = url
                         try {
@@ -176,10 +178,10 @@ fun LoginScreen(
                                 settingsStore.setPairingToken(pairingToken.trim())
                                 persistLogin(url, login.token)
                             } else {
-                                status = "Login failed: empty device token."
+                                status = "登录失败：设备 Token 为空。"
                             }
                         } catch (error: Exception) {
-                            status = "Login failed: ${error.message}"
+                            status = "登录失败：${error.message}"
                         } finally {
                             loading = false
                         }
@@ -188,7 +190,7 @@ fun LoginScreen(
                 enabled = !loading && pairingToken.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                if (loading) CircularProgressIndicator(modifier = Modifier.padding(2.dp)) else Text("Connect with token")
+                if (loading) CircularProgressIndicator(modifier = Modifier.padding(2.dp)) else Text(strings.connectWithToken)
             }
 
             OutlinedButton(
@@ -204,12 +206,12 @@ fun LoginScreen(
                             if (session != null) {
                                 pairingSessionId = session.id
                                 pairingCode = session.code
-                                status = "Approve this device in VibeLink, then keep this screen open. Code: ${session.code}"
+                                status = "请在 VibeLink 中批准此设备，并保持本页打开。验证码：${session.code}"
                             } else {
-                                status = "Pairing request failed: empty session."
+                                status = "配对请求失败：会话为空。"
                             }
                         } catch (error: Exception) {
-                            status = "Pairing request failed: ${error.message}"
+                            status = "配对请求失败：${error.message}"
                         } finally {
                             loading = false
                         }
@@ -217,17 +219,22 @@ fun LoginScreen(
                 },
                 enabled = !loading,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Create pairing request") }
+            ) { Text(strings.createPairingRequest) }
 
             if (pairingSessionId.isNotBlank()) {
-                Text("Pairing ID: ${pairingSessionId.take(8)} / Code: $pairingCode", style = MaterialTheme.typography.bodySmall)
+                Text("配对 ID：${pairingSessionId.take(8)} / 验证码：$pairingCode", style = MaterialTheme.typography.bodySmall)
             }
 
             if (status.isNotBlank()) {
                 Text(
                     text = status,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (status.contains("failed", ignoreCase = true) || status.contains("denied", ignoreCase = true)) {
+                    color = if (
+                        status.contains("failed", ignoreCase = true) ||
+                        status.contains("denied", ignoreCase = true) ||
+                        status.contains("失败") ||
+                        status.contains("拒绝")
+                    ) {
                         MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant

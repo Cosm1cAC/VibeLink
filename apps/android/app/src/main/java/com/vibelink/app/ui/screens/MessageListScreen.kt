@@ -93,6 +93,7 @@ import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.ProviderDefinition
 import com.vibelink.app.network.ProviderRegistryResponse
 import com.vibelink.app.ui.components.ToolCallCardList
+import com.vibelink.app.ui.i18n.LocalAppStrings
 import coil.compose.AsyncImage
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
@@ -124,6 +125,7 @@ fun MessageListScreen(
     val remoteStatus by viewModel.remoteStatus.collectAsState()
     val providerRegistry by viewModel.providerRegistry.collectAsState()
     val pendingApproval by viewModel.pendingApproval.collectAsState()
+    val strings = LocalAppStrings.current
 
     var prompt by remember(conversation?.key) {
         mutableStateOf(if (conversation?.key?.startsWith("share:") == true) conversation.preview else "")
@@ -145,7 +147,7 @@ fun MessageListScreen(
     fun uploadAttachment(uri: Uri) {
         scope.launch {
             attachmentUploading = true
-            attachmentStatus = "Uploading attachment"
+            attachmentStatus = strings.uploadingAttachment
             try {
                 val upload = uploadAttachmentUri(context, apiClient, uri)
                 val attachmentText = MessageContentUtils.attachmentPromptText(
@@ -154,9 +156,9 @@ fun MessageListScreen(
                     preview = upload.preview,
                 )
                 prompt = listOf(prompt.trim(), attachmentText).filter { it.isNotBlank() }.joinToString("\n\n")
-                attachmentStatus = "Attached ${upload.name.ifBlank { "file" }}"
+                attachmentStatus = strings.attached(upload.name.ifBlank { strings.file })
             } catch (error: Exception) {
-                attachmentStatus = error.message ?: "Attachment upload failed"
+                attachmentStatus = error.message ?: strings.attachmentUploadFailed
             } finally {
                 attachmentUploading = false
             }
@@ -184,12 +186,12 @@ fun MessageListScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(title.ifBlank { "Chat" }, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                        Text(title.ifBlank { strings.chat }, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                         val subtitle = when {
                             isDesktopRemote && remoteStatus.isNotBlank() -> remoteStatus
                             running && currentTaskId.isNotBlank() -> "running · ${currentTaskId.take(8)}"
-                            running -> "running"
-                            conversation?.kind == "new" -> "VibeLink Agent"
+                            running -> strings.running
+                            conversation?.kind == "new" -> strings.vibelinkAgent
                             else -> conversation?.provider.orEmpty()
                         }
                         if (subtitle.isNotBlank()) {
@@ -205,24 +207,24 @@ fun MessageListScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
                     }
                 },
                 actions = {
                     IconButton(onClick = { viewModel.refresh(apiClient) }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
                     }
                     if (isDesktopRemote) {
                         IconButton(onClick = { viewModel.retryDesktop(apiClient) }) {
-                            Icon(Icons.Default.Replay, contentDescription = "Retry remote queue")
+                            Icon(Icons.Default.Replay, contentDescription = strings.retryRemoteQueue)
                         }
                         IconButton(onClick = { viewModel.clearDesktopQueue(apiClient) }) {
-                            Icon(Icons.Default.Clear, contentDescription = "Clear remote queue")
+                            Icon(Icons.Default.Clear, contentDescription = strings.clearRemoteQueue)
                         }
                     }
                     if (running) {
                         IconButton(onClick = { viewModel.stopCurrentTask(apiClient) }) {
-                            Icon(Icons.Default.Stop, contentDescription = "Stop task")
+                            Icon(Icons.Default.Stop, contentDescription = strings.stopTask)
                         }
                     }
                 },
@@ -284,7 +286,7 @@ fun MessageListScreen(
                     ) {
                         CircularProgressIndicator()
                         Spacer(Modifier.height(8.dp))
-                        Text("Loading", style = MaterialTheme.typography.bodySmall)
+                        Text(strings.loading, style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 messages.isEmpty() -> {
@@ -382,6 +384,7 @@ private fun ComposerBar(
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Surface(tonalElevation = 3.dp) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(10.dp),
@@ -399,11 +402,11 @@ private fun ComposerBar(
                     }
                 }
             } else {
-                AssistChip(onClick = {}, label = { Text("Codex Remote uses the current Codex Desktop settings") })
+                AssistChip(onClick = {}, label = { Text(strings.codexRemoteCurrentSettings) })
             }
 
             if (!isDesktopRemote) {
-                Text("Quick commands", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(strings.quickCommands, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(PromptCommandCatalog.commands, key = { it.id }) { command ->
                         AssistChip(
@@ -420,8 +423,8 @@ private fun ComposerBar(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Recent prompts", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = onClearPromptHistory) { Text("Clear") }
+                    Text(strings.recentPrompts, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = onClearPromptHistory) { Text(strings.clear) }
                 }
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(promptHistory.take(6), key = { it }) { item ->
@@ -439,7 +442,7 @@ private fun ComposerBar(
                 val efforts = provider?.reasoningEfforts.orEmpty().ifEmpty { listOf("", "low", "medium", "high", "xhigh") }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (provider?.capabilities?.modelOverride == false) {
-                        AssistChip(onClick = {}, label = { Text("Model: ${models.firstOrNull()?.label ?: "provider default"}") })
+                        AssistChip(onClick = {}, label = { Text("Model: ${models.firstOrNull()?.label ?: strings.providerDefault}") })
                     } else {
                         if (models.isNotEmpty()) {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -447,7 +450,7 @@ private fun ComposerBar(
                                     FilterChip(
                                         selected = model == option.id || (model.isBlank() && option.default),
                                         onClick = { onModelChange(option.id) },
-                                        label = { Text(option.label.ifBlank { option.id.ifBlank { "Default" } }) },
+                                        label = { Text(option.label.ifBlank { option.id.ifBlank { strings.defaultOption } }) },
                                     )
                                 }
                             }
@@ -456,7 +459,7 @@ private fun ComposerBar(
                             value = model,
                             onValueChange = onModelChange,
                             modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Model override") },
+                            label = { Text(strings.modelOverride) },
                             singleLine = true,
                         )
                     }
@@ -466,7 +469,7 @@ private fun ComposerBar(
                                 FilterChip(
                                     selected = reasoningEffort == effort || (reasoningEffort.isBlank() && effort.isBlank()),
                                     onClick = { onReasoningEffortChange(effort) },
-                                    label = { Text(effort.ifBlank { "Default effort" }) },
+                                    label = { Text(effort.ifBlank { strings.defaultEffort }) },
                                 )
                             }
                         }
@@ -475,7 +478,7 @@ private fun ComposerBar(
                         value = cwd,
                         onValueChange = onCwdChange,
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Working directory") },
+                        label = { Text(strings.workingDirectory) },
                         singleLine = true,
                     )
                 }
@@ -483,24 +486,24 @@ private fun ComposerBar(
 
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 IconButton(onClick = onPickImage, enabled = !isDesktopRemote && !attachmentUploading) {
-                    Icon(Icons.Default.Image, contentDescription = "Attach image")
+                    Icon(Icons.Default.Image, contentDescription = strings.attachImage)
                 }
                 IconButton(onClick = onPickFile, enabled = !isDesktopRemote && !attachmentUploading) {
-                    Icon(Icons.Default.AttachFile, contentDescription = "Attach file")
+                    Icon(Icons.Default.AttachFile, contentDescription = strings.attachFile)
                 }
                 OutlinedTextField(
                     value = prompt,
                     onValueChange = onPromptChange,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp, max = 140.dp),
-                    placeholder = { Text(if (isDesktopRemote) "Send to Codex Desktop" else "Message VibeLink Agent") },
+                    placeholder = { Text(if (isDesktopRemote) strings.sendToCodexDesktop else strings.messageVibeLinkAgent) },
                     minLines = 1,
                     maxLines = 5,
                 )
                 IconButton(onClick = onToggleOptions, enabled = !isDesktopRemote) {
-                    Icon(Icons.Default.Tune, contentDescription = "Composer options")
+                    Icon(Icons.Default.Tune, contentDescription = strings.composerOptions)
                 }
                 IconButton(onClick = onOpenLiveCall, enabled = !isDesktopRemote) {
-                    Icon(Icons.Default.Mic, contentDescription = "Open Live Call")
+                    Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)
                 }
                 Button(onClick = onSend, enabled = canSend) {
                     if (sending) {
@@ -525,7 +528,7 @@ private fun ComposerBar(
                 OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.Stop, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Stop current task")
+                    Text(strings.stopCurrentTask)
                 }
             }
         }
@@ -545,6 +548,7 @@ private fun MessageBubble(
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
+    val strings = LocalAppStrings.current
     var expanded by remember(message.role, message.text, message.toolCalls.size) { mutableStateOf(true) }
     var menuOpen by remember { mutableStateOf(false) }
     var editing by remember(message.role, message.text, message.turnId, message.id) { mutableStateOf(false) }
@@ -562,10 +566,10 @@ private fun MessageBubble(
         else -> MaterialTheme.colorScheme.surface
     }
     val roleLabel = when (message.role) {
-        "user" -> "You"
-        "assistant" -> "Agent"
-        "error" -> "Error"
-        "system" -> "System"
+        "user" -> strings.you
+        "assistant" -> strings.agent
+        "error" -> strings.error
+        "system" -> strings.system
         else -> message.role
     }
     val codeBlocks = remember(message.text) { MessageContentUtils.extractCodeBlocks(message.text) }
@@ -593,26 +597,26 @@ private fun MessageBubble(
                     Row {
                         if (codeBlocks.isNotEmpty()) {
                             IconButton(
-                                onClick = { copyMessage(context, codeBlocks.joinToString("\n\n"), "Code copied") },
+                                onClick = { copyMessage(context, codeBlocks.joinToString("\n\n"), strings.codeCopied) },
                                 modifier = Modifier.size(40.dp),
                             ) {
-                                Icon(Icons.Default.Code, contentDescription = "Copy code blocks", modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.Code, contentDescription = strings.copyCodeBlocks, modifier = Modifier.size(18.dp))
                             }
                         }
                         if (fileReferences.isNotEmpty()) {
                             IconButton(
-                                onClick = { copyMessage(context, fileReferences.joinToString("\n"), "File references copied") },
+                                onClick = { copyMessage(context, fileReferences.joinToString("\n"), strings.fileReferencesCopied) },
                                 modifier = Modifier.size(40.dp),
                             ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy file references", modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.ContentCopy, contentDescription = strings.copyFileReferences, modifier = Modifier.size(18.dp))
                             }
                         }
                         if (message.text.isNotBlank()) {
                             IconButton(
-                                onClick = { copyMessage(context, message.text) },
+                                onClick = { copyMessage(context, message.text, strings.copied) },
                                 modifier = Modifier.size(40.dp),
                             ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy message", modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.ContentCopy, contentDescription = strings.copyMessage, modifier = Modifier.size(18.dp))
                             }
                         }
                         IconButton(
@@ -621,18 +625,18 @@ private fun MessageBubble(
                         ) {
                             Icon(
                                 if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                contentDescription = if (expanded) "Collapse message" else "Expand message",
+                                contentDescription = if (expanded) strings.collapseMessage else strings.expandMessage,
                             )
                         }
                         if (canEdit || canRegenerate || canDelete) {
                             Box {
                                 IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = "Message actions")
+                                    Icon(Icons.Default.MoreVert, contentDescription = strings.messageActions)
                                 }
                                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                                     if (canEdit) {
                                         DropdownMenuItem(
-                                            text = { Text("Edit") },
+                                            text = { Text(strings.edit) },
                                             leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
                                             onClick = {
                                                 editDraft = message.text
@@ -644,7 +648,7 @@ private fun MessageBubble(
                                     }
                                     if (canRegenerate) {
                                         DropdownMenuItem(
-                                            text = { Text("Regenerate") },
+                                            text = { Text(strings.regenerate) },
                                             leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
                                             onClick = {
                                                 menuOpen = false
@@ -654,7 +658,7 @@ private fun MessageBubble(
                                     }
                                     if (canDelete) {
                                         DropdownMenuItem(
-                                            text = { Text("Delete") },
+                                            text = { Text(strings.delete) },
                                             leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
                                             onClick = {
                                                 menuOpen = false
@@ -681,14 +685,14 @@ private fun MessageBubble(
                     )
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { editing = false }) { Text("Cancel") }
+                        TextButton(onClick = { editing = false }) { Text(strings.cancel) }
                         Button(
                             onClick = {
                                 onEdit(message, editDraft)
                                 editing = false
                             },
                             enabled = editDraft.trim().isNotBlank(),
-                        ) { Text("Save") }
+                        ) { Text(strings.save) }
                     }
                 } else if (displayText.isNotBlank()) {
                     if (!compact || isError || isSystem) Spacer(Modifier.height(4.dp))
@@ -710,7 +714,7 @@ private fun MessageBubble(
                     Spacer(Modifier.height(8.dp))
                     FileReferenceChips(
                         fileReferences = fileReferences,
-                        onCopy = { reference -> copyMessage(context, reference, "File reference copied") },
+                        onCopy = { reference -> copyMessage(context, reference, strings.fileReferenceCopied) },
                         onOpen = onOpenFileReference,
                     )
                 }
@@ -844,6 +848,7 @@ private fun MarkdownText(text: String) {
 
 @Composable
 private fun StreamingPlaceholderBubble() {
+    val strings = LocalAppStrings.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
@@ -855,7 +860,7 @@ private fun StreamingPlaceholderBubble() {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            Text("Agent is typing", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(strings.agentTyping, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -866,20 +871,21 @@ private fun ChatEmptyState(
     onUseSuggestion: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val strings = LocalAppStrings.current
     Column(
         modifier = modifier.padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text(
-            text = if (conversation == null) "Restoring chat" else "Start with context",
+            text = if (conversation == null) strings.restoringChat else strings.startWithContext,
             style = MaterialTheme.typography.titleSmall,
         )
         if (conversation != null) {
             val suggestions = listOf(
-                "Summarize the current workspace status",
-                "Review the latest changes and risks",
-                "Plan the next safe implementation step",
+                strings.suggestionSummarizeWorkspace,
+                strings.suggestionReviewChanges,
+                strings.suggestionPlanNextStep,
             )
             suggestions.forEach { suggestion ->
                 AssistChip(onClick = { onUseSuggestion(suggestion) }, label = { Text(suggestion) })
@@ -932,6 +938,7 @@ private fun ApprovalRequiredCard(
     onOpenApprovals: () -> Unit,
     onRetry: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
@@ -941,10 +948,10 @@ private fun ApprovalRequiredCard(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onOpenApprovals, modifier = Modifier.weight(1f)) {
-                    Text("Open approvals")
+                    Text(strings.openApprovals)
                 }
                 OutlinedButton(onClick = onRetry, modifier = Modifier.weight(1f), enabled = approval.retry != null) {
-                    Text("Retry")
+                    Text(strings.retry)
                 }
             }
         }
@@ -954,6 +961,7 @@ private fun ApprovalRequiredCard(
 @Composable
 private fun ErrorBanner(message: String, onOpenApprovals: () -> Unit) {
     val approvalRequired = message.contains("Approval required", ignoreCase = true)
+    val strings = LocalAppStrings.current
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
@@ -963,7 +971,7 @@ private fun ErrorBanner(message: String, onOpenApprovals: () -> Unit) {
             )
             if (approvalRequired) {
                 OutlinedButton(onClick = onOpenApprovals, modifier = Modifier.fillMaxWidth()) {
-                    Text("Open approvals")
+                    Text(strings.openApprovals)
                 }
             }
         }

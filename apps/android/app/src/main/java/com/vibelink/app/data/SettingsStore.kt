@@ -21,6 +21,7 @@ class SettingsStore(private val context: Context) {
         private val KEY_PAIRING_TOKEN = stringPreferencesKey("pairing_token")
         private val KEY_ACTIVE_SESSION_ID = stringPreferencesKey("active_session_id")
         private val KEY_PROMPT_HISTORY = stringPreferencesKey("prompt_history")
+        private val KEY_APP_LANGUAGE = stringPreferencesKey("app_language")
     }
 
     val bridgeUrl: Flow<String> = context.dataStore.data.map { prefs ->
@@ -41,6 +42,10 @@ class SettingsStore(private val context: Context) {
 
     val promptHistory: Flow<List<String>> = context.dataStore.data.map { prefs ->
         PromptHistoryCodec.decode(prefs[KEY_PROMPT_HISTORY].orEmpty())
+    }
+
+    val appLanguage: Flow<AppLanguage> = context.dataStore.data.map { prefs ->
+        AppLanguage.fromCode(prefs[KEY_APP_LANGUAGE])
     }
 
     suspend fun setBridgeUrl(url: String) {
@@ -70,6 +75,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun clearPromptHistory() {
         context.dataStore.edit { it.remove(KEY_PROMPT_HISTORY) }
+    }
+
+    suspend fun setAppLanguage(language: AppLanguage) {
+        context.dataStore.edit { it[KEY_APP_LANGUAGE] = language.code }
     }
 
     suspend fun clearSession() {

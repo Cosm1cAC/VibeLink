@@ -2,7 +2,7 @@
 
 ## Goal
 
-Close the gaps listed in `docs/android-handoff.md` by verifying the previous Android parity work, finishing the remaining Android-native parity slices, and keeping the app testable after every increment. This plan treats the report as a matrix, not a single bug: correctness/safety items first, then chat-native UX, then Web parity surfaces, then remaining platform-depth items.
+Close the gaps previously tracked in the Android handoff review. The final status is now summarized in `docs/android-parity-closure-report.md`; this plan remains as implementation history.
 
 ## Current state
 
@@ -24,7 +24,7 @@ This session continues from that baseline. The completed Android handoff slice c
 
 ### Phase 1: Verify Existing Progress
 
-1. Read `docs/android-handoff.md` and map each P0/P1/P2 gap against current Android code.
+1. Read the prior Android gap review and map each P0/P1/P2 gap against current Android code.
 2. Check current branch, uncommitted diff, and recent commit history to avoid duplicating previous work.
 3. Run Android unit tests to establish a green baseline.
 
@@ -66,7 +66,7 @@ This session continues from that baseline. The completed Android handoff slice c
 
 ## Acceptance Criteria
 
-- [x] Every concrete P0/P1 item in `docs/android-handoff.md` is either implemented or explicitly documented as already implemented by prior commits.
+- [x] Every concrete P0/P1 item from the prior Android gap review is either implemented or explicitly documented as already implemented by prior commits.
 - [x] Chat messages expose file-reference actions when assistant output mentions repo files.
 - [x] Chat messages expose copy/edit/delete/regenerate actions where appropriate.
 - [x] The Android composer can attach images/files through the bridge attachment endpoint.

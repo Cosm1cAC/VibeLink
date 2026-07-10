@@ -1,6 +1,6 @@
 # Android Handoff Gap Closure TODO
 
-Generated from `docs/android-handoff.md` and the current `codex/android-handoff-gaps` branch state.
+Generated from the prior Android handoff review and the current `codex/android-handoff-gaps` branch state. The final closure status is now captured in `docs/android-parity-closure-report.md`.
 
 ## Already completed by previous commits
 

@@ -37,7 +37,7 @@ class MessageContentUtilsTest {
     fun extractsDeduplicatedFileReferences() {
         val text = """
             See apps/android/app/src/main/java/com/vibelink/app/ui/screens/MessageListScreen.kt:247
-            and docs/android-handoff.md. Ignore https://example.com/file.kt and repeat docs/android-handoff.md.
+            and docs/android-parity-closure-report.md. Ignore https://example.com/file.kt and repeat docs/android-parity-closure-report.md.
         """.trimIndent()
 
         val refs = MessageContentUtils.extractFileReferences(text)
@@ -45,7 +45,7 @@ class MessageContentUtilsTest {
         assertEquals(
             listOf(
                 "apps/android/app/src/main/java/com/vibelink/app/ui/screens/MessageListScreen.kt:247",
-                "docs/android-handoff.md",
+                "docs/android-parity-closure-report.md",
             ),
             refs,
         )

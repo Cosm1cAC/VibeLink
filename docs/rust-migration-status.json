@@ -94,8 +94,8 @@
         "docs/event-store-worker.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, local/runtime/server canary harnesses, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
-      "nextAction": "Wire the local, runtime, and server canaries into release or CI status, then run limited human-driven real-session canaries before broader default exposure.",
+      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, local/runtime/server canary harnesses, CI canary status wiring, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
+      "nextAction": "Run limited human-driven real-session canaries with runtime stats capture before broader default exposure.",
       "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across automated and human-driven representative runtime sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
     },
     {

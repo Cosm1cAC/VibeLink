@@ -44,7 +44,7 @@ The worker client applies a pending-request cap before posting work to the threa
 
 Task and tool event append paths still preserve the existing immediate cursor behavior unless their specific async or batch flags are enabled. If the worker fails, VibeLink logs one warning and falls back to the synchronous SQLite adapter.
 
-## Rust Sidecar Opt-In
+## Rust Sidecar Opt-In And Canary
 
 `src/eventStoreContract.js` now owns the shared JSON method allowlist, control method names, protocol version, and error envelope used by both the Node Worker and sidecar smoke fixture. `src/eventStoreSidecarClient.js` speaks the Rust-ready stdio JSONL shape:
 
@@ -94,12 +94,24 @@ Before the first routed request, `src/db.js` calls `__health` and verifies `ok`,
 
 It also includes `eventStore.rustSidecar`, `eventStore.metrics`, grouped by contract method, with request counts, failures, fallback counts, average/max/last duration, mode counts, and slow sync-call stalls. Set `VIBELINK_EVENT_STORE_STALL_THRESHOLD_MS` to tune the stall threshold for local hardware or CI; the default is 50ms. The same response includes task-event batch metrics, tool-event batch metrics, live-call event batch metrics, and tool-event SSE replay metrics. These numbers are intentionally runtime-local; they reset when the bridge restarts and are meant for before/after comparisons during worker, batch, and Rust sidecar experiments.
 
+## Local Canary
+
+`npm run event-store:canary` runs an isolated local comparison against temporary SQLite databases. It seeds task, tool-run, and live-call owners, runs the sync adapter as the baseline, then runs the Rust sidecar against the same append/replay workload. The script fails if readiness is bad, direct Rust fallback is non-zero, sidecar failures occur, append averages are more than 10% slower than baseline, pending requests do not drain, or backpressure appears. The default command prefers `apps/windows/target/release/vibelink(.exe)` when present and falls back to `apps/windows/target/debug/vibelink(.exe)`.
+
+The representative 2026-07-10 local release canary passed with:
+
+```bash
+npm run event-store:canary -- --output .tmp/event-store-canary-final.json
+```
+
+That run measured 10,800 append events across task, tool, and live-call paths. Append averages were `insertTaskEvents` sync 7.9ms vs Rust 4.2ms, `insertToolEvents` sync 10.9ms vs Rust 5.8ms, and `insertLiveCallEvents` sync 7.4ms vs Rust 4.7ms, with 0 fallback, 0 sidecar failures, 0 pending requests after drain, and 0 backpressure rejects. The `.tmp` output is a local evidence artifact and is not committed.
+
 ## Next Slices
 
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.
 - Window large task/live-call replay paths where callers still request broad history.
 - Add high-frequency event burst smoke tests around the runtime stall and batch metrics.
-- Run measured local canaries before making the Rust sidecar broader than opt-in or auto-readiness experiments.
+- Run limited canary sessions with runtime stats capture before making the Rust sidecar default-on.
 
 ## Rollback
 
@@ -119,7 +131,7 @@ No data migration rollback is required for this slice because the Rust sidecar w
 
 ## Canary Thresholds
 
-Before moving the event-store sidecar from `opt-in` to `canary`, run a representative local session with `VIBELINK_EVENT_STORE_RUST_SIDECAR=auto` and the same Worker/batch flags planned for canary. Use `GET /api/tool-events/stats` before and after the session.
+Before moving the event-store sidecar beyond limited `canary`, run representative local and runtime sessions with `VIBELINK_EVENT_STORE_RUST_SIDECAR=auto` and the same Worker/batch flags planned for rollout. Use `GET /api/tool-events/stats` before and after runtime sessions.
 
 Promotion requires all of the following:
 

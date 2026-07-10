@@ -573,11 +573,11 @@ impl EventStoreSidecar {
         set_json_string(&mut event_json, "turnId", turn_id.clone());
         set_json_string(&mut event_json, "blockId", block_id.clone());
 
-        self.db.execute(
+        let inserted = self.db.execute(
             "INSERT OR IGNORE INTO task_events (
-                task_id, event_id, event_type, event_at, text, payload_json, event_json,
-                created_at, event_kind, turn_id, block_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    task_id, event_id, event_type, event_at, text, payload_json, event_json,
+                    created_at, event_kind, turn_id, block_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 task_id,
                 event_id,
@@ -592,6 +592,9 @@ impl EventStoreSidecar {
                 block_id
             ],
         )?;
+        if inserted > 0 {
+            return Ok(Some(self.db.last_insert_rowid()));
+        }
         self.cursor_for("task_events", "task_id", task_id, &event_id)
     }
 
@@ -638,30 +641,41 @@ impl EventStoreSidecar {
         )?)
     }
 
-    fn insert_tool_event(&self, tool_run_id: &str, event: &Value) -> Result<Option<i64>> {
-        let run = self
-            .db
+    fn tool_run_owner(&self, tool_run_id: &str) -> Result<Option<(String, String)>> {
+        self.db
             .query_row(
                 "SELECT task_id, workspace_id FROM tool_runs WHERE id = ?",
                 params![tool_run_id],
                 |row| {
                     Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                     ))
                 },
             )
-            .optional()?;
-        let Some((run_task_id, run_workspace_id)) = run else {
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn insert_tool_event(&self, tool_run_id: &str, event: &Value) -> Result<Option<i64>> {
+        let Some((task_id, workspace_id)) = self.tool_run_owner(tool_run_id)? else {
             return Ok(None);
         };
+        self.insert_tool_event_with_owner(tool_run_id, event, &task_id, &workspace_id)
+    }
 
+    fn insert_tool_event_with_owner(
+        &self,
+        tool_run_id: &str,
+        event: &Value,
+        default_task_id: &str,
+        default_workspace_id: &str,
+    ) -> Result<Option<i64>> {
         let current = now_iso();
         let event_at = event_string_or(event, "at", &current);
         let event_id = event_string_or(event, "id", &format!("{tool_run_id}:{event_at}:rust"));
-        let task_id = event_string_or(event, "taskId", &run_task_id.unwrap_or_default());
-        let workspace_id =
-            event_string_or(event, "workspaceId", &run_workspace_id.unwrap_or_default());
+        let task_id = event_string_or(event, "taskId", default_task_id);
+        let workspace_id = event_string_or(event, "workspaceId", default_workspace_id);
         let mut event_json = event_object(event);
         set_json_string(&mut event_json, "id", event_id.clone());
         set_json_string(&mut event_json, "at", event_at.clone());
@@ -669,11 +683,11 @@ impl EventStoreSidecar {
         set_json_string(&mut event_json, "taskId", task_id.clone());
         set_json_string(&mut event_json, "workspaceId", workspace_id.clone());
 
-        self.db.execute(
+        let inserted = self.db.execute(
             "INSERT OR IGNORE INTO tool_events (
-                tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
-                text, payload_json, event_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
+                    text, payload_json, event_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 tool_run_id,
                 task_id,
@@ -687,6 +701,9 @@ impl EventStoreSidecar {
                 current
             ],
         )?;
+        if inserted > 0 {
+            return Ok(Some(self.db.last_insert_rowid()));
+        }
         self.cursor_for("tool_events", "tool_run_id", tool_run_id, &event_id)
     }
 
@@ -695,10 +712,13 @@ impl EventStoreSidecar {
         tool_run_id: &str,
         events: &[Value],
     ) -> Result<Vec<Option<i64>>> {
+        let Some((task_id, workspace_id)) = self.tool_run_owner(tool_run_id)? else {
+            return Ok(vec![None; events.len()]);
+        };
         let mut cursors = Vec::with_capacity(events.len());
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         for event in events {
-            match self.insert_tool_event(tool_run_id, event) {
+            match self.insert_tool_event_with_owner(tool_run_id, event, &task_id, &workspace_id) {
                 Ok(cursor) => cursors.push(cursor),
                 Err(error) => {
                     let _ = self.db.execute_batch("ROLLBACK");
@@ -738,7 +758,7 @@ impl EventStoreSidecar {
         rows.map(|row| event_json_with_cursor(row?)).collect()
     }
 
-    fn insert_live_call_event(&self, session_id: &str, event: &Value) -> Result<Option<i64>> {
+    fn live_call_exists(&self, session_id: &str) -> Result<bool> {
         let exists: Option<String> = self
             .db
             .query_row(
@@ -747,10 +767,21 @@ impl EventStoreSidecar {
                 |row| row.get(0),
             )
             .optional()?;
-        if exists.is_none() {
+        Ok(exists.is_some())
+    }
+
+    fn insert_live_call_event(&self, session_id: &str, event: &Value) -> Result<Option<i64>> {
+        if !self.live_call_exists(session_id)? {
             return Ok(None);
         }
+        self.insert_live_call_event_existing(session_id, event)
+    }
 
+    fn insert_live_call_event_existing(
+        &self,
+        session_id: &str,
+        event: &Value,
+    ) -> Result<Option<i64>> {
         let current = now_iso();
         let event_at = event_string_or(event, "at", &current);
         let event_id = event_string_or(event, "id", &format!("{session_id}:{event_at}:rust"));
@@ -759,10 +790,10 @@ impl EventStoreSidecar {
         set_json_string(&mut event_json, "at", event_at.clone());
         set_json_string(&mut event_json, "sessionId", session_id.to_string());
 
-        self.db.execute(
+        let inserted = self.db.execute(
             "INSERT OR IGNORE INTO live_call_events (
-                session_id, event_id, event_type, event_at, text, payload_json, event_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    session_id, event_id, event_type, event_at, text, payload_json, event_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 session_id,
                 event_id,
@@ -774,6 +805,9 @@ impl EventStoreSidecar {
                 current
             ],
         )?;
+        if inserted > 0 {
+            return Ok(Some(self.db.last_insert_rowid()));
+        }
         self.cursor_for("live_call_events", "session_id", session_id, &event_id)
     }
 
@@ -782,10 +816,13 @@ impl EventStoreSidecar {
         session_id: &str,
         events: &[Value],
     ) -> Result<Vec<Option<i64>>> {
+        if !self.live_call_exists(session_id)? {
+            return Ok(vec![None; events.len()]);
+        }
         let mut cursors = Vec::with_capacity(events.len());
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         for event in events {
-            match self.insert_live_call_event(session_id, event) {
+            match self.insert_live_call_event_existing(session_id, event) {
                 Ok(cursor) => cursors.push(cursor),
                 Err(error) => {
                     let _ = self.db.execute_batch("ROLLBACK");

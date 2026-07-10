@@ -104,7 +104,7 @@ export function emitLiveCallEvent(sessionId, type, payload = {}) {
  * On the first non-empty delta we also mark the agent task id so the
  * panel can link to the underlying VibeLink Agent task.
  */
-export function appendAgentTaskLiveCallDelta(sessionId, taskId, text, final = false, fullText = "") {
+export function appendAgentTaskLiveCallDelta(sessionId, taskId, text, final = false, fullText = "", correlation = {}) {
   const session = sessions.get(sessionId);
   if (!session) return null;
   if (!session.agentTaskId && taskId) {
@@ -115,12 +115,12 @@ export function appendAgentTaskLiveCallDelta(sessionId, taskId, text, final = fa
     const answer = (fullText || text || "").trim();
     if (answer) {
       session.lastAnswer = answer;
-      pushEvent(session, "live_call.agent.done", { text: answer, taskId: session.agentTaskId || taskId || "" });
+      pushEvent(session, "live_call.agent.done", { text: answer, taskId: session.agentTaskId || taskId || "", ...correlation });
     }
     return null;
   }
   if (!text) return null;
-  return pushEvent(session, "live_call.agent.delta", { text, taskId: session.agentTaskId || taskId || "" });
+  return pushEvent(session, "live_call.agent.delta", { text, taskId: session.agentTaskId || taskId || "", ...correlation });
 }
 
 export function createLiveCallSession(options = {}) {
@@ -261,13 +261,13 @@ export function recordLiveCallTranscript(id, body = {}) {
   });
   if (final && QUESTION_PATTERN.test(text)) {
     session.lastQuestion = text;
-    pushEvent(session, "live_call.question.detected", { text });
+    const questionEvent = pushEvent(session, "live_call.question.detected", { text });
     // Fire-and-forget Live Call → VibeLink Agent dispatch. The function
     // self-guards against missing settings, disabled env, and rapid-fire
     // duplicate questions.
     if (session.questionDetectedHook) {
       try {
-        session.questionDetectedHook(text, session);
+        session.questionDetectedHook(text, session, questionEvent);
       } catch (error) {
         console.error("[liveCall] question hook failed:", error.message);
       }

@@ -1,5 +1,11 @@
 package com.vibelink.app.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.text.method.LinkMovementMethod
+import android.widget.TextView
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +28,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Send
@@ -54,16 +65,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ChatMessage
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.ProviderDefinition
 import com.vibelink.app.network.ProviderRegistryResponse
 import com.vibelink.app.ui.components.ToolCallCardList
+import io.noties.markwon.Markwon
+import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,6 +88,11 @@ fun MessageListScreen(
     viewModel: MessageListViewModel,
     conversation: ConversationItem?,
     onBack: () -> Unit,
+    onOpenApprovals: () -> Unit = {},
+    onOpenLiveCall: () -> Unit = {},
+    promptHistory: List<String> = emptyList(),
+    onRememberPrompt: (String) -> Unit = {},
+    onClearPromptHistory: () -> Unit = {},
 ) {
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -82,8 +103,11 @@ fun MessageListScreen(
     val currentTaskId by viewModel.currentTaskId.collectAsState()
     val remoteStatus by viewModel.remoteStatus.collectAsState()
     val providerRegistry by viewModel.providerRegistry.collectAsState()
+    val pendingApproval by viewModel.pendingApproval.collectAsState()
 
-    var prompt by remember(conversation?.key) { mutableStateOf("") }
+    var prompt by remember(conversation?.key) {
+        mutableStateOf(if (conversation?.key?.startsWith("share:") == true) conversation.preview else "")
+    }
     var activeAgent by remember(conversation?.key) { mutableStateOf(conversation?.provider?.takeIf { it.isNotBlank() } ?: "codex") }
     var model by remember(conversation?.key) { mutableStateOf("") }
     var reasoningEffort by remember(conversation?.key) { mutableStateOf("") }
@@ -172,11 +196,16 @@ fun MessageListScreen(
                     providerRegistry = providerRegistry,
                     providers = selectableProviders,
                     onToggleOptions = { showOptions = !showOptions },
+                    onOpenLiveCall = onOpenLiveCall,
+                    promptHistory = promptHistory,
+                    onUseHistoryPrompt = { prompt = it },
+                    onClearPromptHistory = onClearPromptHistory,
                     running = running,
                     sending = sending,
                     canSend = canSend,
                     onSend = {
                         val text = prompt
+                        onRememberPrompt(text)
                         prompt = ""
                         viewModel.sendPrompt(
                             apiClient = apiClient,
@@ -205,11 +234,10 @@ fun MessageListScreen(
                     }
                 }
                 messages.isEmpty() -> {
-                    Text(
-                        text = if (conversation == null) "No chat selected" else "No messages yet",
+                    ChatEmptyState(
+                        conversation = conversation,
+                        onUseSuggestion = { prompt = it },
                         modifier = Modifier.align(Alignment.Center),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 else -> {
@@ -219,9 +247,18 @@ fun MessageListScreen(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        if (error.isNotBlank()) {
+                        pendingApproval?.let { approval ->
                             item {
-                                ErrorBanner(error)
+                                ApprovalRequiredCard(
+                                    approval = approval,
+                                    onOpenApprovals = onOpenApprovals,
+                                    onRetry = { viewModel.retryPendingApproval(apiClient) },
+                                )
+                            }
+                        }
+                        if (error.isNotBlank() && pendingApproval == null) {
+                            item {
+                                ErrorBanner(error, onOpenApprovals = onOpenApprovals)
                             }
                         }
                         itemsIndexed(messages, key = { index, message -> "$index:${message.role}:${message.text.hashCode()}:${message.toolCalls.size}" }) { _, message ->
@@ -229,15 +266,7 @@ fun MessageListScreen(
                         }
                         if (running) {
                             item {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("Working", style = MaterialTheme.typography.bodySmall)
-                                }
+                                StreamingPlaceholderBubble()
                             }
                         }
                     }
@@ -268,6 +297,10 @@ private fun ComposerBar(
     providerRegistry: ProviderRegistryResponse,
     providers: List<ProviderDefinition>,
     onToggleOptions: () -> Unit,
+    onOpenLiveCall: () -> Unit,
+    promptHistory: List<String>,
+    onUseHistoryPrompt: (String) -> Unit,
+    onClearPromptHistory: () -> Unit,
     running: Boolean,
     sending: Boolean,
     canSend: Boolean,
@@ -292,6 +325,37 @@ private fun ComposerBar(
                 }
             } else {
                 AssistChip(onClick = {}, label = { Text("Codex Remote uses the current Codex Desktop settings") })
+            }
+
+            if (!isDesktopRemote) {
+                Text("Quick commands", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(PromptCommandCatalog.commands, key = { it.id }) { command ->
+                        AssistChip(
+                            onClick = { onPromptChange(PromptCommandCatalog.applyCommand(prompt, command)) },
+                            label = { Text(command.label) },
+                        )
+                    }
+                }
+            }
+
+            if (!isDesktopRemote && promptHistory.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Recent prompts", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = onClearPromptHistory) { Text("Clear") }
+                }
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(promptHistory.take(6), key = { it }) { item ->
+                        AssistChip(
+                            onClick = { onUseHistoryPrompt(item) },
+                            label = { Text(item, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        )
+                    }
+                }
             }
 
             if (showOptions && !isDesktopRemote) {
@@ -354,6 +418,9 @@ private fun ComposerBar(
                 IconButton(onClick = onToggleOptions, enabled = !isDesktopRemote) {
                     Icon(Icons.Default.Tune, contentDescription = "Composer options")
                 }
+                IconButton(onClick = onOpenLiveCall, enabled = !isDesktopRemote) {
+                    Icon(Icons.Default.Mic, contentDescription = "Open Live Call")
+                }
                 Button(onClick = onSend, enabled = canSend) {
                     if (sending) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -380,6 +447,8 @@ private fun MessageBubble(
     compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    var expanded by remember(message.role, message.text, message.toolCalls.size) { mutableStateOf(true) }
     val isUser = message.role == "user"
     val isSystem = message.role == "system"
     val isError = message.role == "error"
@@ -396,6 +465,7 @@ private fun MessageBubble(
         "system" -> "System"
         else -> message.role
     }
+    val codeBlocks = remember(message.text) { MessageContentUtils.extractCodeBlocks(message.text) }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -403,39 +473,188 @@ private fun MessageBubble(
         colors = CardDefaults.cardColors(containerColor = containerColor),
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-            if (!compact || isError || isSystem) {
-                Text(
-                    text = roleLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (!compact || isError || isSystem || message.text.isNotBlank()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = roleLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row {
+                        if (codeBlocks.isNotEmpty()) {
+                            IconButton(
+                                onClick = { copyMessage(context, codeBlocks.joinToString("\n\n"), "Code copied") },
+                                modifier = Modifier.size(40.dp),
+                            ) {
+                                Icon(Icons.Default.Code, contentDescription = "Copy code blocks", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        if (message.text.isNotBlank()) {
+                            IconButton(
+                                onClick = { copyMessage(context, message.text) },
+                                modifier = Modifier.size(40.dp),
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy message", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        IconButton(
+                            onClick = { expanded = !expanded },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (expanded) "Collapse message" else "Expand message",
+                            )
+                        }
+                    }
+                }
             }
             val displayText = message.text.trim()
-            if (displayText.isNotBlank()) {
-                if (!compact || isError || isSystem) Spacer(Modifier.height(4.dp))
-                Text(
-                    text = displayText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    lineHeight = 20.sp,
-                )
-            }
-            if (message.toolCalls.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                ToolCallCardList(toolCalls = message.toolCalls, toolCallCount = message.toolCallCount)
+            if (expanded) {
+                if (displayText.isNotBlank()) {
+                    if (!compact || isError || isSystem) Spacer(Modifier.height(4.dp))
+                    if (compact || isError) {
+                        Text(
+                            text = displayText,
+                            style = MaterialTheme.typography.bodyMedium,
+                            lineHeight = 20.sp,
+                        )
+                    } else {
+                        MarkdownText(text = displayText)
+                    }
+                }
+                if (message.toolCalls.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    ToolCallCardList(toolCalls = message.toolCalls, toolCallCount = message.toolCallCount)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ErrorBanner(message: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        Text(
-            text = message,
+private fun MarkdownText(text: String) {
+    val context = LocalContext.current
+    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
+    val markwon = remember(context) {
+        Markwon.builder(context)
+            .usePlugin(StrikethroughPlugin.create())
+            .build()
+    }
+    AndroidView(
+        modifier = Modifier.fillMaxWidth(),
+        factory = { viewContext ->
+            TextView(viewContext).apply {
+                setTextColor(textColor)
+                textSize = 14f
+                setLineSpacing(2f, 1f)
+                movementMethod = LinkMovementMethod.getInstance()
+            }
+        },
+        update = { view ->
+            view.setTextColor(textColor)
+            markwon.setMarkdown(view, text)
+        },
+    )
+}
+
+@Composable
+private fun StreamingPlaceholderBubble() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Row(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
-            color = MaterialTheme.colorScheme.onErrorContainer,
-            style = MaterialTheme.typography.bodySmall,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            Text("Agent is typing", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun ChatEmptyState(
+    conversation: ConversationItem?,
+    onUseSuggestion: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = if (conversation == null) "Restoring chat" else "Start with context",
+            style = MaterialTheme.typography.titleSmall,
         )
+        if (conversation != null) {
+            val suggestions = listOf(
+                "Summarize the current workspace status",
+                "Review the latest changes and risks",
+                "Plan the next safe implementation step",
+            )
+            suggestions.forEach { suggestion ->
+                AssistChip(onClick = { onUseSuggestion(suggestion) }, label = { Text(suggestion) })
+            }
+        }
+    }
+}
+
+private fun copyMessage(context: Context, text: String, toast: String = "Copied") {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("VibeLink message", text))
+    Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
+}
+
+@Composable
+private fun ApprovalRequiredCard(
+    approval: PendingApprovalState,
+    onOpenApprovals: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = approval.message,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onOpenApprovals, modifier = Modifier.weight(1f)) {
+                    Text("Open approvals")
+                }
+                OutlinedButton(onClick = onRetry, modifier = Modifier.weight(1f), enabled = approval.retry != null) {
+                    Text("Retry")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ErrorBanner(message: String, onOpenApprovals: () -> Unit) {
+    val approvalRequired = message.contains("Approval required", ignoreCase = true)
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (approvalRequired) {
+                OutlinedButton(onClick = onOpenApprovals, modifier = Modifier.fillMaxWidth()) {
+                    Text("Open approvals")
+                }
+            }
+        }
     }
 }
 

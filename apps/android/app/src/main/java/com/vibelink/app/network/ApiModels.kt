@@ -187,6 +187,8 @@ data class AsrCheckpointInfo(
 
 data class LiveCallEvent(
     val question: String = "",
+    @SerializedName("questionId") val questionId: String = "",
+    @SerializedName("questionCursor") val questionCursor: Int = 0,
     val error: String = "",
     val id: String = "",
     val cursor: Int = 0,
@@ -416,6 +418,15 @@ data class CommandResult(
     val stdout: String = "",
     val stderr: String = "",
     @SerializedName("exitCode") val exitCode: Int = 0,
+    val test: TestSummary? = null,
+)
+
+data class TestSummary(
+    val ok: Boolean = false,
+    val passed: Int = 0,
+    val failed: Int = 0,
+    val failures: List<String> = emptyList(),
+    val log: String = "",
 )
 
 
@@ -489,6 +500,10 @@ data class ConversationItem(
 data class ChatMessage(
     val role: String = "",         // "user" | "assistant" | "system" | "error"
     val text: String = "",
+    val id: String = "",
+    @SerializedName("turnId") val turnId: String = "",
+    @SerializedName("taskId") val taskId: String = "",
+    val streaming: Boolean = false,
     val toolCalls: List<ToolCallSummary> = emptyList(),
     @SerializedName("toolCallCount") val toolCallCount: Int = 0,
 )

@@ -70,7 +70,7 @@ function buildLiveCallPrompt(question, history) {
  * for an internal pipe. The poll interval is small enough to feel
  * streaming but cheap enough to ignore.
  */
-function subscribeTaskForLiveCall(sessionId, taskId) {
+function subscribeTaskForLiveCall(sessionId, taskId, correlation = {}) {
   let after = 0;
   let stopped = false;
   let accumulator = "";
@@ -84,15 +84,15 @@ function subscribeTaskForLiveCall(sessionId, taskId) {
         const text = textFromAgentEvent(event);
         if (text) {
           accumulator += text;
-          appendAgentTaskLiveCallDelta(sessionId, taskId, text, false);
+          appendAgentTaskLiveCallDelta(sessionId, taskId, text, false, "", correlation);
         }
         if (event.type === "system" && /Exited with code 0/i.test(event.text || "")) {
-          appendAgentTaskLiveCallDelta(sessionId, taskId, "", true, accumulator.trim());
+          appendAgentTaskLiveCallDelta(sessionId, taskId, "", true, accumulator.trim(), correlation);
           stopped = true;
           return;
         }
         if (event.type === "error" || (event.type === "system" && /Exited with code [1-9]/.test(event.text || ""))) {
-          appendAgentTaskLiveCallDelta(sessionId, taskId, `[error] ${event.text || ""}`, true, accumulator.trim());
+          appendAgentTaskLiveCallDelta(sessionId, taskId, `[error] ${event.text || ""}`, true, accumulator.trim(), correlation);
           stopped = true;
           return;
         }
@@ -152,7 +152,7 @@ function textFromAgentEvent(event) {
  * No-ops if the session is missing, the agent is disabled, or the question
  * is too close to the previous one (debounce).
  */
-export async function dispatchLiveCallQuestion({ sessionId, question, history, settings, agent = "claude", model = "" }) {
+export async function dispatchLiveCallQuestion({ sessionId, question, questionEvent = null, history, settings, agent = "claude", model = "" }) {
   if (!isLiveCallAgentEnabled()) return null;
   const session = getInMemorySession(sessionId);
   if (!session) return null;
@@ -163,8 +163,14 @@ export async function dispatchLiveCallQuestion({ sessionId, question, history, s
   tracker.lastQuestionAt = now;
   liveCallTasks.set(sessionId, tracker);
 
+  const correlation = {
+    questionId: questionEvent?.id || "",
+    questionCursor: Number(questionEvent?.cursor || 0)
+  };
+
   emitLiveCallEvent(sessionId, "live_call.agent.thinking", {
-    question: String(question || "").slice(0, 400)
+    question: String(question || "").slice(0, 400),
+    ...correlation
   });
 
   let task;
@@ -191,14 +197,15 @@ export async function dispatchLiveCallQuestion({ sessionId, question, history, s
   } catch (error) {
     emitLiveCallEvent(sessionId, "live_call.agent.error", {
       error: String(error?.message || error),
-      question: String(question || "").slice(0, 400)
+      question: String(question || "").slice(0, 400),
+      ...correlation
     });
     return null;
   }
 
   attachAgentTaskToSession(sessionId, task.id);
   tracker.taskId = task.id;
-  tracker.subscriber = subscribeTaskForLiveCall(sessionId, task.id);
+  tracker.subscriber = subscribeTaskForLiveCall(sessionId, task.id, correlation);
   liveCallTasks.set(sessionId, tracker);
   return task.id;
 }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -83,6 +84,8 @@ fun WorkspaceScreen(
     val error by viewModel.error.collectAsState()
 
     var command by remember { mutableStateOf("git status --short --branch") }
+    var testCommand by remember { mutableStateOf("npm test") }
+    var commitMessage by remember { mutableStateOf("") }
     val selectedWorkspace = workspaces.firstOrNull { it.id == selectedWorkspaceId }
 
     LaunchedEffect(Unit) {
@@ -135,6 +138,10 @@ fun WorkspaceScreen(
                     commandResult = commandResult,
                     error = error,
                     onCommandChange = { command = it },
+                    testCommand = testCommand,
+                    onTestCommandChange = { testCommand = it },
+                    commitMessage = commitMessage,
+                    onCommitMessageChange = { commitMessage = it },
                 )
             }
 
@@ -163,7 +170,21 @@ private fun WorkspaceContent(
     commandResult: CommandResult?,
     error: String,
     onCommandChange: (String) -> Unit,
+    testCommand: String,
+    onTestCommandChange: (String) -> Unit,
+    commitMessage: String,
+    onCommitMessageChange: (String) -> Unit,
 ) {
+    var fileQuery by remember(selectedWorkspaceId, currentDir) { mutableStateOf("") }
+    var fileLimit by remember(selectedWorkspaceId, currentDir, fileQuery) { mutableStateOf(40) }
+    var changedLimit by remember(selectedWorkspaceId, changedFiles.size) { mutableStateOf(32) }
+    var showFullDiff by remember(selectedWorkspaceId, gitDiff?.diff) { mutableStateOf(false) }
+    val filteredFiles = remember(files, fileQuery) {
+        val query = fileQuery.trim()
+        if (query.isBlank()) files else files.filter { item ->
+            item.path.contains(query, ignoreCase = true) || item.name.contains(query, ignoreCase = true)
+        }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(12.dp),
@@ -208,8 +229,16 @@ private fun WorkspaceContent(
                 if (files.isEmpty()) {
                     MutedText("No files in this directory.")
                 } else {
+                    OutlinedTextField(
+                        value = fileQuery,
+                        onValueChange = { fileQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Search files in this folder") },
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.height(8.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        files.take(40).forEach { item ->
+                        filteredFiles.take(fileLimit).forEach { item ->
                             WorkspaceFileRow(
                                 item = item,
                                 onClick = {
@@ -219,6 +248,11 @@ private fun WorkspaceContent(
                             )
                         }
                     }
+                    ListLimitFooter(
+                        visible = filteredFiles.size.coerceAtMost(fileLimit),
+                        total = filteredFiles.size,
+                        onShowMore = { fileLimit += 40 },
+                    )
                 }
             }
         }
@@ -253,22 +287,60 @@ private fun WorkspaceContent(
 
         item {
             SectionCard(title = "Git Changes") {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        OutlinedButton(
+                            onClick = { viewModel.applyGitAction(apiClient, "stage-all") },
+                            enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                        ) { Text("Stage all") }
+                    }
+                    item {
+                        OutlinedButton(
+                            onClick = { viewModel.applyGitAction(apiClient, "unstage-all") },
+                            enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                        ) { Text("Unstage all") }
+                    }
+                    item {
+                        OutlinedButton(
+                            onClick = { viewModel.applyGitAction(apiClient, "pull") },
+                            enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                        ) { Text("Pull") }
+                    }
+                    item {
+                        OutlinedButton(
+                            onClick = { viewModel.applyGitAction(apiClient, "push") },
+                            enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                        ) { Text("Push") }
+                    }
+                    item {
+                        OutlinedButton(
+                            onClick = { viewModel.applyGitAction(apiClient, "pr") },
+                            enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                        ) { Text("PR") }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = commitMessage,
+                    onValueChange = onCommitMessageChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Commit message") },
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
-                        onClick = { viewModel.applyGitAction(apiClient, "stage-all") },
-                        enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
-                    ) { Text("Stage all") }
-                    OutlinedButton(
-                        onClick = { viewModel.applyGitAction(apiClient, "unstage-all") },
-                        enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
-                    ) { Text("Unstage all") }
+                        onClick = { viewModel.applyGitAction(apiClient, "commit", message = commitMessage.trim()) },
+                        enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank() && commitMessage.trim().isNotBlank(),
+                    ) { Text("Commit") }
+                    if (gitActionRunning) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 }
                 Spacer(Modifier.height(8.dp))
                 if (changedFiles.isEmpty()) {
                     MutedText("Working tree is clean or Git is unavailable.")
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        changedFiles.take(32).forEach { item ->
+                        changedFiles.take(changedLimit).forEach { item ->
                             GitFileRow(
                                 item = item,
                                 gitActionRunning = gitActionRunning,
@@ -278,6 +350,11 @@ private fun WorkspaceContent(
                             )
                         }
                     }
+                    ListLimitFooter(
+                        visible = changedFiles.size.coerceAtMost(changedLimit),
+                        total = changedFiles.size,
+                        onShowMore = { changedLimit += 32 },
+                    )
                 }
             }
         }
@@ -288,7 +365,42 @@ private fun WorkspaceContent(
                 if (diff.isBlank()) {
                     MutedText("No diff preview.")
                 } else {
-                    CodeBlock(text = diff.take(8000), maxLines = 80)
+                    val truncated = diff.length > 8000 && !showFullDiff
+                    CodeBlock(text = if (showFullDiff) diff else diff.take(8000), maxLines = if (showFullDiff) 400 else 80)
+                    if (truncated) {
+                        Spacer(Modifier.height(8.dp))
+                        MutedText("Diff preview is truncated at 8000 characters.")
+                        TextButton(onClick = { showFullDiff = true }) { Text("Show full diff") }
+                    } else if (showFullDiff && diff.length > 8000) {
+                        TextButton(onClick = { showFullDiff = false }) { Text("Collapse diff") }
+                    }
+                }
+            }
+        }
+
+        item {
+            SectionCard(title = "Test") {
+                OutlinedTextField(
+                    value = testCommand,
+                    onValueChange = onTestCommandChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 1,
+                    maxLines = 3,
+                    label = { Text("Test command") },
+                    singleLine = false,
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { viewModel.runCommand(apiClient, testCommand, kind = "test") },
+                    enabled = testCommand.isNotBlank() && !commandRunning && selectedWorkspaceId.isNotBlank(),
+                ) {
+                    if (commandRunning) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    }
+                    Spacer(Modifier.size(8.dp))
+                    Text(if (commandRunning) "Running" else "Run tests")
                 }
             }
         }
@@ -389,6 +501,7 @@ private fun WorkspaceFileRow(item: WorkspaceFileItem, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
+            .heightIn(min = 48.dp)
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
@@ -416,7 +529,7 @@ private fun GitFileRow(
     onUnstage: () -> Unit,
     onRestore: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = item.status.ifBlank { "M" },
@@ -458,11 +571,31 @@ private fun CommandResultView(result: CommandResult) {
     val output = listOf(result.stdout.trim(), result.stderr.trim()).filter { it.isNotBlank() }.joinToString("\n")
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AssistChip(onClick = {}, label = { Text("exit ${result.exitCode}") })
+        result.test?.let { summary ->
+            AssistChip(onClick = {}, label = { Text("${summary.passed} passed / ${summary.failed} failed") })
+            if (summary.failures.isNotEmpty()) {
+                CodeBlock(text = summary.failures.joinToString("\n"), maxLines = 20)
+            }
+        }
         if (output.isBlank()) {
             MutedText("Command finished without output.")
         } else {
             CodeBlock(text = output.take(8000), maxLines = 80)
         }
+    }
+}
+
+@Composable
+private fun ListLimitFooter(visible: Int, total: Int, onShowMore: () -> Unit) {
+    if (total <= 0) return
+    Spacer(Modifier.height(6.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MutedText("Showing $visible of $total")
+        if (visible < total) TextButton(onClick = onShowMore) { Text("Show more") }
     }
 }
 

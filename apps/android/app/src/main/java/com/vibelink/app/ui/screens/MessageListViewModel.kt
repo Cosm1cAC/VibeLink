@@ -3,6 +3,8 @@ package com.vibelink.app.ui.screens
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ApiException
 import com.vibelink.app.network.ChatMessage
@@ -10,8 +12,10 @@ import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.DesktopRemoteState
 import com.vibelink.app.network.DesktopRemoteTarget
 import com.vibelink.app.network.DesktopTranscriptEntry
+import com.vibelink.app.network.DesktopFocusResponse
 import com.vibelink.app.network.ProviderRegistryResponse
 import com.vibelink.app.network.TaskDetail
+import com.vibelink.app.network.TaskCreateResponse
 import com.vibelink.app.network.TaskEvent
 import com.vibelink.app.network.ToolCallSummary
 import com.vibelink.app.network.ToolEvent
@@ -24,6 +28,20 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
+
+data class PendingPromptRetry(
+    val prompt: String,
+    val agent: String,
+    val model: String = "",
+    val reasoningEffort: String = "",
+    val cwd: String = "",
+)
+
+data class PendingApprovalState(
+    val approvalId: String,
+    val message: String,
+    val retry: PendingPromptRetry? = null,
+)
 
 class MessageListViewModel : ViewModel() {
 
@@ -59,6 +77,9 @@ class MessageListViewModel : ViewModel() {
     private val _providerRegistry = MutableStateFlow(ProviderRegistryResponse())
     val providerRegistry: StateFlow<ProviderRegistryResponse> = _providerRegistry.asStateFlow()
 
+    private val _pendingApproval = MutableStateFlow<PendingApprovalState?>(null)
+    val pendingApproval: StateFlow<PendingApprovalState?> = _pendingApproval.asStateFlow()
+
     private var taskEventSource: EventSource? = null
     private var toolEventSource: EventSource? = null
     private var pollJob: Job? = null
@@ -83,6 +104,7 @@ class MessageListViewModel : ViewModel() {
             _running.value = false
             _sending.value = false
             _currentTaskId.value = if (conversation.kind == "task") conversation.id else ""
+            _pendingApproval.value = null
             _remoteReady.value = false
             _remoteStatus.value = ""
             _title.value = conversation.title.ifBlank { titleForKind(conversation.kind) }
@@ -91,12 +113,7 @@ class MessageListViewModel : ViewModel() {
                 loadProviderRegistry(apiClient)
                 when (conversation.kind) {
                     "new" -> {
-                        _messages.value = listOf(
-                            ChatMessage(
-                                role = "system",
-                                text = "Start a VibeLink Agent task. You can choose Codex, Claude, Doubao, or GLM before sending.",
-                            ),
-                        )
+                        _messages.value = emptyList()
                     }
                     "desktop" -> loadDesktopRemote(apiClient, seq, fresh = true)
                     "task" -> loadTask(apiClient, conversation, seq)
@@ -149,6 +166,7 @@ class MessageListViewModel : ViewModel() {
         val conversation = activeConversation ?: return
         val trimmed = prompt.trim()
         if (trimmed.isBlank() || _sending.value) return
+        val retry = PendingPromptRetry(trimmed, agent, model, reasoningEffort, cwd)
 
         viewModelScope.launch {
             _sending.value = true
@@ -164,9 +182,40 @@ class MessageListViewModel : ViewModel() {
                     else -> createOrResumeTask(apiClient, conversation, trimmed, agent, model, reasoningEffort, cwd)
                 }
             } catch (error: ApiException) {
-                appendError(apiErrorMessage(error))
+                val notice = TaskApprovalHandoff.noticeFromException(error)
+                if (notice != null) appendApprovalNotice(notice, retry)
+                else appendError(TaskApprovalHandoff.messageFor(error))
             } catch (error: Exception) {
                 appendError(error.message ?: "Failed to send prompt")
+            } finally {
+                _sending.value = false
+            }
+        }
+    }
+
+    fun retryPendingApproval(apiClient: ApiClient) {
+        val retry = _pendingApproval.value?.retry ?: return
+        val conversation = activeConversation ?: return
+        if (_sending.value) return
+        viewModelScope.launch {
+            _sending.value = true
+            _error.value = ""
+            try {
+                createOrResumeTask(
+                    apiClient = apiClient,
+                    conversation = conversation,
+                    prompt = retry.prompt,
+                    agent = retry.agent,
+                    model = retry.model,
+                    reasoningEffort = retry.reasoningEffort,
+                    cwdOverride = retry.cwd,
+                )
+            } catch (error: ApiException) {
+                val notice = TaskApprovalHandoff.noticeFromException(error)
+                if (notice != null) appendApprovalNotice(notice, retry)
+                else appendError(TaskApprovalHandoff.messageFor(error))
+            } catch (error: Exception) {
+                appendError(error.message ?: "Failed to retry prompt")
             } finally {
                 _sending.value = false
             }
@@ -306,20 +355,30 @@ class MessageListViewModel : ViewModel() {
             else -> ""
         }
         val mode = if (resumeSessionId.isNotBlank()) "resume" else "new"
+        val resolvedAgent = agent.ifBlank { conversation.provider.ifBlank { "codex" } }
+        val resolvedCwd = cwdOverride.ifBlank { conversation.cwd }
         val response = apiClient.createTask(
             prompt = prompt,
-            cwd = cwdOverride.ifBlank { conversation.cwd },
-            agent = agent.ifBlank { conversation.provider.ifBlank { "codex" } },
+            cwd = resolvedCwd,
+            agent = resolvedAgent,
             model = model.trim(),
             title = conversation.title.ifBlank { prompt.take(80) },
             mode = mode,
             sessionId = resumeSessionId,
             reasoningEffort = reasoningEffort.trim(),
         )
+        TaskApprovalHandoff.noticeFromResponse(response)?.let { notice ->
+            appendApprovalNotice(
+                notice,
+                PendingPromptRetry(prompt, resolvedAgent, model, reasoningEffort, resolvedCwd),
+            )
+            return
+        }
         if (response.id.isBlank()) {
             appendError(response.error.ifBlank { "Task was created but no task id was returned." })
             return
         }
+        _pendingApproval.value = null
         _currentTaskId.value = response.id
         _running.value = true
         val nextConversation = conversation.copy(
@@ -354,7 +413,16 @@ class MessageListViewModel : ViewModel() {
             null
         }
         if (target != null) {
-            runCatching { apiClient.focusDesktopConversation(target.desktopIndex ?: 0) }
+            val focusResult = runCatching { apiClient.focusDesktopConversation(target.desktopIndex ?: 0) }
+            val validation = DesktopRemoteSendPolicy.validateFocus(
+                target = target,
+                response = focusResult.getOrNull(),
+                failure = focusResult.exceptionOrNull(),
+            )
+            if (!validation.canSend) {
+                appendError(validation.message)
+                return
+            }
         }
         val result = apiClient.sendDesktopRemoteMessage(prompt, target)
         if (result.state != null) {
@@ -430,16 +498,7 @@ class MessageListViewModel : ViewModel() {
             toolCallFromEvents(runId, events)
         }.sortedBy { it.cursor }
         if (toolCalls.isEmpty()) return
-        val toolMessage = ChatMessage(
-            role = "assistant",
-            text = "",
-            toolCalls = toolCalls,
-            toolCallCount = toolCalls.size,
-        )
-        val withoutPreviousToolSync = _messages.value.filterNot {
-            it.text.isBlank() && it.toolCalls.isNotEmpty()
-        }
-        _messages.value = withoutPreviousToolSync + toolMessage
+        _messages.value = attachToolCallsToActiveAssistant(_messages.value, toolCalls)
     }
 
     private fun appendSystem(text: String) {
@@ -453,13 +512,25 @@ class MessageListViewModel : ViewModel() {
         _error.value = text
     }
 
+    private fun appendApprovalNotice(notice: ApprovalNotice, retry: PendingPromptRetry?) {
+        _pendingApproval.value = PendingApprovalState(notice.approvalId, notice.message, retry)
+        appendError(notice.message)
+    }
+
     companion object {
         fun messagesFromEvents(events: List<TaskEvent>): List<ChatMessage> {
             return events.mapNotNull { event ->
                 val role = taskEventRole(event)
-                val text = event.text.trim()
+                val rawText = event.text
+                val text = if (role == "assistant") rawText else rawText.trim()
                 if (text.isBlank() || role == "debug") return@mapNotNull null
-                ChatMessage(role = role, text = text)
+                ChatMessage(
+                    role = role,
+                    text = text,
+                    id = event.id.ifBlank { "event:${event.cursor}:${event.type}" },
+                    turnId = event.id.ifBlank { "event:${event.cursor}" },
+                    streaming = role == "assistant",
+                )
             }
         }
 
@@ -489,9 +560,44 @@ class MessageListViewModel : ViewModel() {
         }
 
         fun mergeMessages(current: List<ChatMessage>, incoming: List<ChatMessage>): List<ChatMessage> {
-            if (current.isEmpty()) return incoming
             if (incoming.isEmpty()) return current
-            return current + incoming
+            val merged = current.toMutableList()
+            for (message in incoming) {
+                val last = merged.lastOrNull()
+                if (last != null && canMergeAssistantText(last, message)) {
+                    merged[merged.lastIndex] = last.copy(
+                        text = listOf(last.text, message.text).filter { it.isNotBlank() }.joinToString(""),
+                        streaming = last.streaming || message.streaming,
+                        turnId = last.turnId.ifBlank { message.turnId },
+                        taskId = last.taskId.ifBlank { message.taskId },
+                    )
+                } else {
+                    merged += message
+                }
+            }
+            return merged
+        }
+
+        fun attachToolCallsToActiveAssistant(current: List<ChatMessage>, toolCalls: List<ToolCallSummary>): List<ChatMessage> {
+            if (toolCalls.isEmpty()) return current
+            val withoutPreviousToolSync = current.filterNot { it.text.isBlank() && it.toolCalls.isNotEmpty() }
+            val targetIndex = withoutPreviousToolSync.indexOfLast { message ->
+                message.role == "assistant" && (message.text.isNotBlank() || message.streaming || message.toolCalls.isNotEmpty())
+            }
+            if (targetIndex < 0) {
+                return withoutPreviousToolSync + ChatMessage(
+                    role = "assistant",
+                    id = "tools:${toolCalls.joinToString(",") { it.id }}",
+                    toolCalls = toolCalls,
+                    toolCallCount = toolCalls.size,
+                )
+            }
+            return withoutPreviousToolSync.mapIndexed { index, message ->
+                if (index != targetIndex) message else {
+                    val mergedCalls = mergeToolCalls(message.toolCalls, toolCalls)
+                    message.copy(toolCalls = mergedCalls, toolCallCount = mergedCalls.size)
+                }
+            }
         }
 
         fun appendDisplayMessages(current: List<ChatMessage>, message: ChatMessage): List<ChatMessage> {
@@ -500,6 +606,24 @@ class MessageListViewModel : ViewModel() {
                     (it.text.startsWith("Start a VibeLink Agent task") || it.text == "No messages in this history.")
             }
             return seed + message
+        }
+
+        private fun canMergeAssistantText(previous: ChatMessage, next: ChatMessage): Boolean {
+            return previous.role == "assistant" &&
+                next.role == "assistant" &&
+                previous.toolCalls.isEmpty() &&
+                next.toolCalls.isEmpty() &&
+                previous.text.isNotBlank() &&
+                next.text.isNotBlank()
+        }
+
+        private fun mergeToolCalls(existing: List<ToolCallSummary>, incoming: List<ToolCallSummary>): List<ToolCallSummary> {
+            val byId = linkedMapOf<String, ToolCallSummary>()
+            (existing + incoming).forEachIndexed { index, tool ->
+                val key = tool.id.ifBlank { "tool:$index:${tool.name}:${tool.cursor}" }
+                byId[key] = tool
+            }
+            return byId.values.sortedBy { it.cursor }
         }
 
         fun toolCallFromEvents(runId: String, events: List<ToolEvent>): ToolCallSummary {
@@ -623,12 +747,77 @@ class MessageListViewModel : ViewModel() {
             else -> "Chat"
         }
 
-        private fun apiErrorMessage(error: ApiException): String {
-            return if (error.statusCode == 428) {
-                "Approval required. Open Settings > Approvals to approve this task, then refresh the chat."
-            } else {
-                error.body.ifBlank { "HTTP ${error.statusCode}" }
-            }
+    }
+}
+
+data class ApprovalNotice(
+    val approvalId: String,
+    val message: String,
+)
+
+object TaskApprovalHandoff {
+    fun noticeFromResponse(response: TaskCreateResponse): ApprovalNotice? {
+        val approvalId = response.approvalId.ifBlank { response.approval?.id.orEmpty() }
+        if (approvalId.isBlank()) return null
+        return ApprovalNotice(approvalId, approvalMessage(approvalId, response.error))
+    }
+
+    fun noticeFromException(error: ApiException): ApprovalNotice? {
+        if (error.statusCode != 428) return null
+        val json = parseObject(error.body)
+        val approvalId = stringMember(json, "approvalId").ifBlank {
+            stringMember(json?.getAsJsonObject("approval"), "id")
         }
+        val reason = stringMember(json, "error")
+        return ApprovalNotice(approvalId, approvalMessage(approvalId, reason))
+    }
+
+    fun messageFor(error: ApiException): String {
+        return noticeFromException(error)?.message ?: error.body.ifBlank { "HTTP ${error.statusCode}" }
+    }
+
+    private fun approvalMessage(approvalId: String, reason: String): String {
+        val idSuffix = if (approvalId.isBlank()) "" else " ($approvalId)"
+        val reasonPrefix = reason.ifBlank { "This action needs approval." }
+        return "$reasonPrefix Approval required$idSuffix. Open Settings > Approvals, approve it, then retry this prompt."
+    }
+
+    private fun parseObject(raw: String): JsonObject? {
+        return runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
+    }
+
+    private fun stringMember(json: JsonObject?, key: String): String {
+        return runCatching { json?.get(key)?.takeIf { !it.isJsonNull }?.asString.orEmpty() }.getOrDefault("")
+    }
+}
+
+data class DesktopFocusValidation(
+    val canSend: Boolean,
+    val message: String = "",
+)
+
+object DesktopRemoteSendPolicy {
+    fun validateFocus(
+        target: DesktopRemoteTarget?,
+        response: DesktopFocusResponse?,
+        failure: Throwable? = null,
+    ): DesktopFocusValidation {
+        if (target == null) return DesktopFocusValidation(canSend = true)
+        if (failure != null) {
+            return DesktopFocusValidation(
+                canSend = false,
+                message = "Blocked send: unable to confirm Codex Desktop conversation ${targetLabel(target)}. ${failure.message.orEmpty()}".trim(),
+            )
+        }
+        if (response?.ok == true) return DesktopFocusValidation(canSend = true)
+        val reason = response?.error?.ifBlank { response.action }?.ifBlank { "focus request failed" } ?: "focus request failed"
+        return DesktopFocusValidation(
+            canSend = false,
+            message = "Blocked send: unable to confirm Codex Desktop conversation ${targetLabel(target)}. $reason",
+        )
+    }
+
+    private fun targetLabel(target: DesktopRemoteTarget): String {
+        return target.desktopTitle.ifBlank { "#${target.desktopIndex ?: 0}" }
     }
 }

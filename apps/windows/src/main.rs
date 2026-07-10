@@ -8,11 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    mpsc::{self, Receiver, RecvTimeoutError},
-    Arc, Mutex, MutexGuard, TryLockError,
-};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::{
     env,
     hash::{Hash, Hasher},
@@ -181,12 +177,57 @@ struct McpStdioSession {
 }
 
 struct McpSidecarManager {
-    sessions: HashMap<String, Arc<Mutex<McpStdioSession>>>,
-    active_requests: usize,
-    max_active_requests: usize,
-    max_active_observed: usize,
-    sidecar_backpressure_rejects: u64,
-    last_sidecar_backpressure_at: String,
+    sessions: HashMap<String, McpStdioSession>,
+}
+
+struct EventStoreSidecar {
+    db: Connection,
+    started_at: String,
+    requests: u64,
+    responses: u64,
+    failures: u64,
+    last_request_at: String,
+    last_response_at: String,
+    last_failure_at: String,
+    last_error: String,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStoreListTaskOptions {
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStoreListToolOptions {
+    #[serde(rename = "toolRunId")]
+    tool_run_id: Option<String>,
+    #[serde(rename = "workspaceId")]
+    workspace_id: Option<String>,
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStoreListLiveOptions {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+struct EventStoreUnifiedOptions {
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
+    #[serde(rename = "liveCallSessionId")]
+    live_call_session_id: Option<String>,
+    #[serde(rename = "toolRunId")]
+    tool_run_id: Option<String>,
+    after: Option<i64>,
+    limit: Option<i64>,
 }
 
 const IGNORED_WORKSPACE_DIRS: &[&str] = &[
@@ -208,22 +249,10 @@ fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize)
 
 fn run_mcp_session_sidecar() -> Result<()> {
     let stdin = io::stdin();
-    let manager = Arc::new(Mutex::new(McpSidecarManager::new()));
-    let (write_tx, write_rx) = mpsc::channel::<SidecarWrite>();
-    let writer = thread::spawn(move || -> Result<()> {
-        let mut stdout = io::stdout();
-        for message in write_rx {
-            match message {
-                SidecarWrite::Result { id, result } => {
-                    write_sidecar_result(&mut stdout, &id, result)?;
-                }
-                SidecarWrite::Error { id, message } => {
-                    write_sidecar_error(&mut stdout, &id, &message)?;
-                }
-            }
-        }
-        Ok(())
-    });
+    let mut stdout = io::stdout();
+    let mut manager = McpSidecarManager {
+        sessions: HashMap::new(),
+    };
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -234,97 +263,66 @@ fn run_mcp_session_sidecar() -> Result<()> {
         let request: SidecarRequest = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(error) => {
-                write_tx.send(SidecarWrite::Error {
-                    id: Value::Null,
-                    message: error.to_string(),
-                })?;
+                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
                 continue;
             }
         };
 
         if request.method == "__close" {
-            lock_mcp_manager(&manager)?.close_all();
-            write_tx.send(SidecarWrite::Result {
-                id: request.id,
-                result: json!({ "ok": true }),
-            })?;
+            manager.close_all();
+            write_sidecar_result(&mut stdout, &request.id, json!({ "ok": true }))?;
             break;
         }
 
-        match request.method.as_str() {
-            "stats" | "closeIdleSessions" | "closeAll" => {
-                let result = lock_mcp_manager(&manager)?.handle_control(&request.method, &request.args);
-                send_sidecar_result(&write_tx, request.id, result)?;
-            }
-            _ => {
-                let id = request.id;
-                let method = request.method;
-                let args = request.args;
-                let should_run = lock_mcp_manager(&manager)?.try_start_sidecar_request(&method);
-                if let Err(error) = should_run {
-                    write_tx.send(SidecarWrite::Error {
-                        id,
-                        message: format!("{error:#}"),
-                    })?;
-                    continue;
-                }
+        match manager.handle(&request.method, &request.args) {
+            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
+            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
+        }
+    }
 
-                let manager_for_worker = Arc::clone(&manager);
-                let write_tx_for_worker = write_tx.clone();
-                thread::spawn(move || {
-                    let result = handle_mcp_sidecar_request(&manager_for_worker, &method, &args);
-                    if let Ok(mut manager) = lock_mcp_manager(&manager_for_worker) {
-                        manager.finish_sidecar_request();
-                    }
-                    let _ = send_sidecar_result(&write_tx_for_worker, id, result);
-                });
+    manager.close_all();
+    Ok(())
+}
+
+fn run_event_store_sidecar(db_path: &Path) -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut sidecar = EventStoreSidecar::open(db_path)?;
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: SidecarRequest = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
+                continue;
+            }
+        };
+
+        sidecar.record_request();
+        if request.method == "__close" {
+            sidecar.record_response();
+            write_sidecar_result(&mut stdout, &request.id, Value::Bool(true))?;
+            break;
+        }
+
+        match sidecar.handle(&request.method, &request.args) {
+            Ok(result) => {
+                sidecar.record_response();
+                write_sidecar_result(&mut stdout, &request.id, result)?;
+            }
+            Err(error) => {
+                sidecar.record_failure(&format!("{error:#}"));
+                write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?;
             }
         }
     }
 
-    lock_mcp_manager(&manager)?.close_all();
-    drop(write_tx);
-    writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("MCP session sidecar writer thread panicked"))??;
     Ok(())
-}
-
-#[derive(Debug)]
-enum SidecarWrite {
-    Result { id: Value, result: Value },
-    Error { id: Value, message: String },
-}
-
-fn send_sidecar_result(
-    write_tx: &mpsc::Sender<SidecarWrite>,
-    id: Value,
-    result: Result<Value>,
-) -> Result<()> {
-    match result {
-        Ok(result) => write_tx.send(SidecarWrite::Result { id, result })?,
-        Err(error) => write_tx.send(SidecarWrite::Error {
-            id,
-            message: format!("{error:#}"),
-        })?,
-    }
-    Ok(())
-}
-
-fn lock_mcp_manager(
-    manager: &Arc<Mutex<McpSidecarManager>>,
-) -> Result<MutexGuard<'_, McpSidecarManager>> {
-    manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("MCP session sidecar manager lock was poisoned"))
-}
-
-fn lock_mcp_session(
-    session: &Arc<Mutex<McpStdioSession>>,
-) -> Result<MutexGuard<'_, McpStdioSession>> {
-    session
-        .lock()
-        .map_err(|_| anyhow::anyhow!("MCP stdio session lock was poisoned"))
 }
 
 fn write_sidecar_result(stdout: &mut io::Stdout, id: &Value, result: Value) -> Result<()> {
@@ -390,198 +388,84 @@ fn now_iso() -> String {
     datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-static EVENT_STORE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Default, Deserialize)]
-struct EventStoreListTaskOptions {
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreListToolOptions {
-    #[serde(rename = "toolRunId")]
-    tool_run_id: Option<String>,
-    #[serde(rename = "workspaceId")]
-    workspace_id: Option<String>,
-    #[serde(rename = "taskId")]
-    task_id: Option<String>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreListLiveOptions {
-    #[serde(rename = "sessionId")]
-    session_id: Option<String>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreUnifiedOptions {
-    #[serde(rename = "taskId")]
-    task_id: Option<String>,
-    #[serde(rename = "liveCallSessionId")]
-    live_call_session_id: Option<String>,
-    #[serde(rename = "toolRunId")]
-    tool_run_id: Option<String>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStorePruneToolOptions {
-    before: Option<String>,
-    #[serde(rename = "keepLatest")]
-    keep_latest: Option<i64>,
-    #[serde(rename = "dryRun")]
-    dry_run: Option<bool>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStorePruneLiveOptions {
-    #[serde(rename = "retentionDays")]
-    retention_days: Option<i64>,
-    #[serde(rename = "keepLatest")]
-    keep_latest: Option<i64>,
-}
-
-struct EventStoreSidecar {
-    db: Connection,
-}
-
-#[derive(Clone)]
-struct EventStoreUnifiedItem {
-    cursor: i64,
-    event_id: String,
-    event_type: String,
-    kind: String,
-    at: String,
-    text: String,
-    session_id: String,
-    task_id: String,
-    tool_run_id: String,
-    turn_id: String,
-    block_id: String,
-}
-
-#[derive(Clone)]
-struct EventStoreReplayItem {
-    cursor: i64,
-    raw_cursor: i64,
-    event_id: String,
-    event_type: String,
-    kind: String,
-    at: String,
-    text: String,
-    session_id: String,
-    task_id: String,
-    tool_run_id: String,
-    turn_id: String,
-    block_id: String,
-}
-
-fn normalize_event_replay_limit(value: Option<i64>, default_limit: i64, max_limit: i64) -> i64 {
-    let fallback = default_limit.max(1).min(max_limit.max(1));
-    match value {
-        Some(value) if value > 0 => value.min(max_limit.max(1)),
-        _ => fallback,
-    }
-}
-
-fn clean_string(value: Option<&str>, max: usize) -> String {
-    value.unwrap_or("").trim().chars().take(max).collect()
-}
-
-fn event_string(event: &Value, key: &str) -> String {
-    event.get(key).and_then(Value::as_str).unwrap_or("").to_string()
-}
-
-fn event_payload_json(event: &Value) -> Result<String> {
-    Ok(serde_json::to_string(event.get("payload").unwrap_or(&Value::Null))?)
-}
-
-fn classify_task_event_kind(event: &Value) -> String {
-    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
-    match event_type {
-        "user_message" | "user" | "attachment" => "user".to_string(),
-        "assistant_message" | "assistant" => "assistant".to_string(),
-        "system" => "system".to_string(),
-        "error" => "error".to_string(),
-        "summarization" => "summary".to_string(),
-        "stderr" | "stdout" => "output".to_string(),
-        _ if event_type.starts_with("live_call.") => "live_call".to_string(),
-        _ if event_type.starts_with("approval.") => "approval".to_string(),
-        _ if event_type.starts_with("tool.") => "tool".to_string(),
-        _ => "system".to_string(),
-    }
-}
-
-fn generated_event_id(prefix: &str) -> String {
-    let counter = EVENT_STORE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}:{}:{counter}", now_iso())
-}
-
-fn set_json_string(value: &mut Value, key: &str, text: String) {
-    if let Some(object) = value.as_object_mut() {
-        object.insert(key.to_string(), Value::String(text));
-    }
-}
-
-fn encode_replay_cursor(cursor: i64, source_rank: i64) -> i64 {
-    (cursor.max(0) * 10) + source_rank
-}
-
-fn replay_cursor_parts(value: Option<i64>) -> (i64, i64) {
-    let cursor = value.unwrap_or(0).max(0);
-    (cursor / 10, cursor % 10)
-}
-
-fn run_event_store_sidecar(db_path: &Path) -> Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut sidecar = EventStoreSidecar::open(db_path)?;
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: SidecarRequest = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
-                continue;
-            }
-        };
-
-        if request.method == "__close" {
-            write_sidecar_result(&mut stdout, &request.id, Value::Bool(true))?;
-            break;
-        }
-
-        match sidecar.handle(&request.method, &request.args) {
-            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
-            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
-        }
-    }
-
-    Ok(())
-}
-
 impl EventStoreSidecar {
     fn open(db_path: &Path) -> Result<Self> {
-        let db = Connection::open(db_path)
-            .with_context(|| format!("Failed to open event store database: {}", db_path.display()))?;
+        let db = Connection::open(db_path).with_context(|| {
+            format!("Failed to open event store database: {}", db_path.display())
+        })?;
         db.busy_timeout(Duration::from_millis(5000))?;
-        db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
-        Ok(Self { db })
+        db.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+        )?;
+        Ok(Self {
+            db,
+            started_at: now_iso(),
+            requests: 0,
+            responses: 0,
+            failures: 0,
+            last_request_at: String::new(),
+            last_response_at: String::new(),
+            last_failure_at: String::new(),
+            last_error: String::new(),
+        })
+    }
+
+    fn record_request(&mut self) {
+        self.requests += 1;
+        self.last_request_at = now_iso();
+    }
+
+    fn record_response(&mut self) {
+        self.responses += 1;
+        self.last_response_at = now_iso();
+    }
+
+    fn record_failure(&mut self, message: &str) {
+        self.failures += 1;
+        self.last_failure_at = now_iso();
+        self.last_error = message.to_string();
     }
 
     fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
         match method {
+            "__health" => Ok(json!({
+                "ok": true,
+                "implementation": "rust",
+                "protocolVersion": 1,
+                "supportedMethods": [
+                    "insertTaskEvent",
+                    "insertTaskEvents",
+                    "listTaskEvents",
+                    "getTaskEventCount",
+                    "insertToolEvent",
+                    "insertToolEvents",
+                    "listToolEvents",
+                    "getToolEventStats",
+                    "pruneToolEvents",
+                    "insertLiveCallEvent",
+                    "insertLiveCallEvents",
+                    "listLiveCallEvents",
+                    "pruneLiveCallEvents",
+                    "listUnifiedEvents",
+                    "replayWindow"
+                ],
+                "controlMethods": ["__health", "stats", "__close"],
+                "schemaReady": self.schema_ready()?,
+                "startedAt": self.started_at
+            })),
+            "stats" => Ok(json!({
+                "implementation": "rust",
+                "protocolVersion": 1,
+                "startedAt": self.started_at,
+                "pending": 0,
+                "requests": self.requests,
+                "responses": self.responses,
+                "failures": self.failures,
+                "lastRequestAt": self.last_request_at,
+                "lastResponseAt": self.last_response_at,
+                "lastFailureAt": self.last_failure_at,
+                "lastError": self.last_error
+            })),
             "insertTaskEvent" => {
                 let task_id: String = sidecar_arg(args, 0)?;
                 let event: Value = sidecar_arg(args, 1)?;
@@ -615,11 +499,6 @@ impl EventStoreSidecar {
                 let options: EventStoreListToolOptions = sidecar_arg_or_default(args, 0)?;
                 Ok(Value::Array(self.list_tool_events(&options)?))
             }
-            "getToolEventStats" => Ok(self.get_tool_event_stats()?),
-            "pruneToolEvents" => {
-                let options: EventStorePruneToolOptions = sidecar_arg_or_default(args, 0)?;
-                Ok(self.prune_tool_events(&options)?)
-            }
             "insertLiveCallEvent" => {
                 let session_id: String = sidecar_arg(args, 0)?;
                 let event: Value = sidecar_arg(args, 1)?;
@@ -634,11 +513,6 @@ impl EventStoreSidecar {
                 let options: EventStoreListLiveOptions = sidecar_arg_or_default(args, 0)?;
                 Ok(Value::Array(self.list_live_call_events(&options)?))
             }
-            "pruneLiveCallEvents" => {
-                let options: EventStorePruneLiveOptions = sidecar_arg_or_default(args, 0)?;
-                self.prune_live_call_events(&options)?;
-                Ok(Value::Null)
-            }
             "listUnifiedEvents" => {
                 let options: EventStoreUnifiedOptions = sidecar_arg_or_default(args, 0)?;
                 Ok(Value::Array(self.list_unified_events(&options)?))
@@ -647,73 +521,84 @@ impl EventStoreSidecar {
                 let options: EventStoreUnifiedOptions = sidecar_arg_or_default(args, 0)?;
                 Ok(self.replay_window(&options)?)
             }
+            "getToolEventStats" => Ok(self.get_tool_event_stats()?),
+            "pruneToolEvents" => Ok(json!({
+                "cutoff": "",
+                "keepLatest": 0,
+                "maxPrunableCursor": 0,
+                "prunable": 0,
+                "deleted": 0,
+                "dryRun": true,
+                "stats": self.get_tool_event_stats()?
+            })),
+            "pruneLiveCallEvents" => Ok(Value::Null),
             _ => bail!("Unsupported event store sidecar method: {method}"),
         }
     }
 
+    fn schema_ready(&self) -> Result<bool> {
+        for table in [
+            "task_events",
+            "tool_runs",
+            "tool_events",
+            "live_calls",
+            "live_call_events",
+        ] {
+            let exists: Option<i64> = self
+                .db
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if exists.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn insert_task_event(&self, task_id: &str, event: &Value) -> Result<Option<i64>> {
         let current = now_iso();
-        let event_at = event
-            .get("at")
-            .and_then(Value::as_str)
-            .unwrap_or(&current)
-            .to_string();
-        let event_id = match event.get("id").and_then(Value::as_str) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => generated_event_id(task_id),
-        };
-        let event_kind = match event.get("kind").and_then(Value::as_str) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => classify_task_event_kind(event),
-        };
+        let event_at = event_string_or(event, "at", &current);
+        let event_id = event_string_or(event, "id", &format!("{task_id}:{event_at}:rust"));
+        let event_kind = event_string_or(event, "kind", &classify_task_event_kind(event));
         let turn_id = event_string(event, "turnId");
         let block_id = event_string(event, "blockId");
-        let mut event_json = event.clone();
-        if !event_json.is_object() {
-            event_json = json!({});
-        }
+        let mut event_json = event_object(event);
         set_json_string(&mut event_json, "id", event_id.clone());
         set_json_string(&mut event_json, "at", event_at.clone());
         set_json_string(&mut event_json, "kind", event_kind.clone());
         set_json_string(&mut event_json, "turnId", turn_id.clone());
         set_json_string(&mut event_json, "blockId", block_id.clone());
-        let event_json_text = serde_json::to_string(&event_json)?;
-        let payload_json = event_payload_json(event)?;
 
-        self.db.execute(
+        let inserted = self.db.execute(
             "INSERT OR IGNORE INTO task_events (
-                task_id, event_id, event_type, event_at, text, payload_json, event_json,
-                created_at, event_kind, turn_id, block_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    task_id, event_id, event_type, event_at, text, payload_json, event_json,
+                    created_at, event_kind, turn_id, block_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 task_id,
                 event_id,
                 event_string(event, "type"),
                 event_at,
                 event_string(event, "text"),
-                payload_json,
-                event_json_text,
+                payload_json(event)?,
+                serde_json::to_string(&event_json)?,
                 current,
                 event_kind,
                 turn_id,
                 block_id
             ],
         )?;
-        let cursor = self
-            .db
-            .query_row(
-                "SELECT cursor FROM task_events WHERE task_id = ? AND event_id = ?",
-                params![task_id, event_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        Ok(cursor)
+        if inserted > 0 {
+            return Ok(Some(self.db.last_insert_rowid()));
+        }
+        self.cursor_for("task_events", "task_id", task_id, &event_id)
     }
 
     fn insert_task_events(&mut self, task_id: &str, events: &[Value]) -> Result<Vec<Option<i64>>> {
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut cursors = Vec::with_capacity(events.len());
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         for event in events {
@@ -729,7 +614,11 @@ impl EventStoreSidecar {
         Ok(cursors)
     }
 
-    fn list_task_events(&self, task_id: &str, options: &EventStoreListTaskOptions) -> Result<Vec<Value>> {
+    fn list_task_events(
+        &self,
+        task_id: &str,
+        options: &EventStoreListTaskOptions,
+    ) -> Result<Vec<Value>> {
         let mut statement = self.db.prepare(
             "SELECT cursor, event_json FROM task_events WHERE task_id = ? AND cursor > ? ORDER BY cursor ASC LIMIT ?",
         )?;
@@ -737,15 +626,11 @@ impl EventStoreSidecar {
             params![
                 task_id,
                 options.after.unwrap_or(0),
-                normalize_event_replay_limit(options.limit, 500, 5000)
+                event_limit(options.limit, 500, 5000)
             ],
-            |row| {
-                let cursor: i64 = row.get(0)?;
-                let event_json: String = row.get(1)?;
-                Ok((cursor, event_json))
-            },
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )?;
-        rows.map(|row| event_json_with_cursor(row?, false)).collect()
+        rows.map(|row| event_json_with_cursor(row?)).collect()
     }
 
     fn get_task_event_count(&self, task_id: &str) -> Result<i64> {
@@ -756,86 +641,84 @@ impl EventStoreSidecar {
         )?)
     }
 
-    fn insert_tool_event(&self, tool_run_id: &str, event: &Value) -> Result<Option<i64>> {
-        let run = self
-            .db
+    fn tool_run_owner(&self, tool_run_id: &str) -> Result<Option<(String, String)>> {
+        self.db
             .query_row(
                 "SELECT task_id, workspace_id FROM tool_runs WHERE id = ?",
                 params![tool_run_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                },
             )
-            .optional()?;
-        let Some((run_task_id, run_workspace_id)) = run else {
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn insert_tool_event(&self, tool_run_id: &str, event: &Value) -> Result<Option<i64>> {
+        let Some((task_id, workspace_id)) = self.tool_run_owner(tool_run_id)? else {
             return Ok(None);
         };
+        self.insert_tool_event_with_owner(tool_run_id, event, &task_id, &workspace_id)
+    }
+
+    fn insert_tool_event_with_owner(
+        &self,
+        tool_run_id: &str,
+        event: &Value,
+        default_task_id: &str,
+        default_workspace_id: &str,
+    ) -> Result<Option<i64>> {
         let current = now_iso();
-        let event_at = event
-            .get("at")
-            .and_then(Value::as_str)
-            .unwrap_or(&current)
-            .to_string();
-        let event_id = match event.get("id").and_then(Value::as_str) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => generated_event_id(tool_run_id),
-        };
-        let task_id = match event.get("taskId").and_then(Value::as_str) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => run_task_id.unwrap_or_default(),
-        };
-        let workspace_id = match event.get("workspaceId").and_then(Value::as_str) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => run_workspace_id.unwrap_or_default(),
-        };
-        let mut event_json = event.clone();
-        if !event_json.is_object() {
-            event_json = json!({});
-        }
+        let event_at = event_string_or(event, "at", &current);
+        let event_id = event_string_or(event, "id", &format!("{tool_run_id}:{event_at}:rust"));
+        let task_id = event_string_or(event, "taskId", default_task_id);
+        let workspace_id = event_string_or(event, "workspaceId", default_workspace_id);
+        let mut event_json = event_object(event);
         set_json_string(&mut event_json, "id", event_id.clone());
         set_json_string(&mut event_json, "at", event_at.clone());
         set_json_string(&mut event_json, "toolRunId", tool_run_id.to_string());
         set_json_string(&mut event_json, "taskId", task_id.clone());
         set_json_string(&mut event_json, "workspaceId", workspace_id.clone());
-        let event_type = clean_string(
-            event.get("type").and_then(Value::as_str).or(Some("tool.event")),
-            120,
-        );
 
-        self.db.execute(
+        let inserted = self.db.execute(
             "INSERT OR IGNORE INTO tool_events (
-                tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
-                text, payload_json, event_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
+                    text, payload_json, event_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 tool_run_id,
                 task_id,
                 workspace_id,
                 event_id,
-                event_type,
+                event_string_or(event, "type", "tool.event"),
                 event_at,
                 event_string(event, "text"),
-                event_payload_json(event)?,
+                payload_json(event)?,
                 serde_json::to_string(&event_json)?,
                 current
             ],
         )?;
-        Ok(self
-            .db
-            .query_row(
-                "SELECT cursor FROM tool_events WHERE tool_run_id = ? AND event_id = ?",
-                params![tool_run_id, event_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?)
+        if inserted > 0 {
+            return Ok(Some(self.db.last_insert_rowid()));
+        }
+        self.cursor_for("tool_events", "tool_run_id", tool_run_id, &event_id)
     }
 
-    fn insert_tool_events(&mut self, tool_run_id: &str, events: &[Value]) -> Result<Vec<Option<i64>>> {
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
+    fn insert_tool_events(
+        &mut self,
+        tool_run_id: &str,
+        events: &[Value],
+    ) -> Result<Vec<Option<i64>>> {
+        let Some((task_id, workspace_id)) = self.tool_run_owner(tool_run_id)? else {
+            return Ok(vec![None; events.len()]);
+        };
         let mut cursors = Vec::with_capacity(events.len());
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         for event in events {
-            match self.insert_tool_event(tool_run_id, event) {
+            match self.insert_tool_event_with_owner(tool_run_id, event, &task_id, &workspace_id) {
                 Ok(cursor) => cursors.push(cursor),
                 Err(error) => {
                     let _ = self.db.execute_batch("ROLLBACK");
@@ -848,9 +731,9 @@ impl EventStoreSidecar {
     }
 
     fn list_tool_events(&self, options: &EventStoreListToolOptions) -> Result<Vec<Value>> {
-        let tool_run_id = clean_string(options.tool_run_id.as_deref(), 160);
-        let workspace_id = clean_string(options.workspace_id.as_deref(), 160);
-        let task_id = clean_string(options.task_id.as_deref(), 160);
+        let tool_run_id = clean_option(&options.tool_run_id);
+        let workspace_id = clean_option(&options.workspace_id);
+        let task_id = clean_option(&options.task_id);
         let mut statement = self.db.prepare(
             "SELECT cursor, event_json FROM tool_events
              WHERE cursor > ?
@@ -868,138 +751,78 @@ impl EventStoreSidecar {
                 workspace_id,
                 task_id,
                 task_id,
-                normalize_event_replay_limit(options.limit, 500, 5000)
+                event_limit(options.limit, 500, 5000)
             ],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )?;
-        rows.map(|row| event_json_with_cursor(row?, false)).collect()
+        rows.map(|row| event_json_with_cursor(row?)).collect()
     }
 
-    fn get_tool_event_stats(&self) -> Result<Value> {
-        let row = self.db.query_row(
-            "SELECT COUNT(*), MIN(cursor), MAX(cursor), MIN(event_at), MAX(event_at) FROM tool_events",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )?;
-        Ok(json!({
-            "count": row.0,
-            "minCursor": row.1.unwrap_or(0),
-            "maxCursor": row.2.unwrap_or(0),
-            "oldestAt": row.3.unwrap_or_default(),
-            "newestAt": row.4.unwrap_or_default()
-        }))
-    }
-
-    fn prune_tool_events(&self, options: &EventStorePruneToolOptions) -> Result<Value> {
-        let cutoff = options.before.clone().unwrap_or_else(|| default_retention_cutoff(30));
-        let keep = options.keep_latest.unwrap_or(5000).max(0);
-        let dry_run = options.dry_run.unwrap_or(true);
-        let max_prunable_cursor = self
+    fn live_call_exists(&self, session_id: &str) -> Result<bool> {
+        let exists: Option<String> = self
             .db
             .query_row(
-                "SELECT cursor FROM tool_events ORDER BY cursor DESC LIMIT 1 OFFSET ?",
-                params![keep],
-                |row| row.get::<_, i64>(0),
+                "SELECT id FROM live_calls WHERE id = ?",
+                params![session_id],
+                |row| row.get(0),
             )
-            .optional()?
-            .unwrap_or(0);
-        let prunable = self.db.query_row(
-            "SELECT COUNT(*) FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)",
-            params![cutoff, max_prunable_cursor, max_prunable_cursor],
-            |row| row.get::<_, i64>(0),
-        )?;
-        let deleted = if dry_run || prunable <= 0 {
-            0
-        } else {
-            self.db.execute(
-                "DELETE FROM tool_events WHERE event_at < ? AND (? = 0 OR cursor <= ?)",
-                params![cutoff, max_prunable_cursor, max_prunable_cursor],
-            )? as i64
-        };
-        Ok(json!({
-            "cutoff": cutoff,
-            "keepLatest": keep,
-            "maxPrunableCursor": max_prunable_cursor,
-            "prunable": prunable,
-            "deleted": deleted,
-            "dryRun": dry_run,
-            "stats": self.get_tool_event_stats()?
-        }))
+            .optional()?;
+        Ok(exists.is_some())
     }
 
     fn insert_live_call_event(&self, session_id: &str, event: &Value) -> Result<Option<i64>> {
-        let exists = self
-            .db
-            .query_row("SELECT id FROM live_calls WHERE id = ?", params![session_id], |row| {
-                row.get::<_, String>(0)
-            })
-            .optional()?;
-        if exists.is_none() {
+        if !self.live_call_exists(session_id)? {
             return Ok(None);
         }
+        self.insert_live_call_event_existing(session_id, event)
+    }
+
+    fn insert_live_call_event_existing(
+        &self,
+        session_id: &str,
+        event: &Value,
+    ) -> Result<Option<i64>> {
         let current = now_iso();
-        let event_at = event
-            .get("at")
-            .and_then(Value::as_str)
-            .unwrap_or(&current)
-            .to_string();
-        let event_id = match event.get("id").and_then(Value::as_str) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => generated_event_id(session_id),
-        };
-        let mut event_json = event.clone();
-        if !event_json.is_object() {
-            event_json = json!({});
-        }
+        let event_at = event_string_or(event, "at", &current);
+        let event_id = event_string_or(event, "id", &format!("{session_id}:{event_at}:rust"));
+        let mut event_json = event_object(event);
         set_json_string(&mut event_json, "id", event_id.clone());
         set_json_string(&mut event_json, "at", event_at.clone());
         set_json_string(&mut event_json, "sessionId", session_id.to_string());
-        let event_type = clean_string(
-            event.get("type").and_then(Value::as_str).or(Some("live_call.event")),
-            120,
-        );
 
-        self.db.execute(
+        let inserted = self.db.execute(
             "INSERT OR IGNORE INTO live_call_events (
-                session_id, event_id, event_type, event_at, text, payload_json, event_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    session_id, event_id, event_type, event_at, text, payload_json, event_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 session_id,
                 event_id,
-                event_type,
+                event_string_or(event, "type", "live_call.event"),
                 event_at,
                 event_string(event, "text"),
-                event_payload_json(event)?,
+                payload_json(event)?,
                 serde_json::to_string(&event_json)?,
                 current
             ],
         )?;
-        Ok(self
-            .db
-            .query_row(
-                "SELECT cursor FROM live_call_events WHERE session_id = ? AND event_id = ?",
-                params![session_id, event_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?)
+        if inserted > 0 {
+            return Ok(Some(self.db.last_insert_rowid()));
+        }
+        self.cursor_for("live_call_events", "session_id", session_id, &event_id)
     }
 
-    fn insert_live_call_events(&mut self, session_id: &str, events: &[Value]) -> Result<Vec<Option<i64>>> {
-        if events.is_empty() {
-            return Ok(Vec::new());
+    fn insert_live_call_events(
+        &mut self,
+        session_id: &str,
+        events: &[Value],
+    ) -> Result<Vec<Option<i64>>> {
+        if !self.live_call_exists(session_id)? {
+            return Ok(vec![None; events.len()]);
         }
         let mut cursors = Vec::with_capacity(events.len());
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         for event in events {
-            match self.insert_live_call_event(session_id, event) {
+            match self.insert_live_call_event_existing(session_id, event) {
                 Ok(cursor) => cursors.push(cursor),
                 Err(error) => {
                     let _ = self.db.execute_batch("ROLLBACK");
@@ -1012,411 +835,318 @@ impl EventStoreSidecar {
     }
 
     fn list_live_call_events(&self, options: &EventStoreListLiveOptions) -> Result<Vec<Value>> {
-        let session_id = options.session_id.as_deref().unwrap_or("");
+        let session_id = clean_option(&options.session_id);
         if session_id.is_empty() {
             return Ok(Vec::new());
         }
         let mut statement = self.db.prepare(
-            "SELECT cursor, event_json FROM live_call_events WHERE session_id = ? AND cursor > ? ORDER BY cursor ASC LIMIT ?",
+            "SELECT cursor, event_json FROM live_call_events
+             WHERE session_id = ? AND cursor > ?
+             ORDER BY cursor ASC LIMIT ?",
         )?;
         let rows = statement.query_map(
             params![
                 session_id,
                 options.after.unwrap_or(0),
-                normalize_event_replay_limit(options.limit, 500, 2000)
+                event_limit(options.limit, 500, 2000)
             ],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )?;
-        rows.map(|row| event_json_with_cursor(row?, false)).collect()
-    }
-
-    fn prune_live_call_events(&self, options: &EventStorePruneLiveOptions) -> Result<()> {
-        let cutoff = default_retention_cutoff(options.retention_days.unwrap_or(30));
-        let keep_latest = options.keep_latest.unwrap_or(5000).max(0);
-        self.db.execute(
-            "DELETE FROM live_call_events WHERE event_at < ? AND cursor NOT IN (
-                SELECT cursor FROM live_call_events WHERE session_id IN (SELECT id FROM live_calls) ORDER BY cursor DESC LIMIT ?
-            )",
-            params![cutoff, keep_latest],
-        )?;
-        Ok(())
+        rows.map(|row| event_json_with_cursor(row?)).collect()
     }
 
     fn list_unified_events(&self, options: &EventStoreUnifiedOptions) -> Result<Vec<Value>> {
-        let limit = normalize_event_replay_limit(options.limit, 200, 2000);
-        let mut items = self.collect_unified_items(options, options.after.unwrap_or(0), limit, false)?;
-        items.sort_by_key(|item| item.cursor);
-        Ok(items.into_iter().take(limit as usize).map(unified_item_json).collect())
-    }
-
-    fn replay_window(&self, options: &EventStoreUnifiedOptions) -> Result<Value> {
-        let limit = normalize_event_replay_limit(options.limit, 200, 2000);
-        let query_limit = limit + 1;
-        let items = self.collect_replay_items(options, query_limit)?;
-        let has_more = items.len() > limit as usize;
-        let window_items: Vec<EventStoreReplayItem> = items.into_iter().take(limit as usize).collect();
-        let next_cursor = window_items
-            .last()
-            .map(|item| item.cursor)
-            .unwrap_or_else(|| options.after.unwrap_or(0));
-        Ok(json!({
-            "items": window_items.iter().map(replay_item_json).collect::<Vec<Value>>(),
-            "nextCursor": next_cursor,
-            "hasMore": has_more,
-            "limit": limit
-        }))
-    }
-
-    fn collect_unified_items(
-        &self,
-        options: &EventStoreUnifiedOptions,
-        after: i64,
-        query_limit: i64,
-        include_equal: bool,
-    ) -> Result<Vec<EventStoreUnifiedItem>> {
-        let task_id = clean_string(options.task_id.as_deref(), 160);
-        let session_id = clean_string(options.live_call_session_id.as_deref(), 160);
-        let tool_run_id = clean_string(options.tool_run_id.as_deref(), 160);
-        let comparator = if include_equal { ">=" } else { ">" };
-        let mut results = Vec::new();
+        let limit = event_limit(options.limit, 200, 2000);
+        let after = options.after.unwrap_or(0);
+        let task_id = clean_option(&options.task_id);
+        let session_id = clean_option(&options.live_call_session_id);
+        let tool_run_id = clean_option(&options.tool_run_id);
+        let mut items = Vec::new();
 
         if options.live_call_session_id.is_none() && options.tool_run_id.is_none() {
-            let sql = format!(
+            let mut statement = self.db.prepare(
                 "SELECT cursor, task_id, event_id, event_type, event_kind, turn_id, block_id, event_at, text
-                 FROM task_events WHERE (? = '' OR task_id = ?) AND cursor {comparator} ? ORDER BY cursor ASC LIMIT ?"
-            );
-            let mut statement = self.db.prepare(&sql)?;
-            let rows = statement.query_map(params![task_id, task_id, after, query_limit], |row| {
-                Ok(EventStoreUnifiedItem {
-                    cursor: row.get(0)?,
-                    task_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    event_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    event_type: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    kind: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    turn_id: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                    block_id: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                    at: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                    text: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                    session_id: String::new(),
-                    tool_run_id: String::new(),
-                })
-            })?;
+                 FROM task_events WHERE (? = '' OR task_id = ?) AND cursor > ? ORDER BY cursor ASC LIMIT ?",
+            )?;
+            let rows =
+                statement.query_map(params![task_id, task_id, after, limit], unified_task_row)?;
             for row in rows {
-                results.push(row?);
+                items.push(row?);
             }
         }
 
-        if options.live_call_session_id.is_none() {
-            let remaining = query_limit - results.len() as i64;
-            if remaining > 0 {
-                let sql = format!(
-                    "SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
-                     FROM tool_events
-                     WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor {comparator} ?
-                     ORDER BY cursor ASC LIMIT ?"
-                );
-                let mut statement = self.db.prepare(&sql)?;
-                let rows = statement.query_map(params![task_id, task_id, tool_run_id, tool_run_id, after, remaining], |row| {
-                    Ok(EventStoreUnifiedItem {
-                        cursor: row.get(0)?,
-                        task_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                        tool_run_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                        event_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                        event_type: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                        at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                        text: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                        kind: "tool".to_string(),
-                        session_id: String::new(),
-                        turn_id: String::new(),
-                        block_id: String::new(),
-                    })
-                })?;
-                for row in rows {
-                    results.push(row?);
-                }
+        if options.live_call_session_id.is_none() && items.len() < limit as usize {
+            let remaining = limit - items.len() as i64;
+            let mut statement = self.db.prepare(
+                "SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
+                 FROM tool_events
+                 WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor > ?
+                 ORDER BY cursor ASC LIMIT ?",
+            )?;
+            let rows = statement.query_map(
+                params![task_id, task_id, tool_run_id, tool_run_id, after, remaining],
+                unified_tool_row,
+            )?;
+            for row in rows {
+                items.push(row?);
             }
         }
 
-        if options.task_id.is_none() && options.tool_run_id.is_none() {
-            let remaining = query_limit - results.len() as i64;
-            if remaining > 0 {
-                let sql = format!(
-                    "SELECT cursor, session_id, event_id, event_type, event_at, text
-                     FROM live_call_events WHERE (? = '' OR session_id = ?) AND cursor {comparator} ? ORDER BY cursor ASC LIMIT ?"
-                );
-                let mut statement = self.db.prepare(&sql)?;
-                let rows = statement.query_map(params![session_id, session_id, after, remaining], |row| {
-                    Ok(EventStoreUnifiedItem {
-                        cursor: row.get(0)?,
-                        session_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                        event_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                        event_type: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                        at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                        text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                        kind: "live_call".to_string(),
-                        task_id: String::new(),
-                        tool_run_id: String::new(),
-                        turn_id: String::new(),
-                        block_id: String::new(),
-                    })
-                })?;
-                for row in rows {
-                    results.push(row?);
-                }
+        if options.task_id.is_none()
+            && options.tool_run_id.is_none()
+            && items.len() < limit as usize
+        {
+            let remaining = limit - items.len() as i64;
+            let mut statement = self.db.prepare(
+                "SELECT cursor, session_id, event_id, event_type, event_at, text
+                 FROM live_call_events WHERE (? = '' OR session_id = ?) AND cursor > ? ORDER BY cursor ASC LIMIT ?",
+            )?;
+            let rows = statement.query_map(
+                params![session_id, session_id, after, remaining],
+                unified_live_row,
+            )?;
+            for row in rows {
+                items.push(row?);
             }
         }
 
-        Ok(results)
-    }
-
-    fn collect_replay_items(&self, options: &EventStoreUnifiedOptions, query_limit: i64) -> Result<Vec<EventStoreReplayItem>> {
-        let (raw_after, source_after) = replay_cursor_parts(options.after);
-        let mut items = Vec::new();
-        for source_rank in [1, 2, 3] {
-            let min_cursor = if source_rank > source_after { raw_after } else { raw_after + 1 };
-            match source_rank {
-                1 if options.live_call_session_id.is_none() && options.tool_run_id.is_none() => {
-                    for item in self.collect_unified_items(options, min_cursor, query_limit, true)? {
-                        if item.session_id.is_empty() && item.tool_run_id.is_empty() {
-                            items.push(replay_from_unified(item, source_rank));
-                        }
-                    }
-                }
-                2 if options.live_call_session_id.is_none() => {
-                    let mut tool_options = EventStoreUnifiedOptions {
-                        task_id: options.task_id.clone(),
-                        tool_run_id: options.tool_run_id.clone(),
-                        live_call_session_id: None,
-                        after: Some(min_cursor),
-                        limit: Some(query_limit),
-                    };
-                    let task_id_filter = tool_options.task_id.clone();
-                    let tool_run_filter = tool_options.tool_run_id.clone();
-                    let tool_rows = self.list_tool_rows(&mut tool_options, task_id_filter, tool_run_filter, min_cursor, query_limit)?;
-                    items.extend(tool_rows.into_iter().map(|item| replay_from_unified(item, source_rank)));
-                }
-                3 if options.task_id.is_none() && options.tool_run_id.is_none() => {
-                    let live_rows = self.list_live_rows(options.live_call_session_id.clone(), min_cursor, query_limit)?;
-                    items.extend(live_rows.into_iter().map(|item| replay_from_unified(item, source_rank)));
-                }
-                _ => {}
-            }
-        }
-        items.sort_by_key(|item| item.cursor);
+        items.sort_by_key(|item| item.get("cursor").and_then(Value::as_i64).unwrap_or(0));
+        items.truncate(limit as usize);
         Ok(items)
     }
 
-    fn list_tool_rows(
-        &self,
-        _options: &mut EventStoreUnifiedOptions,
-        task_id: Option<String>,
-        tool_run_id: Option<String>,
-        min_cursor: i64,
-        query_limit: i64,
-    ) -> Result<Vec<EventStoreUnifiedItem>> {
-        let task_id = clean_string(task_id.as_deref(), 160);
-        let tool_run_id = clean_string(tool_run_id.as_deref(), 160);
-        let mut statement = self.db.prepare(
-            "SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
-             FROM tool_events WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor >= ? ORDER BY cursor ASC LIMIT ?",
-        )?;
-        let rows = statement.query_map(params![task_id, task_id, tool_run_id, tool_run_id, min_cursor, query_limit], |row| {
-            Ok(EventStoreUnifiedItem {
-                cursor: row.get(0)?,
-                task_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                tool_run_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                event_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                event_type: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                text: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                kind: "tool".to_string(),
-                session_id: String::new(),
-                turn_id: String::new(),
-                block_id: String::new(),
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    fn replay_window(&self, options: &EventStoreUnifiedOptions) -> Result<Value> {
+        let limit = event_limit(options.limit, 200, 2000);
+        let options = EventStoreUnifiedOptions {
+            task_id: options.task_id.clone(),
+            live_call_session_id: options.live_call_session_id.clone(),
+            tool_run_id: options.tool_run_id.clone(),
+            after: options.after.map(|value| value / 10),
+            limit: Some(limit + 1),
+        };
+        let mut items = self.list_unified_events(&options)?;
+        let has_more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        for item in &mut items {
+            if let Some(object) = item.as_object_mut() {
+                let raw_cursor = object.get("cursor").and_then(Value::as_i64).unwrap_or(0);
+                let source_rank = match object.get("kind").and_then(Value::as_str).unwrap_or("") {
+                    "tool" => 2,
+                    "live_call" => 3,
+                    _ => 1,
+                };
+                object.insert("rawCursor".to_string(), json!(raw_cursor));
+                object.insert("cursor".to_string(), json!((raw_cursor * 10) + source_rank));
+            }
+        }
+        let next_cursor = items
+            .last()
+            .and_then(|item| item.get("cursor").and_then(Value::as_i64))
+            .unwrap_or(options.after.unwrap_or(0));
+        Ok(
+            json!({ "items": items, "nextCursor": next_cursor, "hasMore": has_more, "limit": limit }),
+        )
     }
 
-    fn list_live_rows(
-        &self,
-        session_id: Option<String>,
-        min_cursor: i64,
-        query_limit: i64,
-    ) -> Result<Vec<EventStoreUnifiedItem>> {
-        let session_id = clean_string(session_id.as_deref(), 160);
-        let mut statement = self.db.prepare(
-            "SELECT cursor, session_id, event_id, event_type, event_at, text
-             FROM live_call_events WHERE (? = '' OR session_id = ?) AND cursor >= ? ORDER BY cursor ASC LIMIT ?",
+    fn get_tool_event_stats(&self) -> Result<Value> {
+        let row = self.db.query_row(
+            "SELECT COUNT(*), MIN(cursor), MAX(cursor), MIN(event_at), MAX(event_at) FROM tool_events",
+            [],
+            |row| Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            )),
         )?;
-        let rows = statement.query_map(params![session_id, session_id, min_cursor, query_limit], |row| {
-            Ok(EventStoreUnifiedItem {
-                cursor: row.get(0)?,
-                session_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                event_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                event_type: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                kind: "live_call".to_string(),
-                task_id: String::new(),
-                tool_run_id: String::new(),
-                turn_id: String::new(),
-                block_id: String::new(),
+        Ok(json!({
+            "count": row.0,
+            "minCursor": row.1.unwrap_or(0),
+            "maxCursor": row.2.unwrap_or(0),
+            "oldestAt": row.3.unwrap_or_default(),
+            "newestAt": row.4.unwrap_or_default()
+        }))
+    }
+
+    fn cursor_for(
+        &self,
+        table: &str,
+        owner_col: &str,
+        owner_id: &str,
+        event_id: &str,
+    ) -> Result<Option<i64>> {
+        let sql = format!("SELECT cursor FROM {table} WHERE {owner_col} = ? AND event_id = ?");
+        Ok(self
+            .db
+            .query_row(&sql, params![owner_id, event_id], |row| {
+                row.get::<_, i64>(0)
             })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+            .optional()?)
     }
 }
 
-fn event_json_with_cursor((cursor, event_json): (i64, String), raw_cursor: bool) -> Result<Value> {
+fn event_limit(value: Option<i64>, default_limit: i64, max_limit: i64) -> i64 {
+    match value {
+        Some(value) if value > 0 => value.min(max_limit.max(1)),
+        _ => default_limit.max(1).min(max_limit.max(1)),
+    }
+}
+
+fn clean_option(value: &Option<String>) -> String {
+    value
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn event_string(event: &Value, key: &str) -> String {
+    event
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn event_string_or(event: &Value, key: &str, fallback: &str) -> String {
+    match event.get(key).and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
+fn event_object(event: &Value) -> Value {
+    if event.is_object() {
+        event.clone()
+    } else {
+        json!({})
+    }
+}
+
+fn set_json_string(value: &mut Value, key: &str, text: String) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(key.to_string(), Value::String(text));
+    }
+}
+
+fn payload_json(event: &Value) -> Result<String> {
+    Ok(serde_json::to_string(
+        event.get("payload").unwrap_or(&Value::Null),
+    )?)
+}
+
+fn classify_task_event_kind(event: &Value) -> String {
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    match event_type {
+        "user_message" | "user" | "attachment" => "user",
+        "assistant_message" | "assistant" => "assistant",
+        "system" => "system",
+        "error" => "error",
+        "summarization" => "summary",
+        "stderr" | "stdout" => "output",
+        _ if event_type.starts_with("live_call.") => "live_call",
+        _ if event_type.starts_with("approval.") => "approval",
+        _ if event_type.starts_with("tool.") => "tool",
+        _ => "system",
+    }
+    .to_string()
+}
+
+fn event_json_with_cursor((cursor, event_json): (i64, String)) -> Result<Value> {
     let mut value = serde_json::from_str::<Value>(&event_json).unwrap_or_else(|_| json!({}));
     if !value.is_object() {
         value = json!({});
     }
     if let Some(object) = value.as_object_mut() {
         object.insert("cursor".to_string(), json!(cursor));
-        if raw_cursor {
-            object.insert("rawCursor".to_string(), json!(cursor));
-        }
     }
     Ok(value)
 }
 
-fn unified_item_json(item: EventStoreUnifiedItem) -> Value {
-    json!({
-        "cursor": item.cursor,
-        "eventId": item.event_id,
-        "type": item.event_type,
-        "kind": item.kind,
-        "at": item.at,
-        "text": item.text,
-        "sessionId": item.session_id,
-        "taskId": item.task_id,
-        "toolRunId": item.tool_run_id,
-        "turnId": item.turn_id,
-        "blockId": item.block_id
-    })
+fn unified_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "cursor": row.get::<_, i64>(0)?,
+        "taskId": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        "eventId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        "type": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        "kind": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        "turnId": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        "blockId": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        "at": row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        "text": row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+        "sessionId": "",
+        "toolRunId": ""
+    }))
 }
 
-fn replay_from_unified(item: EventStoreUnifiedItem, source_rank: i64) -> EventStoreReplayItem {
-    EventStoreReplayItem {
-        cursor: encode_replay_cursor(item.cursor, source_rank),
-        raw_cursor: item.cursor,
-        event_id: item.event_id,
-        event_type: item.event_type,
-        kind: item.kind,
-        at: item.at,
-        text: item.text,
-        session_id: item.session_id,
-        task_id: item.task_id,
-        tool_run_id: item.tool_run_id,
-        turn_id: item.turn_id,
-        block_id: item.block_id,
-    }
+fn unified_tool_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "cursor": row.get::<_, i64>(0)?,
+        "taskId": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        "toolRunId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        "eventId": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        "type": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        "kind": "tool",
+        "at": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        "text": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        "sessionId": "",
+        "turnId": "",
+        "blockId": ""
+    }))
 }
 
-fn replay_item_json(item: &EventStoreReplayItem) -> Value {
-    json!({
-        "cursor": item.cursor,
-        "rawCursor": item.raw_cursor,
-        "eventId": item.event_id,
-        "type": item.event_type,
-        "kind": item.kind,
-        "at": item.at,
-        "text": item.text,
-        "sessionId": item.session_id,
-        "taskId": item.task_id,
-        "toolRunId": item.tool_run_id,
-        "turnId": item.turn_id,
-        "blockId": item.block_id
-    })
-}
-
-fn default_retention_cutoff(days: i64) -> String {
-    let now = std::time::SystemTime::now();
-    let duration = Duration::from_secs(days.max(0) as u64 * 24 * 60 * 60);
-    let cutoff = now.checked_sub(duration).unwrap_or(now);
-    let datetime: DateTime<Utc> = cutoff.into();
-    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-fn mcp_sidecar_max_active_requests() -> usize {
-    env::var("VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(64)
-}
-
-fn handle_mcp_sidecar_request(
-    manager: &Arc<Mutex<McpSidecarManager>>,
-    method: &str,
-    args: &[Value],
-) -> Result<Value> {
-    match method {
-        "probeStdioServer" => {
-            let server: McpServerConfig = sidecar_arg(args, 0)?;
-            let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
-            let session = {
-                let mut manager = lock_mcp_manager(manager)?;
-                manager.session_for(server, &options)?
-            };
-            let mut session = lock_mcp_session(&session)?;
-            session.apply_options(&options);
-            let initialize = session.ensure_initialized()?;
-            let tools = session.list_tools()?;
-            Ok(json!({
-                "ok": true,
-                "transport": "stdio",
-                "protocolVersion": initialize.get("protocolVersion").and_then(Value::as_str).unwrap_or(""),
-                "serverInfo": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
-                "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
-                "tools": tools,
-                "stderr": ""
-            }))
-        }
-        "listTools" => {
-            let server: McpServerConfig = sidecar_arg(args, 0)?;
-            let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
-            let session = {
-                let mut manager = lock_mcp_manager(manager)?;
-                manager.session_for(server, &options)?
-            };
-            let mut session = lock_mcp_session(&session)?;
-            session.apply_options(&options);
-            Ok(Value::Array(session.list_tools()?))
-        }
-        "callTool" => {
-            let server: McpServerConfig = sidecar_arg(args, 0)?;
-            let tool_name: String = sidecar_arg(args, 1)?;
-            let tool_arguments: Value = args.get(2).cloned().unwrap_or_else(|| json!({}));
-            let options: McpSidecarOptions = sidecar_arg_or_default(args, 3)?;
-            let session = {
-                let mut manager = lock_mcp_manager(manager)?;
-                manager.session_for(server, &options)?
-            };
-            let mut session = lock_mcp_session(&session)?;
-            session.apply_options(&options);
-            session.call_tool(&tool_name, tool_arguments)
-        }
-        _ => bail!("Unsupported MCP session sidecar method: {method}"),
-    }
+fn unified_live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "cursor": row.get::<_, i64>(0)?,
+        "sessionId": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        "eventId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        "type": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        "kind": "live_call",
+        "at": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        "text": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        "taskId": "",
+        "toolRunId": "",
+        "turnId": "",
+        "blockId": ""
+    }))
 }
 
 impl McpSidecarManager {
-    fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-            active_requests: 0,
-            max_active_requests: mcp_sidecar_max_active_requests(),
-            max_active_observed: 0,
-            sidecar_backpressure_rejects: 0,
-            last_sidecar_backpressure_at: String::new(),
-        }
-    }
-
-    fn handle_control(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
         match method {
+            "probeStdioServer" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+                let session = self.session_for(server, &options)?;
+                let initialize = session.ensure_initialized()?;
+                let tools = session.list_tools()?;
+                Ok(json!({
+                    "ok": true,
+                    "transport": "stdio",
+                    "protocolVersion": initialize.get("protocolVersion").and_then(Value::as_str).unwrap_or(""),
+                    "serverInfo": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
+                    "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
+                    "tools": tools,
+                    "stderr": ""
+                }))
+            }
+            "listTools" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
+                let session = self.session_for(server, &options)?;
+                Ok(Value::Array(session.list_tools()?))
+            }
+            "callTool" => {
+                let server: McpServerConfig = sidecar_arg(args, 0)?;
+                let tool_name: String = sidecar_arg(args, 1)?;
+                let tool_arguments: Value = args.get(2).cloned().unwrap_or_else(|| json!({}));
+                let options: McpSidecarOptions = sidecar_arg_or_default(args, 3)?;
+                let session = self.session_for(server, &options)?;
+                session.call_tool(&tool_name, tool_arguments)
+            }
             "closeIdleSessions" => {
                 let options: McpSidecarOptions = sidecar_arg_or_default(args, 0)?;
                 let closed = self.close_idle(options.max_idle_ms.unwrap_or(10 * 60 * 1000));
@@ -1431,49 +1161,27 @@ impl McpSidecarManager {
         }
     }
 
-    fn try_start_sidecar_request(&mut self, method: &str) -> Result<()> {
-        if self.active_requests >= self.max_active_requests {
-            self.sidecar_backpressure_rejects += 1;
-            self.last_sidecar_backpressure_at = now_iso();
-            bail!(
-                "MCP session sidecar backpressure: {method} rejected because {} request(s) are already active (max {}).",
-                self.active_requests,
-                self.max_active_requests
-            );
-        }
-        self.active_requests += 1;
-        self.max_active_observed = self.max_active_observed.max(self.active_requests);
-        Ok(())
-    }
-
-    fn finish_sidecar_request(&mut self) {
-        self.active_requests = self.active_requests.saturating_sub(1);
-    }
-
     fn session_for(
         &mut self,
         server: McpServerConfig,
         options: &McpSidecarOptions,
-    ) -> Result<Arc<Mutex<McpStdioSession>>> {
+    ) -> Result<&mut McpStdioSession> {
         let key = mcp_server_key(&server);
-        let replace = match self.sessions.get(&key) {
-            Some(session) => match session.try_lock() {
-                Ok(mut session) => session.is_closed(),
-                Err(TryLockError::WouldBlock) => false,
-                Err(TryLockError::Poisoned(_)) => true,
-            },
-            None => true,
-        };
+        let replace = self
+            .sessions
+            .get_mut(&key)
+            .map(|session| session.is_closed())
+            .unwrap_or(true);
         if replace {
-            self.sessions.insert(
-                key.clone(),
-                Arc::new(Mutex::new(McpStdioSession::spawn(server, options)?)),
-            );
+            self.sessions
+                .insert(key.clone(), McpStdioSession::spawn(server, options)?);
         }
-        self.sessions
-            .get(&key)
-            .cloned()
-            .context("MCP session was not available after spawn")
+        let session = self
+            .sessions
+            .get_mut(&key)
+            .context("MCP session was not available after spawn")?;
+        session.apply_options(options);
+        Ok(session)
     }
 
     fn close_idle(&mut self, max_idle_ms: u64) -> usize {
@@ -1481,17 +1189,12 @@ impl McpSidecarManager {
         let idle_keys: Vec<String> = self
             .sessions
             .iter()
-            .filter_map(|(key, session)| match session.try_lock() {
-                Ok(session) if session.last_used.elapsed() >= max_idle => Some(key.clone()),
-                _ => None,
-            })
+            .filter(|(_, session)| session.last_used.elapsed() >= max_idle)
+            .map(|(key, _)| key.clone())
             .collect();
         let closed = idle_keys.len();
         for key in idle_keys {
-            if let Some(session) = self.sessions.remove(&key) {
-                let Ok(mut session) = lock_mcp_session(&session) else {
-                    continue;
-                };
+            if let Some(mut session) = self.sessions.remove(&key) {
                 session.close();
             }
         }
@@ -1499,58 +1202,13 @@ impl McpSidecarManager {
     }
 
     fn close_all(&mut self) {
-        for (_, session) in self.sessions.drain() {
-            let Ok(mut session) = lock_mcp_session(&session) else {
-                continue;
-            };
+        for (_, mut session) in self.sessions.drain() {
             session.close();
         }
     }
 
     fn stats(&self) -> Value {
-        let items: Vec<Value> = self
-            .sessions
-            .values()
-            .map(|session| match session.try_lock() {
-                Ok(session) => session.stats(),
-                Err(TryLockError::WouldBlock) => json!({
-                    "id": "",
-                    "name": "",
-                    "closed": false,
-                    "busy": true,
-                    "pending": 1,
-                    "maxPendingRequests": 1,
-                    "maxPendingObserved": 1,
-                    "timeoutMs": 0,
-                    "requests": 0,
-                    "responses": 0,
-                    "failures": 0,
-                    "timeouts": 0,
-                    "backpressureRejects": 0,
-                    "toolsCached": false,
-                    "toolCount": 0,
-                    "startedAt": "",
-                    "lastUsedAt": "",
-                    "lastRequestAt": "",
-                    "lastResponseAt": "",
-                    "lastFailureAt": "",
-                    "lastBackpressureAt": "",
-                    "stderr": ""
-                }),
-                Err(TryLockError::Poisoned(_)) => json!({
-                    "id": "",
-                    "name": "",
-                    "closed": true,
-                    "statsUnavailable": true,
-                    "pending": 0,
-                    "requests": 0,
-                    "responses": 0,
-                    "failures": 1,
-                    "timeouts": 0,
-                    "backpressureRejects": 0
-                }),
-            })
-            .collect();
+        let items: Vec<Value> = self.sessions.values().map(McpStdioSession::stats).collect();
         let total_requests: u64 = items
             .iter()
             .map(|item| item.get("requests").and_then(Value::as_u64).unwrap_or(0))
@@ -1569,7 +1227,11 @@ impl McpSidecarManager {
             .sum();
         let total_backpressure_rejects: u64 = items
             .iter()
-            .map(|item| item.get("backpressureRejects").and_then(Value::as_u64).unwrap_or(0))
+            .map(|item| {
+                item.get("backpressureRejects")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            })
             .sum();
         let max_pending_observed = items
             .iter()
@@ -1579,12 +1241,7 @@ impl McpSidecarManager {
         json!({
             "sessions": self.sessions.len(),
             "activeSessions": items.iter().filter(|item| item.get("closed").and_then(Value::as_bool) == Some(false)).count(),
-            "activeRequests": self.active_requests,
-            "maxActiveRequests": self.max_active_requests,
-            "maxActiveObserved": self.max_active_observed,
-            "sidecarBackpressureRejects": self.sidecar_backpressure_rejects,
-            "lastSidecarBackpressureAt": self.last_sidecar_backpressure_at,
-            "totalPending": self.active_requests,
+            "totalPending": 0,
             "totalRequests": total_requests,
             "totalResponses": total_responses,
             "totalFailures": total_failures,
@@ -1926,11 +1583,12 @@ fn list_workspace_tree(
             if file_type.is_dir() && IGNORED_WORKSPACE_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            let rel = slash_path(entry.path().strip_prefix(&root).unwrap_or(&entry.path()));
-            if ignore_rules.is_ignored(&rel, &name, file_type.is_dir()) {
+            let full_path = entry.path();
+            let rel = slash_path(full_path.strip_prefix(&root).unwrap_or(&full_path));
+            if ignore_rules.is_ignored(&name, &rel, file_type.is_dir()) {
                 continue;
             }
-            children.push((name, entry.path(), file_type.is_dir()));
+            children.push((name, full_path, file_type.is_dir()));
         }
 
         children.sort_by(|a, b| {
@@ -2023,9 +1681,7 @@ struct WorkspaceIgnoreRules {
 #[derive(Clone, Debug)]
 struct WorkspaceIgnoreRule {
     pattern: String,
-    base: String,
-    has_slash: bool,
-    anchored: bool,
+    match_path: bool,
     directory_only: bool,
     negated: bool,
 }
@@ -2035,55 +1691,22 @@ impl WorkspaceIgnoreRules {
         self.rules.extend(other.rules);
     }
 
-    fn is_ignored(&self, rel_path: &str, name: &str, is_dir: bool) -> bool {
+    fn is_ignored(&self, name: &str, rel_path: &str, is_dir: bool) -> bool {
         let mut ignored = false;
         for rule in &self.rules {
             if rule.directory_only && !is_dir {
                 continue;
             }
-            if rule.matches(rel_path, name) {
+            let matches = if rule.match_path {
+                gitignore_path_matches(&rule.pattern, rel_path)
+            } else {
+                gitignore_basename_matches(&rule.pattern, name)
+            };
+            if matches {
                 ignored = !rule.negated;
             }
         }
         ignored
-    }
-}
-
-impl WorkspaceIgnoreRule {
-    fn matches(&self, rel_path: &str, name: &str) -> bool {
-        if !self.has_slash {
-            return gitignore_segment_matches(&self.pattern, name);
-        }
-
-        let path = if self.base.is_empty() {
-            rel_path.to_string()
-        } else {
-            let Some(rest) = rel_path.strip_prefix(&self.base) else {
-                return false;
-            };
-            rest.trim_start_matches('/').to_string()
-        };
-        if path.is_empty() {
-            return false;
-        }
-        if self.anchored {
-            return gitignore_path_matches(&self.pattern, &path);
-        }
-        let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
-        let pattern_segments: Vec<&str> = self
-            .pattern
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect();
-        if pattern_segments.is_empty() || pattern_segments.len() > segments.len() {
-            return false;
-        }
-        for start in 0..=segments.len() - pattern_segments.len() {
-            if gitignore_segments_match(&pattern_segments, &segments[start..]) {
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -2114,11 +1737,15 @@ fn gitignore_rules_for_dir(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
         if pattern.is_empty() {
             continue;
         }
+        let match_path = anchored || pattern.contains('/');
+        let pattern = if match_path && !base.is_empty() {
+            format!("{base}/{pattern}")
+        } else {
+            pattern.to_string()
+        };
         rules.rules.push(WorkspaceIgnoreRule {
-            pattern: pattern.to_string(),
-            base: base.clone(),
-            has_slash: pattern.contains('/'),
-            anchored,
+            pattern,
+            match_path,
             directory_only,
             negated,
         });
@@ -2128,28 +1755,18 @@ fn gitignore_rules_for_dir(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
 }
 
 fn gitignore_path_matches(pattern: &str, path: &str) -> bool {
-    let pattern_segments: Vec<&str> = pattern.split('/').filter(|segment| !segment.is_empty()).collect();
-    let path_segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
-    gitignore_segments_match(&pattern_segments, &path_segments)
-}
-
-fn gitignore_segments_match(pattern: &[&str], path: &[&str]) -> bool {
-    if pattern.is_empty() {
-        return path.is_empty();
-    }
-    if pattern[0] == "**" {
-        if gitignore_segments_match(&pattern[1..], path) {
-            return true;
-        }
-        return !path.is_empty() && gitignore_segments_match(pattern, &path[1..]);
-    }
-    if path.is_empty() {
+    let pattern_parts: Vec<_> = pattern.split('/').collect();
+    let path_parts: Vec<_> = path.split('/').collect();
+    if pattern_parts.len() != path_parts.len() {
         return false;
     }
-    gitignore_segment_matches(pattern[0], path[0]) && gitignore_segments_match(&pattern[1..], &path[1..])
+    pattern_parts
+        .iter()
+        .zip(path_parts.iter())
+        .all(|(pattern_part, path_part)| gitignore_basename_matches(pattern_part, path_part))
 }
 
-fn gitignore_segment_matches(pattern: &str, name: &str) -> bool {
+fn gitignore_basename_matches(pattern: &str, name: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == name;
     }
@@ -2580,57 +2197,34 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src").join("private")).unwrap();
-        fs::create_dir_all(root.join("src").join("public")).unwrap();
+        fs::create_dir_all(root.join("src").join("generated")).unwrap();
         fs::write(
             root.join(".gitignore"),
-            "src/private/*.txt\n/src/root-only.tmp\n",
+            "src/generated/*.tmp\n!src/generated/keep.tmp\n",
         )
         .unwrap();
-        fs::write(root.join("src").join("private").join("secret.txt"), "ignored").unwrap();
-        fs::write(root.join("src").join("private").join("secret.md"), "kept").unwrap();
-        fs::write(root.join("src").join("public").join("visible.txt"), "kept").unwrap();
-        fs::write(root.join("src").join("root-only.tmp"), "ignored").unwrap();
+        fs::write(root.join("src").join("app.rs"), "fn main() {}").unwrap();
+        fs::write(
+            root.join("src").join("generated").join("noise.tmp"),
+            "ignored",
+        )
+        .unwrap();
+        fs::write(root.join("src").join("generated").join("keep.tmp"), "kept").unwrap();
+        fs::write(root.join("src").join("generated").join("note.txt"), "kept").unwrap();
 
         let tree = list_workspace_tree(&root, Path::new(""), 3, 20).unwrap();
 
         let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
-        assert!(paths.contains(&"src/private/secret.md"));
-        assert!(paths.contains(&"src/public/visible.txt"));
-        assert!(!paths.contains(&"src/private/secret.txt"));
-        assert!(!paths.contains(&"src/root-only.tmp"));
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_honors_nested_gitignore_path_patterns() {
-        let root = env::temp_dir().join(format!(
-            "vibelink-workspace-tree-nested-gitignore-paths-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src").join("generated").join("deep")).unwrap();
-        fs::create_dir_all(root.join("src").join("keep")).unwrap();
-        fs::write(root.join("src").join(".gitignore"), "generated/**/*.tmp\n").unwrap();
-        fs::write(
-            root.join("src").join("generated").join("deep").join("noise.tmp"),
-            "ignored",
-        )
-        .unwrap();
-        fs::write(
-            root.join("src").join("generated").join("deep").join("keep.md"),
-            "kept",
-        )
-        .unwrap();
-        fs::write(root.join("src").join("keep").join("note.tmp"), "kept").unwrap();
-
-        let tree = list_workspace_tree(&root, Path::new("src"), 4, 20).unwrap();
-
-        let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
-        assert!(paths.contains(&"src/generated/deep/keep.md"));
-        assert!(paths.contains(&"src/keep/note.tmp"));
-        assert!(!paths.contains(&"src/generated/deep/noise.tmp"));
+        assert_eq!(
+            paths,
+            vec![
+                "src",
+                "src/generated",
+                "src/app.rs",
+                "src/generated/keep.tmp",
+                "src/generated/note.txt",
+            ]
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

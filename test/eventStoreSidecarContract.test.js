@@ -7,6 +7,10 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import {
+  EVENT_STORE_CONTRACT_METHODS,
+  EVENT_STORE_SIDECAR_PROTOCOL_VERSION
+} from "../src/eventStoreContract.js";
 import { createEventStoreSidecarClient } from "../src/eventStoreSidecarClient.js";
 
 function cargoPath() {
@@ -32,7 +36,7 @@ function rustSidecarClient(t, dbPath, options = {}) {
       "event-store-sidecar",
       dbPath
     ],
-    timeoutMs: 10000,
+    timeoutMs: 30000,
     ...options
   });
 }
@@ -111,6 +115,13 @@ test("event store JSON sidecar contract handles append and replay requests", asy
   });
 
   try {
+    const health = await client.health();
+    assert.equal(health.ok, true);
+    assert.equal(health.implementation, "node-fixture");
+    assert.equal(health.protocolVersion, EVENT_STORE_SIDECAR_PROTOCOL_VERSION);
+    assert.deepEqual(health.supportedMethods, EVENT_STORE_CONTRACT_METHODS);
+    assert.equal(health.schemaReady, true);
+
     const taskCursors = await client.insertTaskEvents("task-sidecar", [
       {
         id: "task-event-sidecar-1",
@@ -147,10 +158,58 @@ test("event store JSON sidecar contract handles append and replay requests", asy
       client.request("missingMethod", []),
       /Unsupported event store sidecar method: missingMethod/
     );
-    assert.equal(client.stats().pending, 0);
+    const remoteStats = await client.getSidecarStats();
+    assert.equal(remoteStats.implementation, "node-fixture");
+    assert.equal(remoteStats.protocolVersion, EVENT_STORE_SIDECAR_PROTOCOL_VERSION);
+    assert.equal(remoteStats.pending, 0);
+    assert.equal(remoteStats.requests >= 7, true);
+    assert.equal(remoteStats.responses >= 6, true);
+    assert.equal(remoteStats.failures, 1);
+    const localStats = client.stats();
+    assert.equal(localStats.pending, 0);
+    assert.equal(localStats.requests >= 8, true);
+    assert.equal(localStats.responses >= 7, true);
+    assert.equal(localStats.failures, 1);
   } finally {
     await client.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("event store sidecar client rejects invalid JSON responses", async () => {
+  const client = createEventStoreSidecarClient({
+    command: process.execPath,
+    args: ["-e", "process.stdin.resume(); process.stdout.write('not-json\\n'); setTimeout(() => {}, 1000);"],
+    timeoutMs: 5000
+  });
+
+  try {
+    await assert.rejects(
+      client.health(),
+      /Event store sidecar returned invalid JSON/
+    );
+    assert.equal(client.stats().failures, 1);
+  } finally {
+    await client.close();
+  }
+});
+
+test("event store sidecar client times out unanswered requests", async () => {
+  const client = createEventStoreSidecarClient({
+    command: process.execPath,
+    args: ["-e", "process.stdin.resume();"],
+    timeoutMs: 25
+  });
+
+  try {
+    await assert.rejects(
+      client.health(),
+      /Event store sidecar request timed out: __health/
+    );
+    assert.equal(client.stats().timeouts, 1);
+    assert.equal(client.stats().failures, 1);
+  } finally {
+    await client.close();
   }
 });
 
@@ -159,6 +218,13 @@ test("event store JSON sidecar contract works against the Rust sidecar", async (
   const client = rustSidecarClient(t, dbPath);
 
   try {
+    const health = await client.health();
+    assert.equal(health.ok, true);
+    assert.equal(health.implementation, "rust");
+    assert.equal(health.protocolVersion, EVENT_STORE_SIDECAR_PROTOCOL_VERSION);
+    assert.deepEqual(health.supportedMethods, EVENT_STORE_CONTRACT_METHODS);
+    assert.equal(health.schemaReady, true);
+
     const taskCursors = await client.insertTaskEvents("task-sidecar", [
       {
         id: "task-event-rust-sidecar-1",
@@ -195,7 +261,13 @@ test("event store JSON sidecar contract works against the Rust sidecar", async (
       client.request("missingMethod", []),
       /Unsupported event store sidecar method: missingMethod/
     );
-    assert.equal(client.stats().pending, 0);
+    const remoteStats = await client.getSidecarStats();
+    assert.equal(remoteStats.implementation, "rust");
+    assert.equal(remoteStats.protocolVersion, EVENT_STORE_SIDECAR_PROTOCOL_VERSION);
+    assert.equal(remoteStats.pending, 0);
+    assert.equal(remoteStats.requests >= 7, true);
+    assert.equal(remoteStats.responses >= 6, true);
+    assert.equal(remoteStats.failures, 1);
   } finally {
     await client.close();
     fs.rmSync(dir, { recursive: true, force: true });

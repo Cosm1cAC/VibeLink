@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-10",
+  "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
+  "slices": [
+    {
+      "id": "workspace-tree",
+      "title": "Workspace tree scanner",
+      "priority": "P1",
+      "status": "opt-in",
+      "rollout": "manual flag only",
+      "featureFlags": [
+        { "name": "VIBELINK_RUST_WORKSPACE_TREE", "requiredInCode": true },
+        { "name": "VIBELINK_RUST_BIN", "requiredInCode": true },
+        { "name": "VIBELINK_RUST_BIN_ARGS_JSON", "requiredInCode": true }
+      ],
+      "nodeEntry": "src/workspaces.js",
+      "rustEntry": "apps/windows/src/main.rs",
+      "sidecarCommand": "vibelink workspace-tree",
+      "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails.",
+      "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks hits, misses, cache, budget hits, and last signature.",
+      "tests": [
+        "test/workspacesRustTree.test.js"
+      ],
+      "docs": [
+        "README.md",
+        "docs/rust-migration-status.md"
+      ],
+      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node-side cache reuse.",
+      "nextAction": "Add auto mode, parity gates, fallback counters, lastError stats, and an explicit long-lived scanner/cache plan before canary.",
+      "promotionGate": "Can move to canary only after Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback."
+    },
+    {
+      "id": "mcp-session-sidecar",
+      "title": "Persistent MCP stdio sessions",
+      "priority": "P1",
+      "status": "opt-in",
+      "rollout": "manual flag only",
+      "featureFlags": [
+        { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
+        { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
+        { "name": "VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
+        { "name": "VIBELINK_MCP_PERSISTENT_SESSIONS", "requiredInCode": true }
+      ],
+      "nodeEntry": "src/mcpRuntime.js",
+      "rustEntry": "apps/windows/src/main.rs",
+      "sidecarCommand": "vibelink mcp-session-sidecar",
+      "nodeFallback": "src/mcpRuntime.js falls back to the existing Node stdio probe/call path and closes the failed Rust sidecar client on probe or call failure.",
+      "runtimeStats": "getMcpRustSidecarStats() exposes enabled, command, args, starts, failures, fallbacks, last failure, last error, and client stats.",
+      "tests": [
+        "test/mcpRuntime.test.js",
+        "test/mcpSessionSidecarContract.test.js"
+      ],
+      "docs": [
+        "docs/mcp-persistent-sessions.md",
+        "docs/rust-migration-status.md"
+      ],
+      "currentState": "Node manager, JSONL sidecar client, real Rust mcp-session-sidecar command, opt-in runtime routing, contract tests, burst tests, timeout tests, and crash-replacement tests exist.",
+      "nextAction": "Add auto mode, health readiness checks, promotion thresholds, and docs for spawn-reduction and fallback-rate gates before canary/default-on.",
+      "promotionGate": "Can move to canary only after auto mode validates command/health readiness and tests cover spawn failure, tool-call failure, timeout, invalid JSON, and fallback without task-visible failure."
+    },
+    {
+      "id": "event-store-sidecar",
+      "title": "Event store append/replay sidecar",
+      "priority": "P0",
+      "status": "canary",
+      "rollout": "auto readiness canary with manual rollback flag",
+      "featureFlags": [
+        { "name": "VIBELINK_EVENT_STORE_WORKER", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_BATCH_APPEND", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
+        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS", "requiredInCode": true }
+      ],
+      "nodeEntry": "src/db.js",
+      "rustEntry": "apps/windows/src/main.rs",
+      "sidecarCommand": "vibelink event-store-sidecar <db-path>",
+      "nodeFallback": "src/db.js prefers the Rust sidecar when VIBELINK_EVENT_STORE_RUST_SIDECAR=1, or when VIBELINK_EVENT_STORE_RUST_SIDECAR=auto and the command exists. Missing binary in manual mode, bad health, timeout, invalid JSON, request failure, or sidecar exit falls back to the Node Worker when enabled, otherwise sync SQLite. Missing binary in auto mode skips Rust without marking failure.",
+      "runtimeStats": "getEventStoreRuntimeStats() in src/db.js exposes mode, rustSidecar enabled/auto/available/active/ready/failed, starts/failures/fallbacks/lastError/client stats, worker status, batch append stats, and eventStore metrics.",
+      "tests": [
+        "test/eventStoreContract.test.js",
+        "test/eventStoreWorker.test.js",
+        "test/eventStoreWorkerAppend.test.js",
+        "test/eventStoreSidecarContract.test.js",
+        "test/eventStoreRustRuntime.test.js",
+        "test/eventStoreBatchAppend.test.js",
+        "test/eventStoreBatcher.test.js",
+        "test/eventStoreMetrics.test.js"
+      ],
+      "docs": [
+        "docs/event-store-worker.md",
+        "docs/rust-migration-status.md"
+      ],
+      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, a local canary harness, and a passing 2026-07-10 representative release canary exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
+      "nextAction": "Run limited canary sessions with runtime stats capture, keep fallback-rate/latency/stall checks green, and wire the local canary into release or CI status before broader default exposure.",
+      "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across representative sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
+    },
+    {
+      "id": "audio-pipeline",
+      "title": "Live audio low-latency pipeline",
+      "priority": "P1",
+      "status": "planned",
+      "rollout": "not implemented",
+      "featureFlags": [
+        { "name": "VIBELINK_AUDIO_RUST_PIPELINE", "requiredInCode": false }
+      ],
+      "nodeEntry": "src/liveCallAudioPipeline.js",
+      "rustEntry": "planned: apps/windows/src/main.rs audio-pipeline-sidecar subcommand",
+      "sidecarCommand": "planned: vibelink audio-pipeline-sidecar",
+      "nodeFallback": "Existing live-call audio and ASR paths remain Node/provider-owned. The first Rust slice must fall back to the current Node level/stream path when missing or failed.",
+      "runtimeStats": "planned: sidecar stats should expose processed chunks, processed bytes, dropped chunks, backpressure rejections, and last error.",
+      "tests": [
+        "test/liveCallAudioPipeline.test.js",
+        "test/liveCallAudio.test.js"
+      ],
+      "docs": [
+        "README.md",
+        "docs/rust-migration-status.md"
+      ],
+      "currentState": "Rust audio pipeline is not implemented. Current live-call stack uses existing Node/Kotlin/.NET paths and mock/real ASR integration points.",
+      "nextAction": "Define a bounded JSONL contract for deterministic PCM chunk preprocessing: level, peak, RMS, sequence accounting, ring-buffer/backpressure stats, __health, stats, and __close. Do not move ASR into Rust in the first slice.",
+      "promotionGate": "Can move to contract only after synthetic PCM tests define deterministic level/RMS behavior. Can move to opt-in only after a real sidecar exists and falls back to the existing Node path."
+    },
+    {
+      "id": "compression-adapter",
+      "title": "Compression and context budget helper",
+      "priority": "P2",
+      "status": "planned",
+      "rollout": "not implemented; conditional need",
+      "featureFlags": [
+        { "name": "VIBELINK_RUST_COMPRESSION", "requiredInCode": false }
+      ],
+      "nodeEntry": "planned: src/rustCompressionClient.js",
+      "rustEntry": "planned: apps/windows/src/main.rs compression-sidecar subcommand",
+      "sidecarCommand": "planned: vibelink compression-sidecar",
+      "nodeFallback": "Existing Node/provider prompt construction remains authoritative. First Rust helper should be optional and no-op/fallback when missing.",
+      "runtimeStats": "planned: sidecar stats should expose requests, failures, bytes in/out, and last error.",
+      "tests": [
+        "planned: test/rustCompressionContract.test.js"
+      ],
+      "docs": [
+        "README.md",
+        "docs/rust-migration-status.md"
+      ],
+      "currentState": "No VibeLink Rust compression helper exists. README says to prefer external Headroom sidecar/proxy and only implement VibeLink-native compression if clearly needed.",
+      "nextAction": "If needed, define a deterministic data-plane helper contract for byte/log sampling and budget trimming only; do not claim semantic summarization or provider-token precision.",
+      "promotionGate": "Can move to contract only after deterministic input/output fixtures exist. Can move to opt-in only after a real sidecar exists, fallback preserves current behavior, and docs state this is not semantic summarization."
+    }
+  ]
+}

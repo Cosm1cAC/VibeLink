@@ -41,6 +41,10 @@ export const defaultSettings = {
     privateKey: "",
     subject: ""
   },
+  nativePush: {
+    provider: "fcm",
+    fcmProjectId: ""
+  },
   toolEvents: {
     retentionDays: 30,
     keepLatest: 5000,

@@ -51,10 +51,22 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.network.AuditLogItem
 import com.vibelink.app.network.ApprovalRequestItem
+import com.vibelink.app.network.CloudflareGuideResponse
+import com.vibelink.app.network.DeviceAdminItem
+import com.vibelink.app.network.DoctorResponse
+import com.vibelink.app.network.McpProbeResponse
+import com.vibelink.app.network.McpStatusResponse
+import com.vibelink.app.network.NativePushSettingsPatch
+import com.vibelink.app.network.PairingSession
 import com.vibelink.app.network.PublicSettings
+import com.vibelink.app.network.PushSubscriptionItem
 import com.vibelink.app.network.SecuritySettings
 import com.vibelink.app.network.SettingsPatchRequest
+import com.vibelink.app.network.ToolEventStatsResponse
+import com.vibelink.app.network.ToolEventsPruneResponse
+import com.google.gson.GsonBuilder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -64,8 +76,22 @@ import kotlinx.coroutines.launch
 data class SettingsUiState(
     val settings: PublicSettings? = null,
     val approvals: List<ApprovalRequestItem> = emptyList(),
+    val devices: List<DeviceAdminItem> = emptyList(),
+    val currentDeviceId: String = "",
+    val pairingSessions: List<PairingSession> = emptyList(),
+    val auditLogs: List<AuditLogItem> = emptyList(),
+    val mcpStatus: McpStatusResponse = McpStatusResponse(),
+    val mcpProbe: McpProbeResponse? = null,
+    val cloudflare: CloudflareGuideResponse = CloudflareGuideResponse(),
+    val pushSubscriptions: List<PushSubscriptionItem> = emptyList(),
+    val toolEventStats: ToolEventStatsResponse = ToolEventStatsResponse(),
+    val toolEventPrune: ToolEventsPruneResponse? = null,
+    val settingsExportText: String = "",
+    val settingsImportPreview: List<String> = emptyList(),
+    val doctor: DoctorResponse = DoctorResponse(),
     val loading: Boolean = false,
     val saving: Boolean = false,
+    val adminBusy: String = "",
     val error: String = "",
     val notice: String = "",
 )
@@ -80,10 +106,27 @@ class SettingsViewModel : ViewModel() {
             try {
                 val status = apiClient.checkStatus()
                 val approvals = runCatching { apiClient.listApprovals(status = "pending", limit = 50) }.getOrDefault(emptyList())
+                val devices = runCatching { apiClient.listDevices() }.getOrDefault(com.vibelink.app.network.DeviceListResponse())
+                val pairings = runCatching { apiClient.listPairingSessions(status = "pending") }.getOrDefault(emptyList())
+                val auditLogs = runCatching { apiClient.listAuditLogs(limit = 20) }.getOrDefault(emptyList())
+                val mcpStatus = runCatching { apiClient.getMcpStatus() }.getOrDefault(McpStatusResponse())
+                val cloudflare = runCatching { apiClient.getCloudflareGuide() }.getOrDefault(CloudflareGuideResponse())
+                val pushSubscriptions = runCatching { apiClient.listPushSubscriptions() }.getOrDefault(emptyList())
+                val toolEventStats = runCatching { apiClient.getToolEventStats() }.getOrDefault(ToolEventStatsResponse())
+                val doctor = runCatching { apiClient.getDoctor() }.getOrDefault(DoctorResponse())
                 _uiState.update {
                     it.copy(
                         settings = status.settings,
                         approvals = approvals,
+                        devices = devices.items,
+                        currentDeviceId = devices.currentDeviceId,
+                        pairingSessions = pairings,
+                        auditLogs = auditLogs,
+                        mcpStatus = mcpStatus,
+                        cloudflare = cloudflare,
+                        pushSubscriptions = pushSubscriptions,
+                        toolEventStats = toolEventStats,
+                        doctor = doctor,
                         loading = false,
                     )
                 }
@@ -132,7 +175,163 @@ class SettingsViewModel : ViewModel() {
             }
         }
     }
+
+    fun decidePairing(apiClient: ApiClient, sessionId: String, approve: Boolean) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(error = "", notice = "") }
+            try {
+                apiClient.decidePairingSession(sessionId, approve)
+                val pairings = apiClient.listPairingSessions(status = "pending")
+                _uiState.update {
+                    it.copy(
+                        pairingSessions = pairings,
+                        notice = if (approve) "Pairing approved." else "Pairing denied.",
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(error = error.message ?: "Pairing decision failed") }
+            }
+        }
+    }
+
+    fun revokeDevice(apiClient: ApiClient, deviceId: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(error = "", notice = "") }
+            try {
+                apiClient.revokeDevice(deviceId)
+                val devices = apiClient.listDevices()
+                _uiState.update {
+                    it.copy(
+                        devices = devices.items,
+                        currentDeviceId = devices.currentDeviceId,
+                        notice = "Device revoked.",
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(error = error.message ?: "Device revoke failed") }
+            }
+        }
+    }
+
+    fun probeMcp(apiClient: ApiClient, timeoutMs: Int) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(adminBusy = "mcp", error = "", notice = "") }
+            try {
+                val result = apiClient.probeMcp(timeoutMs)
+                _uiState.update {
+                    it.copy(
+                        mcpProbe = result,
+                        mcpStatus = apiClient.getMcpStatus(),
+                        adminBusy = "",
+                        notice = if (result.ok) "MCP probe completed." else "MCP probe found issues.",
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "MCP probe failed") }
+            }
+        }
+    }
+
+    fun pruneToolEvents(apiClient: ApiClient, dryRun: Boolean, keepLatest: Int) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(adminBusy = if (dryRun) "prune-preview" else "prune", error = "", notice = "") }
+            try {
+                val result = apiClient.pruneToolEvents(dryRun = dryRun, keepLatest = keepLatest)
+                val stats = apiClient.getToolEventStats()
+                _uiState.update {
+                    it.copy(
+                        toolEventPrune = result,
+                        toolEventStats = stats,
+                        adminBusy = "",
+                        notice = if (dryRun) "Tool-event prune preview ready." else "Tool events pruned.",
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Tool-event prune failed") }
+            }
+        }
+    }
+
+    fun exportSettings(apiClient: ApiClient) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(adminBusy = "settings-export", error = "", notice = "") }
+            try {
+                val exported = apiClient.exportSettings()
+                _uiState.update {
+                    it.copy(
+                        settingsExportText = settingsJson.toJson(exported),
+                        adminBusy = "",
+                        notice = "Settings export ready.",
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Settings export failed") }
+            }
+        }
+    }
+
+    fun previewImportSettings(apiClient: ApiClient, rawJson: String) {
+        if (rawJson.trim().isBlank()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(adminBusy = "settings-import-preview", error = "", notice = "") }
+            try {
+                val preview = apiClient.importSettings(rawJson, dryRun = true)
+                _uiState.update {
+                    it.copy(
+                        settingsImportPreview = preview.changedKeys,
+                        adminBusy = "",
+                        notice = "Import preview ready.",
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Settings import preview failed") }
+            }
+        }
+    }
+
+    fun applyImportSettings(apiClient: ApiClient, rawJson: String) {
+        if (rawJson.trim().isBlank()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(adminBusy = "settings-import", error = "", notice = "") }
+            try {
+                val imported = apiClient.importSettings(rawJson, dryRun = false)
+                _uiState.update {
+                    it.copy(
+                        settings = imported.settings ?: it.settings,
+                        settingsImportPreview = imported.changedKeys,
+                        adminBusy = "",
+                        notice = "Settings imported.",
+                    )
+                }
+                load(apiClient)
+            } catch (error: Exception) {
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Settings import failed") }
+            }
+        }
+    }
+
+    fun registerNativePushToken(apiClient: ApiClient, provider: String, token: String) {
+        if (token.trim().isBlank()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(adminBusy = "native-push", error = "", notice = "") }
+            try {
+                apiClient.registerNativePushToken(provider = provider.trim().ifBlank { "fcm" }, token = token.trim())
+                val subscriptions = apiClient.listPushSubscriptions()
+                _uiState.update {
+                    it.copy(
+                        pushSubscriptions = subscriptions,
+                        adminBusy = "",
+                        notice = "Native push token registered.",
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "Native push registration failed") }
+            }
+        }
+    }
 }
+
+private val settingsJson = GsonBuilder().setPrettyPrinting().create()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -155,6 +354,22 @@ fun SettingsScreen(
     var networkAccess by remember { mutableStateOf(true) }
     var requireTrustedWorkspace by remember { mutableStateOf(true) }
     var requireDangerousApproval by remember { mutableStateOf(true) }
+    var trustedWorkspaces by remember { mutableStateOf("") }
+    var hostAllowlist by remember { mutableStateOf("") }
+    var allowTryCloudflare by remember { mutableStateOf(true) }
+    var allowLegacyPairingTokenLogin by remember { mutableStateOf(false) }
+    var notificationEmail by remember { mutableStateOf("") }
+    var nativePushProviderSetting by remember { mutableStateOf("fcm") }
+    var nativePushProjectId by remember { mutableStateOf("") }
+    var nativePushServiceAccountJson by remember { mutableStateOf("") }
+    var toolRetentionDays by remember { mutableStateOf("30") }
+    var toolKeepLatest by remember { mutableStateOf("5000") }
+    var toolAutoPrune by remember { mutableStateOf(true) }
+    var toolPruneInterval by remember { mutableStateOf("360") }
+    var mcpProbeTimeout by remember { mutableStateOf("10000") }
+    var nativePushProvider by remember { mutableStateOf("fcm") }
+    var nativePushToken by remember { mutableStateOf("") }
+    var settingsImportText by remember { mutableStateOf("") }
     var openAiKey by remember { mutableStateOf("") }
     var anthropicKey by remember { mutableStateOf("") }
     var zhipuKey by remember { mutableStateOf("") }
@@ -176,6 +391,17 @@ fun SettingsScreen(
         networkAccess = settings.security.networkAccess
         requireTrustedWorkspace = settings.security.requireTrustedWorkspace
         requireDangerousApproval = settings.security.requireDangerousCommandApproval
+        trustedWorkspaces = settings.security.trustedWorkspaces.joinToString("\n")
+        hostAllowlist = settings.hostAllowlist.joinToString("\n")
+        allowTryCloudflare = settings.allowTryCloudflare
+        allowLegacyPairingTokenLogin = settings.allowLegacyPairingTokenLogin
+        nativePushProviderSetting = settings.nativePush.provider.ifBlank { "fcm" }
+        nativePushProjectId = settings.nativePush.fcmProjectId
+        toolRetentionDays = settings.toolEvents.retentionDays.toString()
+        toolKeepLatest = settings.toolEvents.keepLatest.toString()
+        toolAutoPrune = settings.toolEvents.autoPrune
+        toolPruneInterval = settings.toolEvents.autoPruneIntervalMinutes.toString()
+        mcpProbeTimeout = settings.mcp.probeTimeoutMs.toString()
     }
 
     Scaffold(
@@ -209,10 +435,30 @@ fun SettingsScreen(
                                         networkAccess = networkAccess,
                                         requireTrustedWorkspace = requireTrustedWorkspace,
                                         requireDangerousCommandApproval = requireDangerousApproval,
+                                        trustedWorkspaces = linesFromText(trustedWorkspaces),
+                                    ),
+                                    hostAllowlist = linesFromText(hostAllowlist),
+                                    allowTryCloudflare = allowTryCloudflare,
+                                    allowLegacyPairingTokenLogin = allowLegacyPairingTokenLogin,
+                                    notificationEmail = notificationEmail.trim().ifBlank { null },
+                                    nativePush = NativePushSettingsPatch(
+                                        provider = nativePushProviderSetting,
+                                        fcmProjectId = nativePushProjectId,
+                                        fcmServiceAccountJson = nativePushServiceAccountJson.trim().ifBlank { null },
+                                    ),
+                                    toolEvents = com.vibelink.app.network.ToolEventsSettings(
+                                        retentionDays = intFromText(toolRetentionDays, 30),
+                                        keepLatest = intFromText(toolKeepLatest, 5000),
+                                        autoPrune = toolAutoPrune,
+                                        autoPruneIntervalMinutes = intFromText(toolPruneInterval, 360),
+                                    ),
+                                    mcp = com.vibelink.app.network.McpSettingsPatch(
+                                        probeTimeoutMs = intFromText(mcpProbeTimeout, 10000),
                                     ),
                                     apiKeys = buildApiKeys(openAiKey, anthropicKey, zhipuKey),
                                 ),
                             )
+                            nativePushServiceAccountJson = ""
                         },
                         enabled = !state.saving,
                     ) {
@@ -321,6 +567,92 @@ fun SettingsScreen(
                             ToggleRow("Allow network access", networkAccess) { networkAccess = it }
                             ToggleRow("Require trusted workspace", requireTrustedWorkspace) { requireTrustedWorkspace = it }
                             ToggleRow("Require dangerous-command approval", requireDangerousApproval) { requireDangerousApproval = it }
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = trustedWorkspaces,
+                                onValueChange = { trustedWorkspaces = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Trusted workspaces") },
+                                minLines = 2,
+                                maxLines = 5,
+                                singleLine = false,
+                            )
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = "Access & Notifications") {
+                            OutlinedTextField(
+                                value = hostAllowlist,
+                                onValueChange = { hostAllowlist = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Host allowlist") },
+                                minLines = 2,
+                                maxLines = 5,
+                                singleLine = false,
+                            )
+                            ToggleRow("Allow Cloudflare tunnel hosts", allowTryCloudflare) { allowTryCloudflare = it }
+                            ToggleRow("Allow legacy token login", allowLegacyPairingTokenLogin) { allowLegacyPairingTokenLogin = it }
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = notificationEmail,
+                                onValueChange = { notificationEmail = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text(if (settings?.notificationEmailConfigured == true) "Notification email saved; leave blank to keep" else "Notification email") },
+                                singleLine = true,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            CloudflareCard(state.cloudflare)
+                            Spacer(Modifier.height(10.dp))
+                            Text("Native push", style = MaterialTheme.typography.labelMedium)
+                            Spacer(Modifier.height(6.dp))
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(listOf("fcm", "none")) { value ->
+                                    FilterChip(
+                                        selected = nativePushProviderSetting == value,
+                                        onClick = { nativePushProviderSetting = value },
+                                        label = { Text(value.uppercase()) },
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = nativePushProjectId,
+                                onValueChange = { nativePushProjectId = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("FCM project id") },
+                                singleLine = true,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = nativePushServiceAccountJson,
+                                onValueChange = { nativePushServiceAccountJson = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text(if (settings?.nativePush?.configured == true) "FCM service account saved; leave blank to keep" else "FCM service account JSON") },
+                                minLines = 2,
+                                maxLines = 5,
+                                singleLine = false,
+                            )
+                            MutedText(
+                                if (settings?.nativePush?.configured == true) {
+                                    "FCM configured for ${settings.nativePush.fcmProjectId.ifBlank { "service-account project" }}."
+                                } else {
+                                    "Register Android tokens below; configure FCM here for native delivery."
+                                }
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            NativePushCard(
+                                subscriptions = state.pushSubscriptions,
+                                provider = nativePushProvider,
+                                token = nativePushToken,
+                                busy = state.adminBusy == "native-push",
+                                onProviderChange = { nativePushProvider = it },
+                                onTokenChange = { nativePushToken = it },
+                                onRegister = {
+                                    viewModel.registerNativePushToken(apiClient, nativePushProvider, nativePushToken)
+                                    nativePushToken = ""
+                                },
+                            )
                         }
                     }
 
@@ -363,6 +695,199 @@ fun SettingsScreen(
                                             onDeny = { viewModel.decideApproval(apiClient, approval.id, approve = false) },
                                         )
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = "Devices & Pairing") {
+                            if (state.devices.isEmpty()) {
+                                MutedText("No paired devices are registered.")
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    state.devices.take(8).forEach { device ->
+                                        DeviceCard(
+                                            device = device,
+                                            currentDeviceId = state.currentDeviceId,
+                                            onRevoke = { viewModel.revokeDevice(apiClient, device.id) },
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            Text("Pairing requests", style = MaterialTheme.typography.labelMedium)
+                            Spacer(Modifier.height(6.dp))
+                            if (state.pairingSessions.isEmpty()) {
+                                MutedText("No pending pairing sessions.")
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    state.pairingSessions.take(5).forEach { session ->
+                                        PairingSessionCard(
+                                            session = session,
+                                            onApprove = { viewModel.decidePairing(apiClient, session.id, approve = true) },
+                                            onDeny = { viewModel.decidePairing(apiClient, session.id, approve = false) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = "MCP & Diagnostics") {
+                            Text(
+                                "${state.mcpStatus.enabled}/${state.mcpStatus.configured} MCP servers enabled / ${state.mcpStatus.cachedTools} cached tools",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (state.mcpStatus.servers.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    state.mcpStatus.servers.take(5).forEach { server ->
+                                        McpServerRow(server.name.ifBlank { server.id }, server.type, server.enabled)
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            OutlinedTextField(
+                                value = mcpProbeTimeout,
+                                onValueChange = { mcpProbeTimeout = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("MCP probe timeout ms") },
+                                singleLine = true,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Button(
+                                onClick = { viewModel.probeMcp(apiClient, intFromText(mcpProbeTimeout, 10000)) },
+                                enabled = state.adminBusy.isBlank(),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text(if (state.adminBusy == "mcp") "Probing" else "Probe MCP") }
+                            state.mcpProbe?.let { probe ->
+                                Spacer(Modifier.height(8.dp))
+                                McpProbeSummary(probe)
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = if (state.doctor.ok) "Doctor checks passed" else "Doctor has ${state.doctor.failures.size} failure(s) and ${state.doctor.warnings.size} warning(s)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (state.doctor.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                            )
+                            val checks = (state.doctor.failures + state.doctor.warningChecks).take(6)
+                            if (checks.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    checks.forEach { check -> DoctorCheckRow(check.label, check.detail, check.severity) }
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = "Tool Event Retention") {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(
+                                    value = toolRetentionDays,
+                                    onValueChange = { toolRetentionDays = it },
+                                    modifier = Modifier.weight(1f),
+                                    label = { Text("Days") },
+                                    singleLine = true,
+                                )
+                                OutlinedTextField(
+                                    value = toolKeepLatest,
+                                    onValueChange = { toolKeepLatest = it },
+                                    modifier = Modifier.weight(1f),
+                                    label = { Text("Keep latest") },
+                                    singleLine = true,
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = toolPruneInterval,
+                                onValueChange = { toolPruneInterval = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Auto-prune interval minutes") },
+                                singleLine = true,
+                            )
+                            ToggleRow("Auto prune old tool events", toolAutoPrune) { toolAutoPrune = it }
+                            ToolEventStatsCard(state.toolEventStats, state.toolEventPrune)
+                            Spacer(Modifier.height(8.dp))
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item {
+                                    OutlinedButton(
+                                        onClick = { viewModel.pruneToolEvents(apiClient, dryRun = true, keepLatest = intFromText(toolKeepLatest, 5000)) },
+                                        enabled = state.adminBusy.isBlank(),
+                                    ) { Text(if (state.adminBusy == "prune-preview") "Checking" else "Preview prune") }
+                                }
+                                item {
+                                    OutlinedButton(
+                                        onClick = { viewModel.pruneToolEvents(apiClient, dryRun = false, keepLatest = intFromText(toolKeepLatest, 5000)) },
+                                        enabled = state.adminBusy.isBlank(),
+                                    ) { Text(if (state.adminBusy == "prune") "Pruning" else "Prune now") }
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = "Settings Import / Export") {
+                            Button(
+                                onClick = { viewModel.exportSettings(apiClient) },
+                                enabled = state.adminBusy.isBlank(),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text(if (state.adminBusy == "settings-export") "Exporting" else "Export settings") }
+                            if (state.settingsExportText.isNotBlank()) {
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = state.settingsExportText,
+                                    onValueChange = {},
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Export JSON") },
+                                    minLines = 4,
+                                    maxLines = 8,
+                                    singleLine = false,
+                                    readOnly = true,
+                                )
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            OutlinedTextField(
+                                value = settingsImportText,
+                                onValueChange = { settingsImportText = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Import JSON") },
+                                minLines = 4,
+                                maxLines = 8,
+                                singleLine = false,
+                            )
+                            if (state.settingsImportPreview.isNotEmpty()) {
+                                Spacer(Modifier.height(6.dp))
+                                MutedText("Changes: ${state.settingsImportPreview.joinToString(", ")}")
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item {
+                                    OutlinedButton(
+                                        onClick = { viewModel.previewImportSettings(apiClient, settingsImportText) },
+                                        enabled = state.adminBusy.isBlank() && settingsImportText.trim().isNotBlank(),
+                                    ) { Text(if (state.adminBusy == "settings-import-preview") "Checking" else "Preview import") }
+                                }
+                                item {
+                                    Button(
+                                        onClick = { viewModel.applyImportSettings(apiClient, settingsImportText) },
+                                        enabled = state.adminBusy.isBlank() && settingsImportText.trim().isNotBlank(),
+                                    ) { Text(if (state.adminBusy == "settings-import") "Importing" else "Import") }
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = "Audit Log") {
+                            if (state.auditLogs.isEmpty()) {
+                                MutedText("No audit entries yet.")
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    state.auditLogs.take(8).forEach { item -> AuditLogRow(item) }
                                 }
                             }
                         }
@@ -452,6 +977,215 @@ private fun ApprovalCard(
 }
 
 @Composable
+private fun DeviceCard(
+    device: DeviceAdminItem,
+    currentDeviceId: String,
+    onRevoke: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = device.label.ifBlank { device.id.take(8) },
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (device.id == currentDeviceId) {
+                    Text("current", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                }
+                val revoked = device.revokedAt.isNotBlank()
+                Text(
+                    text = when {
+                        revoked -> "revoked"
+                        device.expired -> "expired"
+                        else -> "active"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (revoked || device.expired) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                )
+            }
+            MutedText(listOf(device.lastSeenAt.ifBlank { "never seen" }, device.expiresAt.ifBlank { "no expiry" }).joinToString(" / "))
+            OutlinedButton(
+                onClick = onRevoke,
+                enabled = device.id != currentDeviceId && device.revokedAt.isBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Revoke") }
+        }
+    }
+}
+
+@Composable
+private fun PairingSessionCard(
+    session: PairingSession,
+    onApprove: () -> Unit,
+    onDeny: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(session.label.ifBlank { session.id.take(8) }, style = MaterialTheme.typography.bodyMedium)
+            MutedText(session.status.ifBlank { "pending" })
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onApprove, modifier = Modifier.weight(1f)) { Text("Approve") }
+                OutlinedButton(onClick = onDeny, modifier = Modifier.weight(1f)) { Text("Deny") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun McpServerRow(name: String, type: String, enabled: Boolean) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(name, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(type.ifBlank { "stdio" }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(if (enabled) "enabled" else "disabled", style = MaterialTheme.typography.labelSmall, color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun CloudflareCard(guide: CloudflareGuideResponse) {
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (guide.registered || !guide.publicHost) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.errorContainer,
+        ),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = when {
+                    guide.tunnelDetected -> "Cloudflare Tunnel"
+                    guide.publicHost -> "Public host"
+                    else -> "Local/private host"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            MutedText(listOf(guide.host.ifBlank { "local" }, if (guide.registered) "registered" else "not registered").joinToString(" / "))
+            guide.warnings.take(2).forEach { warning -> MutedText(warning) }
+            guide.steps.take(3).forEach { step -> MutedText(step) }
+        }
+    }
+}
+
+@Composable
+private fun NativePushCard(
+    subscriptions: List<PushSubscriptionItem>,
+    provider: String,
+    token: String,
+    busy: Boolean,
+    onProviderChange: (String) -> Unit,
+    onTokenChange: (String) -> Unit,
+    onRegister: () -> Unit,
+) {
+    val nativeCount = subscriptions.count { it.kind == "native" }
+    val webCount = subscriptions.count { it.kind == "web" }
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Push delivery", style = MaterialTheme.typography.bodyMedium)
+            MutedText("$webCount Web Push / $nativeCount native token(s)")
+            subscriptions.filter { it.kind == "native" }.take(3).forEach { item ->
+                MutedText("${item.provider.ifBlank { "native" }} ${item.platform.ifBlank { "android" }} ${item.tokenPreview.ifBlank { item.updatedAt }}")
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = provider,
+                    onValueChange = onProviderChange,
+                    modifier = Modifier.weight(0.42f),
+                    label = { Text("Provider") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = onTokenChange,
+                    modifier = Modifier.weight(0.58f),
+                    label = { Text("Token") },
+                    singleLine = true,
+                )
+            }
+            Button(
+                onClick = onRegister,
+                enabled = !busy && token.trim().isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (busy) "Registering" else "Register native token") }
+        }
+    }
+}
+
+@Composable
+private fun McpProbeSummary(probe: McpProbeResponse) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = if (probe.ok) "MCP probe ready" else "MCP probe needs attention",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (probe.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+        )
+        MutedText("${probe.enabled}/${probe.configured} enabled / ${probe.tools.size} tools")
+        probe.results.take(5).forEach { result ->
+            val server = result.server?.name?.ifBlank { result.server.id }.orEmpty().ifBlank { "MCP server" }
+            val status = result.status.ifBlank { if (result.ok) "ok" else "failed" }
+            MutedText("$server: $status${if (result.error.isNotBlank()) " / ${result.error}" else ""}")
+        }
+    }
+}
+
+@Composable
+private fun ToolEventStatsCard(stats: ToolEventStatsResponse, prune: ToolEventsPruneResponse?) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        MutedText("${stats.count} events / cursor ${stats.minCursor}-${stats.maxCursor}")
+        MutedText("${stats.retention.retentionDays}d retention / keep ${stats.retention.keepLatest} / next ${stats.autoPrune.nextRunAt.ifBlank { "manual" }}")
+        prune?.let {
+            MutedText("${if (it.dryRun) "Preview" else "Applied"}: ${it.prunable} prunable / ${it.deleted} deleted")
+        }
+    }
+}
+
+@Composable
+private fun DoctorCheckRow(label: String, detail: String, severity: String) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(label.ifBlank { "Check" }, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            detail,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (severity == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun AuditLogRow(item: AuditLogItem) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(item.type.ifBlank { "event" }, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(if (item.success) "ok" else "failed", style = MaterialTheme.typography.labelSmall, color = if (item.success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+        }
+        val detail = listOf(item.at, item.path, item.reason).filter { it.isNotBlank() }.joinToString(" / ")
+        if (detail.isNotBlank()) MutedText(detail)
+    }
+}
+
+@Composable
+private fun MutedText(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
 private fun NoticeCard(message: String, isError: Boolean) {
     Card(
         colors = CardDefaults.cardColors(
@@ -474,6 +1208,16 @@ private fun buildApiKeys(openAi: String, anthropic: String, zhipu: String): Map<
         if (zhipu.trim().isNotBlank()) put("zhipu", zhipu.trim())
     }
     return keys.ifEmpty { null }
+}
+
+private fun linesFromText(text: String): List<String> {
+    return text.split('\n', ',', ';')
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+}
+
+private fun intFromText(text: String, fallback: Int): Int {
+    return text.trim().toIntOrNull() ?: fallback
 }
 
 private val sandboxOptions = listOf("read-only", "workspace-write", "danger-full-access")

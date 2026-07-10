@@ -1,6 +1,7 @@
 package com.vibelink.app.network
 
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -81,6 +82,110 @@ class ApiClient(
         return gson.fromJson(json, StatusResponse::class.java)
     }
 
+    suspend fun getDoctor(): DoctorResponse {
+        val json = get("/api/doctor")
+        return gson.fromJson(json, DoctorResponse::class.java)
+    }
+
+    suspend fun getMcpStatus(): McpStatusResponse {
+        val json = get("/api/mcp/status")
+        return gson.fromJson(json, McpStatusResponse::class.java)
+    }
+
+    suspend fun probeMcp(timeoutMs: Int = 10000): McpProbeResponse {
+        val json = post("/api/mcp/probe", mapOf("timeoutMs" to timeoutMs))
+        return gson.fromJson(json, McpProbeResponse::class.java)
+    }
+
+    suspend fun getCloudflareGuide(): CloudflareGuideResponse {
+        val json = get("/api/cloudflare/guide")
+        return gson.fromJson(json, CloudflareGuideResponse::class.java)
+    }
+
+    suspend fun getToolEventStats(): ToolEventStatsResponse {
+        val json = get("/api/tool-events/stats")
+        return gson.fromJson(json, ToolEventStatsResponse::class.java)
+    }
+
+    suspend fun pruneToolEvents(dryRun: Boolean = true, keepLatest: Int = 5000): ToolEventsPruneResponse {
+        val json = post("/api/tool-events/prune", ToolEventsPruneRequest(dryRun = dryRun, keepLatest = keepLatest))
+        return gson.fromJson(json, ToolEventsPruneResponse::class.java)
+    }
+
+    suspend fun exportSettings(): SettingsExportResponse {
+        val json = get("/api/settings/export")
+        return gson.fromJson(json, SettingsExportResponse::class.java)
+    }
+
+    suspend fun importSettings(rawJson: String, dryRun: Boolean = false): SettingsImportResponse {
+        val payload = JsonParser.parseString(rawJson).asJsonObject
+        if (dryRun) payload.addProperty("dryRun", true)
+        val json = post("/api/settings/import${if (dryRun) "?dryRun=1" else ""}", payload)
+        return gson.fromJson(json, SettingsImportResponse::class.java)
+    }
+
+    suspend fun listPushSubscriptions(kind: String = ""): List<PushSubscriptionItem> {
+        val query = if (kind.isBlank()) "" else "?kind=${encode(kind)}"
+        val json = get("/api/push/subscriptions$query")
+        return gson.fromJson(json, PushSubscriptionListResponse::class.java).items
+    }
+
+    suspend fun registerNativePushToken(
+        provider: String,
+        token: String,
+        platform: String = "android",
+        appId: String = "com.vibelink.app",
+        installationId: String = "",
+    ): PushSubscriptionResponse {
+        val json = post(
+            "/api/push/native-token",
+            NativePushTokenRequest(
+                provider = provider,
+                token = token,
+                platform = platform,
+                appId = appId,
+                installationId = installationId,
+            ),
+        )
+        return gson.fromJson(json, PushSubscriptionResponse::class.java)
+    }
+
+    suspend fun listDevices(): DeviceListResponse {
+        val json = get("/api/devices")
+        return gson.fromJson(json, DeviceListResponse::class.java)
+    }
+
+    suspend fun revokeDevice(deviceId: String): SimpleOk {
+        val json = post("/api/devices/${encode(deviceId)}/revoke", emptyMap<String, String>())
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun listAuditLogs(limit: Int = 20): List<AuditLogItem> {
+        val json = get("/api/audit-log?limit=$limit")
+        return gson.fromJson(json, AuditLogListResponse::class.java).items
+    }
+
+    suspend fun uploadAttachment(
+        bytes: ByteArray,
+        fileName: String,
+        mimeType: String = "application/octet-stream",
+        relativePath: String = "",
+    ): AttachmentUploadResponse = withContext(Dispatchers.IO) {
+        val contentType = mimeType.ifBlank { "application/octet-stream" }.toMediaType()
+        val req = Request.Builder()
+            .url("$baseUrl/api/attachments")
+            .apply { authHeaders().forEach { (k, v) -> addHeader(k, v) } }
+            .addHeader("X-File-Name", encode(fileName.ifBlank { "attachment" }))
+            .apply { if (relativePath.isNotBlank()) addHeader("X-Relative-Path", encode(relativePath)) }
+            .post(bytes.toRequestBody(contentType))
+            .build()
+        httpClient.newCall(req).execute().use { response ->
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) throw ApiException(response.code, body)
+            gson.fromJson(body, AttachmentUploadResponse::class.java)
+        }
+    }
+
     suspend fun getProviderRegistry(fresh: Boolean = false): ProviderRegistryResponse {
         val json = get("/api/provider-registry${if (fresh) "?fresh=1" else ""}")
         return gson.fromJson(json, ProviderRegistryResponse::class.java)
@@ -103,6 +208,17 @@ class ApiClient(
 
     suspend fun getPairingSession(sessionId: String): PairingStatusResponse {
         val json = get("/api/pairing-sessions/${encode(sessionId)}")
+        return gson.fromJson(json, PairingStatusResponse::class.java)
+    }
+
+    suspend fun listPairingSessions(status: String = "pending"): List<PairingSession> {
+        val json = get("/api/pairing-sessions?status=${encode(status)}")
+        return gson.fromJson(json, PairingSessionListResponse::class.java).items
+    }
+
+    suspend fun decidePairingSession(sessionId: String, approve: Boolean): PairingStatusResponse {
+        val action = if (approve) "approve" else "deny"
+        val json = post("/api/pairing-sessions/${encode(sessionId)}/$action", emptyMap<String, String>())
         return gson.fromJson(json, PairingStatusResponse::class.java)
     }
 
@@ -333,6 +449,41 @@ class ApiClient(
         return gson.fromJson(json, WorkspaceFileResponse::class.java)
     }
 
+    suspend fun mutateWorkspaceFile(
+        workspaceId: String,
+        action: String,
+        path: String,
+        text: String = "",
+        nextPath: String = "",
+    ): WorkspaceFileMutationResponse {
+        val json = post(
+            "/api/workspaces/${encode(workspaceId)}/file",
+            WorkspaceFileMutationRequest(action = action, path = path, text = text, nextPath = nextPath),
+        )
+        return gson.fromJson(json, WorkspaceFileMutationResponse::class.java)
+    }
+
+    suspend fun createWorkspaceWorktree(
+        workspaceId: String,
+        branchName: String,
+        baseRef: String = "HEAD",
+        title: String = "",
+        path: String = "",
+        root: String = "",
+    ): WorkspaceWorktreeResponse {
+        val json = post(
+            "/api/workspaces/${encode(workspaceId)}/worktrees",
+            WorkspaceWorktreeRequest(
+                branchName = branchName,
+                baseRef = baseRef,
+                title = title,
+                path = path,
+                root = root,
+            ),
+        )
+        return gson.fromJson(json, WorkspaceWorktreeResponse::class.java)
+    }
+
     suspend fun getGitStatus(workspaceId: String): GitStatusResponse {
         val json = get("/api/workspaces/${encode(workspaceId)}/git/status")
         return gson.fromJson(json, GitStatusResponse::class.java)
@@ -343,10 +494,10 @@ class ApiClient(
         return gson.fromJson(json, GitDiffResponse::class.java)
     }
 
-    suspend fun applyGitFileAction(workspaceId: String, path: String, action: String): GitActionResponse {
+    suspend fun applyGitFileAction(workspaceId: String, path: String, action: String, patch: String = ""): GitActionResponse {
         val json = post(
             "/api/workspaces/${encode(workspaceId)}/git/file-action",
-            GitFileActionRequest(action = action, path = path),
+            GitFileActionRequest(action = action, path = path, patch = patch),
         )
         return gson.fromJson(json, GitActionResponse::class.java)
     }
@@ -356,12 +507,63 @@ class ApiClient(
         action: String,
         message: String = "",
         title: String = "",
+        branchName: String = "",
+        baseRef: String = "HEAD",
     ): GitActionResponse {
         val json = post(
             "/api/workspaces/${encode(workspaceId)}/git/action",
-            GitActionRequest(action = action, message = message, title = title),
+            GitActionRequest(
+                action = action,
+                message = message,
+                title = title,
+                branchName = branchName,
+                baseRef = baseRef,
+            ),
         )
         return gson.fromJson(json, GitActionResponse::class.java)
+    }
+
+    suspend fun startTerminalSession(
+        workspaceId: String,
+        shell: String = "",
+        mode: String = "auto",
+        cols: Int = 100,
+        rows: Int = 30,
+    ): TerminalStartResponse {
+        val json = post(
+            "/api/workspaces/${encode(workspaceId)}/terminal-session",
+            TerminalStartRequest(shell = shell, mode = mode, cols = cols, rows = rows),
+        )
+        return gson.fromJson(json, TerminalStartResponse::class.java)
+    }
+
+    suspend fun getTerminalSession(toolRunId: String): TerminalSessionResponse {
+        val json = get("/api/terminal-sessions/${encode(toolRunId)}")
+        return gson.fromJson(json, TerminalSessionResponse::class.java)
+    }
+
+    suspend fun sendTerminalInput(toolRunId: String, text: String): TerminalMutationResponse {
+        val json = post(
+            "/api/terminal-sessions/${encode(toolRunId)}/input",
+            TerminalInputRequest(text = text),
+        )
+        return gson.fromJson(json, TerminalMutationResponse::class.java)
+    }
+
+    suspend fun resizeTerminalSession(toolRunId: String, cols: Int, rows: Int): TerminalMutationResponse {
+        val json = post(
+            "/api/terminal-sessions/${encode(toolRunId)}/resize",
+            TerminalResizeRequest(cols = cols, rows = rows),
+        )
+        return gson.fromJson(json, TerminalMutationResponse::class.java)
+    }
+
+    suspend fun stopTerminalSession(toolRunId: String, reason: String = "Stopped from Android"): TerminalMutationResponse {
+        val json = post(
+            "/api/tool-runs/${encode(toolRunId)}/stop",
+            TerminalStopRequest(reason = reason),
+        )
+        return gson.fromJson(json, TerminalMutationResponse::class.java)
     }
 
     suspend fun runCommand(

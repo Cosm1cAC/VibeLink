@@ -58,6 +58,11 @@ export const SettingsPatchSchema = z.object({
   doubaoCdpEndpoint: z.string().optional(),
   doubaoUrl: z.string().optional(),
   mcp: z.any().optional(),
+  nativePush: z.object({
+    provider: z.enum(["fcm", "none"]).optional(),
+    fcmProjectId: z.string().optional(),
+    fcmServiceAccountJson: z.string().optional()
+  }).optional(),
   codebaseMemory: z.object({
     autoMcp: z.boolean().optional()
   }).optional(),

@@ -121,10 +121,20 @@ VibeLink 的长期性能方向是混合架构：Node bridge 继续负责 HTTP AP
 
 ### 当前执行计划
 
-- **Slice 1：Workspace tree**：完成 Rust CLI、Node opt-in 接入、兼容测试和 fallback；Rust scanner 已覆盖部分 gitignore basename 规则、truncation/signature 输出和 Node 侧签名缓存复用，后续继续下沉目录上下文采样、完整 gitignore path 语义和 long-lived Rust cache。
-- **Slice 2：Event store worker**：先抽象事件 append/replay contract，再把 SQLite 同步热路径隔离到 worker/Rust 边界，最后接 SSE replay/fanout 指标；当前已有 JSONL Rust sidecar contract smoke。
+- **Slice 1：Workspace tree**：完成 Rust CLI、Node opt-in 接入、兼容测试和 fallback；Rust scanner 已覆盖 root/nested gitignore basename、wildcard、directory、path pattern、negation 规则，以及 truncation/signature 输出和 Node 侧签名缓存复用，后续继续下沉目录上下文采样、auto/readiness 模式和 long-lived Rust cache。
+- **Slice 2：Event store worker**：先抽象事件 append/replay contract，再把 SQLite 同步热路径隔离到 worker/Rust 边界，最后接 SSE replay/fanout 指标；当前已有真实 Rust `event-store-sidecar`、JSONL contract test 和 `VIBELINK_EVENT_STORE_RUST_SIDECAR=1` 显式 opt-in runtime routing，失败时回退 Worker/sync SQLite。
 - **Slice 3：MCP persistent sessions**：保留现有 JSON-RPC 语义，新增 long-lived stdio session manager、请求队列、超时、重启和背压；当前已有 Node manager、JSONL sidecar contract、Rust `mcp-session-sidecar` 子命令和 opt-in runtime sidecar routing。
 - **Slice 4：Audio pipeline**：以 live call ring buffer、level meter 和 backpressure 为第一批低延迟 Rust 化目标。
+
+### 状态与推进
+
+Rust 化状态以 `docs/rust-migration-status.json` 为机器可读事实源，`docs/rust-migration-status.md` 为人工可读表格。推进任一 slice 前先运行：
+
+```bash
+npm run rust:migration:check
+```
+
+当前口径：Workspace tree、MCP session sidecar 和 Event store sidecar 都已有真实 Rust 实现但仍为 opt-in；Event store 额外具备健康检查、运行时 stats 和 Worker/sync fallback。Audio pipeline 与 Compression adapter 仍是 bounded planned slice。
 
 ### 接入原则
 

@@ -14,7 +14,7 @@ function backpressureError(method, maxPendingRequests) {
   const error = new Error(
     `Event store sidecar backpressure: ${method} rejected because ${maxPendingRequests} request(s) are already pending.`
   );
-  error.code = "EEVENTSTORESIDECARBACKPRESSURE";
+  error.code = "EEVENTSTOREBACKPRESSURE";
   error.maxPendingRequests = maxPendingRequests;
   return error;
 }
@@ -30,16 +30,14 @@ export function createEventStoreSidecarClient({
   args = [],
   cwd = process.cwd(),
   env = process.env,
-  dbPath = "",
   timeoutMs = 10000,
   maxPendingRequests = maxPendingRequestsValue()
 } = {}) {
   if (!command) throw new TypeError("createEventStoreSidecarClient requires command.");
-  const childEnv = dbPath ? { ...env, VIBELINK_EVENT_STORE_DB_PATH: dbPath } : env;
 
   const child = spawn(command, Array.isArray(args) ? args : [], {
     cwd,
-    env: childEnv,
+    env,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"]
   });
@@ -48,14 +46,30 @@ export function createEventStoreSidecarClient({
   let terminated = false;
   let stdout = "";
   let stderr = "";
-  let resolveExit;
-  const exited = new Promise((resolve) => {
-    resolveExit = resolve;
-  });
+  let requests = 0;
+  let responses = 0;
+  let failures = 0;
+  let timeouts = 0;
+  let backpressureRejects = 0;
+  let maxPendingObserved = 0;
+  let lastRequestAt = "";
+  let lastResponseAt = "";
+  let lastFailureAt = "";
+  let lastBackpressureAt = "";
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  function recordFailure() {
+    failures += 1;
+    lastFailureAt = nowIso();
+  }
 
   function rejectPending(error) {
     for (const { reject, timer } of pending.values()) {
       clearTimeout(timer);
+      recordFailure();
       reject(error);
     }
     pending.clear();
@@ -66,8 +80,14 @@ export function createEventStoreSidecarClient({
     if (!request) return;
     pending.delete(message.id);
     clearTimeout(request.timer);
-    if (message.error) request.reject(eventStoreErrorFromPayload(message.error));
-    else request.resolve(message.result);
+    if (message.error) {
+      recordFailure();
+      request.reject(eventStoreErrorFromPayload(message.error));
+    } else {
+      responses += 1;
+      lastResponseAt = nowIso();
+      request.resolve(message.result);
+    }
   }
 
   child.stdout?.on("data", (chunk) => {
@@ -97,58 +117,69 @@ export function createEventStoreSidecarClient({
   child.on("error", (error) => {
     terminated = true;
     rejectPending(error);
-    resolveExit?.();
   });
 
   child.on("exit", (code, signal) => {
     terminated = true;
     if (pending.size > 0) rejectPending(sidecarExitError(code, signal, stderr.trim()));
-    resolveExit?.();
   });
+
+  function waitForExit(timeoutMs = 2000) {
+    if (terminated) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      timer.unref?.();
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
 
   function request(method, requestArgs = [], options = {}) {
     if (terminated) return Promise.reject(new Error("Event store sidecar is closed."));
     const pendingLimit = maxPendingRequestsValue(options.maxPendingRequests ?? maxPendingRequests);
-    if (pending.size >= pendingLimit) return Promise.reject(backpressureError(method, pendingLimit));
+    if (pending.size >= pendingLimit) {
+      backpressureRejects += 1;
+      lastBackpressureAt = nowIso();
+      return Promise.reject(backpressureError(method, pendingLimit));
+    }
     const timeout = Math.max(1, Number(options.timeout || timeoutMs));
     const id = nextId++;
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
+        timeouts += 1;
+        recordFailure();
         reject(new Error(`Event store sidecar request timed out: ${method}`));
       }, timeout);
+      timer.unref?.();
       pending.set(id, { resolve, reject, timer });
+      requests += 1;
+      lastRequestAt = nowIso();
+      maxPendingObserved = Math.max(maxPendingObserved, pending.size);
       child.stdin.write(`${JSON.stringify({ id, method, args: Array.isArray(requestArgs) ? requestArgs : [] })}\n`, "utf8", (error) => {
         if (!error) return;
         pending.delete(id);
         clearTimeout(timer);
+        recordFailure();
         reject(error);
       });
     });
   }
 
   async function close() {
-    if (terminated) {
-      await exited;
-      return;
-    }
+    if (terminated) return;
     try {
       await request("__close", [], { timeout: 2000 });
     } catch {
       // The sidecar may already be exiting; kill below is the hard stop.
     }
-    try { child.stdin?.end(); } catch {}
-    const timedOut = Symbol("timeout");
-    const result = await Promise.race([
-      exited.then(() => null),
-      new Promise((resolve) => setTimeout(() => resolve(timedOut), 1000))
-    ]);
-    if (result === timedOut && !child.killed) {
-      child.kill();
-      await exited;
-    }
+    await waitForExit(2000);
     terminated = true;
+    try { child.stdin?.end(); } catch {}
+    if (!child.killed) child.kill();
   }
 
   return {
@@ -156,9 +187,21 @@ export function createEventStoreSidecarClient({
     stats: () => ({
       pending: pending.size,
       maxPendingRequests: maxPendingRequestsValue(maxPendingRequests),
+      maxPendingObserved,
+      requests,
+      responses,
+      failures,
+      timeouts,
+      backpressureRejects,
+      lastRequestAt,
+      lastResponseAt,
+      lastFailureAt,
+      lastBackpressureAt,
       terminated,
       stderr: stderr.trim()
     }),
+    health: () => request("__health"),
+    getSidecarStats: () => request("stats"),
     insertTaskEvent: (taskId, event) => request("insertTaskEvent", [taskId, event]),
     insertTaskEvents: (taskId, events) => request("insertTaskEvents", [taskId, events]),
     listTaskEvents: (taskId, options) => request("listTaskEvents", [taskId, options]),

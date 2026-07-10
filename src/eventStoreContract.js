@@ -1,3 +1,5 @@
+export const EVENT_STORE_SIDECAR_PROTOCOL_VERSION = 1;
+
 export const EVENT_STORE_CONTRACT_METHODS = Object.freeze([
   "insertTaskEvent",
   "insertTaskEvents",
@@ -14,6 +16,12 @@ export const EVENT_STORE_CONTRACT_METHODS = Object.freeze([
   "pruneLiveCallEvents",
   "listUnifiedEvents",
   "replayWindow"
+]);
+
+export const EVENT_STORE_SIDECAR_CONTROL_METHODS = Object.freeze([
+  "__health",
+  "stats",
+  "__close"
 ]);
 
 export function serializeEventStoreError(error) {

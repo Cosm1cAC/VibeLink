@@ -18,6 +18,14 @@ data class PublicSettings(
     @SerializedName("doubaoCdpEndpoint") val doubaoCdpEndpoint: String = "",
     @SerializedName("doubaoUrl") val doubaoUrl: String = "",
     val security: SecuritySettings = SecuritySettings(),
+    @SerializedName("hostAllowlist") val hostAllowlist: List<String> = emptyList(),
+    @SerializedName("allowTryCloudflare") val allowTryCloudflare: Boolean = true,
+    @SerializedName("allowLegacyPairingTokenLogin") val allowLegacyPairingTokenLogin: Boolean = false,
+    @SerializedName("notificationEmailConfigured") val notificationEmailConfigured: Boolean = false,
+    @SerializedName("webPush") val webPush: WebPushSettings = WebPushSettings(),
+    @SerializedName("nativePush") val nativePush: NativePushSettings = NativePushSettings(),
+    @SerializedName("toolEvents") val toolEvents: ToolEventsSettings = ToolEventsSettings(),
+    val mcp: McpSettings = McpSettings(),
 )
 
 data class SecuritySettings(
@@ -26,6 +34,41 @@ data class SecuritySettings(
     @SerializedName("networkAccess") val networkAccess: Boolean = true,
     @SerializedName("requireTrustedWorkspace") val requireTrustedWorkspace: Boolean = true,
     @SerializedName("requireDangerousCommandApproval") val requireDangerousCommandApproval: Boolean = true,
+    @SerializedName("trustedWorkspaces") val trustedWorkspaces: List<String> = emptyList(),
+)
+
+data class WebPushSettings(
+    val enabled: Boolean = false,
+    @SerializedName("publicKey") val publicKey: String = "",
+)
+
+data class NativePushSettings(
+    val provider: String = "fcm",
+    @SerializedName("fcmProjectId") val fcmProjectId: String = "",
+    val configured: Boolean = false,
+)
+
+data class ToolEventsSettings(
+    @SerializedName("retentionDays") val retentionDays: Int = 30,
+    @SerializedName("keepLatest") val keepLatest: Int = 5000,
+    @SerializedName("autoPrune") val autoPrune: Boolean = true,
+    @SerializedName("autoPruneIntervalMinutes") val autoPruneIntervalMinutes: Int = 360,
+)
+
+data class McpSettings(
+    @SerializedName("probeTimeoutMs") val probeTimeoutMs: Int = 10000,
+    val servers: List<McpServerInfo> = emptyList(),
+)
+
+data class McpSettingsPatch(
+    @SerializedName("probeTimeoutMs") val probeTimeoutMs: Int? = null,
+    val servers: List<McpServerInfo>? = null,
+)
+
+data class NativePushSettingsPatch(
+    val provider: String = "fcm",
+    @SerializedName("fcmProjectId") val fcmProjectId: String = "",
+    @SerializedName("fcmServiceAccountJson") val fcmServiceAccountJson: String? = null,
 )
 
 data class LoginResponse(
@@ -58,6 +101,10 @@ data class PairingStatusResponse(
     val session: PairingSession? = null,
 )
 
+data class PairingSessionListResponse(
+    val items: List<PairingSession> = emptyList(),
+)
+
 data class ClaimPairingResponse(
     val ok: Boolean = false,
     val token: String = "",
@@ -76,6 +123,192 @@ data class StatusResponse(
     val network: List<NetworkAddress> = emptyList(),
 )
 
+data class DeviceListResponse(
+    val items: List<DeviceAdminItem> = emptyList(),
+    @SerializedName("currentDeviceId") val currentDeviceId: String = "",
+)
+
+data class DeviceAdminItem(
+    val id: String = "",
+    val label: String = "",
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("lastSeenAt") val lastSeenAt: String = "",
+    @SerializedName("revokedAt") val revokedAt: String = "",
+    @SerializedName("expiresAt") val expiresAt: String = "",
+    @SerializedName("rotatedAt") val rotatedAt: String = "",
+    val expired: Boolean = false,
+)
+
+data class AuditLogListResponse(
+    val items: List<AuditLogItem> = emptyList(),
+)
+
+data class AuditLogItem(
+    val cursor: Int = 0,
+    val type: String = "",
+    val at: String = "",
+    @SerializedName("deviceId") val deviceId: String = "",
+    val ip: String = "",
+    @SerializedName("userAgent") val userAgent: String = "",
+    val method: String = "",
+    val path: String = "",
+    val success: Boolean = false,
+    val reason: String = "",
+    val target: String = "",
+    val meta: Map<String, Any?>? = null,
+)
+
+data class McpStatusResponse(
+    val ok: Boolean = false,
+    val configured: Int = 0,
+    val enabled: Int = 0,
+    val servers: List<McpServerInfo> = emptyList(),
+    @SerializedName("cachedTools") val cachedTools: Int = 0,
+    @SerializedName("probeTimeoutMs") val probeTimeoutMs: Int = 0,
+    @SerializedName("toolRunId") val toolRunId: String = "",
+)
+
+data class McpProbeResponse(
+    val ok: Boolean = false,
+    val configured: Int = 0,
+    val enabled: Int = 0,
+    val probed: Int = 0,
+    val results: List<McpProbeResult> = emptyList(),
+    val tools: List<McpToolInfo> = emptyList(),
+    @SerializedName("toolRunId") val toolRunId: String = "",
+)
+
+data class McpProbeResult(
+    val ok: Boolean = false,
+    val status: String = "",
+    val error: String = "",
+    @SerializedName("toolCount") val toolCount: Int = 0,
+    val server: McpServerInfo? = null,
+)
+
+data class McpToolInfo(
+    val name: String = "",
+    @SerializedName("fullName") val fullName: String = "",
+    val title: String = "",
+    val description: String = "",
+)
+
+data class McpServerInfo(
+    val id: String = "",
+    val name: String = "",
+    val type: String = "",
+    val enabled: Boolean = false,
+    val command: String = "",
+    val args: List<String> = emptyList(),
+    val cwd: String = "",
+    val url: String = "",
+    @SerializedName("envKeys") val envKeys: List<String> = emptyList(),
+    @SerializedName("headerKeys") val headerKeys: List<String> = emptyList(),
+)
+
+data class DoctorResponse(
+    val ok: Boolean = false,
+    val checks: List<DoctorCheck> = emptyList(),
+    val failures: List<DoctorCheck> = emptyList(),
+    @SerializedName("warningChecks") val warningChecks: List<DoctorCheck> = emptyList(),
+    val warnings: List<DoctorCheck> = emptyList(),
+    @SerializedName("generatedAt") val generatedAt: String = "",
+    @SerializedName("toolRunId") val toolRunId: String = "",
+)
+
+data class DoctorCheck(
+    val id: String = "",
+    val ok: Boolean = false,
+    val label: String = "",
+    val detail: String = "",
+    val severity: String = "",
+)
+
+data class CloudflareGuideResponse(
+    val host: String = "",
+    @SerializedName("publicHost") val publicHost: Boolean = false,
+    @SerializedName("tunnelDetected") val tunnelDetected: Boolean = false,
+    val registered: Boolean = false,
+    @SerializedName("listeningOnAllInterfaces") val listeningOnAllInterfaces: Boolean = false,
+    val allowlist: List<String> = emptyList(),
+    @SerializedName("accessRecommended") val accessRecommended: Boolean = false,
+    val warnings: List<String> = emptyList(),
+    val steps: List<String> = emptyList(),
+)
+
+data class ToolEventStatsResponse(
+    val count: Int = 0,
+    @SerializedName("minCursor") val minCursor: Int = 0,
+    @SerializedName("maxCursor") val maxCursor: Int = 0,
+    @SerializedName("oldestAt") val oldestAt: String = "",
+    @SerializedName("newestAt") val newestAt: String = "",
+    val retention: ToolEventsSettings = ToolEventsSettings(),
+    @SerializedName("autoPrune") val autoPrune: ToolEventAutoPruneState = ToolEventAutoPruneState(),
+)
+
+data class ToolEventAutoPruneState(
+    @SerializedName("nextRunAt") val nextRunAt: String = "",
+    val error: String = "",
+)
+
+data class ToolEventsPruneRequest(
+    val dryRun: Boolean = true,
+    @SerializedName("keepLatest") val keepLatest: Int = 5000,
+)
+
+data class ToolEventsPruneResponse(
+    val dryRun: Boolean = true,
+    val cutoff: String = "",
+    @SerializedName("keepLatest") val keepLatest: Int = 0,
+    val prunable: Int = 0,
+    val deleted: Int = 0,
+)
+
+data class SettingsExportResponse(
+    val kind: String = "",
+    val version: Int = 0,
+    @SerializedName("exportedAt") val exportedAt: String = "",
+    val settings: Map<String, Any?> = emptyMap(),
+)
+
+data class SettingsImportResponse(
+    val ok: Boolean = false,
+    val dryRun: Boolean = false,
+    @SerializedName("changedKeys") val changedKeys: List<String> = emptyList(),
+    val settings: PublicSettings? = null,
+)
+
+data class PushSubscriptionListResponse(
+    val items: List<PushSubscriptionItem> = emptyList(),
+)
+
+data class PushSubscriptionItem(
+    val id: String = "",
+    @SerializedName("deviceId") val deviceId: String = "",
+    val endpoint: String = "",
+    val kind: String = "",
+    val provider: String = "",
+    val platform: String = "",
+    @SerializedName("appId") val appId: String = "",
+    @SerializedName("installationId") val installationId: String = "",
+    @SerializedName("tokenPreview") val tokenPreview: String = "",
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class NativePushTokenRequest(
+    val provider: String = "fcm",
+    val token: String,
+    val platform: String = "android",
+    @SerializedName("appId") val appId: String = "com.vibelink.app",
+    @SerializedName("installationId") val installationId: String = "",
+)
+
+data class PushSubscriptionResponse(
+    val ok: Boolean = false,
+    val subscription: PushSubscriptionItem = PushSubscriptionItem(),
+)
+
 data class NetworkAddress(
     val name: String = "",
     val address: String = "",
@@ -84,6 +317,20 @@ data class NetworkAddress(
 
 data class SimpleOk(
     val ok: Boolean = false,
+)
+
+data class AttachmentUploadResponse(
+    val ok: Boolean = false,
+    val id: String = "",
+    val name: String = "",
+    @SerializedName("relativePath") val relativePath: String = "",
+    val path: String = "",
+    val url: String = "",
+    val kind: String = "",
+    val markdown: String = "",
+    @SerializedName("mimeType") val mimeType: String = "",
+    val size: Long = 0,
+    val preview: String = "",
 )
 
 // Provider registry / model catalog
@@ -369,6 +616,91 @@ data class WorkspaceFileResponse(
     val binary: Boolean = false,
 )
 
+data class WorkspaceFileMutationRequest(
+    val action: String,
+    val path: String,
+    val text: String = "",
+    @SerializedName("nextPath") val nextPath: String = "",
+)
+
+data class WorkspaceFileMutationResponse(
+    val ok: Boolean = false,
+    val action: String = "",
+    val workspace: WorkspaceItem? = null,
+    val path: String = "",
+    @SerializedName("previousPath") val previousPath: String = "",
+    @SerializedName("absolutePath") val absolutePath: String = "",
+    val size: Long = 0,
+    @SerializedName("updatedAt") val updatedAt: String = "",
+    val text: String = "",
+    val binary: Boolean = false,
+)
+
+data class WorkspaceWorktreeRequest(
+    @SerializedName("branchName") val branchName: String,
+    @SerializedName("baseRef") val baseRef: String = "HEAD",
+    val title: String = "",
+    val path: String = "",
+    val root: String = "",
+)
+
+data class WorkspaceWorktreeResponse(
+    val ok: Boolean = false,
+    val workspace: WorkspaceItem = WorkspaceItem(),
+    @SerializedName("branchName") val branchName: String = "",
+    val path: String = "",
+    @SerializedName("toolRunId") val toolRunId: String = "",
+)
+
+data class TerminalStartRequest(
+    val shell: String = "",
+    val mode: String = "auto",
+    val cols: Int = 100,
+    val rows: Int = 30,
+)
+
+data class TerminalSessionInfo(
+    val id: String = "",
+    val mode: String = "",
+    val shell: String = "",
+    val cwd: String = "",
+    val pid: Int = 0,
+    val status: String = "",
+    @SerializedName("startedAt") val startedAt: String = "",
+    @SerializedName("endedAt") val endedAt: String = "",
+    @SerializedName("exitCode") val exitCode: Int? = null,
+    val signal: String = "",
+    @SerializedName("supportsStdin") val supportsStdin: Boolean = false,
+    @SerializedName("supportsResize") val supportsResize: Boolean = false,
+    @SerializedName("supportsAnsi") val supportsAnsi: Boolean = false,
+)
+
+data class TerminalStartResponse(
+    val ok: Boolean = false,
+    val status: String = "",
+    val session: TerminalSessionInfo? = null,
+    @SerializedName("toolRunId") val toolRunId: String = "",
+)
+
+data class TerminalSessionResponse(
+    val session: TerminalSessionInfo? = null,
+)
+
+data class TerminalInputRequest(val text: String)
+
+data class TerminalResizeRequest(
+    val cols: Int,
+    val rows: Int,
+)
+
+data class TerminalStopRequest(val reason: String = "Stopped from Android")
+
+data class TerminalMutationResponse(
+    val ok: Boolean = false,
+    val session: TerminalSessionInfo? = null,
+    val error: String = "",
+)
+
 
 data class GitStatusResponse(
     val ok: Boolean = false,
@@ -433,12 +765,15 @@ data class TestSummary(
 data class GitFileActionRequest(
     val action: String,
     val path: String,
+    val patch: String = "",
 )
 
 data class GitActionRequest(
     val action: String,
     val message: String = "",
     val title: String = "",
+    @SerializedName("branchName") val branchName: String = "",
+    @SerializedName("baseRef") val baseRef: String = "HEAD",
 )
 
 data class GitActionResponse(
@@ -720,6 +1055,13 @@ data class SettingsPatchRequest(
     @SerializedName("doubaoCdpEndpoint") val doubaoCdpEndpoint: String? = null,
     @SerializedName("doubaoUrl") val doubaoUrl: String? = null,
     val security: SecuritySettings? = null,
+    @SerializedName("hostAllowlist") val hostAllowlist: List<String>? = null,
+    @SerializedName("allowTryCloudflare") val allowTryCloudflare: Boolean? = null,
+    @SerializedName("allowLegacyPairingTokenLogin") val allowLegacyPairingTokenLogin: Boolean? = null,
+    @SerializedName("notificationEmail") val notificationEmail: String? = null,
+    @SerializedName("nativePush") val nativePush: NativePushSettingsPatch? = null,
+    @SerializedName("toolEvents") val toolEvents: ToolEventsSettings? = null,
+    val mcp: McpSettingsPatch? = null,
     val apiKeys: Map<String, String>? = null,
 )
 

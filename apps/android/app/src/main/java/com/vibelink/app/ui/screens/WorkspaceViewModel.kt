@@ -6,13 +6,29 @@ import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.CommandResult
 import com.vibelink.app.network.GitDiffResponse
 import com.vibelink.app.network.GitStatusResponse
+import com.vibelink.app.network.TerminalSessionInfo
+import com.vibelink.app.network.ToolEvent
 import com.vibelink.app.network.WorkspaceFileItem
 import com.vibelink.app.network.WorkspaceFileResponse
 import com.vibelink.app.network.WorkspaceItem
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+
+data class WorkspaceTerminalUiState(
+    val sessionId: String = "",
+    val status: String = "idle",
+    val mode: String = "",
+    val shell: String = "",
+    val cwd: String = "",
+    val output: String = "",
+    val cursor: Int = 0,
+    val supportsResize: Boolean = false,
+)
 
 class WorkspaceViewModel : ViewModel() {
     private val _workspaces = MutableStateFlow<List<WorkspaceItem>>(emptyList())
@@ -51,6 +67,11 @@ class WorkspaceViewModel : ViewModel() {
     private val _gitActionRunning = MutableStateFlow(false)
     val gitActionRunning: StateFlow<Boolean> = _gitActionRunning.asStateFlow()
 
+    private val _terminal = MutableStateFlow(WorkspaceTerminalUiState())
+    val terminal: StateFlow<WorkspaceTerminalUiState> = _terminal.asStateFlow()
+
+    private var terminalPollJob: Job? = null
+
     private val _error = MutableStateFlow("")
     val error: StateFlow<String> = _error.asStateFlow()
 
@@ -76,6 +97,8 @@ class WorkspaceViewModel : ViewModel() {
     fun selectWorkspace(apiClient: ApiClient, workspaceId: String) {
         if (workspaceId == _selectedWorkspaceId.value) return
         viewModelScope.launch {
+            terminalPollJob?.cancel()
+            _terminal.value = WorkspaceTerminalUiState()
             _selectedWorkspaceId.value = workspaceId
             _currentDir.value = ""
             _selectedFile.value = null
@@ -148,18 +171,111 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
+    fun openFileReference(apiClient: ApiClient, reference: String) {
+        val rawPath = reference.trim().replace('\\', '/').replace(Regex(":\\d+$"), "")
+        if (rawPath.isBlank()) return
+        viewModelScope.launch {
+            _refreshing.value = true
+            _error.value = ""
+            try {
+                val items = _workspaces.value.ifEmpty {
+                    apiClient.listWorkspaces().also { _workspaces.value = it }
+                }
+                val selected = items.firstOrNull { it.id == _selectedWorkspaceId.value }
+                    ?: items.firstOrNull { workspace ->
+                        val root = workspace.path.replace('\\', '/').trimEnd('/')
+                        root.isNotBlank() && rawPath.startsWith("$root/")
+                    }
+                    ?: items.firstOrNull()
+                val workspaceId = selected?.id.orEmpty()
+                if (workspaceId.isBlank()) return@launch
+
+                val root = selected?.path.orEmpty().replace('\\', '/').trimEnd('/')
+                val relativePath = if (root.isNotBlank() && rawPath.startsWith("$root/")) {
+                    rawPath.removePrefix("$root/")
+                } else {
+                    rawPath.trimStart('/')
+                }
+                _selectedWorkspaceId.value = workspaceId
+                _currentDir.value = relativePath.substringBeforeLast('/', "")
+                _selectedFile.value = apiClient.getWorkspaceFile(workspaceId, relativePath)
+                loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Failed to open file reference"
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
     fun clearFilePreview() {
         _selectedFile.value = null
     }
 
-    fun applyGitFileAction(apiClient: ApiClient, path: String, action: String) {
+    fun mutateFile(apiClient: ApiClient, action: String, path: String, text: String = "", nextPath: String = "") {
+        val workspaceId = _selectedWorkspaceId.value
+        if (workspaceId.isBlank() || path.trim().isBlank()) return
+        viewModelScope.launch {
+            _refreshing.value = true
+            _error.value = ""
+            try {
+                val result = apiClient.mutateWorkspaceFile(
+                    workspaceId = workspaceId,
+                    action = action,
+                    path = path.trim(),
+                    text = text,
+                    nextPath = nextPath.trim(),
+                )
+                _selectedFile.value = when (result.action) {
+                    "delete" -> null
+                    else -> apiClient.getWorkspaceFile(workspaceId, result.path)
+                }
+                loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Workspace file action failed"
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
+    fun createWorktree(apiClient: ApiClient, branchName: String, baseRef: String = "HEAD", title: String = "") {
+        val workspaceId = _selectedWorkspaceId.value
+        val trimmedBranch = branchName.trim()
+        if (workspaceId.isBlank() || trimmedBranch.isBlank()) return
+        viewModelScope.launch {
+            _gitActionRunning.value = true
+            _error.value = ""
+            try {
+                val result = apiClient.createWorkspaceWorktree(
+                    workspaceId = workspaceId,
+                    branchName = trimmedBranch,
+                    baseRef = baseRef.trim().ifBlank { "HEAD" },
+                    title = title.trim(),
+                )
+                val items = apiClient.listWorkspaces()
+                _workspaces.value = items
+                val nextWorkspaceId = result.workspace.id.ifBlank { workspaceId }
+                _selectedWorkspaceId.value = nextWorkspaceId
+                _currentDir.value = ""
+                _selectedFile.value = null
+                loadWorkspaceDetails(apiClient, nextWorkspaceId, "")
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Worktree creation failed"
+            } finally {
+                _gitActionRunning.value = false
+            }
+        }
+    }
+
+    fun applyGitFileAction(apiClient: ApiClient, path: String, action: String, patch: String = "") {
         val workspaceId = _selectedWorkspaceId.value
         if (workspaceId.isBlank() || path.isBlank()) return
         viewModelScope.launch {
             _gitActionRunning.value = true
             _error.value = ""
             try {
-                apiClient.applyGitFileAction(workspaceId, path, action)
+                apiClient.applyGitFileAction(workspaceId, path, action, patch)
                 loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
             } catch (error: Exception) {
                 _error.value = error.message ?: "Git action failed"
@@ -169,14 +285,28 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
-    fun applyGitAction(apiClient: ApiClient, action: String, message: String = "", title: String = "") {
+    fun applyGitAction(
+        apiClient: ApiClient,
+        action: String,
+        message: String = "",
+        title: String = "",
+        branchName: String = "",
+        baseRef: String = "HEAD",
+    ) {
         val workspaceId = _selectedWorkspaceId.value
         if (workspaceId.isBlank()) return
         viewModelScope.launch {
             _gitActionRunning.value = true
             _error.value = ""
             try {
-                apiClient.applyGitAction(workspaceId, action, message = message, title = title)
+                apiClient.applyGitAction(
+                    workspaceId,
+                    action,
+                    message = message,
+                    title = title,
+                    branchName = branchName,
+                    baseRef = baseRef,
+                )
                 loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
             } catch (error: Exception) {
                 _error.value = error.message ?: "Git action failed"
@@ -204,9 +334,122 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
+    fun startTerminal(apiClient: ApiClient, shell: String = "", mode: String = "auto") {
+        val workspaceId = _selectedWorkspaceId.value
+        if (workspaceId.isBlank()) return
+        viewModelScope.launch {
+            _error.value = ""
+            try {
+                val result = apiClient.startTerminalSession(workspaceId, shell = shell.trim(), mode = mode)
+                val sessionId = result.toolRunId.ifBlank { result.session?.id.orEmpty() }
+                if (sessionId.isBlank()) error("Terminal session did not return an id")
+                _terminal.value = terminalState(result.session, sessionId, output = "")
+                pollTerminal(apiClient, sessionId)
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Terminal session failed to start"
+            }
+        }
+    }
+
+    fun sendTerminalInput(apiClient: ApiClient, text: String) {
+        val sessionId = _terminal.value.sessionId
+        if (sessionId.isBlank() || text.isBlank()) return
+        viewModelScope.launch {
+            _error.value = ""
+            try {
+                apiClient.sendTerminalInput(sessionId, if (text.endsWith("\n")) text else "$text\n")
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Terminal input failed"
+            }
+        }
+    }
+
+    fun resizeTerminal(apiClient: ApiClient, cols: Int, rows: Int) {
+        val sessionId = _terminal.value.sessionId
+        if (sessionId.isBlank()) return
+        viewModelScope.launch {
+            try {
+                apiClient.resizeTerminalSession(sessionId, cols.coerceIn(20, 400), rows.coerceIn(5, 200))
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Terminal resize failed"
+            }
+        }
+    }
+
+    fun stopTerminal(apiClient: ApiClient) {
+        val sessionId = _terminal.value.sessionId
+        if (sessionId.isBlank()) return
+        viewModelScope.launch {
+            try {
+                apiClient.stopTerminalSession(sessionId)
+                refreshTerminal(apiClient, sessionId)
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Terminal stop failed"
+            }
+        }
+    }
+
+    private fun pollTerminal(apiClient: ApiClient, sessionId: String) {
+        terminalPollJob?.cancel()
+        terminalPollJob = viewModelScope.launch {
+            while (isActive && _terminal.value.sessionId == sessionId) {
+                refreshTerminal(apiClient, sessionId)
+                if (_terminal.value.status !in setOf("running", "starting", "pending")) break
+                delay(700)
+            }
+        }
+    }
+
+    private suspend fun refreshTerminal(apiClient: ApiClient, sessionId: String) {
+        val current = _terminal.value
+        val detail = apiClient.getToolRun(sessionId, after = current.cursor)
+        val events = detail.events.sortedBy { it.cursor }
+        val cursor = events.maxOfOrNull { it.cursor } ?: current.cursor
+        val output = appendTerminalOutput(current.output, events)
+        val session = runCatching { apiClient.getTerminalSession(sessionId).session }.getOrNull()
+        val toolStatus = detail.toolRun?.get("status")?.toString().orEmpty()
+        _terminal.value = terminalState(
+            session = session,
+            sessionId = sessionId,
+            output = output,
+            cursor = cursor,
+            fallbackStatus = toolStatus.ifBlank { current.status },
+        )
+    }
+
+    override fun onCleared() {
+        terminalPollJob?.cancel()
+        super.onCleared()
+    }
+
     private suspend fun loadWorkspaceDetails(apiClient: ApiClient, workspaceId: String, dir: String) {
         _files.value = apiClient.getWorkspaceTree(workspaceId, dir).items
         _gitStatus.value = apiClient.getGitStatus(workspaceId)
         _gitDiff.value = apiClient.getGitDiff(workspaceId)
     }
+}
+
+private fun terminalState(
+    session: TerminalSessionInfo?,
+    sessionId: String,
+    output: String,
+    cursor: Int = 0,
+    fallbackStatus: String = "running",
+): WorkspaceTerminalUiState = WorkspaceTerminalUiState(
+    sessionId = sessionId,
+    status = session?.status?.ifBlank { fallbackStatus } ?: fallbackStatus,
+    mode = session?.mode.orEmpty(),
+    shell = session?.shell.orEmpty(),
+    cwd = session?.cwd.orEmpty(),
+    output = output,
+    cursor = cursor,
+    supportsResize = session?.supportsResize == true,
+)
+
+private fun appendTerminalOutput(current: String, events: List<ToolEvent>): String {
+    val appended = events
+        .asSequence()
+        .filter { it.type == "tool.output" }
+        .joinToString(separator = "") { it.text }
+    return (current + appended).takeLast(100_000)
 }

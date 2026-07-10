@@ -121,6 +121,10 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 },
                 onOpenApprovals = { navController.navigate("settings") },
                 onOpenLiveCall = { navController.navigate("call") },
+                onOpenFileReference = { reference ->
+                    workspaceViewModel.openFileReference(apiClient, reference)
+                    navController.navigate("workspace")
+                },
                 promptHistory = promptHistory,
                 onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
                 onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },

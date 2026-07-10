@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dataDir, defaultSettings, settingsPath, tasksDir } from "./config.js";
 import { codebaseMemoryInstallInfo, codebaseMemoryServerConfig, mergeCodebaseMemoryServer } from "./codebaseMemoryRuntime.js";
-import { credentialBackend, readApiKeys, writeApiKeys } from "./credentialStore.js";
+import { credentialBackend, readApiKeys, readSecret, writeApiKeys } from "./credentialStore.js";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -16,6 +16,10 @@ function mergeSettings(base, next) {
     webPush: {
       ...base.webPush,
       ...(next?.webPush || {})
+    },
+    nativePush: {
+      ...base.nativePush,
+      ...(next?.nativePush || {})
     },
     apiKeys: {
       ...base.apiKeys,
@@ -142,6 +146,14 @@ function sanitizeCodebaseMemory(value = {}) {
   return next;
 }
 
+function sanitizeNativePush(value = {}) {
+  const next = {};
+  const provider = typeof value.provider === "string" ? value.provider.trim().toLowerCase() : "";
+  if (provider && ["fcm", "none"].includes(provider)) next.provider = provider;
+  if (typeof value.fcmProjectId === "string") next.fcmProjectId = value.fcmProjectId.trim().slice(0, 200);
+  return next;
+}
+
 function mergeSecretObject(existing = {}, next = null) {
   if (!next || typeof next !== "object" || Array.isArray(next)) return existing || {};
   const merged = {};
@@ -204,6 +216,10 @@ export async function settingsWithSecrets(settings) {
       openai: secrets.openai || settings.apiKeys?.openai || "",
       anthropic: secrets.anthropic || settings.apiKeys?.anthropic || "",
       zhipu: secrets.zhipu || settings.apiKeys?.zhipu || ""
+    },
+    nativePush: {
+      ...(settings.nativePush || {}),
+      fcmServiceAccountJson: await readSecret("fcmServiceAccount")
     }
   };
 }
@@ -264,6 +280,93 @@ export async function saveSettings(settings) {
   await writeFile(settingsPath, `${JSON.stringify(safeSettings, null, 2)}\n`, "utf8");
 }
 
+const settingsExportKeys = [
+  "defaultCwd",
+  "claudeCommand",
+  "codexCommand",
+  "codexTemplate",
+  "doubaoCommand",
+  "doubaoCdpEndpoint",
+  "doubaoUrl",
+  "permissionMode",
+  "security",
+  "allowedRoots",
+  "hostAllowlist",
+  "allowTryCloudflare",
+    "allowLegacyPairingTokenLogin",
+    "webPush",
+    "nativePush",
+    "toolEvents",
+  "codebaseMemory",
+  "mcp"
+];
+
+function settingsExportPatch(settings = {}) {
+  const patch = {};
+  for (const key of settingsExportKeys) {
+    if (Object.prototype.hasOwnProperty.call(settings, key)) patch[key] = clone(settings[key]);
+  }
+  if (patch.webPush) {
+    patch.webPush = {
+      subject: typeof patch.webPush.subject === "string" ? patch.webPush.subject : ""
+    };
+  }
+  return sanitizeSettingsPatch(patch);
+}
+
+function changedSettingsKeys(previous = {}, next = {}) {
+  return settingsExportKeys.filter((key) => JSON.stringify(previous?.[key] ?? null) !== JSON.stringify(next?.[key] ?? null));
+}
+
+export async function buildSettingsExport(settings = {}) {
+  return {
+    kind: "vibelink.settings.export",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    settings: settingsExportPatch(settings)
+  };
+}
+
+export function importSettingsSnapshot(current = {}, snapshot = {}) {
+  const rawSettings = snapshot?.settings && typeof snapshot.settings === "object" ? snapshot.settings : snapshot;
+  const patch = settingsExportPatch(rawSettings || {});
+  const imported = {
+    ...current,
+    ...patch,
+    apiKeys: current.apiKeys || {},
+    notificationEmail: current.notificationEmail || "",
+    security: {
+      ...(current.security || {}),
+      ...(patch.security || {})
+    },
+    toolEvents: {
+      ...(current.toolEvents || {}),
+      ...(patch.toolEvents || {})
+    },
+    codebaseMemory: {
+      ...(current.codebaseMemory || {}),
+      ...(patch.codebaseMemory || {})
+    },
+    webPush: {
+      ...(current.webPush || {}),
+      ...(patch.webPush || {})
+    },
+    nativePush: {
+      ...(current.nativePush || {}),
+      ...(patch.nativePush || {})
+    },
+    mcp: patch.mcp ? mergeMcpSettings(current.mcp || {}, patch.mcp) : current.mcp
+  };
+  return mergeSettings(defaultSettings, imported);
+}
+
+export function summarizeSettingsImport(previous = {}, next = {}) {
+  return {
+    ok: true,
+    changedKeys: changedSettingsKeys(previous, next)
+  };
+}
+
 export async function publicSettings(settings) {
   const secrets = await readApiKeys();
   const backend = await credentialBackend();
@@ -294,6 +397,11 @@ export async function publicSettings(settings) {
     webPush: {
       enabled: Boolean(settings.webPush?.publicKey),
       publicKey: settings.webPush?.publicKey || ""
+    },
+    nativePush: {
+      provider: settings.nativePush?.provider || defaultSettings.nativePush.provider,
+      fcmProjectId: settings.nativePush?.fcmProjectId || "",
+      configured: Boolean(await readSecret("fcmServiceAccount") || process.env.VIBELINK_FCM_SERVICE_ACCOUNT_JSON)
     },
     toolEvents: {
       ...defaultSettings.toolEvents,
@@ -387,6 +495,10 @@ export function sanitizeSettingsPatch(patch = {}) {
 
   if (patch.mcp && typeof patch.mcp === "object") {
     next.mcp = sanitizeMcp(patch.mcp);
+  }
+
+  if (patch.nativePush && typeof patch.nativePush === "object") {
+    next.nativePush = sanitizeNativePush(patch.nativePush);
   }
 
   if (patch.codebaseMemory && typeof patch.codebaseMemory === "object") {

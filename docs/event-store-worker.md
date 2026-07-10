@@ -116,6 +116,16 @@ npm run event-store:runtime-canary -- --output .tmp/event-store-runtime-canary-f
 
 That run queued 7,200 task/tool/live-call append events through the runtime batchers. Runtime append metrics were `insertTaskEvents` 24 Rust calls at 37.8ms average, `insertToolEvents` 24 Rust calls at 38.1ms average, and `insertLiveCallEvents` 24 Rust calls at 31.6ms average, with runtime mode `rust-sidecar`, 0 fallback, 0 failures, 0 sync stalls, 0 pending requests after drain, and 0 backpressure rejects.
 
+`npm run event-store:server-canary` starts the bridge itself on a temporary `VIBELINK_DATA_DIR` and random local port, logs in through `/api/login`, executes a small workspace command, emits live-call transcript and audio-level events through HTTP, and validates `/api/tool-events/stats`.
+
+The representative 2026-07-10 server canary passed with:
+
+```bash
+npm run event-store:server-canary -- --output .tmp/event-store-server-canary-final.json
+```
+
+That run verified service startup, auth, workspace command output, live-call event ingestion, runtime mode `rust-sidecar`, 2 Rust `insertToolEvents` calls at 2.6ms average, 13 Rust `insertLiveCallEvents` calls at 4.5ms average, 0 fallback, 0 failures, 0 sync stalls, 0 pending requests, and 0 backpressure rejects.
+
 ## Next Slices
 
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.

@@ -116,12 +116,28 @@ npm run event-store:runtime-canary -- --output .tmp/event-store-runtime-canary-f
 
 That run queued 7,200 task/tool/live-call append events through the runtime batchers. Runtime append metrics were `insertTaskEvents` 24 Rust calls at 37.8ms average, `insertToolEvents` 24 Rust calls at 38.1ms average, and `insertLiveCallEvents` 24 Rust calls at 31.6ms average, with runtime mode `rust-sidecar`, 0 fallback, 0 failures, 0 sync stalls, 0 pending requests after drain, and 0 backpressure rejects.
 
+`npm run event-store:server-canary` starts the bridge itself on a temporary `VIBELINK_DATA_DIR` and random local port, logs in through `/api/login`, executes a small workspace command, emits live-call transcript and audio-level events through HTTP, and validates `/api/tool-events/stats`.
+
+The representative 2026-07-10 server canary passed with:
+
+```bash
+npm run event-store:server-canary -- --output .tmp/event-store-server-canary-final.json
+```
+
+That run verified service startup, auth, workspace command output, live-call event ingestion, runtime mode `rust-sidecar`, 2 Rust `insertToolEvents` calls at 2.6ms average, 13 Rust `insertLiveCallEvents` calls at 4.5ms average, 0 fallback, 0 failures, 0 sync stalls, 0 pending requests, and 0 backpressure rejects.
+
+`npm run event-store:canary:all` runs the local, runtime, and server canaries serially and writes CI-friendly JSON outputs under `.tmp/`. The aggregate uses a CI-sized local workload of 24 rounds x 100 events per append path to reduce host-noise sensitivity while still measuring 7,200 direct append events before the runtime and server canaries. The local direct comparison keeps the 10% ratio threshold and adds a 10ms absolute latency margin for low-millisecond CI jitter; standalone promotion runs can omit `--latency-margin-ms` to use the strict default. The canaries are intentionally not parallelized because concurrent SQLite workloads can distort latency thresholds.
+
+## CI Canary Gate
+
+`.github/workflows/event-store-rust-canary.yml` runs on Windows for event-store, Rust sidecar, test, canary, package, and Rust migration document changes. The gate installs Node 22 and stable Rust, builds `apps/windows` in release mode, checks the Rust migration manifest, runs `npm run test:event-store`, then runs `npm run event-store:canary:all` serially. The workflow uploads `.tmp/event-store-*-canary-ci.json` as an artifact so failed or borderline canary runs have timing evidence attached to the status check.
+
 ## Next Slices
 
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.
 - Window large task/live-call replay paths where callers still request broad history.
 - Add high-frequency event burst smoke tests around the runtime stall and batch metrics.
-- Run limited canary sessions with runtime stats capture before making the Rust sidecar default-on.
+- Run limited human-driven real-session canaries with runtime stats capture before making the Rust sidecar default-on.
 
 ## Rollback
 

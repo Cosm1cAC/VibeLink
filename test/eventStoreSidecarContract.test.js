@@ -22,10 +22,45 @@ function cargoPath() {
   return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
 }
 
-function rustSidecarClient(t, dbPath, options = {}) {
+function parseRustSidecarArgs() {
+  if (!process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON) return ["event-store-sidecar"];
+  try {
+    const parsed = JSON.parse(process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON);
+    return Array.isArray(parsed) ? parsed.map(String) : ["event-store-sidecar"];
+  } catch {
+    return ["event-store-sidecar"];
+  }
+}
+
+function rustSidecarTimeoutMs(fallback) {
+  const parsed = Number(process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function rustSidecarRunner(dbPath) {
+  if (process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND) {
+    return {
+      command: process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND,
+      args: [...parseRustSidecarArgs(), dbPath],
+      timeoutMs: rustSidecarTimeoutMs(30000)
+    };
+  }
+
+  const binaryName = process.platform === "win32" ? "vibelink.exe" : "vibelink";
+  for (const profile of ["release", "debug"]) {
+    const command = path.join(process.cwd(), "apps", "windows", "target", profile, binaryName);
+    if (fs.existsSync(command)) {
+      return {
+        command,
+        args: ["event-store-sidecar", dbPath],
+        timeoutMs: 30000
+      };
+    }
+  }
+
   const cargo = cargoPath();
-  if (!cargo) t.skip("cargo is not available");
-  return createEventStoreSidecarClient({
+  if (!cargo) return null;
+  return {
     command: cargo,
     args: [
       "run",
@@ -36,7 +71,18 @@ function rustSidecarClient(t, dbPath, options = {}) {
       "event-store-sidecar",
       dbPath
     ],
-    timeoutMs: 30000,
+    timeoutMs: 120000
+  };
+}
+
+function rustSidecarClient(t, dbPath, options = {}) {
+  const runner = rustSidecarRunner(dbPath);
+  if (!runner) {
+    t.skip("Rust event-store sidecar is not available");
+    return null;
+  }
+  return createEventStoreSidecarClient({
+    ...runner,
     ...options
   });
 }
@@ -216,6 +262,10 @@ test("event store sidecar client times out unanswered requests", async () => {
 test("event store JSON sidecar contract works against the Rust sidecar", async (t) => {
   const { dir, dbPath } = createSidecarDb();
   const client = rustSidecarClient(t, dbPath);
+  if (!client) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  }
 
   try {
     const health = await client.health();

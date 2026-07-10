@@ -27,9 +27,9 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `opt-in` | Manual flag only | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Add `auto` mode, parity gates, fallback counters, lastError stats, and a long-lived scanner/cache plan before canary. |
+| Workspace tree scanner | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Finish the remaining parity gates and document the long-lived scanner/cache limitations before canary. |
 | Persistent MCP stdio sessions | `opt-in` | Manual flag only | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Add `auto` mode, health readiness checks, spawn-reduction/fallback-rate promotion gates, and rollback docs. |
-| Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited real-session canaries with runtime stats capture, keep fallback-rate/latency/stall checks green, and wire the local plus runtime canaries into release or CI status before broader default exposure. |
+| Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
 | Compression and context budget helper | `planned` | Not implemented; conditional need | Planned `VIBELINK_RUST_COMPRESSION` | Existing Node/provider prompt construction | Only if needed, define deterministic byte/log sampling and budget trimming helper; do not claim semantic summarization or exact provider tokens. |
 
@@ -37,13 +37,11 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node cache reuse.
+Current state: Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, Node cache reuse, `VIBELINK_RUST_WORKSPACE_TREE=auto` safe-detection, and runtime stats for mode, availability, fallbacks, failures, and last error.
 
 Can move to `canary` only when:
 
-- Node/Rust parity tests cover directories-first sorting, hidden file policy, fixed ignores, nested `.gitignore`, path-pattern `.gitignore`, truncation, signature/cache behavior, and missing-binary fallback.
-- `VIBELINK_RUST_WORKSPACE_TREE=auto` or an equivalent safe-detection mode exists.
-- Runtime stats include fallback count and last error.
+- Remaining Node/Rust parity tests cover directories-first sorting, hidden file policy, fixed ignores, nested `.gitignore`, path-pattern `.gitignore`, truncation, signature/cache behavior, and missing-binary fallback.
 - Any remaining gitignore semantic gap or long-lived scanner/cache limitation is explicitly listed as a blocker.
 
 ### Persistent MCP stdio sessions
@@ -59,13 +57,13 @@ Can move to `canary` only when:
 
 ### Event store append/replay sidecar
 
-Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, a real Rust `event-store-sidecar` command, real Rust contract coverage, explicit opt-in runtime routing, `auto` readiness mode, a health gate, runtime stats, Worker/sync fallback tests, rollback docs, canary thresholds, local and runtime canary harnesses, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses `last_insert_rowid()` on the normal insert hot path.
+Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, a real Rust `event-store-sidecar` command, real Rust contract coverage, explicit opt-in runtime routing, `auto` readiness mode, a health gate, runtime stats, Worker/sync fallback tests, rollback docs, canary thresholds, local/runtime/server canary harnesses, CI canary status wiring, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses `last_insert_rowid()` on the normal insert hot path.
 
 Can move to `default-on` only when:
 
-- Canary metrics stay within the documented latency, fallback-rate, and main-thread stall thresholds across representative local and runtime sessions.
+- Canary metrics stay within the documented latency, fallback-rate, and main-thread stall thresholds across representative local, runtime, and server sessions.
 - Limited real-session canaries preserve 0 fallback/failure/backpressure and clean pending drain after readiness.
-- CI or release status checks run the event-store contract/runtime tests plus the local and runtime canary harnesses.
+- CI or release status checks run the event-store contract/runtime tests plus the local, runtime, and server canary harnesses.
 - `src/db.js` route-level tests continue to cover spawn failure, bad health, timeout, invalid JSON, sidecar exit, request failure, and Worker/sync fallback without task-visible failure.
 - Runtime status continues to expose starts, failures, fallbacks, pending, terminated, ready/failed state, last error, and mode counts for Rust, Worker, and sync fallback.
 - Rollback remains tested and documented with `VIBELINK_EVENT_STORE_RUST_SIDECAR=0`.
@@ -114,6 +112,9 @@ cargo test --manifest-path apps/windows/Cargo.toml
 cargo build --manifest-path apps/windows/Cargo.toml
 npm run event-store:canary
 npm run event-store:runtime-canary
+npm run event-store:server-canary
+# or run the canary harnesses serially with CI output paths
+npm run event-store:canary:all
 ```
 
 Audio promotion also requires:

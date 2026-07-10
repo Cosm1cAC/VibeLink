@@ -27,7 +27,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `opt-in` | Manual flag only | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Add `auto` mode, parity gates, fallback counters, lastError stats, and a long-lived scanner/cache plan before canary. |
+| Workspace tree scanner | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Finish the remaining parity gates and document the long-lived scanner/cache limitations before canary. |
 | Persistent MCP stdio sessions | `opt-in` | Manual flag only | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Add `auto` mode, health readiness checks, spawn-reduction/fallback-rate promotion gates, and rollback docs. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
@@ -37,13 +37,11 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node cache reuse.
+Current state: Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, Node cache reuse, `VIBELINK_RUST_WORKSPACE_TREE=auto` safe-detection, and runtime stats for mode, availability, fallbacks, failures, and last error.
 
 Can move to `canary` only when:
 
-- Node/Rust parity tests cover directories-first sorting, hidden file policy, fixed ignores, nested `.gitignore`, path-pattern `.gitignore`, truncation, signature/cache behavior, and missing-binary fallback.
-- `VIBELINK_RUST_WORKSPACE_TREE=auto` or an equivalent safe-detection mode exists.
-- Runtime stats include fallback count and last error.
+- Remaining Node/Rust parity tests cover directories-first sorting, hidden file policy, fixed ignores, nested `.gitignore`, path-pattern `.gitignore`, truncation, signature/cache behavior, and missing-binary fallback.
 - Any remaining gitignore semantic gap or long-lived scanner/cache limitation is explicitly listed as a blocker.
 
 ### Persistent MCP stdio sessions

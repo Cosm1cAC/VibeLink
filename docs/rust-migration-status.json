@@ -8,7 +8,7 @@
       "title": "Workspace tree scanner",
       "priority": "P1",
       "status": "opt-in",
-      "rollout": "manual flag only",
+      "rollout": "manual flag plus auto safe-detection",
       "featureFlags": [
         { "name": "VIBELINK_RUST_WORKSPACE_TREE", "requiredInCode": true },
         { "name": "VIBELINK_RUST_BIN", "requiredInCode": true },
@@ -17,8 +17,8 @@
       "nodeEntry": "src/workspaces.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink workspace-tree",
-      "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails.",
-      "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks hits, misses, cache, budget hits, and last signature.",
+      "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails. VIBELINK_RUST_WORKSPACE_TREE=auto skips a missing binary without marking a Rust failure.",
+      "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks mode, auto/available state, command, hits, misses, fallbacks, failures, cache, budget hits, last signature, and last error.",
       "tests": [
         "test/workspacesRustTree.test.js"
       ],
@@ -26,9 +26,9 @@
         "README.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node-side cache reuse.",
-      "nextAction": "Add auto mode, parity gates, fallback counters, lastError stats, and an explicit long-lived scanner/cache plan before canary.",
-      "promotionGate": "Can move to canary only after Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback."
+      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, Node-side cache reuse, auto safe-detection, and fallback/error runtime stats.",
+      "nextAction": "Finish the remaining Node/Rust parity gates and document the explicit long-lived scanner/cache limitations before canary.",
+      "promotionGate": "Can move to canary only after remaining Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback, with any long-lived scanner/cache limitation listed as a blocker."
     },
     {
       "id": "mcp-session-sidecar",

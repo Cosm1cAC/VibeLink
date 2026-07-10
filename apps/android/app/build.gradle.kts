@@ -71,6 +71,7 @@ dependencies {
     // Markdown (for rendering messages)
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")
+    implementation("io.coil-kt:coil-compose:2.7.0")
 
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")

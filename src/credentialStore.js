@@ -6,7 +6,7 @@ import { dataDir } from "./config.js";
 
 const appName = "VibeLink";
 const secretDir = path.join(dataDir, "secrets");
-const supportedKeys = ["openai", "anthropic", "zhipu"];
+const supportedKeys = ["openai", "anthropic", "zhipu", "fcmServiceAccount"];
 
 function serviceName(key) {
   return `${appName}:${key}`;
@@ -145,7 +145,12 @@ export async function writeSecret(key, value) {
 }
 
 function envNameForKey(key) {
-  const map = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", zhipu: "ZHIPU_API_KEY" };
+  const map = {
+    openai: "OPENAI_API_KEY",
+    anthropic: "ANTHROPIC_API_KEY",
+    zhipu: "ZHIPU_API_KEY",
+    fcmServiceAccount: "VIBELINK_FCM_SERVICE_ACCOUNT_JSON"
+  };
   return map[key] || "";
 }
 

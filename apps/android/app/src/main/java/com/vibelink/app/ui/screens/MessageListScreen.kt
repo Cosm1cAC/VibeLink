@@ -3,9 +3,13 @@ package com.vibelink.app.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,15 +31,20 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AssistChip
@@ -43,6 +52,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -62,24 +73,32 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.network.AttachmentUploadResponse
 import com.vibelink.app.network.ChatMessage
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.ProviderDefinition
 import com.vibelink.app.network.ProviderRegistryResponse
 import com.vibelink.app.ui.components.ToolCallCardList
+import coil.compose.AsyncImage
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,6 +109,7 @@ fun MessageListScreen(
     onBack: () -> Unit,
     onOpenApprovals: () -> Unit = {},
     onOpenLiveCall: () -> Unit = {},
+    onOpenFileReference: (String) -> Unit = {},
     promptHistory: List<String> = emptyList(),
     onRememberPrompt: (String) -> Unit = {},
     onClearPromptHistory: () -> Unit = {},
@@ -113,11 +133,41 @@ fun MessageListScreen(
     var reasoningEffort by remember(conversation?.key) { mutableStateOf("") }
     var cwd by remember(conversation?.key) { mutableStateOf(conversation?.cwd.orEmpty()) }
     var showOptions by remember { mutableStateOf(false) }
+    var attachmentStatus by remember(conversation?.key) { mutableStateOf("") }
+    var attachmentUploading by remember(conversation?.key) { mutableStateOf(false) }
 
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val isDesktopRemote = conversation?.kind == "desktop"
     val selectableProviders = remember(providerRegistry) { providersForComposer(providerRegistry) }
     val canSend = prompt.trim().isNotBlank() && !sending && conversation != null
+    fun uploadAttachment(uri: Uri) {
+        scope.launch {
+            attachmentUploading = true
+            attachmentStatus = "Uploading attachment"
+            try {
+                val upload = uploadAttachmentUri(context, apiClient, uri)
+                val attachmentText = MessageContentUtils.attachmentPromptText(
+                    name = upload.name,
+                    markdown = upload.markdown,
+                    preview = upload.preview,
+                )
+                prompt = listOf(prompt.trim(), attachmentText).filter { it.isNotBlank() }.joinToString("\n\n")
+                attachmentStatus = "Attached ${upload.name.ifBlank { "file" }}"
+            } catch (error: Exception) {
+                attachmentStatus = error.message ?: "Attachment upload failed"
+            } finally {
+                attachmentUploading = false
+            }
+        }
+    }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) uploadAttachment(uri)
+    }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) uploadAttachment(uri)
+    }
 
     LaunchedEffect(conversation?.key) {
         if (conversation != null) viewModel.loadConversation(apiClient, conversation)
@@ -200,6 +250,10 @@ fun MessageListScreen(
                     promptHistory = promptHistory,
                     onUseHistoryPrompt = { prompt = it },
                     onClearPromptHistory = onClearPromptHistory,
+                    attachmentUploading = attachmentUploading,
+                    attachmentStatus = attachmentStatus,
+                    onPickImage = { imagePicker.launch("image/*") },
+                    onPickFile = { filePicker.launch("*/*") },
                     running = running,
                     sending = sending,
                     canSend = canSend,
@@ -262,7 +316,24 @@ fun MessageListScreen(
                             }
                         }
                         itemsIndexed(messages, key = { index, message -> "$index:${message.role}:${message.text.hashCode()}:${message.toolCalls.size}" }) { _, message ->
-                            MessageBubble(message = message, compact = isDesktopRemote)
+                            MessageBubble(
+                                message = message,
+                                apiBaseUrl = apiClient.baseUrl,
+                                compact = isDesktopRemote,
+                                onEdit = viewModel::editMessage,
+                                onDelete = viewModel::deleteMessage,
+                                onRegenerate = { target ->
+                                    viewModel.regenerateMessage(
+                                        apiClient = apiClient,
+                                        target = target,
+                                        agent = activeAgent,
+                                        model = model,
+                                        reasoningEffort = reasoningEffort,
+                                        cwd = cwd,
+                                    )
+                                },
+                                onOpenFileReference = onOpenFileReference,
+                            )
                         }
                         if (running) {
                             item {
@@ -301,6 +372,10 @@ private fun ComposerBar(
     promptHistory: List<String>,
     onUseHistoryPrompt: (String) -> Unit,
     onClearPromptHistory: () -> Unit,
+    attachmentUploading: Boolean,
+    attachmentStatus: String,
+    onPickImage: () -> Unit,
+    onPickFile: () -> Unit,
     running: Boolean,
     sending: Boolean,
     canSend: Boolean,
@@ -407,6 +482,12 @@ private fun ComposerBar(
             }
 
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                IconButton(onClick = onPickImage, enabled = !isDesktopRemote && !attachmentUploading) {
+                    Icon(Icons.Default.Image, contentDescription = "Attach image")
+                }
+                IconButton(onClick = onPickFile, enabled = !isDesktopRemote && !attachmentUploading) {
+                    Icon(Icons.Default.AttachFile, contentDescription = "Attach file")
+                }
                 OutlinedTextField(
                     value = prompt,
                     onValueChange = onPromptChange,
@@ -425,9 +506,19 @@ private fun ComposerBar(
                     if (sending) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Default.Send, contentDescription = null)
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
                     }
                 }
+            }
+
+            if (attachmentStatus.isNotBlank()) {
+                Text(
+                    text = attachmentStatus,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (attachmentUploading) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
 
             if (running && !isDesktopRemote) {
@@ -444,14 +535,26 @@ private fun ComposerBar(
 @Composable
 private fun MessageBubble(
     message: ChatMessage,
+    apiBaseUrl: String,
     compact: Boolean,
+    onEdit: (ChatMessage, String) -> Unit,
+    onDelete: (ChatMessage) -> Unit,
+    onRegenerate: (ChatMessage) -> Unit,
+    onOpenFileReference: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     var expanded by remember(message.role, message.text, message.toolCalls.size) { mutableStateOf(true) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var editing by remember(message.role, message.text, message.turnId, message.id) { mutableStateOf(false) }
+    var editDraft by remember(message.role, message.text, message.turnId, message.id) { mutableStateOf(message.text) }
     val isUser = message.role == "user"
     val isSystem = message.role == "system"
     val isError = message.role == "error"
+    val canEdit = isUser && message.text.isNotBlank()
+    val canRegenerate = message.role == "assistant" && message.text.isNotBlank()
+    val canDelete = !isSystem && !isError
     val containerColor = when {
         isError -> MaterialTheme.colorScheme.errorContainer
         isSystem -> MaterialTheme.colorScheme.surfaceVariant
@@ -466,6 +569,9 @@ private fun MessageBubble(
         else -> message.role
     }
     val codeBlocks = remember(message.text) { MessageContentUtils.extractCodeBlocks(message.text) }
+    val fileReferences = remember(message.text) { MessageContentUtils.extractFileReferences(message.text) }
+    val imageLinks = remember(message.text) { MessageContentUtils.extractImageLinks(message.text) }
+    val artifactLinks = remember(message.text) { MessageContentUtils.extractArtifactLinks(message.text) }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -493,6 +599,14 @@ private fun MessageBubble(
                                 Icon(Icons.Default.Code, contentDescription = "Copy code blocks", modifier = Modifier.size(18.dp))
                             }
                         }
+                        if (fileReferences.isNotEmpty()) {
+                            IconButton(
+                                onClick = { copyMessage(context, fileReferences.joinToString("\n"), "File references copied") },
+                                modifier = Modifier.size(40.dp),
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy file references", modifier = Modifier.size(18.dp))
+                            }
+                        }
                         if (message.text.isNotBlank()) {
                             IconButton(
                                 onClick = { copyMessage(context, message.text) },
@@ -510,12 +624,73 @@ private fun MessageBubble(
                                 contentDescription = if (expanded) "Collapse message" else "Expand message",
                             )
                         }
+                        if (canEdit || canRegenerate || canDelete) {
+                            Box {
+                                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) {
+                                    Icon(Icons.Default.MoreVert, contentDescription = "Message actions")
+                                }
+                                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                    if (canEdit) {
+                                        DropdownMenuItem(
+                                            text = { Text("Edit") },
+                                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                            onClick = {
+                                                editDraft = message.text
+                                                editing = true
+                                                expanded = true
+                                                menuOpen = false
+                                            },
+                                        )
+                                    }
+                                    if (canRegenerate) {
+                                        DropdownMenuItem(
+                                            text = { Text("Regenerate") },
+                                            leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                            onClick = {
+                                                menuOpen = false
+                                                onRegenerate(message)
+                                            },
+                                        )
+                                    }
+                                    if (canDelete) {
+                                        DropdownMenuItem(
+                                            text = { Text("Delete") },
+                                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                            onClick = {
+                                                menuOpen = false
+                                                onDelete(message)
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
             val displayText = message.text.trim()
             if (expanded) {
-                if (displayText.isNotBlank()) {
+                if (editing) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = editDraft,
+                        onValueChange = { editDraft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        maxLines = 8,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { editing = false }) { Text("Cancel") }
+                        Button(
+                            onClick = {
+                                onEdit(message, editDraft)
+                                editing = false
+                            },
+                            enabled = editDraft.trim().isNotBlank(),
+                        ) { Text("Save") }
+                    }
+                } else if (displayText.isNotBlank()) {
                     if (!compact || isError || isSystem) Spacer(Modifier.height(4.dp))
                     if (compact || isError) {
                         Text(
@@ -530,6 +705,111 @@ private fun MessageBubble(
                 if (message.toolCalls.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     ToolCallCardList(toolCalls = message.toolCalls, toolCallCount = message.toolCallCount)
+                }
+                if (fileReferences.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    FileReferenceChips(
+                        fileReferences = fileReferences,
+                        onCopy = { reference -> copyMessage(context, reference, "File reference copied") },
+                        onOpen = onOpenFileReference,
+                    )
+                }
+                if (imageLinks.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    ImagePreviewGallery(
+                        apiBaseUrl = apiBaseUrl,
+                        links = imageLinks,
+                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url)) },
+                    )
+                }
+                if (artifactLinks.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    ArtifactChips(
+                        links = artifactLinks,
+                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url)) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImagePreviewGallery(
+    apiBaseUrl: String,
+    links: List<MessageContentUtils.ContentLink>,
+    onOpen: (MessageContentUtils.ContentLink) -> Unit,
+) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(links.take(8), key = { it.url }) { link ->
+            Card(
+                onClick = { onOpen(link) },
+                modifier = Modifier.size(156.dp),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Box {
+                    AsyncImage(
+                        model = resolveContentUrl(apiBaseUrl, link.url),
+                        contentDescription = link.label.ifBlank { "Image" },
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.54f),
+                    ) {
+                        Text(
+                            text = link.label.ifBlank { "Image" },
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArtifactChips(
+    links: List<MessageContentUtils.ContentLink>,
+    onOpen: (MessageContentUtils.ContentLink) -> Unit,
+) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(links.take(8), key = { it.url }) { link ->
+            AssistChip(
+                onClick = { onOpen(link) },
+                label = { Text("${link.kind}: ${link.label}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileReferenceChips(
+    fileReferences: List<String>,
+    onCopy: (String) -> Unit,
+    onOpen: (String) -> Unit,
+) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(fileReferences.take(6), key = { it }) { reference ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AssistChip(
+                    onClick = { onOpen(reference) },
+                    label = { Text(reference, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                )
+                IconButton(
+                    onClick = { onCopy(reference) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        contentDescription = "Copy file reference",
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
             }
         }
@@ -612,6 +892,38 @@ private fun copyMessage(context: Context, text: String, toast: String = "Copied"
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("VibeLink message", text))
     Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
+}
+
+private fun resolveContentUrl(baseUrl: String, rawUrl: String): String {
+    val trimmed = rawUrl.trim()
+    if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) return trimmed
+    val base = baseUrl.trimEnd('/')
+    return if (trimmed.startsWith('/')) "$base$trimmed" else "$base/$trimmed"
+}
+
+private suspend fun uploadAttachmentUri(
+    context: Context,
+    apiClient: ApiClient,
+    uri: Uri,
+): AttachmentUploadResponse {
+    val resolver = context.contentResolver
+    val name = displayNameForUri(context, uri)
+    val mimeType = resolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }
+    val bytes = withContext(Dispatchers.IO) {
+        resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+    }
+    return apiClient.uploadAttachment(bytes = bytes, fileName = name, mimeType = mimeType)
+}
+
+private fun displayNameForUri(context: Context, uri: Uri): String {
+    val resolver = context.contentResolver
+    resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0) return cursor.getString(index).orEmpty().ifBlank { "attachment" }
+        }
+    }
+    return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { "attachment" } ?: "attachment"
 }
 
 @Composable

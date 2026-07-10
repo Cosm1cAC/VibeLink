@@ -274,6 +274,56 @@ async function git(args, cwd) {
   }
 }
 
+async function gitWithInput(args, cwd, input = "") {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, {
+      cwd,
+      env: withAgentReachPath(process.env),
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      resolve({ ok: false, stdout, stderr: stderr || error.message, exitCode: 1 });
+    });
+    child.on("close", (code) => {
+      resolve({ ok: code === 0, stdout, stderr, exitCode: code ?? 1 });
+    });
+    child.stdin.end(input);
+  });
+}
+
+function unifiedPatchForPath(patchValue, relPath) {
+  const patch = String(patchValue || "");
+  if (!patch.trim()) {
+    const error = new Error("Git hunk patch is required.");
+    error.status = 400;
+    throw error;
+  }
+  if (Buffer.byteLength(patch, "utf8") > 512 * 1024) {
+    const error = new Error("Git hunk patch is too large.");
+    error.status = 413;
+    throw error;
+  }
+  const normalizedPath = relPath.replaceAll("\\", "/");
+  const plainHeader = `diff --git a/${normalizedPath} b/${normalizedPath}`;
+  const quotedHeader = `diff --git ${JSON.stringify(`a/${normalizedPath}`)} ${JSON.stringify(`b/${normalizedPath}`)}`;
+  const diffHeaders = patch.split(/\r?\n/).filter((line) => line.startsWith("diff --git "));
+  if (diffHeaders.length !== 1 || ![plainHeader, quotedHeader].includes(diffHeaders[0])) {
+    const error = new Error("Git hunk patch must target exactly the requested file.");
+    error.status = 400;
+    throw error;
+  }
+  return patch.endsWith("\n") ? patch : `${patch}\n`;
+}
+
 export function ensureWorkspaces(settings) {
   return ensureDefaultWorkspaces(settings);
 }
@@ -344,6 +394,28 @@ function safeWorkspaceChild(root, child = "") {
     throw error;
   }
   return target;
+}
+
+function workspaceMutationPath(root, value = "", field = "path") {
+  const raw = String(value || "").replaceAll("\\", "/").trim();
+  if (!raw || raw === ".") {
+    const error = new Error(`Workspace file ${field} is required.`);
+    error.status = 400;
+    throw error;
+  }
+  if (path.isAbsolute(raw) || /(^|\/)\.\.(\/|$)/.test(raw)) {
+    const error = new Error("Path is outside workspace.");
+    error.status = 403;
+    throw error;
+  }
+  return safeWorkspaceChild(root, raw);
+}
+
+function invalidateWorkspaceCaches(root = "") {
+  workspaceTreeCache.clear();
+  rustWorkspaceTreeCache.clear();
+  workspaceContextFileCache.clear();
+  invalidateGitSummaryCache(root);
 }
 
 function isTextFile(filePath, stat) {
@@ -701,6 +773,79 @@ export async function getWorkspaceFile(id, settings, filePath = "") {
   };
 }
 
+export async function mutateWorkspaceFile(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const root = resolveAllowedPath(workspace.path, settings);
+  const action = String(body.action || "write").trim().toLowerCase();
+  const target = workspaceMutationPath(root, body.path || "", "path");
+  touchWorkspace(workspace.id);
+
+  if (action === "write") {
+    const text = typeof body.text === "string" ? body.text : "";
+    if (Buffer.byteLength(text, "utf8") > 1024 * 1024) {
+      const error = new Error("Workspace file text is too large.");
+      error.status = 413;
+      throw error;
+    }
+    if (fs.existsSync(target) && !fs.statSync(target).isFile()) {
+      const error = new Error("Workspace file path must be a file.");
+      error.status = 400;
+      throw error;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, text, "utf8");
+    invalidateWorkspaceCaches(root);
+    const rel = path.relative(root, target).replaceAll("\\", "/");
+    return {
+      ...(await getWorkspaceFile(id, settings, rel)),
+      action
+    };
+  }
+
+  if (action === "delete") {
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      const error = new Error("Workspace file path must be a file.");
+      error.status = 400;
+      throw error;
+    }
+    fs.unlinkSync(target);
+    invalidateWorkspaceCaches(root);
+    return {
+      ok: true,
+      action,
+      workspace,
+      path: path.relative(root, target).replaceAll("\\", "/")
+    };
+  }
+
+  if (action === "rename") {
+    const nextTarget = workspaceMutationPath(root, body.nextPath || "", "nextPath");
+    if (!fs.existsSync(target)) {
+      const error = new Error("Workspace file path does not exist.");
+      error.status = 404;
+      throw error;
+    }
+    if (fs.existsSync(nextTarget)) {
+      const error = new Error("Workspace destination already exists.");
+      error.status = 409;
+      throw error;
+    }
+    fs.mkdirSync(path.dirname(nextTarget), { recursive: true });
+    fs.renameSync(target, nextTarget);
+    invalidateWorkspaceCaches(root);
+    const rel = path.relative(root, nextTarget).replaceAll("\\", "/");
+    return {
+      ...(await getWorkspaceFile(id, settings, rel)),
+      action,
+      previousPath: path.relative(root, target).replaceAll("\\", "/")
+    };
+  }
+
+  const error = new Error("Unsupported workspace file action.");
+  error.status = 400;
+  throw error;
+}
+
 export async function openWorkspaceInExplorer(id, settings) {
   const workspace = workspaceOrThrow(id);
   const target = resolveAllowedPath(workspace.path, settings);
@@ -1029,6 +1174,38 @@ export async function applyWorkspaceGitFileAction(id, settings, body = {}) {
       error.status = 409;
       throw error;
     }
+  } else if (action === "use-ours" || action === "use-theirs") {
+    const side = action === "use-ours" ? "--ours" : "--theirs";
+    const checkout = await git(["checkout", side, "--", relPath], cwd);
+    if (!checkout.ok) {
+      const error = new Error(checkout.stderr || "Failed to select the conflict side.");
+      error.status = 409;
+      throw error;
+    }
+    const staged = await git(["add", "--", relPath], cwd);
+    if (!staged.ok) {
+      const error = new Error(staged.stderr || "Failed to mark the conflict as resolved.");
+      error.status = 409;
+      throw error;
+    }
+  } else if (action === "mark-resolved") {
+    const result = await git(["add", "--", relPath], cwd);
+    if (!result.ok) {
+      const error = new Error(result.stderr || "Failed to mark the conflict as resolved.");
+      error.status = 409;
+      throw error;
+    }
+  } else if (action === "stage-hunk" || action === "unstage-hunk") {
+    const patch = unifiedPatchForPath(body.patch, relPath);
+    const args = ["apply", "--cached", "--unidiff-zero"];
+    if (action === "unstage-hunk") args.push("--reverse");
+    args.push("-");
+    const result = await gitWithInput(args, cwd, patch);
+    if (!result.ok) {
+      const error = new Error(result.stderr || "Failed to apply git hunk.");
+      error.status = 409;
+      throw error;
+    }
   } else {
     const error = new Error("Unsupported git file action.");
     error.status = 400;
@@ -1058,6 +1235,38 @@ export async function applyWorkspaceGitAction(id, settings, body = {}) {
     result = await git(["add", "-A"], cwd);
   } else if (action === "unstage-all") {
     result = await git(["restore", "--staged", "."], cwd);
+  } else if (action === "branch-create" || action === "branch-switch") {
+    const branchName = String(body.branchName || "").trim();
+    if (!branchName) {
+      const error = new Error("Branch name is required.");
+      error.status = 400;
+      throw error;
+    }
+    const validBranch = await git(["check-ref-format", "--branch", branchName], cwd);
+    if (!validBranch.ok) {
+      const error = new Error(validBranch.stderr || "Invalid branch name.");
+      error.status = 400;
+      throw error;
+    }
+    if (action === "branch-create") {
+      const baseRef = String(body.baseRef || "HEAD").trim() || "HEAD";
+      const resolvedBase = await git(["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`], cwd);
+      if (!resolvedBase.ok) {
+        const error = new Error(resolvedBase.stderr || "Base ref was not found.");
+        error.status = 400;
+        throw error;
+      }
+      result = await git(["switch", "-c", branchName, resolvedBase.stdout.trim()], cwd);
+    } else {
+      result = await git(["switch", branchName], cwd);
+    }
+  } else if (action === "stash-push") {
+    const args = ["stash", "push", "-u"];
+    const message = String(body.message || "").trim();
+    if (message) args.push("-m", message);
+    result = await git(args, cwd);
+  } else if (action === "stash-pop") {
+    result = await git(["stash", "pop"], cwd);
   } else if (action === "commit") {
     const message = String(body.message || "").trim();
     if (!message) {

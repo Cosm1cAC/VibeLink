@@ -23,6 +23,7 @@ import {
   getPairingSession,
   getToolRun,
   findWorkspaceForPath,
+  listPushSubscriptions,
   listApprovalRequests,
   listAuditLogs,
   listDesktopObservations,
@@ -42,6 +43,7 @@ import {
   eventStoreMode,
   getEventStoreRuntimeStats,
   replayEventWindowAsync,
+  upsertNativePushToken,
   upsertPushSubscription
 } from "./db.js";
 import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
@@ -90,11 +92,11 @@ import {
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
 import { buildProviderRegistry } from "./providerRegistry.js";
-import { loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets } from "./store.js";
-import { writeApiKeys } from "./credentialStore.js";
+import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
+import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
-import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
+import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
@@ -1392,6 +1394,24 @@ function serveAttachment(request, response, url) {
   });
 }
 
+function publicPushSubscription(item = {}) {
+  const subscription = item.subscription || {};
+  const token = String(subscription.token || "");
+  return {
+    id: item.id || "",
+    deviceId: item.deviceId || "",
+    endpoint: item.endpoint || "",
+    kind: item.kind || subscription.kind || (String(item.endpoint || "").startsWith("native:") ? "native" : "web"),
+    provider: subscription.provider || "",
+    platform: subscription.platform || "",
+    appId: subscription.appId || "",
+    installationId: subscription.installationId || "",
+    tokenPreview: token ? `${token.slice(0, 6)}...${token.slice(-4)}` : "",
+    createdAt: item.createdAt || "",
+    updatedAt: item.updatedAt || ""
+  };
+}
+
 async function routeApi(request, response, url) {
   if (url.pathname === "/api/login" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "login", { limit: 8, windowMs: 10 * 60 * 1000 })) return;
@@ -2376,6 +2396,9 @@ async function routeApi(request, response, url) {
       return;
     }
     const credentialResult = patch.apiKeys ? await writeApiKeys(patch.apiKeys) : {};
+    if (typeof body.nativePush?.fcmServiceAccountJson === "string" && body.nativePush.fcmServiceAccountJson.trim()) {
+      credentialResult.fcmServiceAccount = await writeSecret("fcmServiceAccount", body.nativePush.fcmServiceAccountJson.trim());
+    }
     settings = {
       ...settings,
       ...patch,
@@ -2390,6 +2413,39 @@ async function routeApi(request, response, url) {
     scheduleToolEventsPrune();
     audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch), credentials: credentialResult } });
     sendJson(response, 200, { ok: true, settings: await publicSettings(settings) });
+    return;
+  }
+
+  if (url.pathname === "/api/settings/export" && request.method === "GET") {
+    audit(request, url, auth, { type: "settings.export", success: true });
+    sendJson(response, 200, await buildSettingsExport(settings));
+    return;
+  }
+
+  if (url.pathname === "/api/settings/import" && request.method === "POST") {
+    const body = await readBody(request);
+    let nextSettings;
+    try {
+      nextSettings = importSettingsSnapshot(settings, body);
+    } catch (error) {
+      sendError(response, error.status || 400, error.message || "Invalid settings import.");
+      return;
+    }
+    const summary = summarizeSettingsImport(settings, nextSettings);
+    if (isDryRun(url) || body.dryRun === true) {
+      sendJson(response, 200, {
+        dryRun: true,
+        ...summary,
+        settings: await publicSettings(nextSettings)
+      });
+      return;
+    }
+    settings = ensureNotificationSettings(nextSettings);
+    await saveSettings(settings);
+    ensureDefaultWorkspaces(settings);
+    scheduleToolEventsPrune();
+    audit(request, url, auth, { type: "settings.import", success: true, meta: summary });
+    sendJson(response, 200, { ok: true, ...summary, settings: await publicSettings(settings) });
     return;
   }
 
@@ -2491,11 +2547,41 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/push/subscriptions" && request.method === "GET") {
+    const kind = url.searchParams.get("kind") || "";
+    sendJson(response, 200, {
+      items: applyFields(listPushSubscriptions({ kind: kind || null }).map(publicPushSubscription), url)
+    });
+    return;
+  }
+
   if (url.pathname === "/api/push/subscriptions" && request.method === "POST") {
     const body = await readBody(request);
     const subscription = upsertPushSubscription({ deviceId: auth.device?.id || "", subscription: body.subscription || body });
     audit(request, url, auth, { type: "push.subscribe", success: true, target: subscription.id });
-    sendJson(response, 201, { ok: true, subscription });
+    sendJson(response, 201, { ok: true, subscription: publicPushSubscription(subscription) });
+    return;
+  }
+
+  if (url.pathname === "/api/push/native-token" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "push.native", { limit: 12, windowMs: 10 * 60 * 1000 }, auth, auth.device?.id || "")) return;
+    const body = await readBody(request);
+    let subscription;
+    try {
+      subscription = upsertNativePushToken({
+        deviceId: auth.device?.id || "",
+        provider: body.provider || "android",
+        token: body.token || "",
+        platform: body.platform || "android",
+        appId: body.appId || "",
+        installationId: body.installationId || ""
+      });
+    } catch (error) {
+      sendError(response, error.status || 400, error.message);
+      return;
+    }
+    audit(request, url, auth, { type: "push.native.subscribe", success: true, target: subscription.id, meta: { provider: subscription.provider, platform: subscription.platform } });
+    sendJson(response, 201, { ok: true, subscription: publicPushSubscription(subscription) });
     return;
   }
 
@@ -2539,6 +2625,43 @@ async function routeApi(request, response, url) {
   const workspaceFileMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file$/);
   if (workspaceFileMatch && request.method === "GET") {
     sendJson(response, 200, await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || ""));
+    return;
+  }
+
+  if (workspaceFileMatch && request.method === "POST") {
+    const body = await readBody(request);
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        wouldValidate: {
+          action: body.action || "write",
+          path: body.path || "",
+          nextPath: body.nextPath || "",
+          textBytes: Buffer.byteLength(String(body.text || ""), "utf8")
+        },
+        approvalRequired: false
+      });
+      return;
+    }
+    try {
+      const result = await mutateWorkspaceFile(workspaceFileMatch[1], settings, body);
+      audit(request, url, auth, {
+        type: "workspace.file",
+        success: true,
+        target: result.path || body.path || "",
+        meta: { action: result.action || body.action || "write", previousPath: result.previousPath || "" }
+      });
+      sendJson(response, result.action === "write" ? 200 : 200, result);
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.file",
+        success: false,
+        target: body.path || "",
+        reason: error.message,
+        meta: { action: body.action || "write" }
+      });
+      sendError(response, error.status || 500, error.message);
+    }
     return;
   }
 

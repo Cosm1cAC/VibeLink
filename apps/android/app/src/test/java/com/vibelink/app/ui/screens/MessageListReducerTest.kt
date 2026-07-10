@@ -48,4 +48,56 @@ class MessageListReducerTest {
         assertEquals(1, reduced[1].toolCallCount)
         assertFalse(reduced.any { it.text.isBlank() && it.toolCalls.isNotEmpty() && it !== reduced[1] })
     }
+
+    @Test
+    fun editsFirstMatchingMessageByTurnId() {
+        val messages = listOf(
+            ChatMessage(role = "user", text = "Original", turnId = "turn-1"),
+            ChatMessage(role = "user", text = "Original", turnId = "turn-2"),
+        )
+
+        val edited = MessageListViewModel.editFirstMatchingMessage(
+            messages,
+            target = ChatMessage(role = "user", text = "ignored", turnId = "turn-1"),
+            nextText = "Updated",
+        )
+
+        assertEquals("Updated", edited[0].text)
+        assertEquals("Original", edited[1].text)
+    }
+
+    @Test
+    fun deletesOnlyTheFirstMatchingMessage() {
+        val messages = listOf(
+            ChatMessage(role = "assistant", text = "Duplicate"),
+            ChatMessage(role = "assistant", text = "Duplicate"),
+            ChatMessage(role = "user", text = "Keep me"),
+        )
+
+        val reduced = MessageListViewModel.deleteFirstMatchingMessage(
+            messages,
+            target = ChatMessage(role = "assistant", text = "Duplicate"),
+        )
+
+        assertEquals(2, reduced.size)
+        assertEquals("Duplicate", reduced[0].text)
+        assertEquals("Keep me", reduced[1].text)
+    }
+
+    @Test
+    fun findsPreviousUserPromptForRegeneration() {
+        val messages = listOf(
+            ChatMessage(role = "user", text = "First prompt", turnId = "u1"),
+            ChatMessage(role = "assistant", text = "First answer", turnId = "a1"),
+            ChatMessage(role = "user", text = "Second prompt", turnId = "u2"),
+            ChatMessage(role = "assistant", text = "Second answer", turnId = "a2"),
+        )
+
+        val prompt = MessageListViewModel.previousUserPromptForRegeneration(
+            messages,
+            target = ChatMessage(role = "assistant", text = "ignored", turnId = "a2"),
+        )
+
+        assertEquals("Second prompt", prompt)
+    }
 }

@@ -1,28 +1,51 @@
-# Rust Migration TODO
+# Android Handoff Gap Closure TODO
 
-Generated from `docs/rust-migration-status.json`. Keep this aligned with `npm run rust:migration:check`.
+Generated from `docs/android-handoff.md` and the current `codex/android-handoff-gaps` branch state.
 
-## Status automation
+## Already completed by previous commits
 
-- [x] Add `docs/rust-migration-status.json` with all Rust migration slices.
-- [x] Add `docs/rust-migration-status.md` with status table and promotion gates.
-- [x] Add `tools/check-rust-migration-status.mjs`.
-- [x] Add package scripts for Rust migration checks and focused test bundles.
-- [ ] Link README and `docs/feature-gap-table.md` to `docs/rust-migration-status.md`.
-- [ ] Add ADR for Node control plane + Rust data plane + sidecar-first + fallback-required.
+- [x] Restore message routes from `conversationKey` after pending state is lost.
+- [x] Block targeted Desktop Remote sends when focus confirmation fails.
+- [x] Add explicit approval handoff with Settings > Approvals and retry context.
+- [x] Correlate Live Call QA answers by stable question/task identifiers.
+- [x] Add system-following dark mode.
+- [x] Add Live Call entry point to the main composer.
+- [x] Add streaming assistant bubble behavior and attach tool cards to active turns.
+- [x] Add prompt history and quick command chips.
+- [x] Add message copy and code-block copy actions.
+- [x] Add Workspace search/show-more/full-diff/test/git actions.
+- [x] Add Android share and foreground notification polish.
 
-## Slice next actions
+## Completed in this session
 
-- [ ] Workspace tree scanner (`opt-in`): add auto mode, parity gates, fallback counters, lastError stats, and either full gitignore path semantics or an explicit blocker before canary.
-- [ ] Persistent MCP stdio sessions (`opt-in`): add auto mode, health readiness checks, promotion thresholds, and docs for spawn-reduction and fallback-rate gates before canary/default-on.
-- [ ] Event store append/replay sidecar (`contract`): add `__health`/`stats` to the JSONL contract, implement real Rust `event-store-sidecar`, then wire `src/db.js` to prefer it under an explicit flag with Worker/sync fallback.
-- [ ] Live audio low-latency pipeline (`planned`): define a bounded JSONL contract for deterministic PCM chunk preprocessing: level, peak, RMS, sequence accounting, ring-buffer/backpressure stats, `__health`, `stats`, and `__close`; do not move ASR into Rust in the first slice.
-- [ ] Compression and context budget helper (`planned`): if needed, define a deterministic data-plane helper contract for byte/log sampling and budget trimming only; do not claim semantic summarization or provider-token precision.
+- [x] Add file-reference extraction utility and tests.
+- [x] Surface detected file references in chat message actions.
+- [x] Add or update focused tests for file-reference behavior.
+- [x] Add Android message edit/delete/regenerate reducers and focused tests.
+- [x] Surface edit/delete/regenerate in the Android message action menu.
+- [x] Add native image/file picker buttons to the Android composer.
+- [x] Upload picked attachments through `/api/attachments` and inject markdown/preview prompt text.
+- [x] Add Android Settings admin summaries for devices, pending pairing sessions, audit logs, MCP status, and Doctor checks.
+- [x] Add Android device revoke and pairing approve/deny actions.
+- [x] Add Workspace file write/rename/delete routes and Android file editor controls.
+- [x] Add branch create/switch, stash push/pop, worktree creation, per-hunk stage, and conflict-resolution actions.
+- [x] Add Android PTY terminal session controls with input, resize, stop, and tool-event output polling.
+- [x] Add richer Markdown rendering plus image/artifact link chips in Android message bubbles.
+- [x] Add direct file-reference open from chat into Workspace file preview, with copy still available.
+- [x] Add Cloudflare guidance, tool-event retention/prune controls, MCP probe controls, and Doctor summaries in Settings.
+- [x] Add a tested mobile runtime policy for weak network, background catch-up, notification permission, foreground audio, and multi-device sync decisions.
+- [x] Add native push token registration, FCM credential configuration, and server-side native push delivery path.
+- [x] Add settings export/import endpoints with dry-run preview plus Android Settings controls.
+- [x] Add inline Android image thumbnail gallery using Coil while preserving artifact link actions.
 
 ## Verification
 
-- [x] `node tools/check-rust-migration-status.mjs`
-- [ ] `npm run rust:migration:check`
-- [ ] `npm run rust:test`
-- [ ] `npm run test:event-store`
-- [ ] `npm run test:rust-sidecars`
+- [x] Baseline Android unit tests: `apps/android/.\gradlew.bat testDebugUnitTest`
+- [x] Focused Android unit tests after final slice: `apps/android/.\gradlew.bat :app:testDebugUnitTest --tests "com.vibelink.app.ui.screens.MessageContentUtilsTest"`
+- [x] Focused Android message reducer tests: `apps/android/.\gradlew.bat :app:testDebugUnitTest --tests "com.vibelink.app.ui.screens.MessageListReducerTest"`
+- [x] Focused Android Workspace/mobile tests: `apps/android/.\gradlew.bat :app:testDebugUnitTest --tests "com.vibelink.app.ui.screens.WorkspaceDiffUtilsTest" --tests "com.vibelink.app.mobile.MobileResiliencePolicyTest"`
+- [x] Focused backend workspace tests: `node --test test/workspacesFileMutation.test.js test/workspacesGitDepth.test.js test/workspacesWorktree.test.js`
+- [x] Focused backend settings/native push tests: `node --test test/settingsImportExport.test.js test/nativePushSubscription.test.js`
+- [x] Final Android unit test suite: `apps/android/.\gradlew.bat testDebugUnitTest`
+- [x] Review diff for scope and secrets.
+- [ ] Stage, commit, and push current branch.

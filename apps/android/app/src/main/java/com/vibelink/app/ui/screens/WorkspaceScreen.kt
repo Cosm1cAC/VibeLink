@@ -21,9 +21,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -81,6 +86,7 @@ fun WorkspaceScreen(
     val refreshing by viewModel.refreshing.collectAsState()
     val commandRunning by viewModel.commandRunning.collectAsState()
     val gitActionRunning by viewModel.gitActionRunning.collectAsState()
+    val terminal by viewModel.terminal.collectAsState()
     val error by viewModel.error.collectAsState()
 
     var command by remember { mutableStateOf("git status --short --branch") }
@@ -132,7 +138,9 @@ fun WorkspaceScreen(
                     selectedFile = selectedFile,
                     changedFiles = gitStatus?.files.orEmpty().ifEmpty { gitDiff?.files.orEmpty() },
                     gitDiff = gitDiff,
+                    terminal = terminal,
                     command = command,
+                    refreshing = refreshing,
                     commandRunning = commandRunning,
                     gitActionRunning = gitActionRunning,
                     commandResult = commandResult,
@@ -164,7 +172,9 @@ private fun WorkspaceContent(
     selectedFile: WorkspaceFileResponse?,
     changedFiles: List<GitStatusItem>,
     gitDiff: GitDiffResponse?,
+    terminal: WorkspaceTerminalUiState,
     command: String,
+    refreshing: Boolean,
     commandRunning: Boolean,
     gitActionRunning: Boolean,
     commandResult: CommandResult?,
@@ -179,6 +189,17 @@ private fun WorkspaceContent(
     var fileLimit by remember(selectedWorkspaceId, currentDir, fileQuery) { mutableStateOf(40) }
     var changedLimit by remember(selectedWorkspaceId, changedFiles.size) { mutableStateOf(32) }
     var showFullDiff by remember(selectedWorkspaceId, gitDiff?.diff) { mutableStateOf(false) }
+    var newFilePath by remember(selectedWorkspaceId, currentDir) { mutableStateOf("") }
+    var newFileText by remember(selectedWorkspaceId, currentDir) { mutableStateOf("") }
+    var worktreeBranch by remember(selectedWorkspaceId) { mutableStateOf("") }
+    var worktreeBaseRef by remember(selectedWorkspaceId) { mutableStateOf("HEAD") }
+    var worktreeTitle by remember(selectedWorkspaceId) { mutableStateOf("") }
+    var branchName by remember(selectedWorkspaceId) { mutableStateOf("") }
+    var branchBaseRef by remember(selectedWorkspaceId) { mutableStateOf("HEAD") }
+    var stashMessage by remember(selectedWorkspaceId) { mutableStateOf("") }
+    var terminalShell by remember(selectedWorkspaceId) { mutableStateOf("") }
+    var terminalInput by remember(selectedWorkspaceId, terminal.sessionId) { mutableStateOf("") }
+    val diffHunks = remember(gitDiff?.diff) { parseWorkspaceDiffHunks(gitDiff?.diff.orEmpty()) }
     val filteredFiles = remember(files, fileQuery) {
         val query = fileQuery.trim()
         if (query.isBlank()) files else files.filter { item ->
@@ -254,34 +275,37 @@ private fun WorkspaceContent(
                         onShowMore = { fileLimit += 40 },
                     )
                 }
+                Spacer(Modifier.height(10.dp))
+                WorkspaceFileCreateForm(
+                    path = newFilePath,
+                    text = newFileText,
+                    enabled = !refreshing && selectedWorkspaceId.isNotBlank(),
+                    onPathChange = { newFilePath = it },
+                    onTextChange = { newFileText = it },
+                    onCreate = {
+                        viewModel.mutateFile(
+                            apiClient = apiClient,
+                            action = "write",
+                            path = newFilePath,
+                            text = newFileText,
+                        )
+                        newFilePath = ""
+                        newFileText = ""
+                    },
+                )
             }
         }
 
         selectedFile?.let { file ->
             item {
-                SectionCard(title = "File Preview") {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = file.path,
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        IconButton(onClick = { viewModel.clearFilePreview() }) {
-                            Icon(Icons.Default.Close, contentDescription = "Close preview")
-                        }
-                    }
-                    if (file.binary || file.text.isBlank()) {
-                        MutedText("Binary or large file; preview is unavailable.")
-                    } else {
-                        CodeBlock(text = file.text.take(12000), maxLines = 120)
-                    }
-                }
+                WorkspaceFilePreviewCard(
+                    file = file,
+                    busy = refreshing,
+                    onClose = viewModel::clearFilePreview,
+                    onSave = { text -> viewModel.mutateFile(apiClient, "write", file.path, text) },
+                    onRename = { nextPath -> viewModel.mutateFile(apiClient, "rename", file.path, nextPath = nextPath) },
+                    onDelete = { viewModel.mutateFile(apiClient, "delete", file.path) },
+                )
             }
         }
 
@@ -335,6 +359,48 @@ private fun WorkspaceContent(
                     ) { Text("Commit") }
                     if (gitActionRunning) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 }
+                Spacer(Modifier.height(10.dp))
+                WorkspaceWorktreeForm(
+                    branchName = worktreeBranch,
+                    baseRef = worktreeBaseRef,
+                    title = worktreeTitle,
+                    enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                    onBranchNameChange = { worktreeBranch = it },
+                    onBaseRefChange = { worktreeBaseRef = it },
+                    onTitleChange = { worktreeTitle = it },
+                    onCreate = {
+                        viewModel.createWorktree(apiClient, worktreeBranch, worktreeBaseRef, worktreeTitle)
+                        worktreeBranch = ""
+                        worktreeBaseRef = "HEAD"
+                        worktreeTitle = ""
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+                WorkspaceBranchStashForm(
+                    branchName = branchName,
+                    baseRef = branchBaseRef,
+                    stashMessage = stashMessage,
+                    enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                    onBranchNameChange = { branchName = it },
+                    onBaseRefChange = { branchBaseRef = it },
+                    onStashMessageChange = { stashMessage = it },
+                    onCreateBranch = {
+                        viewModel.applyGitAction(
+                            apiClient,
+                            "branch-create",
+                            branchName = branchName.trim(),
+                            baseRef = branchBaseRef.trim().ifBlank { "HEAD" },
+                        )
+                    },
+                    onSwitchBranch = {
+                        viewModel.applyGitAction(apiClient, "branch-switch", branchName = branchName.trim())
+                    },
+                    onStashPush = {
+                        viewModel.applyGitAction(apiClient, "stash-push", message = stashMessage.trim())
+                        stashMessage = ""
+                    },
+                    onStashPop = { viewModel.applyGitAction(apiClient, "stash-pop") },
+                )
                 Spacer(Modifier.height(8.dp))
                 if (changedFiles.isEmpty()) {
                     MutedText("Working tree is clean or Git is unavailable.")
@@ -347,6 +413,9 @@ private fun WorkspaceContent(
                                 onStage = { viewModel.applyGitFileAction(apiClient, item.path.ifBlank { item.oldPath }, "stage") },
                                 onUnstage = { viewModel.applyGitFileAction(apiClient, item.path.ifBlank { item.oldPath }, "unstage") },
                                 onRestore = { viewModel.applyGitFileAction(apiClient, item.path.ifBlank { item.oldPath }, "restore") },
+                                onUseOurs = { viewModel.applyGitFileAction(apiClient, item.path.ifBlank { item.oldPath }, "use-ours") },
+                                onUseTheirs = { viewModel.applyGitFileAction(apiClient, item.path.ifBlank { item.oldPath }, "use-theirs") },
+                                onMarkResolved = { viewModel.applyGitFileAction(apiClient, item.path.ifBlank { item.oldPath }, "mark-resolved") },
                             )
                         }
                     }
@@ -367,6 +436,16 @@ private fun WorkspaceContent(
                 } else {
                     val truncated = diff.length > 8000 && !showFullDiff
                     CodeBlock(text = if (showFullDiff) diff else diff.take(8000), maxLines = if (showFullDiff) 400 else 80)
+                    if (diffHunks.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        DiffHunkPanel(
+                            hunks = diffHunks.take(12),
+                            enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
+                            onStageHunk = { hunk ->
+                                viewModel.applyGitFileAction(apiClient, hunk.path, "stage-hunk", patch = hunk.patch)
+                            },
+                        )
+                    }
                     if (truncated) {
                         Spacer(Modifier.height(8.dp))
                         MutedText("Diff preview is truncated at 8000 characters.")
@@ -433,6 +512,271 @@ private fun WorkspaceContent(
                     Spacer(Modifier.height(10.dp))
                     CommandResultView(result)
                 }
+            }
+        }
+
+        item {
+            WorkspaceTerminalCard(
+                terminal = terminal,
+                shell = terminalShell,
+                input = terminalInput,
+                enabled = selectedWorkspaceId.isNotBlank(),
+                onShellChange = { terminalShell = it },
+                onInputChange = { terminalInput = it },
+                onStart = { viewModel.startTerminal(apiClient, terminalShell) },
+                onSendInput = {
+                    viewModel.sendTerminalInput(apiClient, terminalInput)
+                    terminalInput = ""
+                },
+                onResize = { viewModel.resizeTerminal(apiClient, 120, 36) },
+                onStop = { viewModel.stopTerminal(apiClient) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceFileCreateForm(
+    path: String,
+    text: String,
+    enabled: Boolean,
+    onPathChange: (String) -> Unit,
+    onTextChange: (String) -> Unit,
+    onCreate: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Create or replace file", style = MaterialTheme.typography.labelMedium)
+        OutlinedTextField(
+            value = path,
+            onValueChange = onPathChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Path") },
+            singleLine = true,
+        )
+        OutlinedTextField(
+            value = text,
+            onValueChange = onTextChange,
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 2,
+            maxLines = 8,
+            label = { Text("Text") },
+            singleLine = false,
+        )
+        Button(
+            onClick = onCreate,
+            enabled = enabled && path.trim().isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(Icons.Default.Add, contentDescription = null)
+            Spacer(Modifier.size(8.dp))
+            Text("Write file")
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceFilePreviewCard(
+    file: WorkspaceFileResponse,
+    busy: Boolean,
+    onClose: () -> Unit,
+    onSave: (String) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: () -> Unit,
+) {
+    var editing by remember(file.path, file.updatedAt) { mutableStateOf(false) }
+    var draftText by remember(file.path, file.text) { mutableStateOf(file.text) }
+    var renamePath by remember(file.path) { mutableStateOf(file.path) }
+    var deleteArmed by remember(file.path) { mutableStateOf(false) }
+
+    SectionCard(title = "File Preview") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = file.path,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onClose) {
+                Icon(Icons.Default.Close, contentDescription = "Close preview")
+            }
+        }
+        if (file.binary) {
+            MutedText("Binary or large file; preview is unavailable.")
+            return@SectionCard
+        }
+
+        OutlinedTextField(
+            value = renamePath,
+            onValueChange = { renamePath = it; deleteArmed = false },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Path") },
+            singleLine = true,
+        )
+        Spacer(Modifier.height(8.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                OutlinedButton(
+                    onClick = { editing = !editing; deleteArmed = false },
+                    enabled = !busy,
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text(if (editing) "Preview" else "Edit")
+                }
+            }
+            item {
+                OutlinedButton(
+                    onClick = { onRename(renamePath); deleteArmed = false },
+                    enabled = !busy && renamePath.trim().isNotBlank() && renamePath.trim() != file.path,
+                ) {
+                    Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Rename")
+                }
+            }
+            item {
+                Button(
+                    onClick = { onSave(draftText); editing = false; deleteArmed = false },
+                    enabled = !busy && editing,
+                ) {
+                    Icon(Icons.Default.Save, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Save")
+                }
+            }
+            item {
+                OutlinedButton(
+                    onClick = {
+                        if (deleteArmed) onDelete() else deleteArmed = true
+                    },
+                    enabled = !busy,
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text(if (deleteArmed) "Confirm delete" else "Delete")
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        if (editing) {
+            OutlinedTextField(
+                value = draftText,
+                onValueChange = { draftText = it; deleteArmed = false },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 8,
+                maxLines = 20,
+                label = { Text("File text") },
+                singleLine = false,
+            )
+        } else if (file.text.isBlank()) {
+            MutedText("Text file is empty.")
+        } else {
+            CodeBlock(text = file.text.take(12000), maxLines = 120)
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceWorktreeForm(
+    branchName: String,
+    baseRef: String,
+    title: String,
+    enabled: Boolean,
+    onBranchNameChange: (String) -> Unit,
+    onBaseRefChange: (String) -> Unit,
+    onTitleChange: (String) -> Unit,
+    onCreate: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Create worktree", style = MaterialTheme.typography.labelMedium)
+        OutlinedTextField(
+            value = branchName,
+            onValueChange = onBranchNameChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Branch") },
+            singleLine = true,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = baseRef,
+                onValueChange = onBaseRefChange,
+                modifier = Modifier.weight(1f),
+                label = { Text("Base") },
+                singleLine = true,
+            )
+            OutlinedButton(
+                onClick = onCreate,
+                enabled = enabled && branchName.trim().isNotBlank(),
+            ) { Text("Create") }
+        }
+        OutlinedTextField(
+            value = title,
+            onValueChange = onTitleChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Title") },
+            singleLine = true,
+        )
+    }
+}
+
+@Composable
+private fun WorkspaceBranchStashForm(
+    branchName: String,
+    baseRef: String,
+    stashMessage: String,
+    enabled: Boolean,
+    onBranchNameChange: (String) -> Unit,
+    onBaseRefChange: (String) -> Unit,
+    onStashMessageChange: (String) -> Unit,
+    onCreateBranch: () -> Unit,
+    onSwitchBranch: () -> Unit,
+    onStashPush: () -> Unit,
+    onStashPop: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Branch and stash", style = MaterialTheme.typography.labelMedium)
+        OutlinedTextField(
+            value = branchName,
+            onValueChange = onBranchNameChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Branch name") },
+            singleLine = true,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = baseRef,
+                onValueChange = onBaseRefChange,
+                modifier = Modifier.weight(1f),
+                label = { Text("Base") },
+                singleLine = true,
+            )
+            OutlinedButton(
+                onClick = onCreateBranch,
+                enabled = enabled && branchName.trim().isNotBlank(),
+            ) { Text("Create") }
+            OutlinedButton(
+                onClick = onSwitchBranch,
+                enabled = enabled && branchName.trim().isNotBlank(),
+            ) { Text("Switch") }
+        }
+        OutlinedTextField(
+            value = stashMessage,
+            onValueChange = onStashMessageChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Stash message") },
+            singleLine = true,
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                OutlinedButton(onClick = onStashPush, enabled = enabled) { Text("Stash") }
+            }
+            item {
+                OutlinedButton(onClick = onStashPop, enabled = enabled) { Text("Pop stash") }
             }
         }
     }
@@ -528,7 +872,11 @@ private fun GitFileRow(
     onStage: () -> Unit,
     onUnstage: () -> Unit,
     onRestore: () -> Unit,
+    onUseOurs: () -> Unit,
+    onUseTheirs: () -> Unit,
+    onMarkResolved: () -> Unit,
 ) {
+    val conflict = isConflictStatus(item.status)
     Column(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
@@ -562,6 +910,119 @@ private fun GitFileRow(
             item {
                 OutlinedButton(onClick = onRestore, enabled = !gitActionRunning) { Text("Restore") }
             }
+            if (conflict) {
+                item {
+                    OutlinedButton(onClick = onUseOurs, enabled = !gitActionRunning) { Text("Ours") }
+                }
+                item {
+                    OutlinedButton(onClick = onUseTheirs, enabled = !gitActionRunning) { Text("Theirs") }
+                }
+                item {
+                    OutlinedButton(onClick = onMarkResolved, enabled = !gitActionRunning) { Text("Resolved") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiffHunkPanel(
+    hunks: List<WorkspaceDiffHunk>,
+    enabled: Boolean,
+    onStageHunk: (WorkspaceDiffHunk) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Hunks", style = MaterialTheme.typography.labelMedium)
+        hunks.forEachIndexed { index, hunk ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "${index + 1}. ${hunk.path} ${hunk.header}",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                OutlinedButton(onClick = { onStageHunk(hunk) }, enabled = enabled) { Text("Stage") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceTerminalCard(
+    terminal: WorkspaceTerminalUiState,
+    shell: String,
+    input: String,
+    enabled: Boolean,
+    onShellChange: (String) -> Unit,
+    onInputChange: (String) -> Unit,
+    onStart: () -> Unit,
+    onSendInput: () -> Unit,
+    onResize: () -> Unit,
+    onStop: () -> Unit,
+) {
+    SectionCard(title = "Terminal") {
+        OutlinedTextField(
+            value = shell,
+            onValueChange = onShellChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Shell") },
+            singleLine = true,
+        )
+        Spacer(Modifier.height(8.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                Button(
+                    onClick = onStart,
+                    enabled = enabled && terminal.status !in setOf("running", "starting", "pending"),
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Start")
+                }
+            }
+            item {
+                OutlinedButton(
+                    onClick = onResize,
+                    enabled = terminal.sessionId.isNotBlank() && terminal.supportsResize,
+                ) { Text("120x36") }
+            }
+            item {
+                OutlinedButton(
+                    onClick = onStop,
+                    enabled = terminal.sessionId.isNotBlank() && terminal.status in setOf("running", "starting", "pending"),
+                ) { Text("Stop") }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            AssistChip(onClick = {}, label = { Text(terminal.status.ifBlank { "idle" }) })
+            if (terminal.mode.isNotBlank()) AssistChip(onClick = {}, label = { Text(terminal.mode) })
+        }
+        if (terminal.output.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            CodeBlock(text = terminal.output, maxLines = 120)
+        }
+        if (terminal.sessionId.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = input,
+                onValueChange = onInputChange,
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 1,
+                maxLines = 4,
+                label = { Text("Input") },
+                singleLine = false,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onSendInput,
+                enabled = input.isNotBlank() && terminal.status in setOf("running", "starting", "pending"),
+            ) { Text("Send") }
         }
     }
 }
@@ -649,6 +1110,11 @@ private fun statusColor(status: String) = when {
     status.contains("D") -> MaterialTheme.colorScheme.error
     status.contains("A") || status.contains("??") -> MaterialTheme.colorScheme.secondary
     else -> MaterialTheme.colorScheme.primary
+}
+
+private fun isConflictStatus(status: String): Boolean {
+    val trimmed = status.trim()
+    return trimmed.contains("U") || trimmed in setOf("AA", "DD")
 }
 
 private fun formatSize(size: Long): String = when {

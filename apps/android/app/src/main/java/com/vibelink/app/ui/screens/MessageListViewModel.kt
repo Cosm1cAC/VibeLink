@@ -222,6 +222,31 @@ class MessageListViewModel : ViewModel() {
         }
     }
 
+    fun editMessage(target: ChatMessage, nextText: String) {
+        _messages.value = editFirstMatchingMessage(_messages.value, target, nextText)
+    }
+
+    fun deleteMessage(target: ChatMessage) {
+        _messages.value = deleteFirstMatchingMessage(_messages.value, target)
+    }
+
+    fun regenerateMessage(
+        apiClient: ApiClient,
+        target: ChatMessage,
+        agent: String,
+        model: String = "",
+        reasoningEffort: String = "",
+        cwd: String = "",
+    ) {
+        val prompt = previousUserPromptForRegeneration(_messages.value, target)
+        if (prompt.isBlank()) {
+            appendError("No earlier user message is available to regenerate from.")
+            return
+        }
+        _messages.value = deleteFirstMatchingMessage(_messages.value, target)
+        sendPrompt(apiClient, prompt, agent, model, reasoningEffort, cwd)
+    }
+
     fun stopCurrentTask(apiClient: ApiClient) {
         val taskId = _currentTaskId.value.ifBlank { activeConversation?.id.orEmpty() }
         if (taskId.isBlank()) return
@@ -608,6 +633,38 @@ class MessageListViewModel : ViewModel() {
             return seed + message
         }
 
+        fun editFirstMatchingMessage(current: List<ChatMessage>, target: ChatMessage, nextText: String): List<ChatMessage> {
+            val trimmed = nextText.trim()
+            if (trimmed.isBlank()) return current
+            var edited = false
+            return current.map { message ->
+                if (edited || !sameMessageForOperation(message, target)) message else {
+                    edited = true
+                    message.copy(text = trimmed, streaming = false)
+                }
+            }
+        }
+
+        fun deleteFirstMatchingMessage(current: List<ChatMessage>, target: ChatMessage): List<ChatMessage> {
+            var deleted = false
+            return current.filter { message ->
+                if (deleted || !sameMessageForOperation(message, target)) true else {
+                    deleted = true
+                    false
+                }
+            }
+        }
+
+        fun previousUserPromptForRegeneration(current: List<ChatMessage>, target: ChatMessage): String {
+            val targetIndex = current.indexOfFirst { sameMessageForOperation(it, target) }
+            val earlier = if (targetIndex >= 0) current.take(targetIndex) else current
+            return earlier.asReversed()
+                .firstOrNull { it.role == "user" && it.text.isNotBlank() }
+                ?.text
+                ?.trim()
+                .orEmpty()
+        }
+
         private fun canMergeAssistantText(previous: ChatMessage, next: ChatMessage): Boolean {
             return previous.role == "assistant" &&
                 next.role == "assistant" &&
@@ -615,6 +672,17 @@ class MessageListViewModel : ViewModel() {
                 next.toolCalls.isEmpty() &&
                 previous.text.isNotBlank() &&
                 next.text.isNotBlank()
+        }
+
+        private fun sameMessageForOperation(message: ChatMessage, target: ChatMessage): Boolean {
+            if (message.role != target.role) return false
+            if (message.turnId.isNotBlank() && target.turnId.isNotBlank()) return message.turnId == target.turnId
+            if (message.id.isNotBlank() && target.id.isNotBlank()) return message.id == target.id
+            return normalizeMessageText(message.text) == normalizeMessageText(target.text)
+        }
+
+        private fun normalizeMessageText(text: String): String {
+            return text.trim().replace(Regex("\\s+"), " ")
         }
 
         private fun mergeToolCalls(existing: List<ToolCallSummary>, incoming: List<ToolCallSummary>): List<ToolCallSummary> {

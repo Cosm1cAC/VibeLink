@@ -1168,6 +1168,10 @@ export function upsertPushSubscription({ deviceId = "", subscription } = {}) {
   }
   const current = nowIso();
   const id = crypto.createHash("sha1").update(subscription.endpoint).digest("hex").slice(0, 24);
+  const nextSubscription = {
+    kind: subscription.kind || (String(subscription.endpoint).startsWith("native:") ? "native" : "web"),
+    ...subscription
+  };
   database()
     .prepare(`
       INSERT INTO push_subscriptions (id, device_id, endpoint, subscription_json, created_at, updated_at, revoked_at)
@@ -1178,22 +1182,66 @@ export function upsertPushSubscription({ deviceId = "", subscription } = {}) {
         updated_at = excluded.updated_at,
         revoked_at = NULL
     `)
-    .run(id, deviceId || "", subscription.endpoint, toJson(subscription), current, current);
-  return { id, deviceId, endpoint: subscription.endpoint, createdAt: current, updatedAt: current };
+    .run(id, deviceId || "", subscription.endpoint, toJson(nextSubscription), current, current);
+  return {
+    id,
+    deviceId: deviceId || "",
+    endpoint: subscription.endpoint,
+    kind: nextSubscription.kind,
+    subscription: nextSubscription,
+    createdAt: current,
+    updatedAt: current
+  };
 }
 
-export function listPushSubscriptions() {
+export function upsertNativePushToken({ deviceId = "", provider = "android", token = "", platform = "android", appId = "", installationId = "" } = {}) {
+  const cleanToken = cleanString(token, 4096);
+  if (!cleanToken) {
+    const error = new Error("Native push token is required.");
+    error.status = 400;
+    throw error;
+  }
+  const cleanProvider = cleanString(provider, 80).toLowerCase() || "android";
+  const endpoint = `native:${cleanProvider}:${crypto.createHash("sha256").update(cleanToken).digest("hex").slice(0, 40)}`;
+  const subscription = upsertPushSubscription({
+    deviceId,
+    subscription: {
+      kind: "native",
+      endpoint,
+      provider: cleanProvider,
+      token: cleanToken,
+      platform: cleanString(platform, 80).toLowerCase() || "android",
+      appId: cleanString(appId, 200),
+      installationId: cleanString(installationId, 200)
+    }
+  });
+  return {
+    ...subscription,
+    provider: subscription.subscription.provider,
+    platform: subscription.subscription.platform,
+    appId: subscription.subscription.appId,
+    installationId: subscription.subscription.installationId
+  };
+}
+
+export function listPushSubscriptions({ kind = "web" } = {}) {
   return database()
     .prepare("SELECT * FROM push_subscriptions WHERE revoked_at IS NULL ORDER BY updated_at DESC")
     .all()
-    .map((row) => ({
-      id: row.id,
-      deviceId: row.device_id || "",
-      endpoint: row.endpoint,
-      subscription: fromJson(row.subscription_json, {}),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    }));
+    .map((row) => {
+      const subscription = fromJson(row.subscription_json, {}) || {};
+      const itemKind = subscription.kind || (String(row.endpoint || "").startsWith("native:") ? "native" : "web");
+      return {
+        id: row.id,
+        deviceId: row.device_id || "",
+        endpoint: row.endpoint,
+        kind: itemKind,
+        subscription,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
+    })
+    .filter((item) => !kind || item.kind === kind);
 }
 
 export function revokePushSubscription(idOrEndpoint) {

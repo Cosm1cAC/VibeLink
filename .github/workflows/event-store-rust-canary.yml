@@ -1,0 +1,78 @@
+name: Event Store Rust Canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/event-store-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/event-store-worker.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/**"
+      - "test/**"
+      - "tools/event-store/**"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/event-store-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/event-store-worker.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/**"
+      - "test/**"
+      - "tools/event-store/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: event-store-rust-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  event-store-rust-canary:
+    name: Contract, runtime, and canary
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Rust event-store sidecar
+        run: cargo build --release --manifest-path apps/windows/Cargo.toml
+
+      - name: Check Rust migration manifest
+        run: npm run rust:migration:check
+
+      - name: Run event-store contract and runtime tests
+        run: npm run test:event-store
+
+      - name: Run event-store canaries serially
+        run: npm run event-store:canary:all
+
+      - name: Upload canary outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-store-canary-results
+          path: .tmp/event-store-*-canary-ci.json
+          if-no-files-found: ignore

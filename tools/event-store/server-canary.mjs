@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -56,8 +57,21 @@ function createTempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-event-store-server-canary-"));
 }
 
-function randomPort() {
-  return 45000 + Math.floor(Math.random() * 10000);
+function reserveAvailablePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? Number(address.port) : 0;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (port > 0) resolve(port);
+        else reject(new Error("could not reserve a local canary port"));
+      });
+    });
+  });
 }
 
 function writeSettings(dataDir, { port, token }) {
@@ -276,7 +290,8 @@ function printSummary(result) {
 }
 
 async function main() {
-  const port = numberArg("--port", randomPort());
+  const port = process.argv.includes("--port") ? numberArg("--port", 0) : await reserveAvailablePort();
+  if (!port) throw new Error("--port must be a positive integer");
   const liveEvents = numberArg("--live-events", 40);
   const commandLines = numberArg("--command-lines", 80);
   const maxAppendAvgMs = numberArg("--max-append-avg-ms", 75);

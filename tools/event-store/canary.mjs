@@ -21,6 +21,13 @@ function numberArg(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+function nonNegativeNumberArg(name, fallback) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return fallback;
+  const parsed = Number(process.argv[index + 1]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function stringArg(name, fallback = "") {
   const index = process.argv.indexOf(name);
   if (index < 0) return fallback;
@@ -341,7 +348,7 @@ async function runRust({ dbPath, command, args, rounds, warmups, batchSize, stal
   }
 }
 
-function evaluate({ sync, rust, stallThresholdMs }) {
+function evaluate({ sync, rust, stallThresholdMs, latencyMarginMs }) {
   const checks = [];
   const rustReady = rust.health?.ok === true && rust.health?.schemaReady === true;
   checks.push({ name: "rust readiness", pass: rustReady, detail: `health ${rustReady ? "ok" : "failed"}` });
@@ -351,7 +358,7 @@ function evaluate({ sync, rust, stallThresholdMs }) {
   for (const method of appendMethods) {
     const baseline = sync.methods[method]?.avgMs || 0;
     const candidate = rust.methods[method]?.avgMs || 0;
-    const limit = baseline * 1.1;
+    const limit = Math.max(baseline * 1.1, baseline + latencyMarginMs);
     const pass = baseline === 0 ? candidate === 0 : candidate <= limit;
     checks.push({
       name: `${method} average latency`,
@@ -402,6 +409,7 @@ async function main() {
   const warmups = numberArg("--warmups", 2);
   const batchSize = numberArg("--batch-size", 120);
   const stallThresholdMs = numberArg("--stall-threshold-ms", 50);
+  const latencyMarginMs = nonNegativeNumberArg("--latency-margin-ms", 0);
   const command = stringArg("--command", defaultRustCommand());
   const args = defaultRustArgs();
   assertRustCommand(command);
@@ -409,7 +417,7 @@ async function main() {
   const tempRoot = createTempRoot();
   const sync = await runSync({ dbPath: path.join(tempRoot, "sync.sqlite"), rounds, warmups, batchSize, stallThresholdMs });
   const rust = await runRust({ dbPath: path.join(tempRoot, "rust.sqlite"), command, args, rounds, warmups, batchSize, stallThresholdMs });
-  const evaluation = evaluate({ sync, rust, stallThresholdMs });
+  const evaluation = evaluate({ sync, rust, stallThresholdMs, latencyMarginMs });
   const result = {
     generatedAt: nowIso(),
     tempRoot,
@@ -419,7 +427,8 @@ async function main() {
       batchSize,
       appendPaths: appendMethods.length,
       totalMeasuredEvents: rounds * batchSize * appendMethods.length,
-      stallThresholdMs
+      stallThresholdMs,
+      latencyMarginMs
     },
     sync,
     rust: { command, args, ...rust },

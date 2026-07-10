@@ -435,7 +435,14 @@ const eventStoreRustSidecarStats = {
 };
 
 export function isEventStoreRustSidecarEnabled() {
-  return process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR === "1";
+  const mode = String(process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR || "").trim().toLowerCase();
+  if (mode === "1" || mode === "true") return true;
+  if (mode === "auto") return eventStoreRustSidecarAvailable();
+  return false;
+}
+
+function isEventStoreRustSidecarAuto() {
+  return String(process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR || "").trim().toLowerCase() === "auto";
 }
 
 export function isEventStoreWorkerEnabled() {
@@ -476,6 +483,14 @@ function eventStoreRustSidecarCommand() {
     "debug",
     process.platform === "win32" ? "vibelink.exe" : "vibelink"
   );
+}
+
+function eventStoreRustSidecarAvailable() {
+  try {
+    return fs.existsSync(eventStoreRustSidecarCommand());
+  } catch {
+    return false;
+  }
 }
 
 function eventStoreRustSidecarArgs() {
@@ -523,8 +538,12 @@ function eventStoreRustSidecarClient() {
 }
 
 function getEventStoreRustSidecarStats() {
+  const auto = isEventStoreRustSidecarAuto();
+  const available = auto ? eventStoreRustSidecarAvailable() : true;
   return {
     enabled: isEventStoreRustSidecarEnabled(),
+    auto,
+    available,
     active: Boolean(eventStoreRustSidecar),
     ready: eventStoreRustSidecarReady,
     failed: eventStoreRustSidecarFailed,

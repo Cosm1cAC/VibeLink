@@ -35,7 +35,7 @@
       "title": "Persistent MCP stdio sessions",
       "priority": "P1",
       "status": "opt-in",
-      "rollout": "manual flag only",
+      "rollout": "manual flag or auto readiness mode",
       "featureFlags": [
         { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
         { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
@@ -78,8 +78,8 @@
       "nodeEntry": "src/db.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink event-store-sidecar <db-path>",
-      "nodeFallback": "src/db.js prefers the Rust sidecar only when VIBELINK_EVENT_STORE_RUST_SIDECAR=1. Missing binary, bad health, timeout, request failure, or sidecar exit falls back to the Node Worker when enabled, otherwise sync SQLite.",
-      "runtimeStats": "getEventStoreRuntimeStats() in src/db.js exposes mode, rustSidecar enabled/active/ready/failed, starts/failures/fallbacks/lastError/client stats, worker status, batch append stats, and eventStore metrics.",
+      "nodeFallback": "src/db.js prefers the Rust sidecar when VIBELINK_EVENT_STORE_RUST_SIDECAR=1, or when VIBELINK_EVENT_STORE_RUST_SIDECAR=auto and the command exists. Missing binary in manual mode, bad health, timeout, invalid JSON, request failure, or sidecar exit falls back to the Node Worker when enabled, otherwise sync SQLite. Missing binary in auto mode skips Rust without marking failure.",
+      "runtimeStats": "getEventStoreRuntimeStats() in src/db.js exposes mode, rustSidecar enabled/auto/available/active/ready/failed, starts/failures/fallbacks/lastError/client stats, worker status, batch append stats, and eventStore metrics.",
       "tests": [
         "test/eventStoreContract.test.js",
         "test/eventStoreWorker.test.js",
@@ -94,9 +94,9 @@
         "docs/event-store-worker.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, health gate, and Worker/sync fallback tests exist.",
-      "nextAction": "Add auto/readiness mode, invalid JSON/runtime exit fallback tests at the db.js routing layer, rollback docs, and canary promotion thresholds for latency, fallback rate, and main-thread stall reduction.",
-      "promotionGate": "Can move to canary only after auto mode validates command/health readiness, db.js tests cover spawn failure, bad health, timeout, invalid JSON, sidecar exit, request failure, and Worker/sync fallback without task-visible failure, and docs define rollback plus latency/fallback-rate thresholds."
+      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, and canary thresholds exist.",
+      "nextAction": "Run measured local canaries against the documented latency, fallback-rate, and stall thresholds before any default exposure.",
+      "promotionGate": "Can move to canary only after measured local canaries meet the documented latency/fallback-rate/stall thresholds and CI/status checks keep auto readiness plus fallback tests green."
     },
     {
       "id": "audio-pipeline",

@@ -14,6 +14,10 @@ function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
+function sendInvalidJson() {
+  process.stdout.write("not-json\n");
+}
+
 function healthy() {
   return {
     ok: true,
@@ -55,6 +59,13 @@ rl.on("line", (line) => {
   }
 
   if (mode === "timeout") return;
+  if (mode === "invalid-json") {
+    sendInvalidJson();
+    return;
+  }
+  if (mode === "exit") {
+    process.exit(42);
+  }
 
   send({
     id,

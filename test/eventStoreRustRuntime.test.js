@@ -34,6 +34,12 @@ function configureRustSidecar(args, extraEnv = {}) {
   return previous;
 }
 
+function configureAutoRustSidecar(args, extraEnv = {}) {
+  const previous = configureRustSidecar(args, extraEnv);
+  process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR = "auto";
+  return previous;
+}
+
 async function cleanupRustSidecarEnv(previous) {
   await drainEventStoreRuntime();
   restoreEnv("VIBELINK_EVENT_STORE_RUST_SIDECAR", previous.rustFlag);
@@ -102,6 +108,91 @@ test("db async event store paths fall back when Rust sidecar health is not ready
   }
 });
 
+test("db async event store paths fall back to worker when Rust sidecar fails and worker is enabled", async () => {
+  const previous = configureRustSidecar(
+    [fixturePath("event-store-failing-sidecar.js")],
+    { VIBELINK_EVENT_STORE_TEST_SIDECAR_MODE: "unhealthy" }
+  );
+  process.env.VIBELINK_EVENT_STORE_WORKER = "1";
+  try {
+    const run = createToolRun({
+      id: `rust-worker-fallback-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+
+    await insertToolEventsAsync(run.id, [
+      { id: `${run.id}:event-1`, type: "tool.stdout", text: "worker fallback" }
+    ]);
+
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((event) => event.text), ["worker fallback"]);
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.rustSidecar.failed, true);
+    assert.equal(stats.worker.enabled, true);
+    assert.equal(stats.metrics.methods.insertToolEvents.modeCounts.worker >= 1, true);
+  } finally {
+    await cleanupRustSidecarEnv(previous);
+  }
+});
+
+test("db async event store paths use Rust sidecar in auto mode when readiness passes", async () => {
+  const previous = configureAutoRustSidecar([fixturePath("event-store-json-sidecar.js")]);
+  try {
+    const run = createToolRun({
+      id: `rust-auto-runtime-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+
+    await insertToolEventsAsync(run.id, [
+      { id: `${run.id}:event-1`, type: "tool.stdout", text: "auto" }
+    ]);
+
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((event) => event.text), ["auto"]);
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.mode, "rust-sidecar");
+    assert.equal(stats.rustSidecar.enabled, true);
+    assert.equal(stats.rustSidecar.auto, true);
+    assert.equal(stats.rustSidecar.ready, true);
+    assert.equal(stats.rustSidecar.failed, false);
+    assert.equal(stats.metrics.methods.insertToolEvents.modeCounts["rust-sidecar"] >= 1, true);
+  } finally {
+    await cleanupRustSidecarEnv(previous);
+  }
+});
+
+test("db async event store paths skip Rust sidecar in auto mode when command is missing", async () => {
+  const previous = configureAutoRustSidecar([]);
+  process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND = path.join(
+    process.cwd(),
+    ".tmp",
+    `missing-event-store-auto-sidecar-${Date.now()}.exe`
+  );
+  try {
+    const run = createToolRun({
+      id: `rust-auto-missing-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+    const beforeStarts = getEventStoreRuntimeStats().rustSidecar.starts;
+
+    await insertToolEventsAsync(run.id, [
+      { id: `${run.id}:event-1`, type: "tool.stdout", text: "auto missing" }
+    ]);
+
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((event) => event.text), ["auto missing"]);
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.mode, "sync");
+    assert.equal(stats.rustSidecar.enabled, false);
+    assert.equal(stats.rustSidecar.auto, true);
+    assert.equal(stats.rustSidecar.failed, false);
+    assert.equal(stats.rustSidecar.starts, beforeStarts);
+    assert.equal(stats.metrics.methods.insertToolEvents.modeCounts.sync >= 1, true);
+  } finally {
+    await cleanupRustSidecarEnv(previous);
+  }
+});
+
 test("db async event store paths fall back when the Rust sidecar command is missing", async () => {
   const previous = configureRustSidecar([]);
   process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND = path.join(
@@ -151,6 +242,58 @@ test("db async event store paths fall back when Rust sidecar requests time out",
     const stats = getEventStoreRuntimeStats();
     assert.equal(stats.rustSidecar.failed, true);
     assert.match(stats.rustSidecar.lastError, /timed out/);
+    assert.equal(stats.metrics.methods.insertToolEvents.modeCounts["sync-fallback"] >= 1, true);
+  } finally {
+    await cleanupRustSidecarEnv(previous);
+  }
+});
+
+test("db async event store paths fall back when Rust sidecar returns invalid JSON", async () => {
+  const previous = configureRustSidecar(
+    [fixturePath("event-store-failing-sidecar.js")],
+    { VIBELINK_EVENT_STORE_TEST_SIDECAR_MODE: "invalid-json" }
+  );
+  try {
+    const run = createToolRun({
+      id: `rust-invalid-json-fallback-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+
+    await insertToolEventsAsync(run.id, [
+      { id: `${run.id}:event-1`, type: "tool.stderr", text: "invalid json fallback" }
+    ]);
+
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((event) => event.text), ["invalid json fallback"]);
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.rustSidecar.failed, true);
+    assert.match(stats.rustSidecar.lastError, /invalid JSON/);
+    assert.equal(stats.metrics.methods.insertToolEvents.modeCounts["sync-fallback"] >= 1, true);
+  } finally {
+    await cleanupRustSidecarEnv(previous);
+  }
+});
+
+test("db async event store paths fall back when Rust sidecar exits during a request", async () => {
+  const previous = configureRustSidecar(
+    [fixturePath("event-store-failing-sidecar.js")],
+    { VIBELINK_EVENT_STORE_TEST_SIDECAR_MODE: "exit" }
+  );
+  try {
+    const run = createToolRun({
+      id: `rust-exit-fallback-${Date.now()}`,
+      toolName: "test.tool",
+      status: "running"
+    });
+
+    await insertToolEventsAsync(run.id, [
+      { id: `${run.id}:event-1`, type: "tool.stderr", text: "exit fallback" }
+    ]);
+
+    assert.deepEqual(listToolEvents({ toolRunId: run.id }).map((event) => event.text), ["exit fallback"]);
+    const stats = getEventStoreRuntimeStats();
+    assert.equal(stats.rustSidecar.failed, true);
+    assert.match(stats.rustSidecar.lastError, /exited before replying/);
     assert.equal(stats.metrics.methods.insertToolEvents.modeCounts["sync-fallback"] >= 1, true);
   } finally {
     await cleanupRustSidecarEnv(previous);

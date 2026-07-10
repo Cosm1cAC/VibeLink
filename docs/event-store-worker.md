@@ -57,11 +57,19 @@ Task and tool event append paths still preserve the existing immediate cursor be
 {"id":3,"result":{"pending":0,"requests":3,"failures":0}}
 ```
 
-`test/eventStoreSidecarContract.test.js` runs that protocol against both `test/fixtures/event-store-json-sidecar.js` and the real Rust `vibelink event-store-sidecar` command in `apps/windows`. `src/db.js` can route async event-store append/replay calls to the Rust sidecar only when explicitly enabled:
+`test/eventStoreSidecarContract.test.js` runs that protocol against both `test/fixtures/event-store-json-sidecar.js` and the real Rust `vibelink event-store-sidecar` command in `apps/windows`. `src/db.js` can route async event-store append/replay calls to the Rust sidecar when explicitly enabled:
 
 ```bash
 VIBELINK_EVENT_STORE_RUST_SIDECAR=1 npm start
 ```
+
+It can also run in safe auto-detection mode:
+
+```bash
+VIBELINK_EVENT_STORE_RUST_SIDECAR=auto npm start
+```
+
+In `auto` mode, the Rust sidecar is attempted only when the configured command exists. A missing command skips Rust without marking the sidecar failed. If the command exists, the first routed request still has to pass the normal `__health` readiness gate before production traffic uses the sidecar.
 
 By default the command is `apps/windows/target/debug/vibelink(.exe)` with `event-store-sidecar <db-path>` appended. Tests and local experiments can override the command and leading args with:
 
@@ -91,4 +99,33 @@ It also includes `eventStore.rustSidecar`, `eventStore.metrics`, grouped by cont
 - Finish moving remaining append paths behind async or batch boundaries while preserving cursor ordering.
 - Window large task/live-call replay paths where callers still request broad history.
 - Add high-frequency event burst smoke tests around the runtime stall and batch metrics.
-- Add `auto` readiness mode, rollback docs, invalid JSON/sidecar-exit db.js fallback tests, and latency/fallback-rate canary thresholds before making the Rust sidecar broader than manual opt-in.
+- Run measured local canaries before making the Rust sidecar broader than opt-in or auto-readiness experiments.
+
+## Rollback
+
+Use the environment switch as the first rollback lever. Restart the bridge with Rust disabled:
+
+```bash
+VIBELINK_EVENT_STORE_RUST_SIDECAR=0 npm start
+```
+
+If the Worker path also needs to be removed from the experiment, restart without the Worker/batch flags:
+
+```bash
+VIBELINK_EVENT_STORE_RUST_SIDECAR=0 VIBELINK_EVENT_STORE_WORKER=0 VIBELINK_EVENT_STORE_BATCH_APPEND=0 npm start
+```
+
+No data migration rollback is required for this slice because the Rust sidecar writes the same SQLite schema through the shared event-store contract. After rollback, confirm `GET /api/tool-events/stats` reports `storeMode` as `sync` or `worker`, `eventStore.rustSidecar.active` as `false`, and no new `rust-sidecar` mode counts.
+
+## Canary Thresholds
+
+Before moving the event-store sidecar from `opt-in` to `canary`, run a representative local session with `VIBELINK_EVENT_STORE_RUST_SIDECAR=auto` and the same Worker/batch flags planned for canary. Use `GET /api/tool-events/stats` before and after the session.
+
+Promotion requires all of the following:
+
+- `eventStore.rustSidecar.ready` is `true`, `failed` is `false`, and `lastError` is empty after readiness.
+- `eventStore.metrics.fallbacks / eventStore.metrics.requests` stays below 1% after readiness. Any readiness failure blocks promotion for that build.
+- `eventStore.metrics.failures` is 0 for event-store methods not intentionally exercised by failure tests.
+- Average `insertToolEvents`, `insertTaskEvents`, and `insertLiveCallEvents` duration is no worse than the sync or Worker baseline by more than 10%.
+- `eventStore.metrics.stalls.count` is lower than the sync baseline for the same workload, or remains 0 when the baseline is already 0.
+- `eventStore.rustSidecar.client.pending` returns to 0 after the workload and `backpressureRejects` remains 0.

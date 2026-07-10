@@ -94,9 +94,9 @@
         "docs/event-store-worker.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, a local canary harness, and a passing 2026-07-10 representative release canary exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
-      "nextAction": "Run limited canary sessions with runtime stats capture, keep fallback-rate/latency/stall checks green, and wire the local canary into release or CI status before broader default exposure.",
-      "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across representative sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
+      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, local and runtime canary harnesses, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
+      "nextAction": "Run limited real-session canaries with runtime stats capture, keep fallback-rate/latency/stall checks green, and wire the local plus runtime canaries into release or CI status before broader default exposure.",
+      "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across representative runtime sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
     },
     {
       "id": "audio-pipeline",

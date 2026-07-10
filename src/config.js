@@ -6,7 +6,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const rootDir = path.resolve(__dirname, "..");
 export const publicDir = path.join(rootDir, "public");
-export const dataDir = path.join(rootDir, ".agent-mobile-terminal");
+export const dataDir = process.env.VIBELINK_DATA_DIR
+  ? path.resolve(process.env.VIBELINK_DATA_DIR)
+  : path.join(rootDir, ".agent-mobile-terminal");
 export const tasksDir = path.join(dataDir, "tasks");
 export const attachmentsDir = path.join(dataDir, "attachments");
 export const settingsPath = path.join(dataDir, "settings.json");

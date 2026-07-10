@@ -48,4 +48,4 @@ Generated from the prior Android handoff review and the current `codex/android-h
 - [x] Focused backend settings/native push tests: `node --test test/settingsImportExport.test.js test/nativePushSubscription.test.js`
 - [x] Final Android unit test suite: `apps/android/.\gradlew.bat testDebugUnitTest`
 - [x] Review diff for scope and secrets.
-- [ ] Stage, commit, and push current branch.
+- [x] Stage, commit, merge to `main`, and push the Android closure work.

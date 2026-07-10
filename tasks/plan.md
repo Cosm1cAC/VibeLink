@@ -72,7 +72,7 @@ This session continues from that baseline. The completed Android handoff slice c
 - [x] The Android composer can attach images/files through the bridge attachment endpoint.
 - [x] Settings exposes device, pairing, audit, MCP, and Doctor summaries.
 - [x] Android unit tests pass with the new message-content behavior.
-- [ ] Working tree is committed and pushed to `origin/codex/android-handoff-gaps`.
+- [x] Android handoff work is committed, merged to `main`, and pushed to `origin/main`.
 
 ## Verification Commands
 

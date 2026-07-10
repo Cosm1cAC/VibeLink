@@ -59,6 +59,12 @@ function writeRustScannerCacheStub(dir) {
   return { scanner, log };
 }
 
+function writeRustScannerInvalidJsonStub(dir) {
+  const scanner = path.join(dir, "rust-scanner-invalid-json-stub.mjs");
+  fs.writeFileSync(scanner, `process.stdout.write("not-json");\n`, "utf8");
+  return scanner;
+}
+
 function cargoPath() {
   if (process.platform === "win32") {
     const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
@@ -101,6 +107,77 @@ test("getWorkspaceTree uses Rust scanner when explicitly enabled", async () => {
   }
 });
 
+test("getWorkspaceTree auto mode uses Rust scanner when command exists", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-auto-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "node fallback", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-auto" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const scanner = writeRustScannerStub(fixture);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "auto";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.items.map((item) => item.name), ["from-rust.txt"]);
+    assert.equal(after.mode, "auto");
+    assert.equal(after.auto, true);
+    assert.equal(after.available, true);
+    assert.equal(after.hits, before.hits + 1);
+    assert.equal(after.lastError, "");
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceTree auto mode skips missing Rust scanner without marking failure", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-auto-missing-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "src"), { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-auto-missing" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "auto";
+  process.env.VIBELINK_RUST_BIN = path.join(fixture, "missing-scanner.exe");
+  delete process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+
+  try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.items.map((item) => item.name), ["src", "README.md"]);
+    assert.equal(after.mode, "auto");
+    assert.equal(after.auto, true);
+    assert.equal(after.available, false);
+    assert.equal(after.misses, before.misses + 1);
+    assert.equal(after.fallbacks, before.fallbacks);
+    assert.equal(after.failures, before.failures);
+    assert.equal(after.lastError, "");
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceTree falls back to Node scanner when Rust scanner fails", async () => {
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-fallback-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
@@ -119,14 +196,58 @@ test("getWorkspaceTree falls back to Node scanner when Rust scanner fails", asyn
   process.env.VIBELINK_RUST_BIN = path.join(fixture, "missing-scanner.exe");
 
   try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
     const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
     assert.equal(result.ok, true);
     assert.deepEqual(result.items.map((item) => item.name), ["src", "README.md"]);
     assert.equal(result.items.some((item) => item.path.startsWith("tmp-cache")), false);
+    assert.equal(after.mode, "manual");
+    assert.equal(after.available, false);
+    assert.equal(after.fallbacks, before.fallbacks + 1);
+    assert.equal(after.failures, before.failures + 1);
+    assert.match(after.lastError, /not found/i);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);
     fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceTree records Rust scanner output failures", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-invalid-json-${process.pid}`);
+  const helperDir = path.join(os.tmpdir(), `vibelink-rust-tree-invalid-json-helper-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.rmSync(helperDir, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.mkdirSync(helperDir, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-invalid-json" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const scanner = writeRustScannerInvalidJsonStub(helperDir);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.items.map((item) => item.name), ["README.md"]);
+    assert.equal(after.fallbacks, before.fallbacks + 1);
+    assert.equal(after.failures, before.failures + 1);
+    assert.match(after.lastError, /workspace-tree failed/i);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+    fs.rmSync(helperDir, { recursive: true, force: true });
   }
 });
 

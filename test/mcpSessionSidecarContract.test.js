@@ -263,14 +263,17 @@ test("Rust MCP session sidecar serves stats while a tool call is in flight", asy
   };
 
   try {
-    const slowCall = client.callTool(server, "echo", { q: "slow" }, { timeoutMs: 10000 });
+    let slowCallCompleted = false;
+    const slowCall = client.callTool(server, "echo", { q: "slow" }, { timeoutMs: 10000 })
+      .then((result) => {
+        slowCallCompleted = true;
+        return result;
+      });
     await sleep(75);
 
-    const startedAt = Date.now();
     const stats = await client.getSessionStats();
-    const elapsedMs = Date.now() - startedAt;
 
-    assert.ok(elapsedMs < 500, `expected stats before slow call completed, got ${elapsedMs}ms`);
+    assert.equal(slowCallCompleted, false, "expected stats before slow call completed");
     assert.ok(stats.activeRequests >= 1, `expected activeRequests >= 1, got ${stats.activeRequests}`);
     assert.ok(stats.maxActiveObserved >= 1, `expected maxActiveObserved >= 1, got ${stats.maxActiveObserved}`);
 

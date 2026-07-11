@@ -10,6 +10,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 - Event store, workspace tree, and persistent MCP sessions are at `canary` with passing Windows workflows.
 - Workspace tree now has exact metadata/context parity across VibeLink, ok-wuthering-waves, and meetily plus a persistent Rust sidecar that keeps cold totals at 53.7-80.3ms with one process and zero session fallback; it remains limited `canary` pending remote/interactive evidence.
 - MCP now has passing read-only real-session canaries against codebase-memory and Headroom. Both reused one Rust sidecar with zero failures, fallbacks, backpressure, or pending work and clean session drain.
+- MCP now also has a five-session auto-mode soak: 65 baseline spawns fell to 5, all sessions drained cleanly, health counters stayed at zero, and scheduled Windows CI repeats it weekly.
 - The Rust Windows bridge now injects its current executable as the packaged MCP/event/workspace sidecar command while preserving deployment overrides, removing the development-target path dependency.
 - Event store now has a write-rejecting read-only sidecar mode and exact replay evidence from the existing approximately 1.01GB database; human-driven append evidence remains outstanding.
 - Audio is now `contract` through an isolated PCM16 Rust sidecar and cross-language tests; it remains disconnected from production because another session is validating live call.

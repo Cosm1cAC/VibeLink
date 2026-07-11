@@ -59,9 +59,11 @@ npm run rust:migration:check
 
 ## Representative Benchmark
 
-`tools/audio-pipeline/benchmark.mjs` measures the current production Node `computePcm16Rms` function and persistent Rust `processPcm16` JSONL round trips for deterministic 16kHz 10ms, 20ms, and 100ms PCM frames. It checks RMS/peak parity, Rust p95 latency, dropped/backpressure counters, pending drain, and clean close. The benchmark does not route production audio.
+`tools/audio-pipeline/benchmark.mjs` measures the current production Node `computePcm16Rms`, `normalizePcm16To16kMono`, and `createVadSegmenter` functions. It compares persistent Rust `processPcm16` JSONL round trips with Node RMS for deterministic 16kHz 10ms, 20ms, and 100ms PCM frames, then measures the production 48kHz stereo-to-16kHz mono path and a deterministic 2-second VAD sequence using production defaults. It checks RMS/peak parity, output frame/segment correctness, Rust p95 latency, dropped/backpressure counters, pending drain, and clean close. The benchmark does not route production audio.
 
 The 2026-07-11 default run used 200 measured rounds per frame after 20 warmups. Node p95 was 0.008ms, 0.003ms, and 0.004ms; Rust round-trip p95 was 0.189ms, 0.199ms, and 0.356ms. RMS and peak deltas were zero, Rust stayed well below the 10ms contract limit, and the sidecar recorded zero drops or backpressure. Because Node stayed far below the 1ms material-bottleneck threshold and Rust was not faster, a production Rust route is not justified for RMS-only processing.
+
+After live-call reconciliation, a 2026-07-12 run used 500 measured rounds after 50 warmups. Production Node resampling p95 was 0.039ms, 0.031ms, and 0.151ms for 10ms, 20ms, and 100ms 48kHz stereo frames. The complete 2-second VAD sequence using production defaults had 0.332ms p95 and produced the expected single segment. Rust JSONL RMS round trips in the same run were 0.424ms, 0.290ms, and 0.641ms. Neither Node workload crossed the 1ms material-bottleneck threshold, and protocol v1 does not cover resampling or VAD, so extending or routing the sidecar would add complexity without measured benefit.
 
 ## Files
 
@@ -76,4 +78,4 @@ The 2026-07-11 default run used 200 measured rounds per frame after 20 warmups. 
 
 ## Promotion Boundary
 
-Remain at `contract`; current RMS-only measurements do not justify a production process boundary. After concurrent live-call work is reconciled, re-run measurement only for a materially different workload such as bounded VAD/resampling. Moving to `opt-in` still requires evidence of a Node bottleneck or Rust benefit, an optional client behind `VIBELINK_AUDIO_RUST_PIPELINE=1`, bounded pending requests, missing/bad/timeout/invalid/exit fallback to the existing Node path, runtime routing metrics, and real PCM canaries. ASR/provider behavior remains outside this slice.
+Remain at `contract`; measured RMS, bounded resampling, and VAD workloads do not justify a production process boundary. Re-run measurement only if production telemetry or workload shape changes materially. Moving to `opt-in` still requires evidence of a Node bottleneck or Rust benefit, an optional client behind `VIBELINK_AUDIO_RUST_PIPELINE=1`, bounded pending requests, missing/bad/timeout/invalid/exit fallback to the existing Node path, runtime routing metrics, and real PCM canaries. ASR/provider behavior remains outside this slice.

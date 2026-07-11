@@ -37,3 +37,33 @@ test("audio benchmark measures representative PCM frames without production rout
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("audio benchmark measures production resampling and VAD workloads", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-audio-live-call-benchmark-"));
+  const output = path.join(tempRoot, "result.json");
+  try {
+    const run = spawnSync(process.execPath, [
+      path.join("tools", "audio-pipeline", "benchmark.mjs"),
+      "--rounds", "10",
+      "--warmup", "2",
+      "--max-rust-p95-ms", "1000",
+      "--node-bottleneck-p95-ms", "1000",
+      "--output", output
+    ], { cwd: process.cwd(), encoding: "utf8", windowsHide: true, timeout: 60000 });
+
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    const result = JSON.parse(fs.readFileSync(output, "utf8"));
+    assert.deepEqual(result.source.nodeProductionFunctions, [
+      "computePcm16Rms",
+      "normalizePcm16To16kMono",
+      "createVadSegmenter"
+    ]);
+    assert.deepEqual(result.liveCallWorkloads.resampling.map((item) => item.frameMs), [10, 20, 100]);
+    assert.equal(result.liveCallWorkloads.resampling.every((item) => item.outputFrames === item.frameMs * 16), true);
+    assert.equal(result.liveCallWorkloads.vad.inputDurationMs, 2000);
+    assert.equal(result.liveCallWorkloads.vad.segments, 1);
+    assert.equal(result.evaluation.liveCallNodeBottleneckObserved, false);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

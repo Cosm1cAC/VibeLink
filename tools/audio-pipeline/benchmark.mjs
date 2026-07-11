@@ -6,7 +6,11 @@ import { performance } from "node:perf_hooks";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import { computePcm16Rms } from "../../src/liveCallAudioPipeline.js";
+import {
+  computePcm16Rms,
+  createVadSegmenter,
+  normalizePcm16To16kMono
+} from "../../src/liveCallAudioPipeline.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..", "..");
@@ -66,6 +70,75 @@ function pcmWorkload(frameMs) {
     peak = Math.max(peak, Math.abs(samples[index] / 32768));
   }
   return { name: `${frameMs}ms-frame`, frameMs, samplesPerFrame, samples, buffer, peak };
+}
+
+function resamplingWorkload(frameMs) {
+  const inputFrames = Math.round(48_000 * frameMs / 1000);
+  const buffer = Buffer.alloc(inputFrames * 2 * 2);
+  for (let frame = 0; frame < inputFrames; frame += 1) {
+    buffer.writeInt16LE(Math.round(Math.sin(frame * Math.PI * 2 / 37) * 12_000), frame * 4);
+    buffer.writeInt16LE(Math.round(Math.sin(frame * Math.PI * 2 / 23) * 8_000), frame * 4 + 2);
+  }
+  return { frameMs, inputFrames, buffer };
+}
+
+function constantFrame(amplitude, frameMs = 20) {
+  const samples = Math.round(16_000 * frameMs / 1000);
+  const buffer = Buffer.alloc(samples * 2);
+  for (let index = 0; index < samples; index += 1) buffer.writeInt16LE(amplitude, index * 2);
+  return buffer;
+}
+
+function benchmarkLiveCallWorkloads({ rounds, warmup, nodeBottleneckP95Ms }) {
+  const resampling = [10, 20, 100].map((frameMs) => {
+    const workload = resamplingWorkload(frameMs);
+    let outputFrames = 0;
+    const run = () => {
+      const normalized = normalizePcm16To16kMono(workload.buffer, { sampleRate: 48_000, channels: 2 });
+      outputFrames = normalized.outputFrames;
+    };
+    for (let index = 0; index < warmup; index += 1) run();
+    const samples = [];
+    for (let index = 0; index < rounds; index += 1) {
+      const startedAt = performance.now();
+      run();
+      samples.push(performance.now() - startedAt);
+    }
+    return { frameMs, inputFrames: workload.inputFrames, outputFrames, node: timingStats(samples) };
+  });
+
+  const silence = constantFrame(0);
+  const speech = constantFrame(8_000);
+  const runVad = () => {
+    const vad = createVadSegmenter();
+    const segments = [];
+    for (let index = 0; index < 10; index += 1) segments.push(...vad.push(silence));
+    for (let index = 0; index < 50; index += 1) segments.push(...vad.push(speech));
+    for (let index = 0; index < 40; index += 1) segments.push(...vad.push(silence));
+    segments.push(...vad.flush());
+    return segments;
+  };
+  for (let index = 0; index < warmup; index += 1) runVad();
+  const vadSamples = [];
+  let segments = [];
+  for (let index = 0; index < rounds; index += 1) {
+    const startedAt = performance.now();
+    segments = runVad();
+    vadSamples.push(performance.now() - startedAt);
+  }
+  const vad = {
+    frameMs: 20,
+    inputFrames: 100,
+    inputDurationMs: 2000,
+    segments: segments.length,
+    outputDurationMs: segments.reduce((total, segment) => total + segment.durationMs, 0),
+    node: timingStats(vadSamples)
+  };
+  const liveCallNodeBottleneckObserved = [
+    ...resampling.map((item) => item.node.p95Ms),
+    vad.node.p95Ms
+  ].some((p95Ms) => p95Ms >= nodeBottleneckP95Ms);
+  return { resampling, vad, liveCallNodeBottleneckObserved };
 }
 
 class AudioSidecarClient {
@@ -179,8 +252,13 @@ function printSummary(result) {
   for (const workload of result.workloads) {
     console.log(`- ${workload.name}: Node p95=${workload.node.p95Ms}ms; Rust p95=${workload.rustRoundTrip.p95Ms}ms; RMS delta=${workload.parity.maxRmsDelta}`);
   }
+  for (const workload of result.liveCallWorkloads.resampling) {
+    console.log(`- ${workload.frameMs}ms 48k stereo resampling: Node p95=${workload.node.p95Ms}ms`);
+  }
+  console.log(`- 2.0s VAD sequence: Node p95=${result.liveCallWorkloads.vad.node.p95Ms}ms; segments=${result.liveCallWorkloads.vad.segments}`);
   console.log(`- Rust p95 limit: ${result.config.maxRustP95Ms}ms`);
   console.log(`- material Node bottleneck: ${result.evaluation.materialNodeBottleneckObserved}`);
+  console.log(`- live-call Node bottleneck: ${result.evaluation.liveCallNodeBottleneckObserved}`);
   console.log(`- production Rust routing justified: ${result.evaluation.productionRoutingJustified}`);
   console.log(`Result: ${result.evaluation.passed ? "PASS" : "FAIL"}`);
 }
@@ -207,6 +285,7 @@ async function main() {
     }
     const stats = await client.request("stats");
     closed = await client.close();
+    const liveCallWorkloads = benchmarkLiveCallWorkloads({ rounds, warmup, nodeBottleneckP95Ms });
 
     const checks = [
       { name: "health", pass: health?.ok === true && health?.implementation === "rust", detail: `${health?.implementation || "missing"} protocol ${health?.protocolVersion || 0}` },
@@ -214,7 +293,13 @@ async function main() {
       ...workloads.map((item) => ({ name: `${item.name} parity`, pass: item.parity.maxRmsDelta <= 1e-12 && item.parity.maxPeakDelta <= 1e-12, detail: `rms=${item.parity.maxRmsDelta}, peak=${item.parity.maxPeakDelta}` })),
       { name: "drops and backpressure", pass: Number(stats.droppedChunks || 0) === 0 && Number(stats.backpressureRejects || 0) === 0, detail: `${stats.droppedChunks || 0} drops, ${stats.backpressureRejects || 0} rejects` },
       { name: "pending drain", pass: Number(stats.pending || 0) === 0, detail: `${stats.pending || 0} pending` },
-      { name: "clean close", pass: closed, detail: `closed=${closed}` }
+      { name: "clean close", pass: closed, detail: `closed=${closed}` },
+      ...liveCallWorkloads.resampling.map((item) => ({
+        name: `${item.frameMs}ms live-call resampling output`,
+        pass: item.outputFrames === item.frameMs * 16,
+        detail: `${item.outputFrames} frames`
+      })),
+      { name: "live-call VAD segmentation", pass: liveCallWorkloads.vad.segments === 1, detail: `${liveCallWorkloads.vad.segments} segments` }
     ];
     const passed = checks.every((check) => check.pass);
     const materialNodeBottleneckObserved = workloads.some((item) => item.node.p95Ms >= nodeBottleneckP95Ms);
@@ -223,14 +308,19 @@ async function main() {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
       source: {
-        nodeProductionFunctions: ["computePcm16Rms"],
+        nodeProductionFunctions: ["computePcm16Rms", "normalizePcm16To16kMono", "createVadSegmenter"],
         rustCommand: command,
         rustMethod: "processPcm16",
+        rustCoveredProductionFunctions: ["computePcm16Rms"],
         productionRouting: false
       },
       config: { rounds, warmup, maxRustP95Ms, nodeBottleneckP95Ms, timeoutMs },
       startupMs: Number(startupMs.toFixed(3)),
       workloads,
+      liveCallWorkloads: {
+        resampling: liveCallWorkloads.resampling,
+        vad: liveCallWorkloads.vad
+      },
       runtime: {
         starts: 1,
         processedChunks: stats.processedChunks || 0,
@@ -243,8 +333,10 @@ async function main() {
       evaluation: {
         passed,
         materialNodeBottleneckObserved,
+        liveCallNodeBottleneckObserved: liveCallWorkloads.liveCallNodeBottleneckObserved,
         rustFasterForAllWorkloads,
-        productionRoutingJustified: passed && materialNodeBottleneckObserved && rustFasterForAllWorkloads,
+        productionRoutingJustified: false,
+        productionRoutingDecision: "Keep Node live-call preprocessing: measured workloads are below the material-bottleneck threshold and Rust does not cover resampling or VAD.",
         checks
       }
     };

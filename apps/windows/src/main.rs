@@ -13,6 +13,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::{
     env,
+    ffi::OsString,
     hash::{Hash, Hasher},
     net::UdpSocket,
     path::{Path, PathBuf},
@@ -2290,7 +2291,11 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
         bail!("Cannot find bridge server at {}", server.display());
     }
 
+    let executable = env::current_exe().context("Cannot resolve current executable path")?;
     let mut command = Command::new("node");
+    for (key, value) in missing_sidecar_command_envs(&executable, |key| env::var_os(key)) {
+        command.env(key, value);
+    }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command
@@ -2310,6 +2315,24 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
         bail!("Node bridge exited with status {status}");
     }
     Ok(())
+}
+
+fn missing_sidecar_command_envs<F>(
+    executable: &Path,
+    mut existing: F,
+) -> Vec<(&'static str, OsString)>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    [
+        "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_RUST_BIN",
+    ]
+    .into_iter()
+    .filter(|key| existing(key).is_none())
+    .map(|key| (key, executable.as_os_str().to_os_string()))
+    .collect()
 }
 
 fn run_pairing_flow(cli: &Cli) -> Result<()> {
@@ -2466,7 +2489,42 @@ fn find_project_root_from(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
+
+    #[test]
+    fn packaged_sidecar_envs_use_current_executable_and_preserve_overrides() {
+        let executable = Path::new("C:/Program Files/VibeLink/vibelink.exe");
+
+        let all_values = missing_sidecar_command_envs(executable, |_| None);
+        assert_eq!(
+            all_values.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![
+                "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
+                "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+                "VIBELINK_RUST_BIN"
+            ]
+        );
+        assert!(all_values
+            .iter()
+            .all(|(_, value)| value == executable.as_os_str()));
+
+        let values = missing_sidecar_command_envs(executable, |key| {
+            (key == "VIBELINK_MCP_RUST_SIDECAR_COMMAND")
+                .then(|| OsString::from("C:/custom/mcp-sidecar.exe"))
+        });
+
+        assert_eq!(
+            values,
+            vec![
+                (
+                    "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+                    executable.as_os_str().to_os_string()
+                ),
+                ("VIBELINK_RUST_BIN", executable.as_os_str().to_os_string())
+            ]
+        );
+    }
 
     #[test]
     fn android_pairing_uri_uses_deep_link_and_escapes_server() {

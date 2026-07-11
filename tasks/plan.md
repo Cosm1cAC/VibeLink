@@ -9,6 +9,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 - The three remote branch heads have been reconciled into `origin/main` through `gh api`.
 - Event store, workspace tree, and persistent MCP sessions are at `canary` with passing Windows workflows.
 - Workspace tree now also has exact real-checkout metadata/context parity evidence; its process-per-miss cold penalty keeps it at `canary`.
+- MCP now has a passing read-only real-session canary against the installed codebase-memory server; another server implementation is still required for broader evidence.
 - Audio remains `planned` and is temporarily excluded because another session is validating live call.
 - Compression is now at `contract`; its bounded protocol is specified in `docs/compression-sidecar.md` and remains disconnected from production routing.
 

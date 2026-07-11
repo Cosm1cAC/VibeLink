@@ -29,6 +29,7 @@
 ## Remaining Migration
 
 - [x] Run the VibeLink checkout through the production workspace router, fix Windows metadata parity, and add a repeatable real-repository canary.
+- [x] Run repeated read-only calls through a real codebase-memory MCP server and add a reusable real-session canary.
 - [ ] Audit all canary claims against current remote CI and runtime evidence.
 - [ ] Advance any remaining server-side work that does not touch Android/live-call.
 - [ ] Reconcile live-call changes before beginning the audio contract.

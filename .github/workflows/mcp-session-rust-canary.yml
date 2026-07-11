@@ -18,6 +18,7 @@ on:
       - "test/mcpRuntime.test.js"
       - "test/mcpSessionSidecarContract.test.js"
       - "test/mcpSessionCanary.test.js"
+      - "test/mcpSessionRealCanary.test.js"
       - "tools/mcp-session/**"
   push:
     branches:
@@ -38,6 +39,7 @@ on:
       - "test/mcpRuntime.test.js"
       - "test/mcpSessionSidecarContract.test.js"
       - "test/mcpSessionCanary.test.js"
+      - "test/mcpSessionRealCanary.test.js"
       - "tools/mcp-session/**"
 
 permissions:
@@ -76,7 +78,7 @@ jobs:
         run: npm run rust:migration:check
 
       - name: Run MCP contract, runtime, and canary tests
-        run: node --test test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js
+        run: node --test --test-concurrency=1 test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/mcpSessionRealCanary.test.js
 
       - name: Run representative runtime canary
         run: npm run mcp-session:canary -- --calls 12 --output .tmp/mcp-session-canary-ci.json

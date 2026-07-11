@@ -53,14 +53,16 @@
       "runtimeStats": "getMcpRustSidecarStats() exposes enabled, mode, auto/available/active/ready/failed state, command, args, starts, failures, fallbacks, last failure, last error, and client stats.",
       "tests": [
         "test/mcpRuntime.test.js",
-        "test/mcpSessionSidecarContract.test.js"
+        "test/mcpSessionSidecarContract.test.js",
+        "test/mcpSessionCanary.test.js",
+        "test/mcpSessionRealCanary.test.js"
       ],
       "docs": [
         "docs/mcp-persistent-sessions.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node manager, JSONL client, real Rust mcp-session-sidecar, auto readiness routing, contract/burst/timeout/crash/backpressure tests, a representative production-router canary, and an independent Windows CI gate exist. The 2026-07-11 release canary reduced MCP server spawns from 13 to 1 across one probe plus 12 calls, cached tools/list, averaged 8.3ms versus 74ms baseline, and preserved zero failures, fallbacks, client backpressure, and pending requests with clean idle drain.",
-      "nextAction": "Run limited real MCP server sessions and monitor the Windows canary gate before considering default-on.",
+      "currentState": "Node manager, JSONL client, real Rust mcp-session-sidecar, auto readiness routing, contract/burst/timeout/crash/backpressure tests, synthetic and real-session canary harnesses, and an independent Windows CI gate exist. The synthetic canary reduced MCP server spawns from 13 to 1. A 2026-07-11 codebase-memory-mcp session discovered 8 tools and completed 3 real get_architecture calls at 32.6ms average and 45.5ms max with one sidecar start, zero failures/fallbacks/backpressure/pending, and clean single-session drain.",
+      "nextAction": "Run the real-session canary against at least one additional MCP server implementation and keep monitoring the Windows gate before considering default-on.",
       "promotionGate": "Can move to default-on only after CI and limited real MCP sessions preserve zero readiness fallback after command availability, zero client and sidecar backpressure under normal load, material spawn reduction, cached tools/list behavior, clean pending drain, and tested fallback without task-visible failure. Rollback with VIBELINK_MCP_RUST_SIDECAR=0 must remain documented and tested."
     },
     {

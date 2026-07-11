@@ -35,8 +35,8 @@
 - [x] Run workspace-tree against two additional repositories and fix locale-sensitive result ordering.
 - [x] Replace workspace-tree process-per-miss canary routing with an optional persistent Rust sidecar and retain two-level fallback.
 - [x] Define and implement the isolated Rust PCM preprocessing contract without changing production live-call routing.
-- [ ] Audit all canary claims against current remote CI and runtime evidence.
-- [ ] Advance any remaining server-side work that does not touch Android/live-call.
+- [x] Audit all canary claims against current remote CI and runtime evidence.
+- [x] Advance all currently actionable server-side work that does not touch Android/live-call.
 - [ ] Reconcile live-call changes before beginning audio production opt-in routing.
-- [ ] Implement and stage the audio pipeline after concurrent testing completes.
+- [ ] After reconciliation, measure representative PCM workloads and implement the optional audio client, fallback metrics, opt-in routing, and canary.
 - [ ] Prove every manifest promotion gate before declaring the full Rust migration goal complete.

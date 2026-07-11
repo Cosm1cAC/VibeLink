@@ -1,6 +1,6 @@
 # Rust Migration Status
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 This file is the human-readable status view for the Rust migration program. The machine-readable source of truth is `docs/rust-migration-status.json`; run `npm run rust:migration:check` before changing statuses.
 
@@ -30,7 +30,7 @@ This file is the human-readable status view for the Rust migration program. The 
 | Workspace tree scanner | `canary` | Persistent-session canary with one-shot/Node rollback | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_WORKSPACE_TREE_SESSION`, `VIBELINK_RUST_BIN` | One-shot Rust, then Node `listDirectory()` | Keep the weekly remote gate green and run limited interactive sessions before default-on. |
 | Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Keep the weekly soak green and collect production auto-mode evidence before default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Keep the weekly remote gate green and run limited human-driven sessions before default-on. |
-| Live audio low-latency pipeline | `contract` | Contract-only; no production routing | Future `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Keep RMS-only routing disconnected; remeasure a materially different VAD/resampling workload after live-call reconciliation. |
+| Live audio low-latency pipeline | `contract` | Contract-only; no production routing | Future `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Keep routing disconnected; measured RMS, resampling, and VAD workloads are below the material-bottleneck threshold. |
 | Compression and context budget helper | `contract` | Contract-only; no production routing | Reserved `VIBELINK_RUST_COMPRESSION` | Existing Node compact/token-budget behavior remains authoritative | Measure whether Node compaction is a material bottleneck before considering an optional client and opt-in routing. |
 
 ## Promotion gates
@@ -75,11 +75,11 @@ Can move to `default-on` only when:
 
 ### Live audio low-latency pipeline
 
-Current state: protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust `audio-pipeline-sidecar`, deterministic PCM16 level/peak/RMS and silence behavior, safe sequence accounting, bounded ring eviction/backpressure counters, structured validation errors, Rust unit tests, cross-language contract tests, a representative PCM benchmark, and an independent Windows CI gate exist. A 2026-07-11 run measured Node RMS p95 at 0.003-0.008ms and persistent Rust JSONL p95 at 0.189-0.356ms for 10/20/100ms frames with zero numeric delta, drops, or backpressure. No production client or live-call/ASR routing was changed.
+Current state: protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust `audio-pipeline-sidecar`, deterministic PCM16 level/peak/RMS and silence behavior, safe sequence accounting, bounded ring eviction/backpressure counters, structured validation errors, Rust unit tests, cross-language contract tests, a representative live-call benchmark, and an independent Windows CI gate exist. A 2026-07-12 run measured production Node 48kHz stereo resampling p95 at 0.031-0.151ms and a complete 2-second VAD sequence using production defaults at 0.332ms p95. Persistent Rust JSONL RMS p95 was 0.290-0.641ms in the same run. All Node workloads remained below the 1ms material-bottleneck threshold, so no production client or live-call/ASR routing was added.
 
 Can move to `opt-in` only when:
 
-- Concurrent live-call changes are reconciled and representative measurements show a material Node bottleneck or Rust benefit for the proposed workload.
+- New representative measurements show a material Node bottleneck or Rust benefit for the proposed workload.
 - An optional bounded client exists behind `VIBELINK_AUDIO_RUST_PIPELINE=1`.
 - Missing command, bad health, timeout, invalid JSON, request failure, and exit all fall back to the current Node live-call path.
 - Runtime routing metrics and real PCM canaries preserve bounded pending/backpressure behavior.

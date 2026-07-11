@@ -94,13 +94,14 @@
         "test/eventStoreRustRuntime.test.js",
         "test/eventStoreBatchAppend.test.js",
         "test/eventStoreBatcher.test.js",
-        "test/eventStoreMetrics.test.js"
+        "test/eventStoreMetrics.test.js",
+        "test/eventStoreRealDataCanary.test.js"
       ],
       "docs": [
         "docs/event-store-worker.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, robust trimmed-mean canary thresholds with raw latency evidence, local/runtime/server canary harnesses, CI canary status wiring, and passing representative release canaries exist. Rust batch append avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
+      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, real Rust event-store-sidecar command, read-only/query-only mode, contract and write-rejection tests, explicit opt-in runtime routing, auto readiness, Worker/sync fallback tests, rollback docs, robust canary thresholds, local/runtime/server/real-data harnesses, and CI status wiring exist. A 2026-07-11 canary read the approximately 1.01GB existing database and preserved exact task/tool/live list, unified, and replay-window parity across 9 comparisons with zero failures/pending. Rust batch append avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
       "nextAction": "Run limited human-driven real-session canaries with runtime stats capture before broader default exposure.",
       "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across automated and human-driven representative runtime sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
     },

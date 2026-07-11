@@ -19,7 +19,25 @@ function cargoPath() {
   return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
 }
 
+function rustBinaryPath() {
+  const binary = process.platform === "win32" ? "vibelink.exe" : "vibelink";
+  const target = path.join(process.cwd(), "apps", "windows", "target");
+  const release = path.join(target, "release", binary);
+  if (fs.existsSync(release)) return release;
+  const debug = path.join(target, "debug", binary);
+  return fs.existsSync(debug) ? debug : "";
+}
+
 function rustSidecarClient(t, options = {}) {
+  const binary = rustBinaryPath();
+  if (binary) {
+    return createMcpSessionSidecarClient({
+      command: binary,
+      args: ["mcp-session-sidecar"],
+      timeoutMs: 10000,
+      ...options
+    });
+  }
   const cargo = cargoPath();
   if (!cargo) t.skip("cargo is not available");
   return createMcpSessionSidecarClient({

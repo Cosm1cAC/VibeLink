@@ -29,12 +29,23 @@ The Rust result includes `truncated` and a metadata signature. Node keeps a boun
 - This is not yet a long-lived Rust scanner. Each uncached request starts the CLI; unchanged requests are served from the Node cache.
 - Cache validation still walks the bounded directory shape synchronously in Node before deciding whether the Rust result can be reused. The cache is process-local, bounded by `VIBELINK_WORKSPACE_TREE_CACHE_MAX_ENTRIES`, and is cleared on restart.
 - The ignore matcher is a deliberate subset, not a complete Git implementation. It does not implement `**`, `?`, character classes, escaped leading `!` or `#`, or every parent-directory re-inclusion edge case. Node fallback and Rust use the same supported subset.
+- Windows may impose a one-time executable loading or security-scan delay before the first Rust process. The canary records first-launch latency separately from steady-state uncached scan latency so this remains visible without distorting every cache-miss measurement.
 
 These limitations do not change the fallback contract, but they must remain visible when evaluating latency and compatibility evidence.
 
-## Canary Gate
+## Canary Evidence
 
-Before promoting this slice from `opt-in` to `canary`, representative auto-mode runs must show:
+Run the local gate with:
+
+```bash
+npm run workspace-tree:canary -- --warm-scans 10 --output .tmp/workspace-tree-canary-final.json
+```
+
+The representative 2026-07-11 run rebuilt the release binary from the current source and passed all checks. It measured a 34.3ms first launch, 31.8ms steady-state cold scan, and 3.3ms warm p95 across 10 repeated scans. The root scan routed through Rust with `--dir .`, all warm scans hit the cache without another Rust start, and the nested `.gitignore` mutation caused exactly one refresh. Available-command fallback/failure counts and missing-command auto-mode failure/fallback deltas were all zero.
+
+`.github/workflows/workspace-tree-rust-canary.yml` rebuilds the release binary on Windows, runs parity/cache tests, executes the same representative canary, and uploads `.tmp/workspace-tree-canary-ci.json`.
+
+Before promoting this slice from `canary` to `default-on`, representative auto-mode runs must continue to show:
 
 - exact Node/Rust path and type parity for the supported fixture matrix;
 - zero Rust failures and fallbacks while the command is available;

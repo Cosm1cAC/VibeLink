@@ -722,7 +722,7 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
       ...baseArgs,
       "workspace-tree",
       "--root", root,
-      "--dir", path.relative(root, dir),
+      "--dir", path.relative(root, dir) || ".",
       "--depth", String(depth),
       "--max-entries", String(maxEntries)
     ], {

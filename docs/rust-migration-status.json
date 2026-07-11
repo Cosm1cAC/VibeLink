@@ -27,7 +27,7 @@
         "docs/workspace-tree-rust.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested gitignore rules, truncation, signature/cache behavior, nested gitignore invalidation, fallback stats, a representative canary harness, and an independent Windows CI canary gate exist. The 2026-07-11 current-source release canary passed with 34.3ms first launch, 31.8ms cold scan, 3.3ms warm p95, 10 cache hits, and zero fallback/failure deltas.",
+      "currentState": "Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested gitignore rules, truncation, signature/cache behavior, nested gitignore invalidation, content-safe file-sample caching, fallback stats, a representative canary harness, and an independent Windows CI canary gate exist. The final 2026-07-11 post-cache-fix release canary passed with 60.4ms first launch, 56.6ms cold scan, 5.9ms warm p95, 10 cache hits, and zero fallback/failure deltas.",
       "nextAction": "Run limited real-repository auto-mode sessions and monitor the Windows canary gate before considering default-on.",
       "promotionGate": "Can move to default-on only after CI and limited real-repository sessions continue to preserve exact supported-subset parity, zero failures and fallbacks with an available command, failure-free missing-command fallback, warm cache reuse, nested gitignore invalidation, and acceptable first-launch/cold/warm latency. Rollback with VIBELINK_RUST_WORKSPACE_TREE=0 must remain tested and documented."
     },

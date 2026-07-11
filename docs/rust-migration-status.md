@@ -37,7 +37,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, truncation, signature/cache behavior, nested ignore-file invalidation, fallback stats, a representative canary harness, and an independent Windows CI gate exist. The 2026-07-11 current-source release canary passed with 34.3ms first launch, 31.8ms cold scan, 3.3ms warm p95, 10 cache hits without another Rust start, one expected refresh after a nested rule change, and zero fallback/failure deltas.
+Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, truncation, signature/cache behavior, nested ignore-file invalidation, content-safe file-sample caching, fallback stats, a representative canary harness, and an independent Windows CI gate exist. The final 2026-07-11 post-cache-fix release canary passed with 60.4ms first launch, 56.6ms cold scan, 5.9ms warm p95, 10 cache hits without another Rust start, one expected refresh after a nested rule change, and zero fallback/failure deltas.
 
 Can move to `default-on` only when:
 

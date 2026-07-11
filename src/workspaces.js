@@ -447,13 +447,14 @@ function workspaceContextFileCacheKey(filePath) {
   return path.resolve(filePath).toLowerCase();
 }
 
-function workspaceContextFileSignature(stat) {
-  return `${Math.trunc(stat.mtimeMs)}:${Math.trunc(stat.ctimeMs)}:${stat.size}`;
+function workspaceContextFileSignature(filePath, stat) {
+  const metadata = `${Math.trunc(stat.mtimeMs)}:${Math.trunc(stat.ctimeMs)}:${stat.size}`;
+  return isTextFile(filePath, stat) ? `${metadata}:${fileContentSignature(filePath, stat)}` : metadata;
 }
 
 function cacheWorkspaceContextFile(filePath, stat, item) {
   workspaceContextFileCache.set(workspaceContextFileCacheKey(filePath), {
-    signature: workspaceContextFileSignature(stat),
+    signature: workspaceContextFileSignature(filePath, stat),
     item: { ...item }
   });
   while (workspaceContextFileCache.size > workspaceContextFileCacheMaxEntries()) {
@@ -466,7 +467,7 @@ function cacheWorkspaceContextFile(filePath, stat, item) {
 
 function workspaceContextForFile(target, rel, stat) {
   const key = workspaceContextFileCacheKey(target);
-  const signature = workspaceContextFileSignature(stat);
+  const signature = workspaceContextFileSignature(target, stat);
   const cached = workspaceContextFileCache.get(key);
   if (cached?.signature === signature) {
     workspaceContextFileStats.cacheHits += 1;

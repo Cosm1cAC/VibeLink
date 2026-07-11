@@ -193,6 +193,27 @@ if (eventStore) {
   }
 }
 
+const compression = slices.find((slice) => slice.id === "compression-adapter");
+if (compression) {
+  const rank = statusRank(statuses, compression.status);
+  const contractRank = statusRank(statuses, "contract");
+  if (rank >= contractRank) {
+    if (isPlannedReference(compression.rustEntry) || isPlannedReference(compression.sidecarCommand)) {
+      fail("compression-adapter cannot be contract or higher while rustEntry/sidecarCommand are still planned.");
+    }
+    if (!existsRelative(compression.rustEntry)) {
+      fail(`compression-adapter rustEntry does not exist: ${compression.rustEntry}`);
+    }
+    const compressionRust = existsRelative(compression.rustEntry)
+      ? fs.readFileSync(path.join(root, compression.rustEntry), "utf8")
+      : "";
+    const windowsMain = fs.readFileSync(path.join(root, "apps", "windows", "src", "main.rs"), "utf8");
+    if (!compressionRust.includes("pub fn run()") || !windowsMain.includes("CompressionSidecar")) {
+      fail("compression-adapter cannot be contract or higher until a real Rust command is present in source.");
+    }
+  }
+}
+
 const todos = slices.map((slice) => `- [ ] ${slice.title} (${slice.status}): ${slice.nextAction}`);
 console.log("Rust migration status TODO summary:");
 console.log(todos.join("\n"));

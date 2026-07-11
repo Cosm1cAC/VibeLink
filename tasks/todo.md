@@ -1,51 +1,35 @@
-# Android Handoff Gap Closure TODO
+# Rust Migration TODO
 
-Generated from the prior Android handoff review and the current `codex/android-handoff-gaps` branch state. The final closure status is now captured in `docs/android-parity-closure-report.md`.
+## Compression Contract
 
-## Already completed by previous commits
+- [x] Specify the deterministic JSONL contract and explicit non-goals.
+  - Acceptance: Methods, validation, outputs, errors, stats, and rollout boundary are documented.
+  - Verify: Review `docs/compression-sidecar.md` against ADR-0001.
+  - Files: `docs/compression-sidecar.md`
+- [x] Add protocol constants and independent JavaScript fixture.
+  - Acceptance: The fixture exposes protocol v1 with `trimUtf8`, `sampleLogLines`, and control methods.
+  - Verify: Contract test can launch and query the fixture.
+  - Files: `src/compressionContract.js`, `test/fixtures/compression-json-sidecar.js`
+- [x] Write failing behavioral contract tests.
+  - Acceptance: Tests cover multibyte head/tail trim, overlap-safe sampling, validation, stats, health, and close.
+  - Verify: `node --test test/rustCompressionContract.test.js` fails because the Rust command is absent.
+  - Files: `test/rustCompressionContract.test.js`
+- [x] Implement the real Rust sidecar.
+  - Acceptance: The release binary passes the same cases as the fixture with no production routing.
+  - Verify: focused Node and Rust commands in `tasks/plan.md` pass.
+  - Files: `apps/windows/src/compression_sidecar.rs`, `apps/windows/src/main.rs`
+- [x] Promote the manifest to `contract` and update status docs.
+  - Acceptance: Evidence and next action are accurate; feature flag remains non-required.
+  - Verify: `npm run rust:migration:check`
+  - Files: `docs/rust-migration-status.json`, `docs/rust-migration-status.md`, `README.md`
+- [ ] Review, commit, and publish through GitHub CLI.
+  - Acceptance: Tracked worktree is clean and remote tree equals the verified local tree.
+  - Verify: `gh api repos/:owner/:repo/git/ref/heads/main` and GitHub Actions.
 
-- [x] Restore message routes from `conversationKey` after pending state is lost.
-- [x] Block targeted Desktop Remote sends when focus confirmation fails.
-- [x] Add explicit approval handoff with Settings > Approvals and retry context.
-- [x] Correlate Live Call QA answers by stable question/task identifiers.
-- [x] Add system-following dark mode.
-- [x] Add Live Call entry point to the main composer.
-- [x] Add streaming assistant bubble behavior and attach tool cards to active turns.
-- [x] Add prompt history and quick command chips.
-- [x] Add message copy and code-block copy actions.
-- [x] Add Workspace search/show-more/full-diff/test/git actions.
-- [x] Add Android share and foreground notification polish.
+## Remaining Migration
 
-## Completed in this session
-
-- [x] Add file-reference extraction utility and tests.
-- [x] Surface detected file references in chat message actions.
-- [x] Add or update focused tests for file-reference behavior.
-- [x] Add Android message edit/delete/regenerate reducers and focused tests.
-- [x] Surface edit/delete/regenerate in the Android message action menu.
-- [x] Add native image/file picker buttons to the Android composer.
-- [x] Upload picked attachments through `/api/attachments` and inject markdown/preview prompt text.
-- [x] Add Android Settings admin summaries for devices, pending pairing sessions, audit logs, MCP status, and Doctor checks.
-- [x] Add Android device revoke and pairing approve/deny actions.
-- [x] Add Workspace file write/rename/delete routes and Android file editor controls.
-- [x] Add branch create/switch, stash push/pop, worktree creation, per-hunk stage, and conflict-resolution actions.
-- [x] Add Android PTY terminal session controls with input, resize, stop, and tool-event output polling.
-- [x] Add richer Markdown rendering plus image/artifact link chips in Android message bubbles.
-- [x] Add direct file-reference open from chat into Workspace file preview, with copy still available.
-- [x] Add Cloudflare guidance, tool-event retention/prune controls, MCP probe controls, and Doctor summaries in Settings.
-- [x] Add a tested mobile runtime policy for weak network, background catch-up, notification permission, foreground audio, and multi-device sync decisions.
-- [x] Add native push token registration, FCM credential configuration, and server-side native push delivery path.
-- [x] Add settings export/import endpoints with dry-run preview plus Android Settings controls.
-- [x] Add inline Android image thumbnail gallery using Coil while preserving artifact link actions.
-
-## Verification
-
-- [x] Baseline Android unit tests: `apps/android/.\gradlew.bat testDebugUnitTest`
-- [x] Focused Android unit tests after final slice: `apps/android/.\gradlew.bat :app:testDebugUnitTest --tests "com.vibelink.app.ui.screens.MessageContentUtilsTest"`
-- [x] Focused Android message reducer tests: `apps/android/.\gradlew.bat :app:testDebugUnitTest --tests "com.vibelink.app.ui.screens.MessageListReducerTest"`
-- [x] Focused Android Workspace/mobile tests: `apps/android/.\gradlew.bat :app:testDebugUnitTest --tests "com.vibelink.app.ui.screens.WorkspaceDiffUtilsTest" --tests "com.vibelink.app.mobile.MobileResiliencePolicyTest"`
-- [x] Focused backend workspace tests: `node --test test/workspacesFileMutation.test.js test/workspacesGitDepth.test.js test/workspacesWorktree.test.js`
-- [x] Focused backend settings/native push tests: `node --test test/settingsImportExport.test.js test/nativePushSubscription.test.js`
-- [x] Final Android unit test suite: `apps/android/.\gradlew.bat testDebugUnitTest`
-- [x] Review diff for scope and secrets.
-- [x] Stage, commit, merge to `main`, and push the Android closure work.
+- [ ] Audit all canary claims against current remote CI and runtime evidence.
+- [ ] Advance any remaining server-side work that does not touch Android/live-call.
+- [ ] Reconcile live-call changes before beginning the audio contract.
+- [ ] Implement and stage the audio pipeline after concurrent testing completes.
+- [ ] Prove every manifest promotion gate before declaring the full Rust migration goal complete.

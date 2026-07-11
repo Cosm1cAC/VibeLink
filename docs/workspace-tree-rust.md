@@ -41,7 +41,7 @@ Run the local gate with:
 npm run workspace-tree:canary -- --warm-scans 10 --output .tmp/workspace-tree-canary-final.json
 ```
 
-The representative 2026-07-11 run rebuilt the release binary from the current source and passed all checks. It measured a 34.3ms first launch, 31.8ms steady-state cold scan, and 3.3ms warm p95 across 10 repeated scans. The root scan routed through Rust with `--dir .`, all warm scans hit the cache without another Rust start, and the nested `.gitignore` mutation caused exactly one refresh. Available-command fallback/failure counts and missing-command auto-mode failure/fallback deltas were all zero.
+The representative 2026-07-11 run rebuilt the release binary from the current source and passed all checks. The final post-cache-fix run measured a 60.4ms first launch, 56.6ms steady-state cold scan, and 5.9ms warm p95 across 10 repeated scans. The root scan routed through Rust with `--dir .`, all warm scans hit the cache without another Rust start, and the nested `.gitignore` mutation caused exactly one refresh. Available-command fallback/failure counts and missing-command auto-mode failure/fallback deltas were all zero.
 
 `.github/workflows/workspace-tree-rust-canary.yml` rebuilds the release binary on Windows, runs parity/cache tests, executes the same representative canary, and uploads `.tmp/workspace-tree-canary-ci.json`.
 

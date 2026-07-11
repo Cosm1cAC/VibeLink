@@ -27,7 +27,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Run the real-repository canary on more repositories and address or accept the cold-route penalty before considering default-on. |
+| Workspace tree scanner | `canary` | Persistent-session canary with one-shot/Node rollback | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_WORKSPACE_TREE_SESSION`, `VIBELINK_RUST_BIN` | One-shot Rust, then Node `listDirectory()` | Monitor remote and limited interactive sessions before considering default-on. |
 | Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run the real-session canary against another MCP server implementation before considering default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
@@ -37,7 +37,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, Windows metadata parity, Node-compatible locale/BFS result ordering, conservative Node fallback for truncated Rust subsets, signature/cache behavior, nested ignore-file invalidation, content-safe file-sample caching, fallback stats, isolated and real-repository canary harnesses, and an independent Windows CI gate exist. VibeLink, `ok-wuthering-waves`, and `meetily` all preserved exact tree/context parity, full warm cache reuse, and zero failures/fallbacks. Repeated runs on the two additional repositories measured Node at 56.3-94.9ms, Rust cold at 152.2-228.1ms, and Rust warm at 20.8-30.3ms, so the slice remains `canary` rather than `default-on`.
+Current state: Rust one-shot CLI and persistent JSONL sidecar, Node opt-in/auto routing, sidecar-to-one-shot-to-Node fallback, bounded pending requests, runtime session stats, root routing, supported-subset parity, inherited/nested `.gitignore` handling, Windows metadata parity, Node-compatible locale/BFS ordering, conservative fallback for truncated Rust subsets, signature/cache behavior, content-safe file caching, contract/client/integration tests, three-repository canaries, and an independent Windows CI gate exist. Persistent runs preserved exact parity, full cache reuse, one sidecar start, clean pending drain/termination, and zero route/session failures or fallbacks. VibeLink measured 30.0-31.0ms Node vs 53.7-80.3ms Rust cold; `ok-wuthering-waves` 77.2ms vs 59.8ms; `meetily` 76.1ms vs 77.1ms. Warm totals were 9.2-26.0ms, so the slice remains limited `canary` pending remote and interactive session evidence.
 
 Can move to `default-on` only when:
 
@@ -45,7 +45,7 @@ Can move to `default-on` only when:
 - Runs with an available command record zero Rust failures and fallbacks; missing-command auto mode falls back without recording a failure.
 - Repeated unchanged scans reuse the Node-held Rust result without another CLI start, while nested `.gitignore` changes invalidate it.
 - Cold and warm latency evidence is acceptable for interactive workspace context requests.
-- The per-cache-miss CLI process, synchronous Node cache validation, bounded process-local cache, and incomplete full-Git ignore semantics remain explicitly documented in `docs/workspace-tree-rust.md`.
+- Persistent-session lifecycle, synchronous Node cache validation, bounded process-local cache, and incomplete full-Git ignore semantics remain explicitly documented in `docs/workspace-tree-rust.md`.
 - The independent Windows canary status stays green and rollback with `VIBELINK_RUST_WORKSPACE_TREE=0` remains tested.
 
 ### Persistent MCP stdio sessions

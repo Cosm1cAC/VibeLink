@@ -39,7 +39,7 @@
         "event-store:server-canary": "node tools/event-store/server-canary.mjs",
         "event-store:real-data-canary": "node tools/event-store/real-data-canary.mjs",
         "event-store:canary:all": "npm run event-store:canary -- --rounds 24 --batch-size 100 --latency-margin-ms 10 --output .tmp/event-store-local-canary-ci.json && npm run event-store:runtime-canary -- --output .tmp/event-store-runtime-canary-ci.json && npm run event-store:server-canary -- --output .tmp/event-store-server-canary-ci.json",
-        "test:rust-sidecars": "node --test --test-concurrency=1 test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/mcpSessionRealCanary.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js test/eventStoreRealDataCanary.test.js test/rustCompressionContract.test.js test/compressionBenchmark.test.js"
+        "test:rust-sidecars": "node --test --test-concurrency=1 test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js test/workspaceTreeSidecarContract.test.js test/workspaceTreeSidecarClient.test.js test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/mcpSessionRealCanary.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js test/eventStoreRealDataCanary.test.js test/rustCompressionContract.test.js test/compressionBenchmark.test.js"
     },
     "dependencies": {
         "@vitejs/plugin-react": "^4.3.4",

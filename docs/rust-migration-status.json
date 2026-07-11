@@ -8,30 +8,35 @@
       "title": "Workspace tree scanner",
       "priority": "P1",
       "status": "canary",
-      "rollout": "auto-mode canary with manual rollback flag",
+      "rollout": "persistent-session canary with one-shot and Node rollback",
       "featureFlags": [
         { "name": "VIBELINK_RUST_WORKSPACE_TREE", "requiredInCode": true },
         { "name": "VIBELINK_RUST_BIN", "requiredInCode": true },
-        { "name": "VIBELINK_RUST_BIN_ARGS_JSON", "requiredInCode": true }
+        { "name": "VIBELINK_RUST_BIN_ARGS_JSON", "requiredInCode": true },
+        { "name": "VIBELINK_RUST_WORKSPACE_TREE_SESSION", "requiredInCode": true },
+        { "name": "VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS", "requiredInCode": true },
+        { "name": "VIBELINK_WORKSPACE_TREE_SIDECAR_MAX_PENDING_REQUESTS", "requiredInCode": true }
       ],
-      "nodeEntry": "src/workspaces.js",
+      "nodeEntry": "src/workspaces.js and src/workspaceTreeSidecarClient.js",
       "rustEntry": "apps/windows/src/main.rs",
-      "sidecarCommand": "vibelink workspace-tree",
-      "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails. VIBELINK_RUST_WORKSPACE_TREE=auto skips a missing binary without marking a Rust failure.",
-      "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks mode, auto/available state, command, hits, misses, fallbacks, failures, cache, budget hits, last signature, and last error.",
+      "sidecarCommand": "vibelink workspace-tree-sidecar (persistent) or vibelink workspace-tree (one-shot fallback)",
+      "nodeFallback": "A failed persistent session falls back to the one-shot Rust CLI; src/workspaces.js listDirectory() is used when Rust is off, missing, invalid, truncated, or both Rust routes fail. Auto mode skips a missing binary without recording failure.",
+      "runtimeStats": "rustWorkspaceTree stats expose mode, availability, route/cache/budget outcomes and nested session mode, active/ready state, starts, failures, fallbacks, last error, pending, request/response, timeout, backpressure, and termination counters.",
       "tests": [
         "test/workspacesRustTree.test.js",
         "test/workspaceTreeCanary.test.js",
-        "test/workspaceTreeRealCanary.test.js"
+        "test/workspaceTreeRealCanary.test.js",
+        "test/workspaceTreeSidecarContract.test.js",
+        "test/workspaceTreeSidecarClient.test.js"
       ],
       "docs": [
         "README.md",
         "docs/workspace-tree-rust.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested gitignore rules, Windows metadata parity, Node-compatible locale/BFS result ordering, conservative Node fallback for truncated Rust subsets, signature/cache behavior, nested gitignore invalidation, content-safe file-sample caching, fallback stats, isolated and real-repository canary harnesses, and an independent Windows CI gate exist. VibeLink, ok-wuthering-waves, and meetily all preserved exact tree/context parity, full warm cache reuse, and zero failures/fallbacks. Repeated runs on the two additional repositories measured Node at 56.3-94.9ms, Rust cold at 152.2-228.1ms, and Rust warm at 20.8-30.3ms.",
-      "nextAction": "Address or explicitly accept the observed process-per-miss cold-route penalty before considering default-on; exact parity evidence now covers three repositories.",
-      "promotionGate": "Can move to default-on only after CI and limited real-repository sessions continue to preserve exact supported-subset parity, zero failures and fallbacks with an available command, failure-free missing-command fallback, warm cache reuse, nested gitignore invalidation, and acceptable first-launch/cold/warm latency. Rollback with VIBELINK_RUST_WORKSPACE_TREE=0 must remain tested and documented."
+      "currentState": "Rust one-shot CLI and persistent JSONL sidecar, Node opt-in/auto routing, sidecar-to-one-shot-to-Node fallback, bounded pending requests, runtime session stats, root routing, supported-subset parity, inherited/nested gitignore rules, Windows metadata parity, Node-compatible locale/BFS ordering, conservative fallback for truncated Rust subsets, signature/cache behavior, content-safe file caching, contract/client/integration tests, three-repository canaries, and an independent Windows CI gate exist. Persistent runs preserved exact parity, full cache reuse, one sidecar start, clean pending drain/termination, and zero route/session failures or fallbacks. VibeLink measured 30.0-31.0ms Node vs 53.7-80.3ms Rust cold; ok-wuthering-waves 77.2ms vs 59.8ms; meetily 76.1ms vs 77.1ms. Warm totals were 9.2-26.0ms.",
+      "nextAction": "Keep the persistent sidecar in limited canary while remote CI and interactive sessions confirm readiness, clean drain, and zero session fallback; then consider default-on with the one-shot and Node rollback paths retained.",
+      "promotionGate": "Can move to default-on only after CI and limited real/interactive sessions preserve exact supported-subset parity, one ready persistent sidecar, zero route/session failures and fallbacks, bounded pending drain, clean termination, warm cache reuse, nested gitignore invalidation, acceptable cold/warm latency, and tested session-to-one-shot-to-Node rollback."
     },
     {
       "id": "mcp-session-sidecar",

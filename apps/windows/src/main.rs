@@ -66,6 +66,8 @@ enum Mode {
         #[arg(long = "max-entries", default_value_t = 240)]
         max_entries: usize,
     },
+    /// Run the persistent workspace tree JSONL sidecar.
+    WorkspaceTreeSidecar,
     /// Run the MCP stdio session JSONL sidecar.
     McpSessionSidecar,
     /// Run the event-store SQLite JSONL sidecar.
@@ -120,6 +122,39 @@ struct WorkspaceTreeItem {
     size: u64,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceTreeScanOptions {
+    root: PathBuf,
+    #[serde(default)]
+    dir: PathBuf,
+    #[serde(default = "default_workspace_tree_depth")]
+    depth: usize,
+    #[serde(rename = "maxEntries", default = "default_workspace_tree_max_entries")]
+    max_entries: usize,
+}
+
+struct WorkspaceTreeSidecar {
+    started_at: String,
+    requests: u64,
+    responses: u64,
+    failures: u64,
+    scans: u64,
+    items: u64,
+    truncated_scans: u64,
+    last_request_at: String,
+    last_response_at: String,
+    last_failure_at: String,
+    last_error: String,
+}
+
+fn default_workspace_tree_depth() -> usize {
+    1
+}
+
+fn default_workspace_tree_max_entries() -> usize {
+    240
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,6 +296,131 @@ fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize)
     let tree = list_workspace_tree(root, dir, depth, max_entries)?;
     println!("{}", serde_json::to_string_pretty(&tree)?);
     Ok(())
+}
+
+fn run_workspace_tree_sidecar() -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut sidecar = WorkspaceTreeSidecar::new();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: SidecarRequest = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                sidecar.record_request();
+                sidecar.record_failure(&error.to_string());
+                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
+                continue;
+            }
+        };
+
+        sidecar.record_request();
+        if request.method == "__close" {
+            sidecar.record_response();
+            write_sidecar_result(&mut stdout, &request.id, Value::Bool(true))?;
+            break;
+        }
+
+        match sidecar.handle(&request.method, &request.args) {
+            Ok(result) => {
+                sidecar.record_response();
+                write_sidecar_result(&mut stdout, &request.id, result)?;
+            }
+            Err(error) => {
+                sidecar.record_failure(&format!("{error:#}"));
+                write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+impl WorkspaceTreeSidecar {
+    fn new() -> Self {
+        Self {
+            started_at: now_iso(),
+            requests: 0,
+            responses: 0,
+            failures: 0,
+            scans: 0,
+            items: 0,
+            truncated_scans: 0,
+            last_request_at: String::new(),
+            last_response_at: String::new(),
+            last_failure_at: String::new(),
+            last_error: String::new(),
+        }
+    }
+
+    fn record_request(&mut self) {
+        self.requests += 1;
+        self.last_request_at = now_iso();
+    }
+
+    fn record_response(&mut self) {
+        self.responses += 1;
+        self.last_response_at = now_iso();
+    }
+
+    fn record_failure(&mut self, message: &str) {
+        self.failures += 1;
+        self.last_failure_at = now_iso();
+        self.last_error = message.to_string();
+    }
+
+    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+        match method {
+            "__health" => Ok(json!({
+                "ok": true,
+                "implementation": "rust",
+                "protocolVersion": 1,
+                "supportedMethods": ["scan"],
+                "controlMethods": ["__health", "stats", "__close"],
+                "startedAt": self.started_at
+            })),
+            "stats" => Ok(self.stats()),
+            "scan" => {
+                let options: WorkspaceTreeScanOptions = sidecar_arg(args, 0)?;
+                let tree = list_workspace_tree(
+                    &options.root,
+                    &options.dir,
+                    options.depth,
+                    options.max_entries,
+                )?;
+                self.scans += 1;
+                self.items += tree.items.len() as u64;
+                if tree.truncated {
+                    self.truncated_scans += 1;
+                }
+                Ok(serde_json::to_value(tree)?)
+            }
+            _ => bail!("Unsupported workspace tree sidecar method: {method}"),
+        }
+    }
+
+    fn stats(&self) -> Value {
+        json!({
+            "implementation": "rust",
+            "protocolVersion": 1,
+            "startedAt": self.started_at,
+            "pending": 0,
+            "requests": self.requests,
+            "responses": self.responses,
+            "failures": self.failures,
+            "scans": self.scans,
+            "items": self.items,
+            "truncatedScans": self.truncated_scans,
+            "lastRequestAt": self.last_request_at,
+            "lastResponseAt": self.last_response_at,
+            "lastFailureAt": self.last_failure_at,
+            "lastError": self.last_error
+        })
+    }
 }
 
 fn run_mcp_session_sidecar() -> Result<()> {
@@ -418,7 +578,7 @@ fn sidecar_arg<T: DeserializeOwned>(args: &[Value], index: usize) -> Result<T> {
     let value = args
         .get(index)
         .cloned()
-        .with_context(|| format!("Missing MCP session sidecar arg {index}"))?;
+        .with_context(|| format!("Missing sidecar arg {index}"))?;
     Ok(serde_json::from_value(value)?)
 }
 
@@ -2075,6 +2235,7 @@ fn run() -> Result<()> {
             depth,
             max_entries,
         } => run_workspace_tree(&root, &dir, depth, max_entries),
+        Mode::WorkspaceTreeSidecar => run_workspace_tree_sidecar(),
         Mode::McpSessionSidecar => run_mcp_session_sidecar(),
         Mode::EventStoreSidecar { db_path, read_only } => {
             run_event_store_sidecar(&db_path, read_only)

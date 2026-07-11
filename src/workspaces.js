@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { withAgentReachPath } from "./agentReachRuntime.js";
 import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
+import { createWorkspaceTreeSidecarClient } from "./workspaceTreeSidecarClient.js";
 
 const execFileAsync = promisify(execFile);
 const ignoredDirs = new Set([".git", "node_modules", ".next", "dist", "build", "target", "coverage", ".agent-mobile-terminal"]);
@@ -16,6 +17,10 @@ const gitStatusCacheStats = { hits: 0, misses: 0, evictions: 0 };
 const workspaceTreeCache = new Map();
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeCache = new Map();
+let rustWorkspaceTreeSidecar = null;
+let rustWorkspaceTreeSidecarKey = "";
+let rustWorkspaceTreeSidecarReady = null;
+let rustWorkspaceTreeLastClientStats = { terminated: true, pending: 0 };
 const workspaceContextFileCache = new Map();
 const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeStats = {
@@ -28,6 +33,13 @@ const rustWorkspaceTreeStats = {
   cacheMisses: 0,
   cacheEvictions: 0,
   lastSignature: "",
+  lastError: ""
+};
+const rustWorkspaceTreeSessionStats = {
+  starts: 0,
+  failures: 0,
+  fallbacks: 0,
+  ready: false,
   lastError: ""
 };
 const textExtensions = new Set([
@@ -194,6 +206,8 @@ export function getWorkspaceRuntimeStats() {
   const rustTreeMode = rustWorkspaceTreeMode();
   const rustTreeCommand = rustWorkspaceTreeCommand();
   const rustTreeEnabled = rustTreeMode !== "off";
+  const sessionMode = rustWorkspaceTreeSessionMode();
+  const sessionClientStats = rustWorkspaceTreeSidecar?.stats() || rustWorkspaceTreeLastClientStats;
   return {
     gitSummaryCache: {
       entries: gitSummaryCache.size,
@@ -243,7 +257,18 @@ export function getWorkspaceRuntimeStats() {
       entries: rustWorkspaceTreeCache.size,
       maxEntries: workspaceTreeCacheMaxEntries(),
       lastSignature: rustWorkspaceTreeStats.lastSignature,
-      lastError: rustWorkspaceTreeStats.lastError
+      lastError: rustWorkspaceTreeStats.lastError,
+      session: {
+        enabled: rustTreeEnabled && sessionMode !== "off",
+        mode: sessionMode,
+        active: Boolean(rustWorkspaceTreeSidecar),
+        ready: rustWorkspaceTreeSessionStats.ready,
+        starts: rustWorkspaceTreeSessionStats.starts,
+        failures: rustWorkspaceTreeSessionStats.failures,
+        fallbacks: rustWorkspaceTreeSessionStats.fallbacks,
+        lastError: rustWorkspaceTreeSessionStats.lastError,
+        client: { ...sessionClientStats }
+      }
     }
   };
 }
@@ -670,6 +695,18 @@ function recordRustWorkspaceTreeFallback(message) {
   rustWorkspaceTreeStats.lastError = message;
 }
 
+function rustWorkspaceTreeSessionMode() {
+  const value = String(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION || "").trim();
+  if (/^auto$/i.test(value)) return "auto";
+  if (/^(1|true|yes|on)$/i.test(value)) return "manual";
+  return "off";
+}
+
+function rustWorkspaceTreeSessionTimeoutMs() {
+  const value = Number(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS || 10000);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10000;
+}
+
 function recordRustWorkspaceTreeBudgetFallback(message) {
   rustWorkspaceTreeStats.misses += 1;
   rustWorkspaceTreeStats.fallbacks += 1;
@@ -680,8 +717,74 @@ function rustWorkspaceTreeCacheKey(dir, root, depth, maxEntries, command, baseAr
   return JSON.stringify({
     command,
     baseArgs,
+    session: rustWorkspaceTreeSessionMode(),
     tree: workspaceTreeCacheKey(dir, root, depth, maxEntries)
   });
+}
+
+export async function closeRustWorkspaceTreeSidecar() {
+  const client = rustWorkspaceTreeSidecar;
+  rustWorkspaceTreeSidecar = null;
+  rustWorkspaceTreeSidecarKey = "";
+  rustWorkspaceTreeSidecarReady = null;
+  rustWorkspaceTreeSessionStats.ready = false;
+  if (!client) return { closed: false };
+  await client.close();
+  rustWorkspaceTreeLastClientStats = client.stats();
+  return { closed: true };
+}
+
+async function ensureRustWorkspaceTreeSidecar(command, baseArgs) {
+  const key = JSON.stringify({ command, baseArgs });
+  if (rustWorkspaceTreeSidecar && rustWorkspaceTreeSidecarKey === key && rustWorkspaceTreeSessionStats.ready) {
+    return rustWorkspaceTreeSidecar;
+  }
+  if (rustWorkspaceTreeSidecarReady && rustWorkspaceTreeSidecarKey === key) {
+    return rustWorkspaceTreeSidecarReady;
+  }
+  if (rustWorkspaceTreeSidecar) await closeRustWorkspaceTreeSidecar();
+
+  const client = createWorkspaceTreeSidecarClient({
+    command,
+    args: [...baseArgs, "workspace-tree-sidecar"],
+    timeoutMs: rustWorkspaceTreeSessionTimeoutMs()
+  });
+  rustWorkspaceTreeSidecar = client;
+  rustWorkspaceTreeSidecarKey = key;
+  rustWorkspaceTreeSessionStats.starts += 1;
+  rustWorkspaceTreeSessionStats.ready = false;
+  const ready = (async () => {
+    const health = await client.health();
+    if (!health?.ok || health.implementation !== "rust" || health.protocolVersion !== 1) {
+      throw new Error("Workspace tree Rust sidecar health check failed.");
+    }
+    if (rustWorkspaceTreeSidecar !== client || rustWorkspaceTreeSidecarKey !== key) {
+      throw new Error("Workspace tree Rust sidecar was superseded during startup.");
+    }
+    rustWorkspaceTreeSessionStats.ready = true;
+    rustWorkspaceTreeSessionStats.lastError = "";
+    return client;
+  })();
+  rustWorkspaceTreeSidecarReady = ready;
+  try {
+    return await ready;
+  } finally {
+    if (rustWorkspaceTreeSidecarReady === ready) rustWorkspaceTreeSidecarReady = null;
+  }
+}
+
+async function scanWithRustWorkspaceTreeSidecar(command, baseArgs, options) {
+  try {
+    const client = await ensureRustWorkspaceTreeSidecar(command, baseArgs);
+    return await client.scan(options);
+  } catch (error) {
+    const message = rustWorkspaceTreeErrorMessage(error);
+    rustWorkspaceTreeSessionStats.failures += 1;
+    rustWorkspaceTreeSessionStats.fallbacks += 1;
+    rustWorkspaceTreeSessionStats.lastError = message;
+    await closeRustWorkspaceTreeSidecar().catch(() => {});
+    return null;
+  }
 }
 
 function cloneWorkspaceTreeItems(items = []) {
@@ -770,18 +873,30 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
   }
   rustWorkspaceTreeStats.cacheMisses += 1;
   try {
-    const { stdout } = await execFileAsync(command, [
-      ...baseArgs,
-      "workspace-tree",
-      "--root", root,
-      "--dir", path.relative(root, dir) || ".",
-      "--depth", String(depth),
-      "--max-entries", String(maxEntries)
-    ], {
-      windowsHide: true,
-      maxBuffer: 10 * 1024 * 1024
-    });
-    const parsed = JSON.parse(stdout);
+    const relativeDir = path.relative(root, dir) || ".";
+    let parsed = null;
+    if (rustWorkspaceTreeSessionMode() !== "off") {
+      parsed = await scanWithRustWorkspaceTreeSidecar(command, baseArgs, {
+        root,
+        dir: relativeDir,
+        depth,
+        maxEntries
+      });
+    }
+    if (!parsed) {
+      const { stdout } = await execFileAsync(command, [
+        ...baseArgs,
+        "workspace-tree",
+        "--root", root,
+        "--dir", relativeDir,
+        "--depth", String(depth),
+        "--max-entries", String(maxEntries)
+      ], {
+        windowsHide: true,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      parsed = JSON.parse(stdout);
+    }
     if (Array.isArray(parsed.items)) {
       if (parsed.truncated) {
         rustWorkspaceTreeStats.budgetHits += 1;

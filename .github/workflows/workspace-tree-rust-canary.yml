@@ -11,9 +11,12 @@ on:
       - "package.json"
       - "package-lock.json"
       - "src/workspaces.js"
+      - "src/workspaceTreeSidecarClient.js"
       - "test/workspacesRustTree.test.js"
       - "test/workspaceTreeCanary.test.js"
       - "test/workspaceTreeRealCanary.test.js"
+      - "test/workspaceTreeSidecarContract.test.js"
+      - "test/workspaceTreeSidecarClient.test.js"
       - "tools/workspace-tree/**"
   push:
     branches:
@@ -27,9 +30,12 @@ on:
       - "package.json"
       - "package-lock.json"
       - "src/workspaces.js"
+      - "src/workspaceTreeSidecarClient.js"
       - "test/workspacesRustTree.test.js"
       - "test/workspaceTreeCanary.test.js"
       - "test/workspaceTreeRealCanary.test.js"
+      - "test/workspaceTreeSidecarContract.test.js"
+      - "test/workspaceTreeSidecarClient.test.js"
       - "tools/workspace-tree/**"
 
 permissions:
@@ -68,7 +74,10 @@ jobs:
         run: npm run rust:migration:check
 
       - name: Run workspace-tree parity and canary tests
-        run: node --test --test-concurrency=1 test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js
+        run: node --test --test-concurrency=1 test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js test/workspaceTreeSidecarContract.test.js test/workspaceTreeSidecarClient.test.js
+
+      - name: Run Rust workspace-tree unit tests
+        run: cargo test --manifest-path apps/windows/Cargo.toml workspace_tree
 
       - name: Run representative auto-mode canary
         run: npm run workspace-tree:canary -- --warm-scans 10 --output .tmp/workspace-tree-canary-ci.json

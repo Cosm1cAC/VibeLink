@@ -8,7 +8,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 
 - The three remote branch heads have been reconciled into `origin/main` through `gh api`.
 - Event store, workspace tree, and persistent MCP sessions are at `canary` with passing Windows workflows.
-- Workspace tree now has exact metadata/context parity across VibeLink, ok-wuthering-waves, and meetily after fixing locale-sensitive ordering; its process-per-miss cold penalty keeps it at `canary`.
+- Workspace tree now has exact metadata/context parity across VibeLink, ok-wuthering-waves, and meetily plus a persistent Rust sidecar that keeps cold totals at 53.7-80.3ms with one process and zero session fallback; it remains limited `canary` pending remote/interactive evidence.
 - MCP now has a passing read-only real-session canary against the installed codebase-memory server; another server implementation is still required for broader evidence.
 - Event store now has a write-rejecting read-only sidecar mode and exact replay evidence from the existing approximately 1.01GB database; human-driven append evidence remains outstanding.
 - Audio remains `planned` and is temporarily excluded because another session is validating live call.

@@ -1,0 +1,80 @@
+name: Workspace Tree Rust Canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/workspace-tree-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/workspace-tree-rust.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/workspaces.js"
+      - "test/workspacesRustTree.test.js"
+      - "test/workspaceTreeCanary.test.js"
+      - "tools/workspace-tree/**"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/workspace-tree-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/workspace-tree-rust.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/workspaces.js"
+      - "test/workspacesRustTree.test.js"
+      - "test/workspaceTreeCanary.test.js"
+      - "tools/workspace-tree/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workspace-tree-rust-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace-tree-rust-canary:
+    name: Parity, cache, and canary
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Rust workspace-tree command
+        run: cargo build --release --manifest-path apps/windows/Cargo.toml
+
+      - name: Check Rust migration manifest
+        run: npm run rust:migration:check
+
+      - name: Run workspace-tree parity and canary tests
+        run: node --test test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js
+
+      - name: Run representative auto-mode canary
+        run: npm run workspace-tree:canary -- --warm-scans 10 --output .tmp/workspace-tree-canary-ci.json
+
+      - name: Upload canary output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tree-canary-result
+          path: .tmp/workspace-tree-canary-ci.json
+          if-no-files-found: ignore

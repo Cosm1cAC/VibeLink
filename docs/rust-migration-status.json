@@ -7,8 +7,8 @@
       "id": "workspace-tree",
       "title": "Workspace tree scanner",
       "priority": "P1",
-      "status": "opt-in",
-      "rollout": "manual flag plus auto safe-detection",
+      "status": "canary",
+      "rollout": "auto-mode canary with manual rollback flag",
       "featureFlags": [
         { "name": "VIBELINK_RUST_WORKSPACE_TREE", "requiredInCode": true },
         { "name": "VIBELINK_RUST_BIN", "requiredInCode": true },
@@ -27,9 +27,9 @@
         "docs/workspace-tree-rust.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI and Node opt-in integration exist. Node/Rust parity covers sorting, hidden files, fixed ignores, inherited and nested gitignore rules, path-pattern rules, truncation, signature/cache behavior, nested gitignore cache invalidation, auto safe-detection, and missing/failing-command fallback stats.",
-      "nextAction": "Run a representative auto-mode workspace-tree canary and capture parity, cold/warm latency, cache-hit, fallback, and failure evidence before promotion.",
-      "promotionGate": "Can move to canary only after representative auto-mode runs preserve exact supported-subset path/type parity, zero failures and fallbacks with an available command, failure-free missing-command fallback, warm cache reuse without another CLI start, nested gitignore invalidation, and acceptable cold/warm latency. The documented per-miss CLI process and bounded Node cache limitations remain rollout constraints."
+      "currentState": "Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested gitignore rules, truncation, signature/cache behavior, nested gitignore invalidation, fallback stats, a representative canary harness, and an independent Windows CI canary gate exist. The 2026-07-11 current-source release canary passed with 34.3ms first launch, 31.8ms cold scan, 3.3ms warm p95, 10 cache hits, and zero fallback/failure deltas.",
+      "nextAction": "Run limited real-repository auto-mode sessions and monitor the Windows canary gate before considering default-on.",
+      "promotionGate": "Can move to default-on only after CI and limited real-repository sessions continue to preserve exact supported-subset parity, zero failures and fallbacks with an available command, failure-free missing-command fallback, warm cache reuse, nested gitignore invalidation, and acceptable first-launch/cold/warm latency. Rollback with VIBELINK_RUST_WORKSPACE_TREE=0 must remain tested and documented."
     },
     {
       "id": "mcp-session-sidecar",

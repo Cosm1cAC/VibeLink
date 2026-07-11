@@ -121,7 +121,7 @@ VibeLink 的长期性能方向是混合架构：Node bridge 继续负责 HTTP AP
 
 ### 当前执行计划
 
-- **Slice 1：Workspace tree**：完成 Rust CLI、Node opt-in/auto 接入、fallback、Node/Rust parity，以及 root/nested/inherited gitignore、truncation/signature 和嵌套规则缓存失效；下一步运行代表性 auto-mode canary，采集冷/热延迟、缓存命中和 fallback/failure 证据。当前仍是 cache miss 时启动 CLI，完整限制见 `docs/workspace-tree-rust.md`。
+- **Slice 1：Workspace tree**：已进入 canary；完成 Rust CLI、Node opt-in/auto 接入、fallback、Node/Rust parity、root/nested/inherited gitignore、truncation/signature、嵌套规则缓存失效、代表性本地 canary 和独立 Windows CI gate。下一步在真实仓库有限运行后再考虑 default-on，完整限制见 `docs/workspace-tree-rust.md`。
 - **Slice 2：Event store worker**：先抽象事件 append/replay contract，再把 SQLite 同步热路径隔离到 worker/Rust 边界，最后接 SSE replay/fanout 指标；当前已有真实 Rust `event-store-sidecar`、JSONL contract test 和 `VIBELINK_EVENT_STORE_RUST_SIDECAR=1` 显式 opt-in runtime routing，失败时回退 Worker/sync SQLite。
 - **Slice 3：MCP persistent sessions**：保留现有 JSON-RPC 语义，新增 long-lived stdio session manager、请求队列、超时、重启和背压；当前已有 Node manager、JSONL sidecar contract、Rust `mcp-session-sidecar` 子命令和 opt-in runtime sidecar routing。
 - **Slice 4：Audio pipeline**：以 live call ring buffer、level meter 和 backpressure 为第一批低延迟 Rust 化目标。

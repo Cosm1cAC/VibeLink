@@ -27,7 +27,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Run a representative auto-mode canary and capture parity, latency, cache, fallback, and failure evidence. |
+| Workspace tree scanner | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Run limited real-repository sessions and monitor the Windows canary gate before considering default-on. |
 | Persistent MCP stdio sessions | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run representative runtime canaries and capture spawn-reduction/fallback-rate evidence before canary/default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
@@ -37,15 +37,16 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI and Node opt-in integration exist. Node/Rust parity now covers directories-first sorting, hidden files, fixed ignores, inherited and nested `.gitignore` rules, path-pattern rules, truncation, signature/cache behavior, and nested ignore-file cache invalidation. `VIBELINK_RUST_WORKSPACE_TREE=auto` safe-detection and fallback/error runtime stats remain in place.
+Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, truncation, signature/cache behavior, nested ignore-file invalidation, fallback stats, a representative canary harness, and an independent Windows CI gate exist. The 2026-07-11 current-source release canary passed with 34.3ms first launch, 31.8ms cold scan, 3.3ms warm p95, 10 cache hits without another Rust start, one expected refresh after a nested rule change, and zero fallback/failure deltas.
 
-Can move to `canary` only when:
+Can move to `default-on` only when:
 
 - Representative auto-mode runs preserve exact Node/Rust path/type parity for the supported ignore-rule subset.
 - Runs with an available command record zero Rust failures and fallbacks; missing-command auto mode falls back without recording a failure.
 - Repeated unchanged scans reuse the Node-held Rust result without another CLI start, while nested `.gitignore` changes invalidate it.
 - Cold and warm latency evidence is acceptable for interactive workspace context requests.
 - The per-cache-miss CLI process, synchronous Node cache validation, bounded process-local cache, and incomplete full-Git ignore semantics remain explicitly documented in `docs/workspace-tree-rust.md`.
+- The independent Windows canary status stays green and rollback with `VIBELINK_RUST_WORKSPACE_TREE=0` remains tested.
 
 ### Persistent MCP stdio sessions
 
@@ -109,6 +110,7 @@ node --test test/eventStoreWorker.test.js
 node --test test/eventStoreMetrics.test.js
 node --test test/eventStoreBatcher.test.js
 node --test test/workspacesRustTree.test.js
+node --test test/workspaceTreeCanary.test.js
 node --test test/mcpRuntime.test.js
 node --test test/mcpSessionSidecarContract.test.js
 cargo test --manifest-path apps/windows/Cargo.toml
@@ -116,6 +118,7 @@ cargo build --manifest-path apps/windows/Cargo.toml
 npm run event-store:canary
 npm run event-store:runtime-canary
 npm run event-store:server-canary
+npm run workspace-tree:canary
 # or run the canary harnesses serially with CI output paths
 npm run event-store:canary:all
 ```

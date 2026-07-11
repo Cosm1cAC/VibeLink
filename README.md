@@ -122,9 +122,10 @@ VibeLink 的长期性能方向是混合架构：Node bridge 继续负责 HTTP AP
 ### 当前执行计划
 
 - **Slice 1：Workspace tree**：已进入 canary；完成 Rust CLI、Node opt-in/auto 接入、fallback、Node/Rust parity、root/nested/inherited gitignore、truncation/signature、嵌套规则缓存失效、代表性本地 canary 和独立 Windows CI gate。下一步在真实仓库有限运行后再考虑 default-on，完整限制见 `docs/workspace-tree-rust.md`。
-- **Slice 2：Event store worker**：先抽象事件 append/replay contract，再把 SQLite 同步热路径隔离到 worker/Rust 边界，最后接 SSE replay/fanout 指标；当前已有真实 Rust `event-store-sidecar`、JSONL contract test 和 `VIBELINK_EVENT_STORE_RUST_SIDECAR=1` 显式 opt-in runtime routing，失败时回退 Worker/sync SQLite。
+- **Slice 2：Event store worker**：已进入 canary；完成真实 Rust `event-store-sidecar`、JSONL contract/runtime test、auto readiness、Worker/sync fallback、代表性本地/runtime/server canary 和独立 Windows CI gate。下一步采集有限真实会话指标后再考虑 default-on。
 - **Slice 3：MCP persistent sessions**：已进入 canary；保留现有 JSON-RPC 语义，完成 long-lived stdio session manager、请求队列、超时、重启、背压、auto readiness、生产路由 canary 和独立 Windows CI gate。代表性运行把 13 次 MCP server spawn 降到 1 次，下一步在真实 MCP server 上有限运行后再考虑 default-on。
 - **Slice 4：Audio pipeline**：以 live call ring buffer、level meter 和 backpressure 为第一批低延迟 Rust 化目标。
+- **Slice 5：Compression adapter**：已进入 contract；完成独立 Node fixture、真实 Rust `compression-sidecar`、UTF-8 安全字节裁剪、日志首尾抽样、stats 和跨语言 contract test。当前没有生产路由，也不承担语义摘要或 provider tokenizer；只有性能证据证明必要时才考虑 opt-in。
 
 ### 状态与推进
 
@@ -134,7 +135,7 @@ Rust 化状态以 `docs/rust-migration-status.json` 为机器可读事实源，`
 npm run rust:migration:check
 ```
 
-当前口径：Workspace tree、MCP session sidecar 和 Event store sidecar 都已有真实 Rust 实现但仍为 opt-in；Event store 额外具备健康检查、运行时 stats 和 Worker/sync fallback。Audio pipeline 与 Compression adapter 仍是 bounded planned slice。
+当前口径：Workspace tree、MCP session sidecar 和 Event store sidecar 都已进入 canary，并保留显式回滚；Compression adapter 已进入 contract，但尚无生产路由；Audio pipeline 仍是 bounded planned slice，等待 live-call 并行验证完成后再推进。
 
 ### 接入原则
 

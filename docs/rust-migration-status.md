@@ -31,7 +31,7 @@ This file is the human-readable status view for the Rust migration program. The 
 | Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run limited real MCP sessions and monitor the Windows canary gate before considering default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
-| Compression and context budget helper | `planned` | Not implemented; conditional need | Planned `VIBELINK_RUST_COMPRESSION` | Existing Node/provider prompt construction | Only if needed, define deterministic byte/log sampling and budget trimming helper; do not claim semantic summarization or exact provider tokens. |
+| Compression and context budget helper | `contract` | Contract-only; no production routing | Reserved `VIBELINK_RUST_COMPRESSION` | Existing Node compact/token-budget behavior remains authoritative | Measure whether Node compaction is a material bottleneck before considering an optional client and opt-in routing. |
 
 ## Promotion gates
 
@@ -91,13 +91,14 @@ Can move to `opt-in` only when:
 
 ### Compression and context budget helper
 
-Current state: not implemented; conditional need only.
+Current state: protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust `compression-sidecar` command, UTF-8-safe head/tail byte trimming, overlap-safe head/tail log sampling, structured errors, runtime stats, Rust unit tests, cross-language contract tests, and an independent Windows CI contract gate exist. The command has no production router and does not perform semantic summarization or provider tokenization.
 
-Can move to `contract` only when:
+Can move to `opt-in` only when:
 
-- Deterministic fixtures exist for byte/log sampling and budget trimming.
-- Docs state this is a data-plane helper, not semantic summarization.
-- The contract avoids provider-token precision claims unless a tokenizer is explicitly introduced later.
+- Measurements show that current Node compact-input construction is a material bottleneck worth another process boundary.
+- An optional Node client is gated by `VIBELINK_RUST_COMPRESSION=1` and falls back without changing current compact/token-budget behavior on missing command, bad health, timeout, invalid JSON, request failure, or sidecar exit.
+- Runtime metrics expose starts, failures, fallbacks, request counts, bytes in/out, pending requests, and last error.
+- Contract and fallback tests remain green, and docs continue to exclude semantic summarization and provider-token precision.
 
 ## Verification bundle
 
@@ -115,6 +116,7 @@ node --test test/workspaceTreeCanary.test.js
 node --test test/mcpRuntime.test.js
 node --test test/mcpSessionSidecarContract.test.js
 node --test test/mcpSessionCanary.test.js
+node --test test/rustCompressionContract.test.js
 cargo test --manifest-path apps/windows/Cargo.toml
 cargo build --manifest-path apps/windows/Cargo.toml
 npm run event-store:canary

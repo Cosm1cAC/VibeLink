@@ -130,26 +130,27 @@
       "id": "compression-adapter",
       "title": "Compression and context budget helper",
       "priority": "P2",
-      "status": "planned",
-      "rollout": "not implemented; conditional need",
+      "status": "contract",
+      "rollout": "contract-only; no production routing",
       "featureFlags": [
         { "name": "VIBELINK_RUST_COMPRESSION", "requiredInCode": false }
       ],
-      "nodeEntry": "planned: src/rustCompressionClient.js",
-      "rustEntry": "planned: apps/windows/src/main.rs compression-sidecar subcommand",
-      "sidecarCommand": "planned: vibelink compression-sidecar",
-      "nodeFallback": "Existing Node/provider prompt construction remains authoritative. First Rust helper should be optional and no-op/fallback when missing.",
-      "runtimeStats": "planned: sidecar stats should expose requests, failures, bytes in/out, and last error.",
+      "nodeEntry": "src/compressionContract.js defines protocol constants for tests; no production router exists",
+      "rustEntry": "apps/windows/src/compression_sidecar.rs",
+      "sidecarCommand": "vibelink compression-sidecar",
+      "nodeFallback": "Existing src/compactService.js and src/contextBudget.js behavior remains authoritative because no production path routes to this contract-only sidecar.",
+      "runtimeStats": "The Rust stats method exposes requests, responses, failures, bytesIn, bytesOut, timestamps, pending, and lastError.",
       "tests": [
-        "planned: test/rustCompressionContract.test.js"
+        "test/rustCompressionContract.test.js"
       ],
       "docs": [
         "README.md",
+        "docs/compression-sidecar.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "No VibeLink Rust compression helper exists. README says to prefer external Headroom sidecar/proxy and only implement VibeLink-native compression if clearly needed.",
-      "nextAction": "If needed, define a deterministic data-plane helper contract for byte/log sampling and budget trimming only; do not claim semantic summarization or provider-token precision.",
-      "promotionGate": "Can move to contract only after deterministic input/output fixtures exist. Can move to opt-in only after a real sidecar exists, fallback preserves current behavior, and docs state this is not semantic summarization."
+      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust compression-sidecar command, UTF-8-safe head/tail byte trimming, overlap-safe head/tail log sampling, structured errors, runtime stats, Rust unit tests, cross-language contract tests, and an independent Windows CI contract gate exist. There is intentionally no production routing, tokenizer claim, or semantic summarization.",
+      "nextAction": "Measure whether current Node compaction creates a material data-plane bottleneck. Only if evidence justifies native routing, add an optional Node client with missing/failed-sidecar fallback and runtime metrics before considering opt-in.",
+      "promotionGate": "Can move to opt-in only after measured need is documented, an optional production client exists behind VIBELINK_RUST_COMPRESSION=1, missing/failed/invalid/timeout sidecars preserve current Node behavior, runtime stats expose routing outcomes, and docs continue to state this is not semantic summarization or provider-token precision."
     }
   ]
 }

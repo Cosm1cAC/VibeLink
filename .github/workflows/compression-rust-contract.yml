@@ -1,0 +1,72 @@
+name: Compression Rust Contract
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/compression-rust-contract.yml"
+      - "apps/windows/**"
+      - "docs/compression-sidecar.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/compressionContract.js"
+      - "test/fixtures/compression-json-sidecar.js"
+      - "test/rustCompressionContract.test.js"
+      - "tools/check-rust-migration-status.mjs"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/compression-rust-contract.yml"
+      - "apps/windows/**"
+      - "docs/compression-sidecar.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/compressionContract.js"
+      - "test/fixtures/compression-json-sidecar.js"
+      - "test/rustCompressionContract.test.js"
+      - "tools/check-rust-migration-status.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compression-rust-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compression-rust-contract:
+    name: Fixture and Rust parity
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build release sidecar
+        run: cargo build --release --manifest-path apps/windows/Cargo.toml
+
+      - name: Check migration manifest
+        run: npm run rust:migration:check
+
+      - name: Run compression contract
+        run: npm run compression:contract
+
+      - name: Run compression Rust unit tests
+        run: cargo test --manifest-path apps/windows/Cargo.toml compression_sidecar

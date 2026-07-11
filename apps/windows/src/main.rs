@@ -21,6 +21,8 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+mod compression_sidecar;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -71,6 +73,8 @@ enum Mode {
         #[arg(value_name = "DB_PATH")]
         db_path: PathBuf,
     },
+    /// Run the deterministic compression helper JSONL sidecar.
+    CompressionSidecar,
 }
 
 #[derive(Debug, Serialize)]
@@ -2023,6 +2027,7 @@ fn run() -> Result<()> {
         } => run_workspace_tree(&root, &dir, depth, max_entries),
         Mode::McpSessionSidecar => run_mcp_session_sidecar(),
         Mode::EventStoreSidecar { db_path } => run_event_store_sidecar(&db_path),
+        Mode::CompressionSidecar => compression_sidecar::run(),
     }
 }
 

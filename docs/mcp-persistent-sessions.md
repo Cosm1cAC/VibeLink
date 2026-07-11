@@ -52,6 +52,8 @@ Optional runtime overrides:
 - `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`: JSON array of sidecar arguments. Defaults to `["mcp-session-sidecar"]`.
 - `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`: global active Rust sidecar request cap. Defaults to `64`; excess probe/list/call requests are rejected with a backpressure error while control calls still run.
 
+The Windows Rust launcher resolves packaged commands without relying on the repository layout. Before launching the Node bridge, it uses its own current executable path as the default `VIBELINK_MCP_RUST_SIDECAR_COMMAND`. The same mechanism supplies the event-store and workspace-tree command paths. Existing environment overrides are inherited unchanged, so rollback and custom deployments retain priority.
+
 ## Canary Gates
 
 Before moving this slice beyond `opt-in`, run representative probe and tool-call sessions with `VIBELINK_MCP_RUST_SIDECAR=auto` and compare `GET /api/mcp/status` before and after the session:
@@ -95,5 +97,5 @@ The 2026-07-11 Headroom run discovered `headroom_compress`, `headroom_retrieve`,
 
 ## Next Slices
 
-- Keep monitoring the Windows gate and representative auto-mode sessions, then verify packaged-command resolution and rollback behavior before considering default-on.
+- Keep monitoring the Windows gate and representative auto-mode sessions before considering default-on; packaged-command resolution and explicit override precedence are now covered by the Rust launcher test.
 - Decide whether to keep the sidecar process model or replace it with a native module after Windows packaging costs are known.

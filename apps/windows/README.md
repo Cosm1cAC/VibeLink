@@ -30,6 +30,8 @@ vibelink.exe event-store-sidecar C:\path\to\mobile-agent.sqlite
 
 The user should not need to run internal modes directly.
 
+When `bridge` launches the Node process, it supplies the current `vibelink.exe` path as the default MCP, event-store, and workspace-tree Rust command. Explicit `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, and `VIBELINK_RUST_BIN` values remain authoritative. This keeps packaged installs independent of development-only `apps/windows/target` paths.
+
 ## Workspace tree scanner
 
 The scanner skips heavy directories such as `.git`, `node_modules`, `target`, and `.agent-mobile-terminal`. It also honors root and nested `.gitignore` basename rules for literal file names, simple `*` wildcard file patterns, and directory-only rules such as `logs/`.

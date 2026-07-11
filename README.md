@@ -116,7 +116,7 @@ VibeLink 的长期性能方向是混合架构：Node bridge 继续负责 HTTP AP
 1. **Workspace scanner**：替换目录遍历、忽略规则、排序、metadata 读取和上下文文件采样。当前已在 `apps/windows` 增加 `workspace-tree` 与持久 `workspace-tree-sidecar`，并由 `src/workspaces.js` 在 `VIBELINK_RUST_WORKSPACE_TREE=1` 时优先调用 Rust scanner；`VIBELINK_RUST_WORKSPACE_TREE_SESSION=1` 启用单进程复用，失败时依次回退一次性 Rust CLI 和 Node scanner。
 2. **Event store worker**：把 `task_events`、`tool_events`、`live_call_events` 的 append、cursor 查询、retention prune 和 SSE replay 从同步 SQLite 主线程路径挪到 Rust/worker 边界。
 3. **Persistent MCP sessions**：为 stdio MCP server 建立长连接池，复用 initialize 状态，减少每次 probe/call 的 spawn 成本，并统一超时、重启和背压。
-4. **Live audio pipeline**：把音频分片、level meter、ring buffer、VAD/重采样等低延迟路径放到 Rust，Node 只接收 transcript 和事件。
+4. **Live audio pipeline**：`audio-pipeline-sidecar` 已完成 contract-only 的 PCM16 level/peak/RMS、sequence、ring buffer 和 backpressure 协议；尚未接入生产 live-call，VAD/重采样/ASR 仍由现有路径负责。
 5. **Compression adapter**：优先复用 Headroom sidecar/proxy；只有当明确需要 VibeLink 内置可控压缩时，才考虑 Rust 实现轻量 token budget、日志压缩和 JSON 抽样。
 
 ### 当前执行计划

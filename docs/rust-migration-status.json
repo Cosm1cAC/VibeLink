@@ -114,27 +114,29 @@
       "id": "audio-pipeline",
       "title": "Live audio low-latency pipeline",
       "priority": "P1",
-      "status": "planned",
-      "rollout": "not implemented",
+      "status": "contract",
+      "rollout": "contract-only; no production routing",
       "featureFlags": [
         { "name": "VIBELINK_AUDIO_RUST_PIPELINE", "requiredInCode": false }
       ],
       "nodeEntry": "src/liveCallAudioPipeline.js",
-      "rustEntry": "planned: apps/windows/src/main.rs audio-pipeline-sidecar subcommand",
-      "sidecarCommand": "planned: vibelink audio-pipeline-sidecar",
-      "nodeFallback": "Existing live-call audio and ASR paths remain Node/provider-owned. The first Rust slice must fall back to the current Node level/stream path when missing or failed.",
-      "runtimeStats": "planned: sidecar stats should expose processed chunks, processed bytes, dropped chunks, backpressure rejections, and last error.",
+      "rustEntry": "apps/windows/src/audio_pipeline_sidecar.rs",
+      "sidecarCommand": "vibelink audio-pipeline-sidecar",
+      "nodeFallback": "Existing live-call audio and ASR paths remain Node/provider-owned because no production router exists. A future opt-in client must fall back on missing command, bad health, timeout, invalid JSON, request failure, or exit.",
+      "runtimeStats": "Contract-side stats expose processed/dropped/buffered/evicted chunks, samples, and bytes; sequence gaps/duplicates/out-of-order; backpressure, request/response/failure, pending, timestamps, limits, and last error. Production routing stats do not exist yet.",
       "tests": [
         "test/liveCallAudioPipeline.test.js",
-        "test/liveCallAudio.test.js"
+        "test/liveCallAudio.test.js",
+        "test/rustAudioPipelineContract.test.js"
       ],
       "docs": [
         "README.md",
+        "docs/audio-pipeline-sidecar.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust audio pipeline is not implemented. Current live-call stack uses existing Node/Kotlin/.NET paths and mock/real ASR integration points.",
-      "nextAction": "Define a bounded JSONL contract for deterministic PCM chunk preprocessing: level, peak, RMS, sequence accounting, ring-buffer/backpressure stats, __health, stats, and __close. Do not move ASR into Rust in the first slice.",
-      "promotionGate": "Can move to contract only after synthetic PCM tests define deterministic level/RMS behavior. Can move to opt-in only after a real sidecar exists and falls back to the existing Node path."
+      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust audio-pipeline-sidecar, deterministic PCM16 level/peak/RMS and silence behavior, safe sequence accounting, bounded ring eviction/backpressure counters, structured validation errors, Rust unit tests, cross-language contract tests, and an independent Windows CI gate exist. No production client or live-call/ASR routing was changed.",
+      "nextAction": "After concurrent live-call work is reconciled, measure representative PCM workloads and design an optional bounded Node client with full fallback/runtime metrics before considering opt-in. Keep ASR/provider behavior out of this slice.",
+      "promotionGate": "Can move to opt-in only after concurrent live-call changes are reconciled, representative PCM measurements justify routing, an optional bounded client exists behind VIBELINK_AUDIO_RUST_PIPELINE=1, all missing/bad/timeout/invalid/exit paths fall back to current Node behavior, and runtime metrics plus real PCM canaries remain healthy."
     },
     {
       "id": "compression-adapter",

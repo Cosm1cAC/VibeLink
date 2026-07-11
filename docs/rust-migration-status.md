@@ -30,7 +30,7 @@ This file is the human-readable status view for the Rust migration program. The 
 | Workspace tree scanner | `canary` | Persistent-session canary with one-shot/Node rollback | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_WORKSPACE_TREE_SESSION`, `VIBELINK_RUST_BIN` | One-shot Rust, then Node `listDirectory()` | Monitor remote and limited interactive sessions before considering default-on. |
 | Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run the real-session canary against another MCP server implementation before considering default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
-| Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
+| Live audio low-latency pipeline | `contract` | Contract-only; no production routing | Future `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Reconcile concurrent live-call work, measure PCM workloads, then design an optional fallback-capable client. |
 | Compression and context budget helper | `contract` | Contract-only; no production routing | Reserved `VIBELINK_RUST_COMPRESSION` | Existing Node compact/token-budget behavior remains authoritative | Measure whether Node compaction is a material bottleneck before considering an optional client and opt-in routing. |
 
 ## Promotion gates
@@ -75,18 +75,14 @@ Can move to `default-on` only when:
 
 ### Live audio low-latency pipeline
 
-Current state: not implemented in Rust.
-
-Can move to `contract` only when:
-
-- A deterministic JSONL contract exists for synthetic PCM chunk processing.
-- Tests assert level, peak, RMS, sequence accounting, and backpressure counters.
-- The first slice explicitly excludes ASR and provider behavior.
+Current state: protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust `audio-pipeline-sidecar`, deterministic PCM16 level/peak/RMS and silence behavior, safe sequence accounting, bounded ring eviction/backpressure counters, structured validation errors, Rust unit tests, cross-language contract tests, and an independent Windows CI gate exist. No production client or live-call/ASR routing was changed.
 
 Can move to `opt-in` only when:
 
-- A real Rust sidecar exists behind `VIBELINK_AUDIO_RUST_PIPELINE=1`.
-- Missing/failing sidecar falls back to the current Node live-call path.
+- Concurrent live-call changes are reconciled and representative PCM measurements justify native routing.
+- An optional bounded client exists behind `VIBELINK_AUDIO_RUST_PIPELINE=1`.
+- Missing command, bad health, timeout, invalid JSON, request failure, and exit all fall back to the current Node live-call path.
+- Runtime routing metrics and real PCM canaries preserve bounded pending/backpressure behavior.
 - `npm run live-call:stream-levels` and `npm run live-call:qa-stress` remain viable smoke checks.
 
 ### Compression and context budget helper
@@ -120,6 +116,7 @@ node --test test/mcpSessionSidecarContract.test.js
 node --test test/mcpSessionCanary.test.js
 node --test test/mcpSessionRealCanary.test.js
 node --test test/rustCompressionContract.test.js
+node --test test/rustAudioPipelineContract.test.js
 cargo test --manifest-path apps/windows/Cargo.toml
 cargo build --manifest-path apps/windows/Cargo.toml
 npm run event-store:canary

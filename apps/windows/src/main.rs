@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod audio_pipeline_sidecar;
 mod compression_sidecar;
 
 #[cfg(windows)]
@@ -79,6 +80,13 @@ enum Mode {
     },
     /// Run the deterministic compression helper JSONL sidecar.
     CompressionSidecar,
+    /// Run deterministic PCM preprocessing as a bounded JSONL sidecar.
+    AudioPipelineSidecar {
+        #[arg(long = "max-buffered-samples", default_value_t = 48_000)]
+        max_buffered_samples: usize,
+        #[arg(long = "max-samples-per-chunk", default_value_t = 8_192)]
+        max_samples_per_chunk: usize,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -2241,6 +2249,10 @@ fn run() -> Result<()> {
             run_event_store_sidecar(&db_path, read_only)
         }
         Mode::CompressionSidecar => compression_sidecar::run(),
+        Mode::AudioPipelineSidecar {
+            max_buffered_samples,
+            max_samples_per_chunk,
+        } => audio_pipeline_sidecar::run(max_buffered_samples, max_samples_per_chunk),
     }
 }
 

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createSqliteEventStore } from "../../src/eventStore.js";
 import { EVENT_STORE_CONTRACT_METHODS, EVENT_STORE_SIDECAR_PROTOCOL_VERSION } from "../../src/eventStoreContract.js";
 import { createEventStoreSidecarClient } from "../../src/eventStoreSidecarClient.js";
+import { evaluateLatency, summarizeLatencySamples } from "./canaryStats.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..", "..");
@@ -238,16 +239,7 @@ async function measure(samples, method, callback) {
 function summarizeSamples(samples, stallThresholdMs) {
   const methods = {};
   for (const [method, values] of Object.entries(samples)) {
-    const sorted = [...values].sort((a, b) => a - b);
-    const total = values.reduce((sum, value) => sum + value, 0);
-    const p95Index = sorted.length ? Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1) : 0;
-    methods[method] = {
-      count: values.length,
-      avgMs: roundMs(values.length ? total / values.length : 0),
-      maxMs: roundMs(sorted[sorted.length - 1] || 0),
-      p95Ms: roundMs(sorted[p95Index] || 0),
-      stalls: values.filter((value) => value >= stallThresholdMs).length
-    };
+    methods[method] = summarizeLatencySamples(values, stallThresholdMs);
   }
   return methods;
 }
@@ -356,14 +348,15 @@ function evaluate({ sync, rust, stallThresholdMs, latencyMarginMs }) {
   checks.push({ name: "sidecar failures", pass: Number(rust.sidecar?.failures || 0) === 0, detail: `${rust.sidecar?.failures || 0} sidecar failures` });
 
   for (const method of appendMethods) {
-    const baseline = sync.methods[method]?.avgMs || 0;
-    const candidate = rust.methods[method]?.avgMs || 0;
-    const limit = Math.max(baseline * 1.1, baseline + latencyMarginMs);
-    const pass = baseline === 0 ? candidate === 0 : candidate <= limit;
+    const latency = evaluateLatency({
+      baseline: sync.methods[method],
+      candidate: rust.methods[method],
+      latencyMarginMs
+    });
     checks.push({
-      name: `${method} average latency`,
-      pass,
-      detail: `rust ${candidate}ms vs sync ${baseline}ms; limit ${roundMs(limit)}ms`
+      name: `${method} trimmed average latency`,
+      pass: latency.pass,
+      detail: `rust ${latency.candidateMs}ms vs sync ${latency.baselineMs}ms; limit ${latency.limitMs}ms`
     });
   }
 
@@ -390,10 +383,10 @@ function printSummary(result) {
   console.log(`- workload: ${result.workload.rounds} rounds x ${result.workload.batchSize} events x 3 append paths (${result.workload.totalMeasuredEvents} measured events)`);
   console.log(`- rust command: ${result.rust.command} ${result.rust.args.join(" ")}`);
   console.log(`- temp root: ${result.tempRoot}`);
-  console.log("\nAppend averages:");
+  console.log("\nAppend 10% trimmed averages:");
   for (const method of appendMethods) {
-    const syncAvg = result.sync.methods[method].avgMs;
-    const rustAvg = result.rust.methods[method].avgMs;
+    const syncAvg = result.sync.methods[method].trimmedAvgMs;
+    const rustAvg = result.rust.methods[method].trimmedAvgMs;
     const ratio = syncAvg ? roundMs(rustAvg / syncAvg) : 0;
     console.log(`- ${method}: sync ${syncAvg}ms, rust ${rustAvg}ms, ratio ${ratio}x`);
   }

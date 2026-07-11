@@ -72,6 +72,14 @@ npm run mcp-session:canary -- --calls 12 --output .tmp/mcp-session-canary-final.
 
 The 2026-07-11 current-source release run passed all checks. For one probe plus 12 tool calls, the non-persistent Node baseline spawned 13 MCP server processes while Rust auto mode spawned one, a 92.3% reduction. Rust cached `tools/list` after one request, completed all 12 `tools/call` requests, averaged 8.3ms per request versus 74ms for the baseline, recorded zero runtime failures, fallbacks, and client backpressure rejects, drained with zero pending requests, closed one idle session, and left the sidecar inactive.
 
+The module-level comparison above isolates routing overhead. Run the authenticated server-route canary to cover the actual HTTP API, device login, rate limiting, tool-run creation, probe/call handlers, `/api/mcp/status`, Rust auto readiness, and process lifecycle:
+
+```bash
+npm run mcp-session:server-canary -- --calls 12 --output .tmp/mcp-session-server-canary.json --delete-temp
+```
+
+The 2026-07-12 release run completed 1 authenticated HTTP probe and 12/12 authenticated HTTP tool calls. Calls averaged 16.8ms with an 18.5ms maximum and each returned a tool-run id. The route started one Rust sidecar and one MCP server, sent one `initialize`, one `tools/list`, and 12 `tools/call` requests, and recorded zero sidecar failures, fallbacks, pending requests, and client backpressure rejects. The artifact stores only counts, argument keys, timings, and status; it excludes login tokens, argument values, and tool response content.
+
 Run a read-only real-session canary against an installed MCP server and an existing indexed project:
 
 ```bash
@@ -101,9 +109,9 @@ npm run mcp-session:soak -- --sessions 5 --calls 12 --output .tmp/mcp-session-so
 
 The 2026-07-11 final soak passed 5/5 sessions. The baseline spawned 65 MCP server processes while Rust spawned 5 servers and 5 sidecars, a 92.3% reduction. All sessions recorded zero failures, fallbacks, backpressure rejections, and pending requests; all 5 drained cleanly, and the maximum observed Rust request was 170.6ms against a 1000ms soak ceiling. The MCP workflow runs this soak on relevant changes and every Monday at 03:17 UTC, uploading both single-session and soak JSON artifacts.
 
-`.github/workflows/mcp-session-rust-canary.yml` rebuilds the release sidecar on Windows, runs contract/runtime/canary tests, executes the 12-call workload plus five-session soak, and uploads both JSON artifacts.
+`.github/workflows/mcp-session-rust-canary.yml` rebuilds the release sidecar on Windows, runs contract/runtime/canary tests, executes the module-level 12-call workload, authenticated server-route canary, and five-session soak, then uploads all three JSON artifacts for 30 days. Missing artifacts fail the workflow.
 
 ## Next Slices
 
-- Keep the weekly Windows soak green and collect representative production auto-mode evidence before considering default-on; packaged-command resolution and explicit override precedence are covered by the Rust launcher test.
+- Keep the weekly Windows server-route canary and soak green, then collect limited installed-production auto-mode evidence before considering default-on; packaged-command resolution and explicit override precedence are covered by the Rust launcher test.
 - Decide whether to keep the sidecar process model or replace it with a native module after Windows packaging costs are known.

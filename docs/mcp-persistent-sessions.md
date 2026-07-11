@@ -93,9 +93,17 @@ node tools/mcp-session/real-canary.mjs `
 
 The 2026-07-11 Headroom run discovered `headroom_compress`, `headroom_retrieve`, and `headroom_stats`, then completed 3/3 read-only stats calls. Calls averaged 1462.3ms with a 1567ms maximum. The Rust route started one sidecar, recorded zero failures, fallbacks, backpressure rejections, and pending requests, closed one session, and left no active sidecar. This satisfies the second real MCP implementation gate without exercising compression mutations.
 
-`.github/workflows/mcp-session-rust-canary.yml` rebuilds the release sidecar on Windows, runs contract/runtime/canary tests, executes the same 12-call workload, and uploads `.tmp/mcp-session-canary-ci.json`.
+Run repeated independent auto-mode lifecycles with:
+
+```bash
+npm run mcp-session:soak -- --sessions 5 --calls 12 --output .tmp/mcp-session-soak.json
+```
+
+The 2026-07-11 final soak passed 5/5 sessions. The baseline spawned 65 MCP server processes while Rust spawned 5 servers and 5 sidecars, a 92.3% reduction. All sessions recorded zero failures, fallbacks, backpressure rejections, and pending requests; all 5 drained cleanly, and the maximum observed Rust request was 170.6ms against a 1000ms soak ceiling. The MCP workflow runs this soak on relevant changes and every Monday at 03:17 UTC, uploading both single-session and soak JSON artifacts.
+
+`.github/workflows/mcp-session-rust-canary.yml` rebuilds the release sidecar on Windows, runs contract/runtime/canary tests, executes the 12-call workload plus five-session soak, and uploads both JSON artifacts.
 
 ## Next Slices
 
-- Keep monitoring the Windows gate and representative auto-mode sessions before considering default-on; packaged-command resolution and explicit override precedence are now covered by the Rust launcher test.
+- Keep the weekly Windows soak green and collect representative production auto-mode evidence before considering default-on; packaged-command resolution and explicit override precedence are covered by the Rust launcher test.
 - Decide whether to keep the sidecar process model or replace it with a native module after Windows packaging costs are known.

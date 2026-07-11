@@ -2,6 +2,8 @@ name: MCP Session Rust Canary
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
   pull_request:
     paths:
       - ".github/workflows/mcp-session-rust-canary.yml"
@@ -19,6 +21,7 @@ on:
       - "test/mcpSessionSidecarContract.test.js"
       - "test/mcpSessionCanary.test.js"
       - "test/mcpSessionRealCanary.test.js"
+      - "test/mcpSessionSoak.test.js"
       - "tools/mcp-session/**"
   push:
     branches:
@@ -40,6 +43,7 @@ on:
       - "test/mcpSessionSidecarContract.test.js"
       - "test/mcpSessionCanary.test.js"
       - "test/mcpSessionRealCanary.test.js"
+      - "test/mcpSessionSoak.test.js"
       - "tools/mcp-session/**"
 
 permissions:
@@ -78,15 +82,20 @@ jobs:
         run: npm run rust:migration:check
 
       - name: Run MCP contract, runtime, and canary tests
-        run: node --test --test-concurrency=1 test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/mcpSessionRealCanary.test.js
+        run: node --test --test-concurrency=1 test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/mcpSessionRealCanary.test.js test/mcpSessionSoak.test.js
 
       - name: Run representative runtime canary
         run: npm run mcp-session:canary -- --calls 12 --output .tmp/mcp-session-canary-ci.json
+
+      - name: Run multi-session auto-mode soak
+        run: npm run mcp-session:soak -- --sessions 5 --calls 12 --output .tmp/mcp-session-soak-ci.json
 
       - name: Upload canary output
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mcp-session-canary-result
-          path: .tmp/mcp-session-canary-ci.json
+          path: |
+            .tmp/mcp-session-canary-ci.json
+            .tmp/mcp-session-soak-ci.json
           if-no-files-found: ignore

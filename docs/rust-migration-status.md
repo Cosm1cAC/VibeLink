@@ -91,7 +91,7 @@ Can move to `opt-in` only when:
 
 ### Compression and context budget helper
 
-Current state: protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust `compression-sidecar` command, UTF-8-safe head/tail byte trimming, overlap-safe head/tail log sampling, structured errors, runtime stats, Rust unit tests, cross-language contract tests, and an independent Windows CI contract gate exist. The command has no production router and does not perform semantic summarization or provider tokenization.
+Current state: protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust `compression-sidecar` command, UTF-8-safe head/tail byte trimming, overlap-safe head/tail log sampling, structured errors, runtime stats, Rust unit tests, cross-language contract tests, a reproducible Node hot-path benchmark, and an independent Windows CI contract gate exist. Two 2026-07-11 runs measured the current Node production functions at 0.253-0.353ms combined p95 on the largest real task stream and 0.425-0.547ms p95 on a 1000-event/2,000,000-character synthetic upper bound, below the 10ms material-bottleneck threshold. The command therefore remains contract-only and does not perform semantic summarization or provider tokenization.
 
 Can move to `opt-in` only when:
 
@@ -126,6 +126,7 @@ npm run event-store:canary
 npm run event-store:runtime-canary
 npm run event-store:server-canary
 npm run event-store:real-data-canary -- --limit 50
+npm run compression:benchmark -- --require-real --output .tmp/compression-node-benchmark-final.json
 npm run workspace-tree:canary
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs
 npm run mcp-session:canary

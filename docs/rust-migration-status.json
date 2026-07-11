@@ -146,15 +146,16 @@
       "nodeFallback": "Existing src/compactService.js and src/contextBudget.js behavior remains authoritative because no production path routes to this contract-only sidecar.",
       "runtimeStats": "The Rust stats method exposes requests, responses, failures, bytesIn, bytesOut, timestamps, pending, and lastError.",
       "tests": [
-        "test/rustCompressionContract.test.js"
+        "test/rustCompressionContract.test.js",
+        "test/compressionBenchmark.test.js"
       ],
       "docs": [
         "README.md",
         "docs/compression-sidecar.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust compression-sidecar command, UTF-8-safe head/tail byte trimming, overlap-safe head/tail log sampling, structured errors, runtime stats, Rust unit tests, cross-language contract tests, and an independent Windows CI contract gate exist. There is intentionally no production routing, tokenizer claim, or semantic summarization.",
-      "nextAction": "Measure whether current Node compaction creates a material data-plane bottleneck. Only if evidence justifies native routing, add an optional Node client with missing/failed-sidecar fallback and runtime metrics before considering opt-in.",
+      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust compression-sidecar command, UTF-8-safe head/tail byte trimming, overlap-safe head/tail log sampling, structured errors, runtime stats, Rust unit tests, cross-language contract tests, a reproducible Node hot-path benchmark, and an independent Windows CI contract gate exist. Two 2026-07-11 runs measured the existing Node production functions at 0.253-0.353ms combined p95 on the largest real task stream and 0.425-0.547ms p95 on a 1000-event/2,000,000-character synthetic upper bound, below the 10ms material-bottleneck threshold. There is intentionally no production routing, tokenizer claim, or semantic summarization.",
+      "nextAction": "Keep this slice contract-only because current measurements do not justify another process boundary. Re-run the benchmark if runtime telemetry or workload shape changes materially; add an optional fallback-capable client only if contrary evidence exceeds the documented threshold.",
       "promotionGate": "Can move to opt-in only after measured need is documented, an optional production client exists behind VIBELINK_RUST_COMPRESSION=1, missing/failed/invalid/timeout sidecars preserve current Node behavior, runtime stats expose routing outcomes, and docs continue to state this is not semantic summarization or provider-token precision."
     }
   ]

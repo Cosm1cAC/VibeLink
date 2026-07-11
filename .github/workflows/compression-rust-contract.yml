@@ -10,9 +10,14 @@ on:
       - "docs/rust-migration-status.*"
       - "package.json"
       - "package-lock.json"
+      - "src/compactService.js"
       - "src/compressionContract.js"
+      - "src/contextBudget.js"
+      - "src/eventStore.js"
       - "test/fixtures/compression-json-sidecar.js"
+      - "test/compressionBenchmark.test.js"
       - "test/rustCompressionContract.test.js"
+      - "tools/compression/**"
       - "tools/check-rust-migration-status.mjs"
   push:
     branches:
@@ -25,9 +30,14 @@ on:
       - "docs/rust-migration-status.*"
       - "package.json"
       - "package-lock.json"
+      - "src/compactService.js"
       - "src/compressionContract.js"
+      - "src/contextBudget.js"
+      - "src/eventStore.js"
       - "test/fixtures/compression-json-sidecar.js"
+      - "test/compressionBenchmark.test.js"
       - "test/rustCompressionContract.test.js"
+      - "tools/compression/**"
       - "tools/check-rust-migration-status.mjs"
 
 permissions:
@@ -70,3 +80,14 @@ jobs:
 
       - name: Run compression Rust unit tests
         run: cargo test --manifest-path apps/windows/Cargo.toml compression_sidecar
+
+      - name: Measure current Node compression hot path
+        run: npm run compression:benchmark -- --synthetic-only --output .tmp/compression-node-benchmark-ci.json
+
+      - name: Upload benchmark output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compression-node-benchmark
+          path: .tmp/compression-node-benchmark-ci.json
+          if-no-files-found: ignore

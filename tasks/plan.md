@@ -13,6 +13,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 - Event store now has a write-rejecting read-only sidecar mode and exact replay evidence from the existing approximately 1.01GB database; human-driven append evidence remains outstanding.
 - Audio remains `planned` and is temporarily excluded because another session is validating live call.
 - Compression is now at `contract`; its bounded protocol is specified in `docs/compression-sidecar.md` and remains disconnected from production routing.
+- Compression production routing is explicitly deferred: repeated Node hot-path p95 was 0.253-0.353ms on representative history and 0.425-0.547ms at the synthetic upper bound, far below the 10ms material-bottleneck threshold.
 
 ## Ordered Work
 

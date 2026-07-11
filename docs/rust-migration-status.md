@@ -28,7 +28,7 @@ This file is the human-readable status view for the Rust migration program. The 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
 | Workspace tree scanner | `canary` | Persistent-session canary with one-shot/Node rollback | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_WORKSPACE_TREE_SESSION`, `VIBELINK_RUST_BIN` | One-shot Rust, then Node `listDirectory()` | Keep the weekly remote gate green and run limited interactive sessions before default-on. |
-| Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Keep the weekly soak green and collect production auto-mode evidence before default-on. |
+| Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Keep the weekly server-route canary and soak green; collect limited installed-production evidence before default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Keep the weekly remote gate green and run limited human-driven sessions before default-on. |
 | Live audio low-latency pipeline | `contract` | Contract-only; no production routing | Future `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Keep routing disconnected; measured RMS, resampling, and VAD workloads are below the material-bottleneck threshold. |
 | Compression and context budget helper | `contract` | Contract-only; no production routing | Reserved `VIBELINK_RUST_COMPRESSION` | Existing Node compact/token-budget behavior remains authoritative | Measure whether Node compaction is a material bottleneck before considering an optional client and opt-in routing. |
@@ -50,7 +50,7 @@ Can move to `default-on` only when:
 
 ### Persistent MCP stdio sessions
 
-Current state: Node manager, JSONL sidecar client, real Rust `mcp-session-sidecar`, auto readiness routing, contract/burst/timeout/crash/backpressure coverage, synthetic/generic real-session/multi-session soak harnesses, packaged-command resolution, and an independent scheduled Windows CI gate exist. The Rust launcher supplies its current executable as the default MCP/event/workspace command while preserving explicit overrides. The synthetic canary reduced MCP server spawns from 13 to 1. A five-session soak reduced 65 baseline MCP spawns to 5, with 5/5 clean sessions, zero failures/fallbacks/backpressure/pending, and 170.6ms maximum request latency. Real codebase-memory and Headroom sessions also passed with one sidecar and clean drain.
+Current state: Node manager, JSONL sidecar client, real Rust `mcp-session-sidecar`, auto readiness routing, contract/burst/timeout/crash/backpressure coverage, synthetic/generic real-session/multi-session soak/authenticated HTTP server-route harnesses, packaged-command resolution, and an independent scheduled Windows CI gate exist. The Rust launcher supplies its current executable as the default MCP/event/workspace command while preserving explicit overrides. The synthetic canary reduced MCP server spawns from 13 to 1. A five-session soak reduced 65 baseline MCP spawns to 5, with 5/5 clean sessions and zero failures/fallbacks/backpressure/pending. A 2026-07-12 server-route canary completed 1 authenticated probe and 12/12 authenticated tool calls through `src/server.js`, starting one sidecar and one MCP server with zero failures, fallbacks, backpressure, or pending requests. Real codebase-memory and Headroom sessions also passed with one sidecar and clean drain.
 
 Can move to `default-on` only when:
 
@@ -127,6 +127,7 @@ npm run compression:benchmark -- --require-real --output .tmp/compression-node-b
 npm run workspace-tree:canary
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs
 npm run mcp-session:canary
+npm run mcp-session:server-canary -- --calls 12 --delete-temp
 npm run mcp-session:real-canary -- --calls 3
 # or run the canary harnesses serially with CI output paths
 npm run event-store:canary:all

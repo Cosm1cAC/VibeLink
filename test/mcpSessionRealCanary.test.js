@@ -42,3 +42,40 @@ test("MCP real canary reuses the Rust session for codebase-memory", (t) => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("MCP real canary accepts an explicit second server implementation", (t) => {
+  const command = rustCommand();
+  if (!fs.existsSync(command)) {
+    t.skip("built Rust MCP sidecar is unavailable");
+    return;
+  }
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-mcp-second-real-canary-test-"));
+  const output = path.join(tempRoot, "result.json");
+  try {
+    const run = spawnSync(process.execPath, [
+      path.join("tools", "mcp-session", "real-canary.mjs"),
+      "--server", "second-mcp",
+      "--server-command", process.execPath,
+      "--server-arg", path.join(process.cwd(), "test", "fixtures", "fake-mcp-server.js"),
+      "--tool", "echo",
+      "--calls", "2",
+      "--command", command,
+      "--output", output
+    ], { cwd: process.cwd(), encoding: "utf8", windowsHide: true, timeout: 180000 });
+
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    const result = JSON.parse(fs.readFileSync(output, "utf8"));
+    assert.equal(result.evaluation.passed, true);
+    assert.equal(result.server.id, "second-mcp");
+    assert.equal(result.workload.tool, "echo");
+    assert.deepEqual(result.workload.argumentKeys, []);
+    assert.equal(result.calls.length, 2);
+    assert.equal(result.runtime.starts, 1);
+    assert.equal(result.runtime.failures, 0);
+    assert.equal(result.runtime.fallbacks, 0);
+    assert.equal(result.runtime.drain.closed, 1);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

@@ -21,6 +21,24 @@ function flag(name) {
   return process.argv.includes(name);
 }
 
+function jsonArg(name, fallback) {
+  const raw = stringArg(name, "");
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${name} must be valid JSON: ${error.message}`);
+  }
+}
+
+function repeatedArgs(name) {
+  const values = [];
+  for (let index = 0; index < process.argv.length; index += 1) {
+    if (process.argv[index] === name && process.argv[index + 1] !== undefined) values.push(String(process.argv[index + 1]));
+  }
+  return values;
+}
+
 function defaultRustCommand() {
   const binary = process.platform === "win32" ? "vibelink.exe" : "vibelink";
   const release = path.join(rootDir, "apps", "windows", "target", "release", binary);
@@ -45,7 +63,8 @@ function printSummary(result) {
   console.log("MCP Rust real-session canary");
   console.log(`- server: ${result.server.id}`);
   console.log(`- tool: ${result.workload.tool}`);
-  console.log(`- project: ${result.workload.project}`);
+  if (result.workload.project) console.log(`- project: ${result.workload.project}`);
+  console.log(`- argument keys: ${result.workload.argumentKeys.join(", ") || "none"}`);
   console.log(`- calls: ${result.workload.calls}`);
   console.log(`- average: ${result.timings.avgMs}ms; max: ${result.timings.maxMs}ms`);
   console.log("\nChecks:");
@@ -59,16 +78,32 @@ async function main() {
   const serverId = stringArg("--server", "codebase-memory-mcp");
   const toolName = stringArg("--tool", "get_architecture");
   const project = stringArg("--project", defaultProject());
+  const serverCommand = stringArg("--server-command", "");
+  const repeatedServerArgs = repeatedArgs("--server-arg");
+  const serverArgs = repeatedServerArgs.length ? repeatedServerArgs : jsonArg("--server-args-json", []);
+  const hasExplicitArguments = process.argv.includes("--arguments-json");
+  const usesCodebaseDefaults = !serverCommand && !hasExplicitArguments;
+  const toolArguments = hasExplicitArguments
+    ? jsonArg("--arguments-json", {})
+    : usesCodebaseDefaults ? { project, aspects: ["overview"] } : {};
   const calls = numberArg("--calls", 3);
   const timeoutMs = numberArg("--timeout-ms", 120000);
   const command = path.resolve(stringArg("--command", defaultRustCommand()));
-  if (!project) throw new Error("A real codebase-memory project is required; pass --project or provide .codebase-memory/artifact.json.");
+  if (usesCodebaseDefaults && !project) throw new Error("A real codebase-memory project is required; pass --project or provide .codebase-memory/artifact.json.");
+  if (!Array.isArray(serverArgs) || serverArgs.some((item) => typeof item !== "string")) throw new Error("--server-args-json must be a JSON array of strings.");
+  if (!toolArguments || typeof toolArguments !== "object" || Array.isArray(toolArguments)) throw new Error("--arguments-json must be a JSON object.");
   if (!fs.existsSync(command)) throw new Error(`Rust MCP sidecar command is missing: ${command}`);
 
   process.env.VIBELINK_MCP_RUST_SIDECAR = "auto";
   process.env.VIBELINK_MCP_RUST_SIDECAR_COMMAND = command;
   const runtime = await import("../../src/mcpRuntime.js");
-  const server = runtime.configuredMcpServers({}).find((item) => item.id === serverId || item.name === serverId);
+  const settings = serverCommand
+    ? {
+        codebaseMemory: { autoMcp: false },
+        mcp: { servers: [{ id: serverId, name: serverId, type: "stdio", enabled: true, command: serverCommand, args: serverArgs }] }
+      }
+    : {};
+  const server = runtime.configuredMcpServers(settings).find((item) => item.id === serverId || item.name === serverId);
   if (!server) throw new Error(`Real MCP server was not discovered: ${serverId}`);
 
   try {
@@ -80,10 +115,10 @@ async function main() {
     if (probe.ok && tool) {
       for (let index = 0; index < calls; index += 1) {
         const started = performance.now();
-        const result = await runtime.callMcpTool({}, {
+        const result = await runtime.callMcpTool(settings, {
           serverId: server.id,
           toolName,
-          arguments: { project, aspects: ["overview"] }
+          arguments: toolArguments
         }, { timeoutMs });
         samples.push(performance.now() - started);
         results.push({ ok: result.ok, status: result.status, contentBlocks: result.content?.length || 0, error: result.error || "" });
@@ -112,7 +147,7 @@ async function main() {
       generatedAt: new Date().toISOString(),
       server: { id: server.id, command: server.command, args: server.args || [] },
       rustCommand: command,
-      workload: { tool: toolName, project, calls },
+      workload: { tool: toolName, project: usesCodebaseDefaults ? project : "", argumentKeys: Object.keys(toolArguments).sort(), calls },
       probe: { status: probe.status, toolCount: probe.toolCount || 0, tools: (probe.tools || []).map((item) => item.name) },
       calls: results,
       timings: { avgMs: roundMs(samples.length ? totalMs / samples.length : 0), maxMs: roundMs(Math.max(0, ...samples)) },

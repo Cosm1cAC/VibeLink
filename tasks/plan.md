@@ -9,7 +9,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 - Pull requests #1 (`codex/mcp-sidecar-concurrency`), #2 (`codex/workspace-rust-ignore-paths`), and #3 (`codex/event-store-rust-sidecar`) are merged into `main`; `gh pr list --state open` is empty.
 - Event store, workspace tree, and persistent MCP sessions are at `canary` with passing Windows workflows.
 - Workspace tree now has exact metadata/context parity across VibeLink, ok-wuthering-waves, and meetily plus a persistent Rust sidecar that keeps cold totals at 53.7-80.3ms with one process and zero session fallback; it remains limited `canary` pending remote/interactive evidence.
-- MCP now has a passing read-only real-session canary against the installed codebase-memory server; another server implementation is still required for broader evidence.
+- MCP now has passing read-only real-session canaries against codebase-memory and Headroom. Both reused one Rust sidecar with zero failures, fallbacks, backpressure, or pending work and clean session drain.
 - Event store now has a write-rejecting read-only sidecar mode and exact replay evidence from the existing approximately 1.01GB database; human-driven append evidence remains outstanding.
 - Audio is now `contract` through an isolated PCM16 Rust sidecar and cross-language tests; it remains disconnected from production because another session is validating live call.
 - Compression is now at `contract`; its bounded protocol is specified in `docs/compression-sidecar.md` and remains disconnected from production routing.
@@ -43,7 +43,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 - Local: `npm run test:rust-sidecars` passed 75/75; `cargo fmt --check`, Clippy with `-D warnings`, release build, focused live-call audio regressions, and `npm run rust:migration:check` passed.
 - Remote commit `64db347f31847b02b388a2da09820786d08da7e2`: Audio Pipeline Rust Contract `29145867540`, MCP Session Rust Canary `29145867538`, Event Store Rust Canary `29145867560`, Workspace Tree Rust Canary `29145867534`, and Compression Rust Contract `29145867536` all completed successfully.
 - Remote tree `8ee19abff2d782de36fef5a7c76baab8860ba7f0` exactly matches the verified local audio-contract commit tree.
-- Remaining default-on/opt-in gates require evidence that automation cannot manufacture: a human-driven event append session, a second real MCP server implementation, representative interactive workspace sessions, and reconciliation with the concurrent live-call work before audio production routing.
+- Remaining default-on/opt-in gates require evidence or integration work that this slice does not manufacture: a human-driven event append session, representative interactive workspace sessions, packaged MCP command verification, and reconciliation with the concurrent live-call work before audio production routing.
 
 ## Risks And Mitigations
 

@@ -30,6 +30,7 @@
 
 - [x] Run the VibeLink checkout through the production workspace router, fix Windows metadata parity, and add a repeatable real-repository canary.
 - [x] Run repeated read-only calls through a real codebase-memory MCP server and add a reusable real-session canary.
+- [x] Generalize the real-session canary and validate a second real MCP implementation through Headroom.
 - [x] Add a hard read-only event-store sidecar mode and validate real task/tool/live replay parity against the existing database.
 - [x] Measure the current Node compression hot path and retain contract-only status because no material bottleneck was observed.
 - [x] Run workspace-tree against two additional repositories and fix locale-sensitive result ordering.

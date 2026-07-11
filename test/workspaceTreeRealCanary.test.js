@@ -34,6 +34,11 @@ test("workspace-tree real canary preserves checkout metadata and context parity"
     assert.equal(result.rust.fallbacks, 0);
     assert.equal(result.rust.hits, 3);
     assert.equal(result.rust.cacheHits, 3);
+    assert.equal(result.rust.session.starts, 1);
+    assert.equal(result.rust.session.failures, 0);
+    assert.equal(result.rust.session.fallbacks, 0);
+    assert.equal(result.rust.session.pending, 0);
+    assert.equal(result.rust.session.terminated, true);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }

@@ -33,6 +33,7 @@
 - [x] Add a hard read-only event-store sidecar mode and validate real task/tool/live replay parity against the existing database.
 - [x] Measure the current Node compression hot path and retain contract-only status because no material bottleneck was observed.
 - [x] Run workspace-tree against two additional repositories and fix locale-sensitive result ordering.
+- [x] Replace workspace-tree process-per-miss canary routing with an optional persistent Rust sidecar and retain two-level fallback.
 - [ ] Audit all canary claims against current remote CI and runtime evidence.
 - [ ] Advance any remaining server-side work that does not touch Android/live-call.
 - [ ] Reconcile live-call changes before beginning the audio contract.

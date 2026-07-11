@@ -27,7 +27,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `canary` | Persistent-session canary with one-shot/Node rollback | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_WORKSPACE_TREE_SESSION`, `VIBELINK_RUST_BIN` | One-shot Rust, then Node `listDirectory()` | Keep the weekly remote gate green and run limited interactive sessions before default-on. |
+| Workspace tree scanner | `canary` | Persistent-session canary with one-shot/Node rollback | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_WORKSPACE_TREE_SESSION`, `VIBELINK_RUST_BIN` | One-shot Rust, then Node `listDirectory()` | Keep the weekly server-route gate green and run limited interactive sessions before default-on. |
 | Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Keep the weekly server-route canary and soak green; collect limited installed-production evidence before default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Keep the weekly remote gate green and run limited human-driven sessions before default-on. |
 | Live audio low-latency pipeline | `contract` | Contract-only; no production routing | Future `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Keep routing disconnected; measured RMS, resampling, and VAD workloads are below the material-bottleneck threshold. |
@@ -37,7 +37,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust one-shot CLI and persistent JSONL sidecar, Node opt-in/auto routing, sidecar-to-one-shot-to-Node fallback, bounded pending requests, runtime session stats, root routing, supported-subset parity, inherited/nested `.gitignore` handling, Windows metadata parity, Node-compatible locale/BFS ordering, conservative fallback for truncated Rust subsets, signature/cache behavior, content-safe file caching, contract/client/integration tests, three-repository canaries, and an independent weekly Windows CI gate exist. Persistent runs preserved exact parity, full cache reuse, one sidecar start, clean pending drain/termination, and zero route/session failures or fallbacks. VibeLink measured 30.0-31.0ms Node vs 53.7-80.3ms Rust cold; `ok-wuthering-waves` 77.2ms vs 59.8ms; `meetily` 76.1ms vs 77.1ms. Warm totals were 9.2-26.0ms, so the slice remains limited `canary` pending interactive session evidence.
+Current state: Rust one-shot CLI and persistent JSONL sidecar, Node opt-in/auto routing, sidecar-to-one-shot-to-Node fallback, bounded pending requests, runtime session stats, root routing, supported-subset parity, inherited/nested `.gitignore` handling, Windows metadata parity, Node-compatible locale/BFS ordering, conservative fallback for truncated Rust subsets, signature/cache behavior, content-safe file caching, contract/client/integration tests, three-repository plus authenticated HTTP server-route canaries, and an independent weekly Windows CI gate exist. Persistent runs preserved exact parity, full cache reuse, one sidecar start, clean pending drain/termination, and zero route/session failures or fallbacks. A 2026-07-12 server-route canary added authenticated tree/context/status coverage with 3 Rust misses, 3 cache hits, one sidecar, and zero failures, fallbacks, pending requests, or backpressure. The slice remains limited `canary` pending interactive session evidence.
 
 Can move to `default-on` only when:
 
@@ -126,6 +126,7 @@ npm run event-store:real-data-canary -- --limit 50
 npm run compression:benchmark -- --require-real --output .tmp/compression-node-benchmark-final.json
 npm run workspace-tree:canary
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs
+npm run workspace-tree:server-canary -- --delete-temp
 npm run mcp-session:canary
 npm run mcp-session:server-canary -- --calls 12 --delete-temp
 npm run mcp-session:real-canary -- --calls 3

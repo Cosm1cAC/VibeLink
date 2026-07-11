@@ -20,15 +20,17 @@
       "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails. VIBELINK_RUST_WORKSPACE_TREE=auto skips a missing binary without marking a Rust failure.",
       "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks mode, auto/available state, command, hits, misses, fallbacks, failures, cache, budget hits, last signature, and last error.",
       "tests": [
-        "test/workspacesRustTree.test.js"
+        "test/workspacesRustTree.test.js",
+        "test/workspaceTreeCanary.test.js",
+        "test/workspaceTreeRealCanary.test.js"
       ],
       "docs": [
         "README.md",
         "docs/workspace-tree-rust.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested gitignore rules, truncation, signature/cache behavior, nested gitignore invalidation, content-safe file-sample caching, fallback stats, a representative canary harness, and an independent Windows CI canary gate exist. The final 2026-07-11 post-cache-fix release canary passed with 60.4ms first launch, 56.6ms cold scan, 5.9ms warm p95, 10 cache hits, and zero fallback/failure deltas.",
-      "nextAction": "Run limited real-repository auto-mode sessions and monitor the Windows canary gate before considering default-on.",
+      "currentState": "Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested gitignore rules, Windows directory-size and millisecond timestamp parity, truncation, signature/cache behavior, nested gitignore invalidation, content-safe file-sample caching, fallback stats, isolated and real-repository canary harnesses, and an independent Windows CI canary gate exist. Two 2026-07-11 VibeLink checkout runs preserved exact tree/context parity, 3 cold Rust routes, 3 warm cache hits, and zero failures/fallbacks; Node ranged from 53.1-183.6ms, Rust cold from 642.5-820.4ms, and Rust warm from 11.5-16ms.",
+      "nextAction": "Run the real-repository canary on additional repositories and address or explicitly accept the observed process-per-miss cold-route penalty before considering default-on.",
       "promotionGate": "Can move to default-on only after CI and limited real-repository sessions continue to preserve exact supported-subset parity, zero failures and fallbacks with an available command, failure-free missing-command fallback, warm cache reuse, nested gitignore invalidation, and acceptable first-launch/cold/warm latency. Rollback with VIBELINK_RUST_WORKSPACE_TREE=0 must remain tested and documented."
     },
     {

@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     thread,
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 mod compression_sidecar;
@@ -1762,7 +1762,7 @@ fn list_workspace_tree(
                 name,
                 path: rel,
                 kind: if is_dir { "directory" } else { "file" }.to_string(),
-                size: metadata.len(),
+                size: workspace_metadata_size(&metadata),
                 updated_at: system_time_iso(metadata.modified().ok()),
             });
             if is_dir && current_depth + 1 < depth {
@@ -1787,13 +1787,12 @@ fn metadata_signature_part(kind: &str, root: &Path, path: &Path) -> String {
             let modified_ms = metadata
                 .modified()
                 .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
+                .map(system_time_rounded_millis)
                 .unwrap_or(0);
             format!(
                 "{kind}:{rel}:{}:{}:{modified_ms}",
                 if metadata.is_dir() { "d" } else { "f" },
-                metadata.len()
+                workspace_metadata_size(&metadata)
             )
         }
         Err(_) => format!("{kind}:{rel}:missing"),
@@ -1998,11 +1997,30 @@ fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn workspace_metadata_size(metadata: &std::fs::Metadata) -> u64 {
+    if cfg!(windows) && metadata.is_dir() {
+        0
+    } else {
+        metadata.len()
+    }
+}
+
+fn rounded_system_time(value: std::time::SystemTime) -> DateTime<Utc> {
+    let datetime: DateTime<Utc> = value.into();
+    datetime
+        .checked_add_signed(chrono::Duration::microseconds(500))
+        .unwrap_or(datetime)
+}
+
+fn system_time_rounded_millis(value: std::time::SystemTime) -> i64 {
+    rounded_system_time(value).timestamp_millis()
+}
+
 fn system_time_iso(value: Option<std::time::SystemTime>) -> String {
     let Some(value) = value else {
         return String::new();
     };
-    let datetime: DateTime<Utc> = value.into();
+    let datetime = rounded_system_time(value);
     datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 fn main() {
@@ -2442,5 +2460,12 @@ mod tests {
         assert_ne!(first.signature, second.signature);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_rounds_submillisecond_timestamps_like_node() {
+        let value = std::time::UNIX_EPOCH + Duration::from_millis(123) + Duration::from_micros(600);
+        assert_eq!(system_time_iso(Some(value)), "1970-01-01T00:00:00.124Z");
+        assert_eq!(system_time_rounded_millis(value), 124);
     }
 }

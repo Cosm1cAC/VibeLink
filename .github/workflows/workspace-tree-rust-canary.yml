@@ -13,6 +13,7 @@ on:
       - "src/workspaces.js"
       - "test/workspacesRustTree.test.js"
       - "test/workspaceTreeCanary.test.js"
+      - "test/workspaceTreeRealCanary.test.js"
       - "tools/workspace-tree/**"
   push:
     branches:
@@ -28,6 +29,7 @@ on:
       - "src/workspaces.js"
       - "test/workspacesRustTree.test.js"
       - "test/workspaceTreeCanary.test.js"
+      - "test/workspaceTreeRealCanary.test.js"
       - "tools/workspace-tree/**"
 
 permissions:
@@ -66,15 +68,20 @@ jobs:
         run: npm run rust:migration:check
 
       - name: Run workspace-tree parity and canary tests
-        run: node --test test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js
+        run: node --test test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js
 
       - name: Run representative auto-mode canary
         run: npm run workspace-tree:canary -- --warm-scans 10 --output .tmp/workspace-tree-canary-ci.json
+
+      - name: Run checkout real-repository canary
+        run: npm run workspace-tree:real-canary -- --workspace . --paths src,docs --max-warm-ms 200 --output .tmp/workspace-tree-real-canary-ci.json --delete-temp
 
       - name: Upload canary output
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: workspace-tree-canary-result
-          path: .tmp/workspace-tree-canary-ci.json
+          path: |
+            .tmp/workspace-tree-canary-ci.json
+            .tmp/workspace-tree-real-canary-ci.json
           if-no-files-found: ignore

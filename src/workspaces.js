@@ -490,21 +490,89 @@ function workspaceContextForFile(target, rel, stat) {
   });
 }
 
-function rootGitignoreDirs(root) {
+function workspaceGitignoreBasenameMatches(pattern, name) {
+  if (!pattern.includes("*")) return pattern === name;
+  if (pattern === "*") return true;
+
+  let remaining = name;
+  const parts = pattern.split("*");
+  let firstPart = true;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!part) {
+      firstPart = false;
+      continue;
+    }
+    if (firstPart && !pattern.startsWith("*")) {
+      if (!remaining.startsWith(part)) return false;
+      remaining = remaining.slice(part.length);
+    } else if (index === parts.length - 1 && !pattern.endsWith("*")) {
+      return remaining.endsWith(part);
+    } else {
+      const matchIndex = remaining.indexOf(part);
+      if (matchIndex < 0) return false;
+      remaining = remaining.slice(matchIndex + part.length);
+    }
+    firstPart = false;
+  }
+  return pattern.endsWith("*") || remaining.length === 0;
+}
+
+function workspaceGitignorePathMatches(pattern, itemPath) {
+  const patternParts = pattern.split("/");
+  const pathParts = itemPath.split("/");
+  return patternParts.length === pathParts.length
+    && patternParts.every((part, index) => workspaceGitignoreBasenameMatches(part, pathParts[index]));
+}
+
+function workspaceGitignoreRulesForDir(root, dir) {
   try {
-    const dirs = new Set();
-    const content = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
+    const rules = [];
+    const content = fs.readFileSync(path.join(dir, ".gitignore"), "utf8");
+    const base = path.relative(root, dir).replaceAll("\\", "/");
     for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!") || trimmed.includes("*")) continue;
-      const pattern = trimmed.replace(/^\/+/, "").replace(/\/+$/, "");
-      if (!pattern || pattern.includes("/")) continue;
-      dirs.add(pattern);
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const negated = trimmed.startsWith("!");
+      const body = (negated ? trimmed.slice(1) : trimmed).trim();
+      if (!body) continue;
+      const directoryOnly = body.endsWith("/");
+      const anchored = body.startsWith("/");
+      const rawPattern = body.replace(/^\/+/, "").replace(/\/+$/, "");
+      if (!rawPattern) continue;
+      const matchPath = anchored || rawPattern.includes("/");
+      const pattern = matchPath && base ? `${base}/${rawPattern}` : rawPattern;
+      rules.push({ pattern, matchPath, directoryOnly, negated });
     }
-    return dirs;
+    return rules;
   } catch {
-    return new Set();
+    return [];
   }
+}
+
+function workspaceGitignoreRulesForAncestors(root, dir) {
+  const relative = path.relative(root, dir);
+  if (!relative) return [];
+  const parts = relative.split(path.sep).filter(Boolean);
+  const rules = [...workspaceGitignoreRulesForDir(root, root)];
+  let current = root;
+  for (const part of parts.slice(0, -1)) {
+    current = path.join(current, part);
+    rules.push(...workspaceGitignoreRulesForDir(root, current));
+  }
+  return rules;
+}
+
+function isWorkspacePathIgnored(rules, name, itemPath, isDirectory) {
+  let ignored = false;
+  for (const rule of rules) {
+    if (rule.directoryOnly && !isDirectory) continue;
+    const matches = rule.matchPath
+      ? workspaceGitignorePathMatches(rule.pattern, itemPath)
+      : workspaceGitignoreBasenameMatches(rule.pattern, name);
+    if (matches) ignored = !rule.negated;
+  }
+  return ignored;
 }
 
 function workspaceTreeCacheKey(dir, root, depth, maxEntries) {
@@ -525,32 +593,37 @@ function workspaceTreeCacheKey(dir, root, depth, maxEntries) {
 }
 
 function workspaceTreeDirectoryVersion(dir, root, depth, maxEntries) {
-  const gitignoreDirs = rootGitignoreDirs(root);
   const parts = [];
-  const queue = [{ dir, rel: "", depth: 0 }];
+  const queue = [{ dir, depth: 0, ignoreRules: workspaceGitignoreRulesForAncestors(root, dir) }];
   let entriesSeen = 0;
 
   while (queue.length && entriesSeen < maxEntries) {
     const current = queue.shift();
     const stat = fs.statSync(current.dir);
-    parts.push(`${current.rel}:d:${stat.mtimeMs}:${stat.size}`);
+    const currentPath = path.relative(root, current.dir).replaceAll("\\", "/");
+    const ignoreRules = [...current.ignoreRules, ...workspaceGitignoreRulesForDir(root, current.dir)];
+    parts.push(`${currentPath}:d:${stat.mtimeMs}:${stat.size}`);
+    parts.push(`${currentPath}/.gitignore:${statSignature(path.join(current.dir, ".gitignore"), { contentHash: true })}`);
 
     const children = fs
       .readdirSync(current.dir, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith(".") || entry.name === ".env")
       .filter((entry) => !(entry.isDirectory() && ignoredDirs.has(entry.name)))
-      .filter((entry) => !(entry.isDirectory() && gitignoreDirs.has(entry.name)))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .filter((entry) => {
+        const itemPath = path.relative(root, path.join(current.dir, entry.name)).replaceAll("\\", "/");
+        return !isWorkspacePathIgnored(ignoreRules, entry.name, itemPath, entry.isDirectory());
+      })
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
 
     for (const entry of children) {
       if (entriesSeen >= maxEntries) break;
-      const rel = current.rel ? `${current.rel}/${entry.name}` : entry.name;
       const fullPath = path.join(current.dir, entry.name);
+      const rel = path.relative(root, fullPath).replaceAll("\\", "/");
       const entryStat = fs.statSync(fullPath);
       parts.push(`${rel}:${entry.isDirectory() ? "d" : "f"}:${entryStat.mtimeMs}:${entryStat.size}`);
       entriesSeen += 1;
       if (entry.isDirectory() && current.depth + 1 < depth) {
-        queue.push({ dir: fullPath, rel, depth: current.depth + 1 });
+        queue.push({ dir: fullPath, depth: current.depth + 1, ignoreRules });
       }
     }
   }
@@ -682,17 +755,20 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
   workspaceTreeStats.cacheMisses += 1;
 
   const entries = [];
-  const queue = [{ dir, depth: 0 }];
-  const gitignoreDirs = rootGitignoreDirs(root);
+  const queue = [{ dir, depth: 0, ignoreRules: workspaceGitignoreRulesForAncestors(root, dir) }];
   let budgetHit = false;
 
   while (queue.length && entries.length < maxEntries) {
     const current = queue.shift();
+    const ignoreRules = [...current.ignoreRules, ...workspaceGitignoreRulesForDir(root, current.dir)];
     const children = fs
       .readdirSync(current.dir, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith(".") || entry.name === ".env")
       .filter((entry) => !(entry.isDirectory() && ignoredDirs.has(entry.name)))
-      .filter((entry) => !(entry.isDirectory() && gitignoreDirs.has(entry.name)))
+      .filter((entry) => {
+        const itemPath = path.relative(root, path.join(current.dir, entry.name)).replaceAll("\\", "/");
+        return !isWorkspacePathIgnored(ignoreRules, entry.name, itemPath, entry.isDirectory());
+      })
       .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
 
     for (const entry of children) {
@@ -711,7 +787,9 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
         updatedAt: stat.mtime.toISOString()
       };
       entries.push(item);
-      if (entry.isDirectory() && current.depth + 1 < depth) queue.push({ dir: fullPath, depth: current.depth + 1 });
+      if (entry.isDirectory() && current.depth + 1 < depth) {
+        queue.push({ dir: fullPath, depth: current.depth + 1, ignoreRules });
+      }
     }
   }
 

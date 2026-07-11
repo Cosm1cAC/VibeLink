@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { storeMcpTools, getCachedMcpTools } from "./db.js";
 import { codebaseMemoryServerConfig, mergeCodebaseMemoryServer, withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
@@ -10,6 +11,8 @@ const MAX_TOOL_DESCRIPTION = 2048;
 const MAX_STDIO_BUFFER = 1024 * 1024;
 let persistentMcpSessions = null;
 let rustMcpSidecar = null;
+let rustMcpSidecarReady = false;
+let rustMcpSidecarFailed = false;
 const rustMcpSidecarStats = {
   starts: 0,
   failures: 0,
@@ -138,8 +141,18 @@ export function isMcpPersistentSessionsEnabled() {
   return process.env.VIBELINK_MCP_PERSISTENT_SESSIONS === "1";
 }
 
+function mcpRustSidecarMode() {
+  const mode = String(process.env.VIBELINK_MCP_RUST_SIDECAR || "").trim().toLowerCase();
+  if (mode === "auto") return "auto";
+  if (/^(1|true|yes|on)$/.test(mode)) return "manual";
+  return "off";
+}
+
 export function isMcpRustSidecarEnabled() {
-  return process.env.VIBELINK_MCP_RUST_SIDECAR === "1";
+  const mode = mcpRustSidecarMode();
+  if (mode === "manual") return true;
+  if (mode === "auto") return mcpRustSidecarAvailable();
+  return false;
 }
 
 function mcpSessionManager() {
@@ -157,6 +170,14 @@ function mcpRustSidecarCommand() {
     "debug",
     process.platform === "win32" ? "vibelink.exe" : "vibelink"
   );
+}
+
+function mcpRustSidecarAvailable() {
+  try {
+    return fs.existsSync(mcpRustSidecarCommand());
+  } catch {
+    return false;
+  }
 }
 
 function mcpRustSidecarArgs() {
@@ -181,10 +202,24 @@ function mcpRustSidecarClient(timeoutMs = 10000) {
   return rustMcpSidecar;
 }
 
+async function readyMcpRustSidecarClient(timeoutMs = 10000) {
+  const client = mcpRustSidecarClient(timeoutMs);
+  if (rustMcpSidecarReady) return client;
+  const stats = await client.getSessionStats({ timeout: timeoutMs });
+  if (!stats || typeof stats !== "object") {
+    throw new Error("MCP Rust sidecar readiness check returned an invalid stats payload.");
+  }
+  rustMcpSidecarReady = true;
+  rustMcpSidecarFailed = false;
+  rustMcpSidecarStats.lastError = "";
+  return client;
+}
+
 async function closeRustMcpSidecar() {
   if (!rustMcpSidecar) return;
   const client = rustMcpSidecar;
   rustMcpSidecar = null;
+  rustMcpSidecarReady = false;
   await client.close().catch(() => {});
 }
 
@@ -222,10 +257,19 @@ export function getPersistentMcpSessionStats() {
 }
 
 export function getMcpRustSidecarStats() {
+  const mode = mcpRustSidecarMode();
+  const configured = mode !== "off";
+  const enabled = isMcpRustSidecarEnabled();
   return {
-    enabled: isMcpRustSidecarEnabled(),
-    command: isMcpRustSidecarEnabled() ? mcpRustSidecarCommand() : "",
-    args: isMcpRustSidecarEnabled() ? mcpRustSidecarArgs() : [],
+    enabled,
+    mode,
+    auto: mode === "auto",
+    available: configured && mcpRustSidecarAvailable(),
+    active: configured && Boolean(rustMcpSidecar),
+    ready: configured && rustMcpSidecarReady,
+    failed: configured && rustMcpSidecarFailed,
+    command: configured ? mcpRustSidecarCommand() : "",
+    args: configured ? mcpRustSidecarArgs() : [],
     starts: rustMcpSidecarStats.starts,
     failures: rustMcpSidecarStats.failures,
     fallbacks: rustMcpSidecarStats.fallbacks,
@@ -458,7 +502,8 @@ async function probePersistentStdioServer(server, timeoutMs, emitProgress) {
 
 async function probeRustSidecarStdioServer(server, timeoutMs, emitProgress) {
   emitProgress?.({ phase: "rust-sidecar.probe", serverId: server.id, name: server.name });
-  const result = await mcpRustSidecarClient(timeoutMs).probeStdioServer(server, { timeoutMs });
+  const client = await readyMcpRustSidecarClient(timeoutMs);
+  const result = await client.probeStdioServer(server, { timeoutMs });
   return {
     ok: true,
     transport: "stdio",
@@ -568,8 +613,9 @@ async function callPersistentStdioTool(server, toolName, toolArguments, timeoutM
 
 async function callRustSidecarStdioTool(server, toolName, toolArguments, timeoutMs, emitProgress) {
   emitProgress?.({ phase: "rust-sidecar.call", serverId: server.id, name: server.name, toolName });
-  const result = await mcpRustSidecarClient(timeoutMs).callTool(server, toolName, toolArguments || {}, { timeoutMs });
-  return { result, stderr: mcpRustSidecarClient(timeoutMs).stats().stderr || "", sidecar: "rust" };
+  const client = await readyMcpRustSidecarClient(timeoutMs);
+  const result = await client.callTool(server, toolName, toolArguments || {}, { timeoutMs });
+  return { result, stderr: client.stats().stderr || "", sidecar: "rust" };
 }
 
 function recordRustSidecarFailure(error) {
@@ -577,6 +623,8 @@ function recordRustSidecarFailure(error) {
   rustMcpSidecarStats.fallbacks += 1;
   rustMcpSidecarStats.lastFailureAt = nowIso();
   rustMcpSidecarStats.lastError = compact(error?.message || error, 1000);
+  rustMcpSidecarReady = false;
+  rustMcpSidecarFailed = true;
 }
 
 async function fallbackProbeStdioServer(server, timeoutMs, emitProgress) {

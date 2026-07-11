@@ -35,7 +35,7 @@
       "title": "Persistent MCP stdio sessions",
       "priority": "P1",
       "status": "opt-in",
-      "rollout": "manual flag only",
+      "rollout": "manual flag plus auto safe-detection",
       "featureFlags": [
         { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
         { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
@@ -46,8 +46,8 @@
       "nodeEntry": "src/mcpRuntime.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink mcp-session-sidecar",
-      "nodeFallback": "src/mcpRuntime.js falls back to the existing Node stdio probe/call path and closes the failed Rust sidecar client on probe or call failure.",
-      "runtimeStats": "getMcpRustSidecarStats() exposes enabled, command, args, starts, failures, fallbacks, last failure, last error, and client stats.",
+      "nodeFallback": "src/mcpRuntime.js falls back to the existing Node stdio probe/call path and closes the failed Rust sidecar client on readiness, probe, or call failure. VIBELINK_MCP_RUST_SIDECAR=auto skips a missing command without marking a Rust failure.",
+      "runtimeStats": "getMcpRustSidecarStats() exposes enabled, mode, auto/available/active/ready/failed state, command, args, starts, failures, fallbacks, last failure, last error, and client stats.",
       "tests": [
         "test/mcpRuntime.test.js",
         "test/mcpSessionSidecarContract.test.js"
@@ -56,9 +56,9 @@
         "docs/mcp-persistent-sessions.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node manager, JSONL sidecar client, real Rust mcp-session-sidecar command, opt-in runtime routing, contract tests, burst tests, timeout tests, crash-replacement tests, in-flight stats, and sidecar-level active-request backpressure exist.",
-      "nextAction": "Add auto mode, health readiness checks, promotion thresholds, and docs for spawn-reduction and fallback-rate gates before canary/default-on.",
-      "promotionGate": "Can move to canary only after auto mode validates command/health readiness and tests cover spawn failure, tool-call failure, timeout, invalid JSON, and fallback without task-visible failure."
+      "currentState": "Node manager, JSONL sidecar client, real Rust mcp-session-sidecar command, opt-in runtime routing, auto safe-detection, stats readiness checks, contract tests, burst tests, timeout tests, crash-replacement tests, in-flight stats, and sidecar-level active-request backpressure exist.",
+      "nextAction": "Run representative runtime canaries and capture spawn-reduction, fallback-rate, backpressure, and clean-drain evidence before canary/default-on.",
+      "promotionGate": "Can move to canary only after representative auto-mode runtime sessions preserve 0 readiness fallback after command availability, 0 sidecar backpressure under normal load, reduced stdio server spawns versus the non-persistent path, clean pending drain, and tests cover spawn failure, readiness failure, tool-call failure, timeout, invalid JSON, and fallback without task-visible failure."
     },
     {
       "id": "event-store-sidecar",

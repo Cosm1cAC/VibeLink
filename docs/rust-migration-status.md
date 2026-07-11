@@ -28,7 +28,7 @@ This file is the human-readable status view for the Rust migration program. The 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
 | Workspace tree scanner | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Finish the remaining parity gates and document the long-lived scanner/cache limitations before canary. |
-| Persistent MCP stdio sessions | `opt-in` | Manual flag only | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Add `auto` mode, health readiness checks, spawn-reduction/fallback-rate promotion gates, and rollback docs. |
+| Persistent MCP stdio sessions | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run representative runtime canaries and capture spawn-reduction/fallback-rate evidence before canary/default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
 | Compression and context budget helper | `planned` | Not implemented; conditional need | Planned `VIBELINK_RUST_COMPRESSION` | Existing Node/provider prompt construction | Only if needed, define deterministic byte/log sampling and budget trimming helper; do not claim semantic summarization or exact provider tokens. |
@@ -46,12 +46,12 @@ Can move to `canary` only when:
 
 ### Persistent MCP stdio sessions
 
-Current state: Node manager, JSONL sidecar client, real Rust `mcp-session-sidecar`, opt-in runtime routing, contract tests, burst tests, timeout tests, crash-replacement tests, in-flight stats, and sidecar-level active-request backpressure exist.
+Current state: Node manager, JSONL sidecar client, real Rust `mcp-session-sidecar`, opt-in runtime routing, `VIBELINK_MCP_RUST_SIDECAR=auto` safe-detection, stats readiness checks, contract tests, burst tests, timeout tests, crash-replacement tests, in-flight stats, and sidecar-level active-request backpressure exist.
 
 Can move to `canary` only when:
 
-- `VIBELINK_MCP_RUST_SIDECAR=auto` or equivalent readiness detection exists.
-- Tests cover spawn failure, tool-call failure, timeout, invalid JSON, and fallback without user-visible task failure.
+- Representative auto-mode runtime sessions preserve 0 readiness fallback after command availability, 0 sidecar backpressure under normal load, reduced stdio server spawns versus the non-persistent path, and clean pending drain.
+- Tests cover spawn failure, readiness failure, tool-call failure, timeout, invalid JSON, and fallback without user-visible task failure.
 - Runtime status exposes starts, failures, fallbacks, pending, terminated, and last error.
 - Docs define spawn-reduction and fallback-rate thresholds for default-on.
 

@@ -32,6 +32,7 @@
 - [x] Run repeated read-only calls through a real codebase-memory MCP server and add a reusable real-session canary.
 - [x] Add a hard read-only event-store sidecar mode and validate real task/tool/live replay parity against the existing database.
 - [x] Measure the current Node compression hot path and retain contract-only status because no material bottleneck was observed.
+- [x] Run workspace-tree against two additional repositories and fix locale-sensitive result ordering.
 - [ ] Audit all canary claims against current remote CI and runtime evidence.
 - [ ] Advance any remaining server-side work that does not touch Android/live-call.
 - [ ] Reconcile live-call changes before beginning the audio contract.

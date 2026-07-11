@@ -65,6 +65,16 @@ function writeRustScannerInvalidJsonStub(dir) {
   return scanner;
 }
 
+function writeRustScannerInvalidItemsStub(dir) {
+  const scanner = path.join(dir, "rust-scanner-invalid-items-stub.mjs");
+  fs.writeFileSync(
+    scanner,
+    `process.stdout.write(JSON.stringify({ items: [{ name: "escape.txt", path: "../escape.txt", type: "file", size: 1, updatedAt: "2026-01-01T00:00:00.000Z" }] }));\n`,
+    "utf8"
+  );
+  return scanner;
+}
+
 function cargoPath() {
   if (process.platform === "win32") {
     const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
@@ -152,6 +162,12 @@ test("getWorkspaceTree preserves Windows Node metadata parity", async (t) => {
   fs.rmSync(fixture, { recursive: true, force: true });
   fs.mkdirSync(path.join(fixture, "nested"), { recursive: true });
   fs.writeFileSync(path.join(fixture, "sample.txt"), "metadata parity", "utf8");
+  fs.writeFileSync(path.join(fixture, "main.py"), "main", "utf8");
+  fs.writeFileSync(path.join(fixture, "main_debug.py"), "debug", "utf8");
+  fs.writeFileSync(path.join(fixture, "README.md"), "readme", "utf8");
+  fs.writeFileSync(path.join(fixture, "README_en.md"), "readme en", "utf8");
+  fs.writeFileSync(path.join(fixture, "nested", "README.md"), "nested readme", "utf8");
+  fs.writeFileSync(path.join(fixture, "nested", "README_en.md"), "nested readme en", "utf8");
   const timestampSeconds = Date.UTC(2026, 0, 2, 3, 4, 5) / 1000 + 0.1236;
   fs.utimesSync(path.join(fixture, "sample.txt"), timestampSeconds, timestampSeconds);
   fs.utimesSync(path.join(fixture, "nested"), timestampSeconds, timestampSeconds);
@@ -455,6 +471,42 @@ test("getWorkspaceTree records Rust scanner output failures", async () => {
   }
 });
 
+test("getWorkspaceTree rejects Rust items outside the requested traversal", async () => {
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-invalid-items-${process.pid}`);
+  const helperDir = path.join(os.tmpdir(), `vibelink-rust-tree-invalid-items-helper-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.rmSync(helperDir, { recursive: true, force: true });
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.mkdirSync(helperDir, { recursive: true });
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-invalid-items" });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  const scanner = writeRustScannerInvalidItemsStub(helperDir);
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = process.execPath;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([scanner]);
+
+  try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const result = await getWorkspaceTree(workspace.id, { allowedRoots: [fixture] }, "");
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
+    assert.deepEqual(result.items.map((item) => item.name), ["README.md"]);
+    assert.equal(after.fallbacks, before.fallbacks + 1);
+    assert.equal(after.failures, before.failures + 1);
+    assert.match(after.lastError, /outside the requested traversal/i);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+    fs.rmSync(helperDir, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceTree tracks Rust scanner budget hits", async () => {
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-budget-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
@@ -476,8 +528,10 @@ test("getWorkspaceTree tracks Rust scanner budget hits", async () => {
     const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
 
     assert.equal(result.ok, true);
-    assert.deepEqual(result.items.map((item) => item.name), ["one.txt"]);
+    assert.deepEqual(result.items.map((item) => item.name), ["README.md", "rust-scanner-budget-stub.mjs"]);
     assert.equal(after.budgetHits, before.budgetHits + 1);
+    assert.equal(after.fallbacks, before.fallbacks + 1);
+    assert.equal(after.failures, before.failures);
   } finally {
     restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
     restoreEnv("VIBELINK_RUST_BIN", previousBin);

@@ -24,6 +24,8 @@ The Rust and Node scanners intentionally share these observable rules:
 
 The Rust result includes `truncated` and a metadata signature. Node keeps a bounded in-memory cache keyed by the scanned path, limits, directory metadata, and the content signature of every `.gitignore` visited by the scan. Changes to nested ignore files therefore invalidate cached Rust results.
 
+Node also normalizes an untruncated Rust result with the existing `localeCompare` directory-first breadth-first order before caching it. This preserves the established locale-sensitive workspace API without adding an ICU dependency to the Rust scanner. If Rust reaches its entry budget, Node records a budget fallback and performs the authoritative scan because a differently ordered truncated subset cannot guarantee parity.
+
 ## Current Limitations
 
 - This is not yet a long-lived Rust scanner. Each uncached request starts the CLI; unchanged requests are served from the Node cache.
@@ -49,7 +51,9 @@ Run the production router against an actual checkout with exact Node/Rust metada
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs --output .tmp/workspace-tree-real-canary.json --delete-temp
 ```
 
-Two 2026-07-11 VibeLink checkout runs passed with 17 root items, exact `src`/`docs` context parity, 3 Rust routes, 3 warm cache hits, and zero failures/fallbacks. The Node baseline ranged from 53.1ms to 183.6ms, the three process-per-miss Rust cold routes ranged from 642.5ms to 820.4ms total, and the three warm routes ranged from 11.5ms to 16ms. This validates correctness and cache reuse but blocks `default-on` until more real repositories are sampled and the cold-route penalty is addressed or accepted.
+Two 2026-07-11 VibeLink checkout runs passed with 17 root items, exact `src`/`docs` context parity, 3 Rust routes, 3 warm cache hits, and zero failures/fallbacks. The Node baseline ranged from 53.1ms to 183.6ms, the three process-per-miss Rust cold routes ranged from 642.5ms to 820.4ms total, and the three warm routes ranged from 11.5ms to 16ms.
+
+Additional runs found and fixed a locale-sensitive ordering gap (`main.py`/`main_debug.py` and localized README names). Two post-fix `ok-wuthering-waves` runs passed exact root plus `src`/`tests` parity across 3 Rust routes at 56.3-62.9ms Node, 152.2-172.9ms Rust cold, and 20.8-23.5ms Rust warm. Two `meetily` runs passed exact root plus `backend`/`frontend`/`docs` parity across 4 Rust routes at 67.7-94.9ms Node, 223.4-228.1ms Rust cold, and 26.4-30.3ms Rust warm. Both had full warm cache reuse and zero failures/fallbacks. Three repositories now validate correctness; the remaining blocker for `default-on` is the process-per-miss cold-route penalty.
 
 `.github/workflows/workspace-tree-rust-canary.yml` rebuilds the release binary on Windows, runs parity/cache tests, executes both the isolated fixture and checkout real-repository canaries, and uploads both JSON results.
 

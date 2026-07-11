@@ -37,7 +37,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, Windows directory-size and millisecond timestamp parity, truncation, signature/cache behavior, nested ignore-file invalidation, content-safe file-sample caching, fallback stats, isolated and real-repository canary harnesses, and an independent Windows CI gate exist. Two 2026-07-11 VibeLink checkout runs preserved exact tree/context parity, 3 cold Rust routes, 3 warm cache hits, and zero failures/fallbacks. Node ranged from 53.1-183.6ms, Rust cold from 642.5-820.4ms, and Rust warm from 11.5-16ms, so the slice remains `canary` rather than `default-on`.
+Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, Windows metadata parity, Node-compatible locale/BFS result ordering, conservative Node fallback for truncated Rust subsets, signature/cache behavior, nested ignore-file invalidation, content-safe file-sample caching, fallback stats, isolated and real-repository canary harnesses, and an independent Windows CI gate exist. VibeLink, `ok-wuthering-waves`, and `meetily` all preserved exact tree/context parity, full warm cache reuse, and zero failures/fallbacks. Repeated runs on the two additional repositories measured Node at 56.3-94.9ms, Rust cold at 152.2-228.1ms, and Rust warm at 20.8-30.3ms, so the slice remains `canary` rather than `default-on`.
 
 Can move to `default-on` only when:
 

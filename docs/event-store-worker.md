@@ -96,7 +96,7 @@ It also includes `eventStore.rustSidecar`, `eventStore.metrics`, grouped by cont
 
 ## Local Canary
 
-`npm run event-store:canary` runs an isolated local comparison against temporary SQLite databases. It seeds task, tool-run, and live-call owners, runs the sync adapter as the baseline, then runs the Rust sidecar against the same append/replay workload. The script fails if readiness is bad, direct Rust fallback is non-zero, sidecar failures occur, append averages are more than 10% slower than baseline, pending requests do not drain, or backpressure appears. The default command prefers `apps/windows/target/release/vibelink(.exe)` when present and falls back to `apps/windows/target/debug/vibelink(.exe)`.
+`npm run event-store:canary` runs an isolated local comparison against temporary SQLite databases. It seeds task, tool-run, and live-call owners, runs the sync adapter as the baseline, then runs the Rust sidecar against the same append/replay workload. The script fails if readiness is bad, direct Rust fallback is non-zero, sidecar failures occur, append 10% trimmed means are more than 10% slower than baseline, pending requests do not drain, or backpressure appears. The default command prefers `apps/windows/target/release/vibelink(.exe)` when present and falls back to `apps/windows/target/debug/vibelink(.exe)`.
 
 The representative 2026-07-10 local release canary passed with:
 
@@ -126,7 +126,7 @@ npm run event-store:server-canary -- --output .tmp/event-store-server-canary-fin
 
 That run verified service startup, auth, workspace command output, live-call event ingestion, runtime mode `rust-sidecar`, 2 Rust `insertToolEvents` calls at 2.6ms average, 13 Rust `insertLiveCallEvents` calls at 4.5ms average, 0 fallback, 0 failures, 0 sync stalls, 0 pending requests, and 0 backpressure rejects.
 
-`npm run event-store:canary:all` runs the local, runtime, and server canaries serially and writes CI-friendly JSON outputs under `.tmp/`. The aggregate uses a CI-sized local workload of 24 rounds x 100 events per append path to reduce host-noise sensitivity while still measuring 7,200 direct append events before the runtime and server canaries. The local direct comparison keeps the 10% ratio threshold and adds a 10ms absolute latency margin for low-millisecond CI jitter; standalone promotion runs can omit `--latency-margin-ms` to use the strict default. The canaries are intentionally not parallelized because concurrent SQLite workloads can distort latency thresholds.
+`npm run event-store:canary:all` runs the local, runtime, and server canaries serially and writes CI-friendly JSON outputs under `.tmp/`. The aggregate uses a CI-sized local workload of 24 rounds x 100 events per append path to reduce host-noise sensitivity while still measuring 7,200 direct append events before the runtime and server canaries. Raw average, max, p95, and stall counts remain in the JSON evidence; latency promotion checks compare the 10% trimmed mean, dropping the highest and lowest two samples from each 24-round method series so isolated hosted-runner pauses do not dominate the gate. The comparison keeps the 10% ratio threshold and adds a 10ms absolute latency margin for low-millisecond CI jitter; standalone promotion runs can omit `--latency-margin-ms` to use the strict default. The canaries are intentionally not parallelized because concurrent SQLite workloads can distort latency thresholds.
 
 ## CI Canary Gate
 
@@ -164,6 +164,6 @@ Promotion requires all of the following:
 - `eventStore.rustSidecar.ready` is `true`, `failed` is `false`, and `lastError` is empty after readiness.
 - `eventStore.metrics.fallbacks / eventStore.metrics.requests` stays below 1% after readiness. Any readiness failure blocks promotion for that build.
 - `eventStore.metrics.failures` is 0 for event-store methods not intentionally exercised by failure tests.
-- Average `insertToolEvents`, `insertTaskEvents`, and `insertLiveCallEvents` duration is no worse than the sync or Worker baseline by more than 10%.
+- The 10% trimmed mean for `insertToolEvents`, `insertTaskEvents`, and `insertLiveCallEvents` is no worse than the sync or Worker baseline by more than 10%; raw average, p95, max, and stall evidence remains visible.
 - `eventStore.metrics.stalls.count` is lower than the sync baseline for the same workload, or remains 0 when the baseline is already 0.
 - `eventStore.rustSidecar.client.pending` returns to 0 after the workload and `backpressureRejects` remains 0.

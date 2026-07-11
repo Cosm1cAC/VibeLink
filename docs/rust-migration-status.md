@@ -62,7 +62,7 @@ Can move to `default-on` only when:
 
 ### Event store append/replay sidecar
 
-Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, a real Rust `event-store-sidecar` command, real Rust contract coverage, explicit opt-in runtime routing, `auto` readiness mode, a health gate, runtime stats, Worker/sync fallback tests, rollback docs, canary thresholds, local/runtime/server canary harnesses, CI canary status wiring, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses `last_insert_rowid()` on the normal insert hot path.
+Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, a real Rust `event-store-sidecar` command, real Rust contract coverage, explicit opt-in runtime routing, `auto` readiness mode, a health gate, runtime stats, Worker/sync fallback tests, rollback docs, robust 10% trimmed-mean canary thresholds with raw average/max/p95 evidence, local/runtime/server canary harnesses, CI status wiring, and passing representative release canaries exist. Rust batch append avoids repeated owner lookups and uses `last_insert_rowid()` on the normal insert hot path.
 
 Can move to `default-on` only when:
 

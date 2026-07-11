@@ -118,6 +118,8 @@ That run queued 7,200 task/tool/live-call append events through the runtime batc
 
 `npm run event-store:server-canary` starts the bridge itself on a temporary `VIBELINK_DATA_DIR` and random local port, logs in through `/api/login`, executes a small workspace command, emits live-call transcript and audio-level events through HTTP, and validates `/api/tool-events/stats`.
 
+This server-route harness gates readiness, Rust routing, failures, fallbacks, stalls, pending requests, and backpressure. Its raw append averages remain in the artifact, with a default 500ms abnormal-liveness ceiling that catches a stuck route without treating two or three cold filesystem batches as a stable performance sample. Promotion latency remains gated by the local 10% trimmed-mean comparison and the 24-round runtime canary's 50ms average limit.
+
 The representative 2026-07-10 server canary passed with:
 
 ```bash

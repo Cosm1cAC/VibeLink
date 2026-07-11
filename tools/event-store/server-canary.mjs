@@ -294,7 +294,7 @@ async function main() {
   if (!port) throw new Error("--port must be a positive integer");
   const liveEvents = numberArg("--live-events", 40);
   const commandLines = numberArg("--command-lines", 80);
-  const maxAppendAvgMs = numberArg("--max-append-avg-ms", 75);
+  const maxAppendAvgMs = numberArg("--max-append-avg-ms", 500);
   const command = stringArg("--command", defaultRustCommand());
   const pairingToken = stringArg("--token", "event-store-canary-token");
   assertRustCommand(command);

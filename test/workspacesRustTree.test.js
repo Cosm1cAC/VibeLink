@@ -74,6 +74,161 @@ function cargoPath() {
   return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
 }
 
+test("getWorkspaceContext preserves Node and Rust scanner parity for supported ignore rules", async (t) => {
+  const cargo = cargoPath();
+  if (!cargo) t.skip("cargo is not available");
+
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-parity-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "docs"), { recursive: true });
+  fs.mkdirSync(path.join(fixture, "src", "node_modules"), { recursive: true });
+  fs.mkdirSync(path.join(fixture, "src", "generated"), { recursive: true });
+  fs.mkdirSync(path.join(fixture, "src", "private"), { recursive: true });
+  fs.mkdirSync(path.join(fixture, "src", "target"), { recursive: true });
+  fs.mkdirSync(path.join(fixture, "src", "tmp-cache"), { recursive: true });
+  fs.writeFileSync(
+    path.join(fixture, "src", ".gitignore"),
+    "generated.tmp\n*.log\n!keep.log\nprivate/\ntmp-cache/\ngenerated/*.tmp\n!generated/keep.tmp\n",
+    "utf8"
+  );
+  fs.writeFileSync(path.join(fixture, "src", ".env"), "VISIBLE=1", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", ".hidden"), "hidden", "utf8");
+  fs.writeFileSync(path.join(fixture, "README.md"), "hello", "utf8");
+  fs.writeFileSync(path.join(fixture, "docs", "guide.md"), "guide", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "node_modules", "noise.js"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "target", "noise.txt"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "tmp-cache", "noise.txt"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "app.rs"), "fn main() {}", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "generated.tmp"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "debug.log"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "keep.log"), "kept", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "private", "note.txt"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "generated", "noise.tmp"), "ignored", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "generated", "keep.tmp"), "kept", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "generated", "note.txt"), "kept", "utf8");
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-parity" });
+  const settings = { allowedRoots: [fixture] };
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+
+  try {
+    delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+    const nodeResult = await getWorkspaceContext(workspace.id, settings, { paths: ["src"] });
+
+    process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+    process.env.VIBELINK_RUST_BIN = cargo;
+    process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([
+      "run",
+      "--quiet",
+      "--manifest-path",
+      path.join(process.cwd(), "apps", "windows", "Cargo.toml"),
+      "--"
+    ]);
+    const rustResult = await getWorkspaceContext(workspace.id, settings, { paths: ["src"] });
+
+    assert.equal(rustResult.prompt, nodeResult.prompt);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceContext Rust scanner inherits gitignore rules from intermediate directories", async (t) => {
+  const cargo = cargoPath();
+  if (!cargo) t.skip("cargo is not available");
+
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-parent-ignore-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "src", "nested"), { recursive: true });
+  fs.writeFileSync(path.join(fixture, "src", ".gitignore"), "secret.txt\n", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "nested", "keep.txt"), "kept", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "nested", "secret.txt"), "ignored", "utf8");
+
+  const workspace = upsertWorkspace({
+    path: fixture,
+    allowedRoot: fixture,
+    title: "rust-tree-parent-ignore"
+  });
+  const settings = { allowedRoots: [fixture] };
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+
+  try {
+    delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+    const nodeResult = await getWorkspaceContext(workspace.id, settings, { paths: ["src/nested"] });
+
+    process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+    process.env.VIBELINK_RUST_BIN = cargo;
+    process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([
+      "run",
+      "--quiet",
+      "--manifest-path",
+      path.join(process.cwd(), "apps", "windows", "Cargo.toml"),
+      "--"
+    ]);
+    const rustResult = await getWorkspaceContext(workspace.id, settings, { paths: ["src/nested"] });
+
+    assert.equal(rustResult.prompt, nodeResult.prompt);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("getWorkspaceContext refreshes Rust cache when nested gitignore content changes", async (t) => {
+  const cargo = cargoPath();
+  if (!cargo) t.skip("cargo is not available");
+
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-gitignore-refresh-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "src"), { recursive: true });
+  fs.writeFileSync(path.join(fixture, "src", ".gitignore"), "secret.txt\n", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "keep.txt"), "kept", "utf8");
+  fs.writeFileSync(path.join(fixture, "src", "secret.txt"), "initially ignored", "utf8");
+
+  const workspace = upsertWorkspace({
+    path: fixture,
+    allowedRoot: fixture,
+    title: "rust-tree-gitignore-refresh"
+  });
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+  process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+  process.env.VIBELINK_RUST_BIN = cargo;
+  process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([
+    "run",
+    "--quiet",
+    "--manifest-path",
+    path.join(process.cwd(), "apps", "windows", "Cargo.toml"),
+    "--"
+  ]);
+
+  try {
+    const before = getWorkspaceRuntimeStats().rustWorkspaceTree;
+    const first = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["src"] });
+    fs.writeFileSync(path.join(fixture, "src", ".gitignore"), "public.txt\n", "utf8");
+    const second = await getWorkspaceContext(workspace.id, { allowedRoots: [fixture] }, { paths: ["src"] });
+    const after = getWorkspaceRuntimeStats().rustWorkspaceTree;
+
+    assert.doesNotMatch(first.prompt, /secret\.txt/);
+    assert.match(second.prompt, /secret\.txt/);
+    assert.equal(after.cacheMisses >= before.cacheMisses + 2, true);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceTree uses Rust scanner when explicitly enabled", async () => {
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });

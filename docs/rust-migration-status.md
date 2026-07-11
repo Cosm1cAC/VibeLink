@@ -1,6 +1,6 @@
 # Rust Migration Status
 
-Last updated: 2026-07-10
+Last updated: 2026-07-11
 
 This file is the human-readable status view for the Rust migration program. The machine-readable source of truth is `docs/rust-migration-status.json`; run `npm run rust:migration:check` before changing statuses.
 
@@ -27,7 +27,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Finish the remaining parity gates and document the long-lived scanner/cache limitations before canary. |
+| Workspace tree scanner | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Run a representative auto-mode canary and capture parity, latency, cache, fallback, and failure evidence. |
 | Persistent MCP stdio sessions | `opt-in` | Manual flag plus auto safe-detection | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run representative runtime canaries and capture spawn-reduction/fallback-rate evidence before canary/default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
@@ -37,12 +37,15 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, Node cache reuse, `VIBELINK_RUST_WORKSPACE_TREE=auto` safe-detection, and runtime stats for mode, availability, fallbacks, failures, and last error.
+Current state: Rust CLI and Node opt-in integration exist. Node/Rust parity now covers directories-first sorting, hidden files, fixed ignores, inherited and nested `.gitignore` rules, path-pattern rules, truncation, signature/cache behavior, and nested ignore-file cache invalidation. `VIBELINK_RUST_WORKSPACE_TREE=auto` safe-detection and fallback/error runtime stats remain in place.
 
 Can move to `canary` only when:
 
-- Remaining Node/Rust parity tests cover directories-first sorting, hidden file policy, fixed ignores, nested `.gitignore`, path-pattern `.gitignore`, truncation, signature/cache behavior, and missing-binary fallback.
-- Any remaining gitignore semantic gap or long-lived scanner/cache limitation is explicitly listed as a blocker.
+- Representative auto-mode runs preserve exact Node/Rust path/type parity for the supported ignore-rule subset.
+- Runs with an available command record zero Rust failures and fallbacks; missing-command auto mode falls back without recording a failure.
+- Repeated unchanged scans reuse the Node-held Rust result without another CLI start, while nested `.gitignore` changes invalidate it.
+- Cold and warm latency evidence is acceptable for interactive workspace context requests.
+- The per-cache-miss CLI process, synchronous Node cache validation, bounded process-local cache, and incomplete full-Git ignore semantics remain explicitly documented in `docs/workspace-tree-rust.md`.
 
 ### Persistent MCP stdio sessions
 

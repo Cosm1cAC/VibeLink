@@ -1700,7 +1700,7 @@ fn list_workspace_tree(
     let mut queue = VecDeque::from([(
         target.clone(),
         0usize,
-        gitignore_rules_for_dir(&root, &root),
+        gitignore_rules_for_ancestors(&root, &target),
     )]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
@@ -1718,9 +1718,7 @@ fn list_workspace_tree(
             &root,
             &current.join(".gitignore"),
         ));
-        if current != root {
-            ignore_rules.extend(gitignore_rules_for_dir(&root, &current));
-        }
+        ignore_rules.extend(gitignore_rules_for_dir(&root, &current));
 
         let mut children = Vec::new();
         for entry in std::fs::read_dir(&current)
@@ -1903,6 +1901,26 @@ fn gitignore_rules_for_dir(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
         });
     }
 
+    rules
+}
+
+fn gitignore_rules_for_ancestors(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
+    let Ok(relative) = dir.strip_prefix(root) else {
+        return WorkspaceIgnoreRules::default();
+    };
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() {
+        return WorkspaceIgnoreRules::default();
+    }
+
+    let mut rules = gitignore_rules_for_dir(root, root);
+    let mut current = root.to_path_buf();
+    for component in components.iter().take(components.len() - 1) {
+        if let std::path::Component::Normal(part) = component {
+            current.push(part);
+            rules.extend(gitignore_rules_for_dir(root, &current));
+        }
+    }
     rules
 }
 

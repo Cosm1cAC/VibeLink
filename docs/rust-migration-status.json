@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-10",
+  "updatedAt": "2026-07-11",
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
@@ -24,11 +24,12 @@
       ],
       "docs": [
         "README.md",
+        "docs/workspace-tree-rust.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, Node-side cache reuse, auto safe-detection, and fallback/error runtime stats.",
-      "nextAction": "Finish the remaining Node/Rust parity gates and document the explicit long-lived scanner/cache limitations before canary.",
-      "promotionGate": "Can move to canary only after remaining Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback, with any long-lived scanner/cache limitation listed as a blocker."
+      "currentState": "Rust CLI and Node opt-in integration exist. Node/Rust parity covers sorting, hidden files, fixed ignores, inherited and nested gitignore rules, path-pattern rules, truncation, signature/cache behavior, nested gitignore cache invalidation, auto safe-detection, and missing/failing-command fallback stats.",
+      "nextAction": "Run a representative auto-mode workspace-tree canary and capture parity, cold/warm latency, cache-hit, fallback, and failure evidence before promotion.",
+      "promotionGate": "Can move to canary only after representative auto-mode runs preserve exact supported-subset path/type parity, zero failures and fallbacks with an available command, failure-free missing-command fallback, warm cache reuse without another CLI start, nested gitignore invalidation, and acceptable cold/warm latency. The documented per-miss CLI process and bounded Node cache limitations remain rollout constraints."
     },
     {
       "id": "mcp-session-sidecar",

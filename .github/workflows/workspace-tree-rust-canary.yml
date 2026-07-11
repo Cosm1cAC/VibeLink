@@ -17,6 +17,7 @@ on:
       - "test/workspacesRustTree.test.js"
       - "test/workspaceTreeCanary.test.js"
       - "test/workspaceTreeRealCanary.test.js"
+      - "test/workspaceTreeServerCanary.test.js"
       - "test/workspaceTreeSidecarContract.test.js"
       - "test/workspaceTreeSidecarClient.test.js"
       - "tools/workspace-tree/**"
@@ -36,6 +37,7 @@ on:
       - "test/workspacesRustTree.test.js"
       - "test/workspaceTreeCanary.test.js"
       - "test/workspaceTreeRealCanary.test.js"
+      - "test/workspaceTreeServerCanary.test.js"
       - "test/workspaceTreeSidecarContract.test.js"
       - "test/workspaceTreeSidecarClient.test.js"
       - "tools/workspace-tree/**"
@@ -76,7 +78,7 @@ jobs:
         run: npm run rust:migration:check
 
       - name: Run workspace-tree parity and canary tests
-        run: node --test --test-concurrency=1 test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js test/workspaceTreeSidecarContract.test.js test/workspaceTreeSidecarClient.test.js
+        run: node --test --test-concurrency=1 test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js test/workspaceTreeServerCanary.test.js test/workspaceTreeSidecarContract.test.js test/workspaceTreeSidecarClient.test.js
 
       - name: Run Rust workspace-tree unit tests
         run: cargo test --manifest-path apps/windows/Cargo.toml workspace_tree
@@ -87,6 +89,9 @@ jobs:
       - name: Run checkout real-repository canary
         run: npm run workspace-tree:real-canary -- --workspace . --paths src,docs --max-warm-ms 200 --output .tmp/workspace-tree-real-canary-ci.json --delete-temp
 
+      - name: Run authenticated server-route canary
+        run: npm run workspace-tree:server-canary -- --output .tmp/workspace-tree-server-canary-ci.json --delete-temp
+
       - name: Upload canary output
         if: always()
         uses: actions/upload-artifact@v7
@@ -95,5 +100,6 @@ jobs:
           path: |
             .tmp/workspace-tree-canary-ci.json
             .tmp/workspace-tree-real-canary-ci.json
-          if-no-files-found: ignore
+            .tmp/workspace-tree-server-canary-ci.json
+          if-no-files-found: error
           retention-days: 30

@@ -26,6 +26,7 @@
         "test/workspacesRustTree.test.js",
         "test/workspaceTreeCanary.test.js",
         "test/workspaceTreeRealCanary.test.js",
+        "test/workspaceTreeServerCanary.test.js",
         "test/workspaceTreeSidecarContract.test.js",
         "test/workspaceTreeSidecarClient.test.js"
       ],
@@ -34,8 +35,8 @@
         "docs/workspace-tree-rust.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Rust one-shot CLI and persistent JSONL sidecar, Node opt-in/auto routing, sidecar-to-one-shot-to-Node fallback, bounded pending requests, runtime session stats, root routing, supported-subset parity, inherited/nested gitignore rules, Windows metadata parity, Node-compatible locale/BFS ordering, conservative fallback for truncated Rust subsets, signature/cache behavior, content-safe file caching, contract/client/integration tests, three-repository canaries, and an independent weekly Windows CI gate exist. Persistent runs preserved exact parity, full cache reuse, one sidecar start, clean pending drain/termination, and zero route/session failures or fallbacks. VibeLink measured 30.0-31.0ms Node vs 53.7-80.3ms Rust cold; ok-wuthering-waves 77.2ms vs 59.8ms; meetily 76.1ms vs 77.1ms. Warm totals were 9.2-26.0ms.",
-      "nextAction": "Keep the weekly Windows canary green and run limited interactive sessions before considering default-on with the one-shot and Node rollback paths retained. Remote artifacts are retained for 30 days.",
+      "currentState": "Rust one-shot CLI and persistent JSONL sidecar, Node opt-in/auto routing, sidecar-to-one-shot-to-Node fallback, bounded pending requests, runtime session stats, root routing, supported-subset parity, inherited/nested gitignore rules, Windows metadata parity, Node-compatible locale/BFS ordering, conservative fallback for truncated Rust subsets, signature/cache behavior, content-safe file caching, contract/client/integration tests, three-repository plus authenticated HTTP server-route canaries, and an independent weekly Windows CI gate exist. Persistent runs preserved exact parity, full cache reuse, one sidecar start, clean pending drain/termination, and zero route/session failures or fallbacks. A 2026-07-12 server-route canary added authenticated tree/context/status coverage with 3 Rust misses, 3 cache hits, one sidecar, and zero failures, fallbacks, pending requests, or backpressure.",
+      "nextAction": "Keep the weekly Windows server-route canary green and run limited interactive sessions before considering default-on with the one-shot and Node rollback paths retained. Remote artifacts are retained for 30 days.",
       "promotionGate": "Can move to default-on only after CI and limited real/interactive sessions preserve exact supported-subset parity, one ready persistent sidecar, zero route/session failures and fallbacks, bounded pending drain, clean termination, warm cache reuse, nested gitignore invalidation, acceptable cold/warm latency, and tested session-to-one-shot-to-Node rollback."
     },
     {

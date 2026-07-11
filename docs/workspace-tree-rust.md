@@ -59,7 +59,15 @@ Additional one-shot runs found and fixed a locale-sensitive ordering gap (`main.
 
 The persistent sidecar removes that process-per-miss penalty while retaining the one-shot Rust and Node fallbacks. Two 2026-07-11 VibeLink runs measured 30.0-31.0ms Node, 53.7-80.3ms Rust cold across 3 scans, and 9.2-10.4ms warm. `ok-wuthering-waves` measured 77.2ms Node, 59.8ms Rust cold across 3 scans, and 15.8ms warm. `meetily` measured 76.1ms Node, 77.1ms Rust cold across 4 scans, and 26.0ms warm. Each run started one sidecar, preserved exact parity and full cache reuse, recorded zero route/session failures or fallbacks, drained pending requests to zero, and terminated cleanly.
 
-`.github/workflows/workspace-tree-rust-canary.yml` rebuilds the release binary on Windows, runs parity/cache tests, executes both the isolated fixture and checkout real-repository canaries, and uploads both JSON results.
+Run the authenticated server-route canary to cover the actual `/api/workspaces/:id/tree`, `/context`, and `/api/status` handlers plus device login:
+
+```bash
+npm run workspace-tree:server-canary -- --output .tmp/workspace-tree-server-canary.json --delete-temp
+```
+
+The 2026-07-12 run made cold and warm tree/context requests for `src` and `docs` through `src/server.js`. Stable response fields preserved exact repeat parity, the route recorded 3 Rust misses followed by 3 cache hits, and one persistent sidecar handled all scans with zero route/session failures, fallbacks, pending requests, or backpressure. The artifact stores paths, counts, status, and timings but excludes tree items, context text, device tokens, and file samples.
+
+`.github/workflows/workspace-tree-rust-canary.yml` rebuilds the release binary on Windows, runs parity/cache tests, executes the isolated fixture, checkout real-repository, and authenticated server-route canaries, and uploads all three JSON results. Missing artifacts fail the workflow.
 
 Before promoting this slice from `canary` to `default-on`, representative auto-mode runs must continue to show:
 

@@ -127,16 +127,17 @@
       "tests": [
         "test/liveCallAudioPipeline.test.js",
         "test/liveCallAudio.test.js",
-        "test/rustAudioPipelineContract.test.js"
+        "test/rustAudioPipelineContract.test.js",
+        "test/audioPipelineBenchmark.test.js"
       ],
       "docs": [
         "README.md",
         "docs/audio-pipeline-sidecar.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust audio-pipeline-sidecar, deterministic PCM16 level/peak/RMS and silence behavior, safe sequence accounting, bounded ring eviction/backpressure counters, structured validation errors, Rust unit tests, cross-language contract tests, and an independent Windows CI gate exist. No production client or live-call/ASR routing was changed.",
-      "nextAction": "After concurrent live-call work is reconciled, measure representative PCM workloads and design an optional bounded Node client with full fallback/runtime metrics before considering opt-in. Keep ASR/provider behavior out of this slice.",
-      "promotionGate": "Can move to opt-in only after concurrent live-call changes are reconciled, representative PCM measurements justify routing, an optional bounded client exists behind VIBELINK_AUDIO_RUST_PIPELINE=1, all missing/bad/timeout/invalid/exit paths fall back to current Node behavior, and runtime metrics plus real PCM canaries remain healthy."
+      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust audio-pipeline-sidecar, deterministic PCM16 level/peak/RMS and silence behavior, safe sequence accounting, bounded ring eviction/backpressure counters, structured validation errors, Rust unit tests, cross-language contract tests, a representative PCM benchmark, and an independent Windows CI gate exist. A 2026-07-11 run measured Node RMS p95 at 0.003-0.008ms and persistent Rust JSONL p95 at 0.189-0.356ms for 10/20/100ms frames with zero numeric delta, drops, or backpressure. No production client or live-call/ASR routing was changed.",
+      "nextAction": "Keep RMS-only processing contract-only because current measurements show no material Node bottleneck or Rust speedup. After concurrent live-call work is reconciled, re-run the benchmark only for a materially different bounded workload such as VAD/resampling before considering an optional client. Keep ASR/provider behavior out of this slice.",
+      "promotionGate": "Can move to opt-in only after concurrent live-call changes are reconciled, representative measurements show a material Node bottleneck or Rust benefit for the proposed workload, an optional bounded client exists behind VIBELINK_AUDIO_RUST_PIPELINE=1, all missing/bad/timeout/invalid/exit paths fall back to current Node behavior, and runtime metrics plus real PCM canaries remain healthy."
     },
     {
       "id": "compression-adapter",

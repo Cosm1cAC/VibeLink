@@ -13,8 +13,11 @@ on:
       - "package.json"
       - "package-lock.json"
       - "src/audioPipelineContract.js"
+      - "src/liveCallAudioPipeline.js"
       - "test/fixtures/audio-pipeline-json-sidecar.js"
+      - "test/audioPipelineBenchmark.test.js"
       - "test/rustAudioPipelineContract.test.js"
+      - "tools/audio-pipeline/benchmark.mjs"
       - "tools/check-rust-migration-status.mjs"
   push:
     branches:
@@ -30,8 +33,11 @@ on:
       - "package.json"
       - "package-lock.json"
       - "src/audioPipelineContract.js"
+      - "src/liveCallAudioPipeline.js"
       - "test/fixtures/audio-pipeline-json-sidecar.js"
+      - "test/audioPipelineBenchmark.test.js"
       - "test/rustAudioPipelineContract.test.js"
+      - "tools/audio-pipeline/benchmark.mjs"
       - "tools/check-rust-migration-status.mjs"
 
 permissions:
@@ -74,3 +80,14 @@ jobs:
 
       - name: Run Rust audio unit tests
         run: cargo test --manifest-path apps/windows/Cargo.toml audio_pipeline_sidecar
+
+      - name: Run representative PCM benchmark
+        run: npm run audio-pipeline:benchmark -- --rounds 100 --warmup 10 --output .tmp/audio-pipeline-benchmark-ci.json
+
+      - name: Upload PCM benchmark
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: audio-pipeline-benchmark-${{ github.run_id }}
+          path: .tmp/audio-pipeline-benchmark-ci.json
+          if-no-files-found: error

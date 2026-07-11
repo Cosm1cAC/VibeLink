@@ -13,6 +13,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 - The Rust Windows bridge now injects its current executable as the packaged MCP/event/workspace sidecar command while preserving deployment overrides, removing the development-target path dependency.
 - Event store now has a write-rejecting read-only sidecar mode and exact replay evidence from the existing approximately 1.01GB database; human-driven append evidence remains outstanding.
 - Audio is now `contract` through an isolated PCM16 Rust sidecar and cross-language tests; it remains disconnected from production because another session is validating live call.
+- Audio RMS benchmarking measured Node p95 at 0.003-0.008ms and Rust JSONL p95 at 0.189-0.356ms for 10/20/100ms frames with exact numeric parity and healthy counters, so RMS-only production routing is not justified.
 - Compression is now at `contract`; its bounded protocol is specified in `docs/compression-sidecar.md` and remains disconnected from production routing.
 - Compression production routing is explicitly deferred: repeated Node hot-path p95 was 0.253-0.353ms on representative history and 0.425-0.547ms at the synthetic upper bound, far below the 10ms material-bottleneck threshold.
 - Audio protocol v1, the independent Node fixture, the Rust sidecar, cross-language tests, and its Windows CI gate are published at `contract`; no Android or production live-call path was changed.

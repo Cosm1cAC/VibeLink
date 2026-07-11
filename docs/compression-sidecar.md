@@ -63,6 +63,7 @@ Malformed JSON and invalid method arguments return the same structured error env
 cargo test --manifest-path apps/windows/Cargo.toml compression_sidecar
 cargo build --release --manifest-path apps/windows/Cargo.toml
 node --test test/rustCompressionContract.test.js
+npm run compression:benchmark -- --require-real --output .tmp/compression-node-benchmark-final.json
 npm run rust:migration:check
 ```
 
@@ -90,7 +91,14 @@ Rust internals use snake_case and return `anyhow::Result`; all protocol errors a
 - Unit-test UTF-8 prefix/suffix boundaries and overlapping line samples in Rust.
 - Run identical behavioral cases against the JavaScript fixture and release Rust binary.
 - Assert health metadata, deterministic outputs, validation errors, stats, and clean close.
+- Benchmark the existing Node `buildCompactSummaryInput` and `estimateEventsTokenCount` hot path against representative read-only history and a 1000-event synthetic upper bound.
 - Keep the slice at `contract`; production fallback and routing tests are required before `opt-in`.
+
+## Production Routing Decision
+
+Two 2026-07-11 benchmark runs each used 200 measured rounds after 20 warmups. The largest task stream in the approximately 1.01GB local event store contained 126 events and 657,060 text characters; its combined Node hot path measured 0.253-0.353ms p95. The synthetic 1000-event, 2,000,000-character workload measured 0.425-0.547ms p95. Both are far below the documented 10ms material-bottleneck threshold.
+
+This evidence does not justify a production Rust process boundary. The slice remains `contract`, `VIBELINK_RUST_COMPRESSION` remains absent from production routing, and Node compact/token-budget behavior remains authoritative. Re-run the benchmark if runtime telemetry or workload shape changes materially.
 
 ## Boundaries
 
@@ -104,9 +112,10 @@ Rust internals use snake_case and return `anyhow::Result`; all protocol errors a
 - Multibyte truncation never emits invalid UTF-8 or exceeds `maxBytes`.
 - Log samples preserve order, deduplicate overlap, and report exact counts/bytes.
 - Invalid calls use a stable error envelope and appear in `stats.failures`.
+- The reproducible Node benchmark records whether current production compaction exceeds the material-bottleneck threshold without exposing event content or task identifiers.
 - The migration manifest advances from `planned` to `contract` without enabling a feature flag or production path.
 
 ## Open Questions
 
-- Whether production measurements justify an optional Node client and routing remains intentionally unresolved until contract evidence exists.
+- Production routing is deferred because current measurements show no material Node bottleneck; it should be reconsidered only with new contrary evidence.
 - Provider-specific tokenization remains outside this sidecar and requires a separate design.

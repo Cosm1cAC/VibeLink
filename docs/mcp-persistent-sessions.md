@@ -70,9 +70,17 @@ npm run mcp-session:canary -- --calls 12 --output .tmp/mcp-session-canary-final.
 
 The 2026-07-11 current-source release run passed all checks. For one probe plus 12 tool calls, the non-persistent Node baseline spawned 13 MCP server processes while Rust auto mode spawned one, a 92.3% reduction. Rust cached `tools/list` after one request, completed all 12 `tools/call` requests, averaged 8.3ms per request versus 74ms for the baseline, recorded zero runtime failures, fallbacks, and client backpressure rejects, drained with zero pending requests, closed one idle session, and left the sidecar inactive.
 
+Run a read-only real-session canary against an installed MCP server and an existing indexed project:
+
+```bash
+npm run mcp-session:real-canary -- --calls 3 --output .tmp/mcp-session-real-canary-final.json
+```
+
+The 2026-07-11 `codebase-memory-mcp` run discovered 8 graph tools and completed 3 `get_architecture` calls against the repository's indexed project. Calls averaged 32.6ms with a 45.5ms maximum. Auto mode started one Rust sidecar, recorded zero failures, fallbacks, backpressure rejections, and pending requests, then closed the single real MCP session and terminated the sidecar cleanly. The output records counts and timings but does not persist tool response content.
+
 `.github/workflows/mcp-session-rust-canary.yml` rebuilds the release sidecar on Windows, runs contract/runtime/canary tests, executes the same 12-call workload, and uploads `.tmp/mcp-session-canary-ci.json`.
 
 ## Next Slices
 
-- Run limited real MCP server sessions and monitor the Windows canary gate before considering default-on.
+- Run the real-session canary against at least one additional MCP server implementation and keep monitoring the Windows gate before considering default-on.
 - Decide whether to keep the sidecar process model or replace it with a native module after Windows packaging costs are known.

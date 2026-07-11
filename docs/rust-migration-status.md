@@ -28,7 +28,7 @@ This file is the human-readable status view for the Rust migration program. The 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
 | Workspace tree scanner | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Run the real-repository canary on more repositories and address or accept the cold-route penalty before considering default-on. |
-| Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run limited real MCP sessions and monitor the Windows canary gate before considering default-on. |
+| Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run the real-session canary against another MCP server implementation before considering default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
 | Compression and context budget helper | `contract` | Contract-only; no production routing | Reserved `VIBELINK_RUST_COMPRESSION` | Existing Node compact/token-budget behavior remains authoritative | Measure whether Node compaction is a material bottleneck before considering an optional client and opt-in routing. |
@@ -50,7 +50,7 @@ Can move to `default-on` only when:
 
 ### Persistent MCP stdio sessions
 
-Current state: Node manager, JSONL sidecar client, real Rust `mcp-session-sidecar`, auto readiness routing, contract/burst/timeout/crash/backpressure coverage, a representative production-router canary, and an independent Windows CI gate exist. The 2026-07-11 release canary reduced MCP server spawns from 13 to 1 across one probe plus 12 calls, cached `tools/list`, averaged 8.3ms versus 74ms baseline, and preserved zero failures, fallbacks, client backpressure, and pending requests with clean idle drain.
+Current state: Node manager, JSONL sidecar client, real Rust `mcp-session-sidecar`, auto readiness routing, contract/burst/timeout/crash/backpressure coverage, synthetic and real-session canary harnesses, and an independent Windows CI gate exist. The synthetic canary reduced MCP server spawns from 13 to 1. A 2026-07-11 `codebase-memory-mcp` session discovered 8 tools and completed 3 real `get_architecture` calls at 32.6ms average and 45.5ms max with one sidecar start, zero failures/fallbacks/backpressure/pending, and clean single-session drain.
 
 Can move to `default-on` only when:
 
@@ -117,6 +117,7 @@ node --test test/workspaceTreeRealCanary.test.js
 node --test test/mcpRuntime.test.js
 node --test test/mcpSessionSidecarContract.test.js
 node --test test/mcpSessionCanary.test.js
+node --test test/mcpSessionRealCanary.test.js
 node --test test/rustCompressionContract.test.js
 cargo test --manifest-path apps/windows/Cargo.toml
 cargo build --manifest-path apps/windows/Cargo.toml
@@ -126,6 +127,7 @@ npm run event-store:server-canary
 npm run workspace-tree:canary
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs
 npm run mcp-session:canary
+npm run mcp-session:real-canary -- --calls 3
 # or run the canary harnesses serially with CI output paths
 npm run event-store:canary:all
 ```

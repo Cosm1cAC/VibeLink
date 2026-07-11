@@ -68,7 +68,7 @@ jobs:
         run: npm run rust:migration:check
 
       - name: Run workspace-tree parity and canary tests
-        run: node --test test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js
+        run: node --test --test-concurrency=1 test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js
 
       - name: Run representative auto-mode canary
         run: npm run workspace-tree:canary -- --warm-scans 10 --output .tmp/workspace-tree-canary-ci.json

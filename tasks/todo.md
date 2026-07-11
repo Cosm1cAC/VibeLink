@@ -22,12 +22,13 @@
   - Acceptance: Evidence and next action are accurate; feature flag remains non-required.
   - Verify: `npm run rust:migration:check`
   - Files: `docs/rust-migration-status.json`, `docs/rust-migration-status.md`, `README.md`
-- [ ] Review, commit, and publish through GitHub CLI.
+- [x] Review, commit, and publish through GitHub CLI.
   - Acceptance: Tracked worktree is clean and remote tree equals the verified local tree.
   - Verify: `gh api repos/:owner/:repo/git/ref/heads/main` and GitHub Actions.
 
 ## Remaining Migration
 
+- [x] Run the VibeLink checkout through the production workspace router, fix Windows metadata parity, and add a repeatable real-repository canary.
 - [ ] Audit all canary claims against current remote CI and runtime evidence.
 - [ ] Advance any remaining server-side work that does not touch Android/live-call.
 - [ ] Reconcile live-call changes before beginning the audio contract.

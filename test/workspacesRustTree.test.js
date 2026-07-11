@@ -137,6 +137,55 @@ test("getWorkspaceContext preserves Node and Rust scanner parity for supported i
   }
 });
 
+test("getWorkspaceTree preserves Windows Node metadata parity", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows filesystem metadata semantics only");
+    return;
+  }
+  const cargo = cargoPath();
+  if (!cargo) {
+    t.skip("cargo is not available");
+    return;
+  }
+
+  const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-metadata-${process.pid}`);
+  fs.rmSync(fixture, { recursive: true, force: true });
+  fs.mkdirSync(path.join(fixture, "nested"), { recursive: true });
+  fs.writeFileSync(path.join(fixture, "sample.txt"), "metadata parity", "utf8");
+  const timestampSeconds = Date.UTC(2026, 0, 2, 3, 4, 5) / 1000 + 0.1236;
+  fs.utimesSync(path.join(fixture, "sample.txt"), timestampSeconds, timestampSeconds);
+  fs.utimesSync(path.join(fixture, "nested"), timestampSeconds, timestampSeconds);
+
+  const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "rust-tree-metadata" });
+  const settings = { allowedRoots: [fixture] };
+  const previousFlag = process.env.VIBELINK_RUST_WORKSPACE_TREE;
+  const previousBin = process.env.VIBELINK_RUST_BIN;
+  const previousArgs = process.env.VIBELINK_RUST_BIN_ARGS_JSON;
+
+  try {
+    delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
+    const nodeResult = await getWorkspaceTree(workspace.id, settings);
+
+    process.env.VIBELINK_RUST_WORKSPACE_TREE = "1";
+    process.env.VIBELINK_RUST_BIN = cargo;
+    process.env.VIBELINK_RUST_BIN_ARGS_JSON = JSON.stringify([
+      "run",
+      "--quiet",
+      "--manifest-path",
+      path.join(process.cwd(), "apps", "windows", "Cargo.toml"),
+      "--"
+    ]);
+    const rustResult = await getWorkspaceTree(workspace.id, settings);
+
+    assert.deepEqual(rustResult.items, nodeResult.items);
+  } finally {
+    restoreEnv("VIBELINK_RUST_WORKSPACE_TREE", previousFlag);
+    restoreEnv("VIBELINK_RUST_BIN", previousBin);
+    restoreEnv("VIBELINK_RUST_BIN_ARGS_JSON", previousArgs);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("getWorkspaceContext Rust scanner inherits gitignore rules from intermediate directories", async (t) => {
   const cargo = cargoPath();
   if (!cargo) t.skip("cargo is not available");

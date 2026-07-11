@@ -27,7 +27,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 | Slice | Status | Rollout | Feature flag(s) | Fallback | Next action |
 | --- | --- | --- | --- | --- | --- |
-| Workspace tree scanner | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Run limited real-repository sessions and monitor the Windows canary gate before considering default-on. |
+| Workspace tree scanner | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_RUST_WORKSPACE_TREE`, `VIBELINK_RUST_BIN`, `VIBELINK_RUST_BIN_ARGS_JSON` | Node `listDirectory()` in `src/workspaces.js` | Run the real-repository canary on more repositories and address or accept the cold-route penalty before considering default-on. |
 | Persistent MCP stdio sessions | `canary` | Auto-mode canary with manual rollback flag | `VIBELINK_MCP_RUST_SIDECAR`, `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS`, `VIBELINK_MCP_PERSISTENT_SESSIONS` | Existing Node stdio probe/call path in `src/mcpRuntime.js` | Run limited real MCP sessions and monitor the Windows canary gate before considering default-on. |
 | Event store append/replay sidecar | `canary` | Auto readiness canary with manual rollback flag | `VIBELINK_EVENT_STORE_RUST_SIDECAR`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS`, Worker/batch flags | Rust sidecar falls back to Node Worker when enabled, otherwise sync SQLite | Run limited human-driven real-session canaries with runtime stats capture before broader default exposure. |
 | Live audio low-latency pipeline | `planned` | Not implemented | Planned `VIBELINK_AUDIO_RUST_PIPELINE` | Existing live-call audio/ASR path | Define deterministic PCM preprocessing contract for level/peak/RMS/ring-buffer/backpressure; ASR stays out of first slice. |
@@ -37,7 +37,7 @@ This file is the human-readable status view for the Rust migration program. The 
 
 ### Workspace tree scanner
 
-Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, truncation, signature/cache behavior, nested ignore-file invalidation, content-safe file-sample caching, fallback stats, a representative canary harness, and an independent Windows CI gate exist. The final 2026-07-11 post-cache-fix release canary passed with 60.4ms first launch, 56.6ms cold scan, 5.9ms warm p95, 10 cache hits without another Rust start, one expected refresh after a nested rule change, and zero fallback/failure deltas.
+Current state: Rust CLI, Node opt-in/auto routing, root-directory routing, supported-subset parity, inherited and nested `.gitignore` handling, Windows directory-size and millisecond timestamp parity, truncation, signature/cache behavior, nested ignore-file invalidation, content-safe file-sample caching, fallback stats, isolated and real-repository canary harnesses, and an independent Windows CI gate exist. Two 2026-07-11 VibeLink checkout runs preserved exact tree/context parity, 3 cold Rust routes, 3 warm cache hits, and zero failures/fallbacks. Node ranged from 53.1-183.6ms, Rust cold from 642.5-820.4ms, and Rust warm from 11.5-16ms, so the slice remains `canary` rather than `default-on`.
 
 Can move to `default-on` only when:
 
@@ -113,6 +113,7 @@ node --test test/eventStoreMetrics.test.js
 node --test test/eventStoreBatcher.test.js
 node --test test/workspacesRustTree.test.js
 node --test test/workspaceTreeCanary.test.js
+node --test test/workspaceTreeRealCanary.test.js
 node --test test/mcpRuntime.test.js
 node --test test/mcpSessionSidecarContract.test.js
 node --test test/mcpSessionCanary.test.js
@@ -123,6 +124,7 @@ npm run event-store:canary
 npm run event-store:runtime-canary
 npm run event-store:server-canary
 npm run workspace-tree:canary
+npm run workspace-tree:real-canary -- --workspace . --paths src,docs
 npm run mcp-session:canary
 # or run the canary harnesses serially with CI output paths
 npm run event-store:canary:all

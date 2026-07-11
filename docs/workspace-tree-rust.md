@@ -43,7 +43,15 @@ npm run workspace-tree:canary -- --warm-scans 10 --output .tmp/workspace-tree-ca
 
 The representative 2026-07-11 run rebuilt the release binary from the current source and passed all checks. The final post-cache-fix run measured a 60.4ms first launch, 56.6ms steady-state cold scan, and 5.9ms warm p95 across 10 repeated scans. The root scan routed through Rust with `--dir .`, all warm scans hit the cache without another Rust start, and the nested `.gitignore` mutation caused exactly one refresh. Available-command fallback/failure counts and missing-command auto-mode failure/fallback deltas were all zero.
 
-`.github/workflows/workspace-tree-rust-canary.yml` rebuilds the release binary on Windows, runs parity/cache tests, executes the same representative canary, and uploads `.tmp/workspace-tree-canary-ci.json`.
+Run the production router against an actual checkout with exact Node/Rust metadata and directory-context parity:
+
+```bash
+npm run workspace-tree:real-canary -- --workspace . --paths src,docs --output .tmp/workspace-tree-real-canary.json --delete-temp
+```
+
+Two 2026-07-11 VibeLink checkout runs passed with 17 root items, exact `src`/`docs` context parity, 3 Rust routes, 3 warm cache hits, and zero failures/fallbacks. The Node baseline ranged from 53.1ms to 183.6ms, the three process-per-miss Rust cold routes ranged from 642.5ms to 820.4ms total, and the three warm routes ranged from 11.5ms to 16ms. This validates correctness and cache reuse but blocks `default-on` until more real repositories are sampled and the cold-route penalty is addressed or accepted.
+
+`.github/workflows/workspace-tree-rust-canary.yml` rebuilds the release binary on Windows, runs parity/cache tests, executes both the isolated fixture and checkout real-repository canaries, and uploads both JSON results.
 
 Before promoting this slice from `canary` to `default-on`, representative auto-mode runs must continue to show:
 

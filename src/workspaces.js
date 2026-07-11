@@ -670,6 +670,12 @@ function recordRustWorkspaceTreeFallback(message) {
   rustWorkspaceTreeStats.lastError = message;
 }
 
+function recordRustWorkspaceTreeBudgetFallback(message) {
+  rustWorkspaceTreeStats.misses += 1;
+  rustWorkspaceTreeStats.fallbacks += 1;
+  rustWorkspaceTreeStats.lastError = message;
+}
+
 function rustWorkspaceTreeCacheKey(dir, root, depth, maxEntries, command, baseArgs) {
   return JSON.stringify({
     command,
@@ -680,6 +686,51 @@ function rustWorkspaceTreeCacheKey(dir, root, depth, maxEntries, command, baseAr
 
 function cloneWorkspaceTreeItems(items = []) {
   return items.map((item) => ({ ...item }));
+}
+
+function orderWorkspaceTreeItemsLikeNode(items, dir, root) {
+  const startPath = path.relative(root, dir).replaceAll("\\", "/");
+  const byParent = new Map();
+  const itemPaths = new Set();
+  for (const rawItem of items) {
+    const normalizedPath = typeof rawItem?.path === "string" ? rawItem.path.replace(/^(\.\/)+/, "") : "";
+    const item = rawItem && { ...rawItem, path: normalizedPath };
+    if (
+      !item
+      || !item.path
+      || item.path.startsWith("/")
+      || item.path.split("/").includes("..")
+      || typeof item.name !== "string"
+      || !["directory", "file"].includes(item.type)
+      || item.path.split("/").at(-1) !== item.name
+      || itemPaths.has(item.path)
+    ) return null;
+    itemPaths.add(item.path);
+    const separator = item.path.lastIndexOf("/");
+    const parentPath = separator >= 0 ? item.path.slice(0, separator) : "";
+    const siblings = byParent.get(parentPath) || [];
+    siblings.push({ ...item });
+    byParent.set(parentPath, siblings);
+  }
+
+  const ordered = [];
+  const queue = [startPath];
+  const visitedParents = new Set();
+  while (queue.length) {
+    const parentPath = queue.shift();
+    if (visitedParents.has(parentPath)) return null;
+    visitedParents.add(parentPath);
+    const children = byParent.get(parentPath) || [];
+    children.sort((left, right) => (
+      Number(right.type === "directory") - Number(left.type === "directory")
+      || left.name.localeCompare(right.name)
+    ));
+    for (const item of children) {
+      ordered.push(item);
+      if (item.type === "directory") queue.push(item.path);
+    }
+  }
+  return ordered.length === items.length ? ordered : null;
 }
 
 function cacheRustWorkspaceTree(cacheKey, signature, items) {
@@ -732,12 +783,21 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
     });
     const parsed = JSON.parse(stdout);
     if (Array.isArray(parsed.items)) {
+      if (parsed.truncated) {
+        rustWorkspaceTreeStats.budgetHits += 1;
+        recordRustWorkspaceTreeBudgetFallback("Rust workspace-tree reached its entry budget; using Node ordering and selection.");
+        return null;
+      }
+      const orderedItems = orderWorkspaceTreeItemsLikeNode(parsed.items, dir, root);
+      if (!orderedItems) {
+        recordRustWorkspaceTreeFallback("Rust workspace-tree returned items outside the requested traversal.");
+        return null;
+      }
       rustWorkspaceTreeStats.hits += 1;
-      if (parsed.truncated) rustWorkspaceTreeStats.budgetHits += 1;
       if (typeof parsed.signature === "string") rustWorkspaceTreeStats.lastSignature = parsed.signature;
       rustWorkspaceTreeStats.lastError = "";
-      cacheRustWorkspaceTree(cacheKey, parsed.signature, parsed.items);
-      return cloneWorkspaceTreeItems(parsed.items);
+      cacheRustWorkspaceTree(cacheKey, parsed.signature, orderedItems);
+      return cloneWorkspaceTreeItems(orderedItems);
     }
     recordRustWorkspaceTreeFallback("Rust workspace-tree returned invalid payload.");
     return null;

@@ -2,6 +2,8 @@ name: Workspace Tree Rust Canary
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
   pull_request:
     paths:
       - ".github/workflows/workspace-tree-rust-canary.yml"
@@ -94,3 +96,4 @@ jobs:
             .tmp/workspace-tree-canary-ci.json
             .tmp/workspace-tree-real-canary-ci.json
           if-no-files-found: ignore
+          retention-days: 30

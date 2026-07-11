@@ -69,6 +69,8 @@ Before promoting this slice from `canary` to `default-on`, representative auto-m
 - a repeated unchanged scan produces a Rust cache hit and no additional CLI start;
 - nested `.gitignore` changes invalidate the cache and produce the updated result;
 - cold and warm latency evidence is captured, with no regression large enough to make the scanner unsuitable for interactive workspace context requests.
+
+The Windows canary workflow repeats the contract, auto-mode, and checkout real-repository canaries every Monday at 04:17 UTC. Both JSON artifacts are retained for 30 days so remote latency, fallback, cache, and drain evidence can be compared across runs. Scheduled evidence does not replace the limited interactive sessions required for `default-on`.
 - persistent sessions start once, remain ready under normal load, drain pending requests, close cleanly, and fall back first to the one-shot Rust command without changing API results.
 
 Rollback is immediate at two levels: set `VIBELINK_RUST_WORKSPACE_TREE_SESSION=0` to retain the one-shot Rust scanner, or set `VIBELINK_RUST_WORKSPACE_TREE=0` (or unset it) to use Node only.

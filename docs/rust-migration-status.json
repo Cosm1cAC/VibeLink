@@ -35,8 +35,8 @@
       "id": "mcp-session-sidecar",
       "title": "Persistent MCP stdio sessions",
       "priority": "P1",
-      "status": "opt-in",
-      "rollout": "manual flag plus auto safe-detection",
+      "status": "canary",
+      "rollout": "auto-mode canary with manual rollback flag",
       "featureFlags": [
         { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
         { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
@@ -57,9 +57,9 @@
         "docs/mcp-persistent-sessions.md",
         "docs/rust-migration-status.md"
       ],
-      "currentState": "Node manager, JSONL sidecar client, real Rust mcp-session-sidecar command, opt-in runtime routing, auto safe-detection, stats readiness checks, contract tests, burst tests, timeout tests, crash-replacement tests, in-flight stats, and sidecar-level active-request backpressure exist.",
-      "nextAction": "Run representative runtime canaries and capture spawn-reduction, fallback-rate, backpressure, and clean-drain evidence before canary/default-on.",
-      "promotionGate": "Can move to canary only after representative auto-mode runtime sessions preserve 0 readiness fallback after command availability, 0 sidecar backpressure under normal load, reduced stdio server spawns versus the non-persistent path, clean pending drain, and tests cover spawn failure, readiness failure, tool-call failure, timeout, invalid JSON, and fallback without task-visible failure."
+      "currentState": "Node manager, JSONL client, real Rust mcp-session-sidecar, auto readiness routing, contract/burst/timeout/crash/backpressure tests, a representative production-router canary, and an independent Windows CI gate exist. The 2026-07-11 release canary reduced MCP server spawns from 13 to 1 across one probe plus 12 calls, cached tools/list, averaged 8.3ms versus 74ms baseline, and preserved zero failures, fallbacks, client backpressure, and pending requests with clean idle drain.",
+      "nextAction": "Run limited real MCP server sessions and monitor the Windows canary gate before considering default-on.",
+      "promotionGate": "Can move to default-on only after CI and limited real MCP sessions preserve zero readiness fallback after command availability, zero client and sidecar backpressure under normal load, material spawn reduction, cached tools/list behavior, clean pending drain, and tested fallback without task-visible failure. Rollback with VIBELINK_MCP_RUST_SIDECAR=0 must remain documented and tested."
     },
     {
       "id": "event-store-sidecar",

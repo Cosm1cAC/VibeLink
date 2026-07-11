@@ -62,7 +62,17 @@ Before moving this slice beyond `opt-in`, run representative probe and tool-call
 - MCP server process spawns are reduced versus the non-persistent Node path for repeated probe/call traffic; cached `tools/list` should avoid repeated tool-list calls for the same server.
 - Runtime closes idle sessions cleanly and leaves no pending sidecar requests after drain.
 
+Run the representative production-router canary with:
+
+```bash
+npm run mcp-session:canary -- --calls 12 --output .tmp/mcp-session-canary-final.json
+```
+
+The 2026-07-11 current-source release run passed all checks. For one probe plus 12 tool calls, the non-persistent Node baseline spawned 13 MCP server processes while Rust auto mode spawned one, a 92.3% reduction. Rust cached `tools/list` after one request, completed all 12 `tools/call` requests, averaged 8.3ms per request versus 74ms for the baseline, recorded zero runtime failures, fallbacks, and client backpressure rejects, drained with zero pending requests, closed one idle session, and left the sidecar inactive.
+
+`.github/workflows/mcp-session-rust-canary.yml` rebuilds the release sidecar on Windows, runs contract/runtime/canary tests, executes the same 12-call workload, and uploads `.tmp/mcp-session-canary-ci.json`.
+
 ## Next Slices
 
-- Run representative runtime canaries and capture spawn-reduction/fallback-rate evidence before canary/default-on.
+- Run limited real MCP server sessions and monitor the Windows canary gate before considering default-on.
 - Decide whether to keep the sidecar process model or replace it with a native module after Windows packaging costs are known.

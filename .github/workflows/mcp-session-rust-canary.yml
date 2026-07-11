@@ -1,0 +1,90 @@
+name: MCP Session Rust Canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/mcp-session-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/mcp-persistent-sessions.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/mcpRuntime.js"
+      - "src/mcpSessionContract.js"
+      - "src/mcpSessionSidecarClient.js"
+      - "src/mcpSessionManager.js"
+      - "test/fixtures/**"
+      - "test/mcpRuntime.test.js"
+      - "test/mcpSessionSidecarContract.test.js"
+      - "test/mcpSessionCanary.test.js"
+      - "tools/mcp-session/**"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/mcp-session-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/mcp-persistent-sessions.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/mcpRuntime.js"
+      - "src/mcpSessionContract.js"
+      - "src/mcpSessionSidecarClient.js"
+      - "src/mcpSessionManager.js"
+      - "test/fixtures/**"
+      - "test/mcpRuntime.test.js"
+      - "test/mcpSessionSidecarContract.test.js"
+      - "test/mcpSessionCanary.test.js"
+      - "tools/mcp-session/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-session-rust-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mcp-session-rust-canary:
+    name: Contract, runtime, and canary
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Rust MCP sidecar
+        run: cargo build --release --manifest-path apps/windows/Cargo.toml
+
+      - name: Check Rust migration manifest
+        run: npm run rust:migration:check
+
+      - name: Run MCP contract, runtime, and canary tests
+        run: node --test test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js
+
+      - name: Run representative runtime canary
+        run: npm run mcp-session:canary -- --calls 12 --output .tmp/mcp-session-canary-ci.json
+
+      - name: Upload canary output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-session-canary-result
+          path: .tmp/mcp-session-canary-ci.json
+          if-no-files-found: ignore

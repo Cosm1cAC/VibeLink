@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -72,6 +72,8 @@ enum Mode {
     EventStoreSidecar {
         #[arg(value_name = "DB_PATH")]
         db_path: PathBuf,
+        #[arg(long)]
+        read_only: bool,
     },
     /// Run the deterministic compression helper JSONL sidecar.
     CompressionSidecar,
@@ -195,6 +197,7 @@ struct McpSidecarRuntimeStats {
 
 struct EventStoreSidecar {
     db: Connection,
+    read_only: bool,
     started_at: String,
     requests: u64,
     responses: u64,
@@ -346,10 +349,10 @@ fn run_mcp_session_sidecar() -> Result<()> {
     Ok(())
 }
 
-fn run_event_store_sidecar(db_path: &Path) -> Result<()> {
+fn run_event_store_sidecar(db_path: &Path, read_only: bool) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut sidecar = EventStoreSidecar::open(db_path)?;
+    let mut sidecar = EventStoreSidecar::open(db_path, read_only)?;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -450,17 +453,41 @@ fn now_iso() -> String {
     datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+fn is_event_store_write_method(method: &str) -> bool {
+    matches!(
+        method,
+        "insertTaskEvent"
+            | "insertTaskEvents"
+            | "insertToolEvent"
+            | "insertToolEvents"
+            | "pruneToolEvents"
+            | "insertLiveCallEvent"
+            | "insertLiveCallEvents"
+            | "pruneLiveCallEvents"
+    )
+}
+
 impl EventStoreSidecar {
-    fn open(db_path: &Path) -> Result<Self> {
-        let db = Connection::open(db_path).with_context(|| {
-            format!("Failed to open event store database: {}", db_path.display())
-        })?;
+    fn open(db_path: &Path, read_only: bool) -> Result<Self> {
+        let db = if read_only {
+            Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            Connection::open(db_path)
+        }
+        .with_context(|| format!("Failed to open event store database: {}", db_path.display()))?;
         db.busy_timeout(Duration::from_millis(5000))?;
-        db.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
-        )?;
+        if read_only {
+            db.execute_batch(
+                "PRAGMA query_only = ON; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+            )?;
+        } else {
+            db.execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+            )?;
+        }
         Ok(Self {
             db,
+            read_only,
             started_at: now_iso(),
             requests: 0,
             responses: 0,
@@ -489,6 +516,9 @@ impl EventStoreSidecar {
     }
 
     fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+        if self.read_only && is_event_store_write_method(method) {
+            bail!("Event store sidecar is read-only; method {method} is not allowed.");
+        }
         match method {
             "__health" => Ok(json!({
                 "ok": true,
@@ -513,6 +543,7 @@ impl EventStoreSidecar {
                 ],
                 "controlMethods": ["__health", "stats", "__close"],
                 "schemaReady": self.schema_ready()?,
+                "readOnly": self.read_only,
                 "startedAt": self.started_at
             })),
             "stats" => Ok(json!({
@@ -520,6 +551,7 @@ impl EventStoreSidecar {
                 "protocolVersion": 1,
                 "startedAt": self.started_at,
                 "pending": 0,
+                "readOnly": self.read_only,
                 "requests": self.requests,
                 "responses": self.responses,
                 "failures": self.failures,
@@ -2044,7 +2076,9 @@ fn run() -> Result<()> {
             max_entries,
         } => run_workspace_tree(&root, &dir, depth, max_entries),
         Mode::McpSessionSidecar => run_mcp_session_sidecar(),
-        Mode::EventStoreSidecar { db_path } => run_event_store_sidecar(&db_path),
+        Mode::EventStoreSidecar { db_path, read_only } => {
+            run_event_store_sidecar(&db_path, read_only)
+        }
         Mode::CompressionSidecar => compression_sidecar::run(),
     }
 }

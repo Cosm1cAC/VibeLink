@@ -126,6 +126,16 @@ npm run event-store:server-canary -- --output .tmp/event-store-server-canary-fin
 
 That run verified service startup, auth, workspace command output, live-call event ingestion, runtime mode `rust-sidecar`, 2 Rust `insertToolEvents` calls at 2.6ms average, 13 Rust `insertLiveCallEvents` calls at 4.5ms average, 0 fallback, 0 failures, 0 sync stalls, 0 pending requests, and 0 backpressure rejects.
 
+Run a strictly read-only parity canary against an existing event-store database:
+
+```bash
+npm run event-store:real-data-canary -- --limit 50 --output .tmp/event-store-real-data-canary-final.json
+```
+
+This command opens the Node baseline with `DatabaseSync(..., { readOnly: true })` and starts Rust with `event-store-sidecar <db> --read-only`. The Rust connection uses SQLite read-only/query-only mode, health and stats expose `readOnly: true`, and all insert/prune methods are rejected before dispatch. The output records stream counts and cursor ranges, not event content.
+
+The 2026-07-11 run read the approximately 1.01GB VibeLink database and found current task, tool, and live-call stream owners. All 9 comparisons across list, unified replay, and bounded replay-window results preserved exact Node/Rust parity, with zero Rust failures and pending requests. This is real-history replay evidence; it does not replace a human-driven append/runtime session.
+
 `npm run event-store:canary:all` runs the local, runtime, and server canaries serially and writes CI-friendly JSON outputs under `.tmp/`. The aggregate uses a CI-sized local workload of 24 rounds x 100 events per append path to reduce host-noise sensitivity while still measuring 7,200 direct append events before the runtime and server canaries. Raw average, max, p95, and stall counts remain in the JSON evidence; latency promotion checks compare the 10% trimmed mean, dropping the highest and lowest two samples from each 24-round method series so isolated hosted-runner pauses do not dominate the gate. The comparison keeps the 10% ratio threshold and adds a 10ms absolute latency margin for low-millisecond CI jitter; standalone promotion runs can omit `--latency-margin-ms` to use the strict default. The canaries and the multi-file `test:event-store` bundle are intentionally serialized because concurrent fresh-process schema initialization or SQLite workloads can create lock races and distort latency thresholds. Burst and backpressure concurrency remain covered inside their focused tests.
 
 ## CI Canary Gate

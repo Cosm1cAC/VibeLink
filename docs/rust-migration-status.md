@@ -62,7 +62,7 @@ Can move to `default-on` only when:
 
 ### Event store append/replay sidecar
 
-Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, a real Rust `event-store-sidecar` command, real Rust contract coverage, explicit opt-in runtime routing, `auto` readiness mode, a health gate, runtime stats, Worker/sync fallback tests, rollback docs, robust 10% trimmed-mean canary thresholds with raw average/max/p95 evidence, local/runtime/server canary harnesses, CI status wiring, and passing representative release canaries exist. Rust batch append avoids repeated owner lookups and uses `last_insert_rowid()` on the normal insert hot path.
+Current state: Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, a real Rust `event-store-sidecar` command, read-only/query-only mode, contract and write-rejection coverage, explicit opt-in runtime routing, `auto` readiness, Worker/sync fallback tests, rollback docs, robust canary thresholds, local/runtime/server/real-data harnesses, and CI status wiring exist. A 2026-07-11 canary read the approximately 1.01GB existing database and preserved exact task/tool/live list, unified, and replay-window parity across 9 comparisons with zero failures/pending. Rust batch append avoids repeated owner lookups and uses `last_insert_rowid()` on the normal insert hot path.
 
 Can move to `default-on` only when:
 
@@ -111,6 +111,7 @@ node --test test/eventStoreRustRuntime.test.js
 node --test test/eventStoreWorker.test.js
 node --test test/eventStoreMetrics.test.js
 node --test test/eventStoreBatcher.test.js
+node --test test/eventStoreRealDataCanary.test.js
 node --test test/workspacesRustTree.test.js
 node --test test/workspaceTreeCanary.test.js
 node --test test/workspaceTreeRealCanary.test.js
@@ -124,6 +125,7 @@ cargo build --manifest-path apps/windows/Cargo.toml
 npm run event-store:canary
 npm run event-store:runtime-canary
 npm run event-store:server-canary
+npm run event-store:real-data-canary -- --limit 50
 npm run workspace-tree:canary
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs
 npm run mcp-session:canary

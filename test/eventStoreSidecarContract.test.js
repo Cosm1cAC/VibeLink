@@ -37,11 +37,11 @@ function rustSidecarTimeoutMs(fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function rustSidecarRunner(dbPath) {
+function rustSidecarRunner(dbPath, extraArgs = []) {
   if (process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND) {
     return {
       command: process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND,
-      args: [...parseRustSidecarArgs(), dbPath],
+      args: [...parseRustSidecarArgs(), dbPath, ...extraArgs],
       timeoutMs: rustSidecarTimeoutMs(30000)
     };
   }
@@ -52,7 +52,7 @@ function rustSidecarRunner(dbPath) {
     if (fs.existsSync(command)) {
       return {
         command,
-        args: ["event-store-sidecar", dbPath],
+        args: ["event-store-sidecar", dbPath, ...extraArgs],
         timeoutMs: 30000
       };
     }
@@ -69,21 +69,23 @@ function rustSidecarRunner(dbPath) {
       path.join(process.cwd(), "apps", "windows", "Cargo.toml"),
       "--",
       "event-store-sidecar",
-      dbPath
+      dbPath,
+      ...extraArgs
     ],
     timeoutMs: 120000
   };
 }
 
 function rustSidecarClient(t, dbPath, options = {}) {
-  const runner = rustSidecarRunner(dbPath);
+  const { sidecarArgs = [], ...clientOptions } = options;
+  const runner = rustSidecarRunner(dbPath, sidecarArgs);
   if (!runner) {
     t.skip("Rust event-store sidecar is not available");
     return null;
   }
   return createEventStoreSidecarClient({
     ...runner,
-    ...options
+    ...clientOptions
   });
 }
 
@@ -318,6 +320,58 @@ test("event store JSON sidecar contract works against the Rust sidecar", async (
     assert.equal(remoteStats.requests >= 7, true);
     assert.equal(remoteStats.responses >= 6, true);
     assert.equal(remoteStats.failures, 1);
+  } finally {
+    await client.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rust event store sidecar read-only mode serves replay and rejects writes", async (t) => {
+  const { dir, dbPath } = createSidecarDb();
+  const writer = rustSidecarClient(t, dbPath);
+  if (!writer) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  }
+
+  try {
+    await writer.insertTaskEvent("task-sidecar", {
+      id: "task-event-read-only",
+      at: "2026-01-01T00:00:00.000Z",
+      type: "assistant",
+      text: "read-only replay"
+    });
+  } finally {
+    await writer.close();
+  }
+
+  const client = rustSidecarClient(t, dbPath, { sidecarArgs: ["--read-only"] });
+  try {
+    const health = await client.health();
+    assert.equal(health.ok, true);
+    assert.equal(health.readOnly, true);
+    assert.equal((await client.listTaskEvents("task-sidecar", { after: 0, limit: 10 })).length, 1);
+
+    const before = new DatabaseSync(dbPath, { readOnly: true });
+    const beforeCount = before.prepare("SELECT COUNT(*) AS count FROM task_events").get().count;
+    before.close();
+    await assert.rejects(
+      client.insertTaskEvent("task-sidecar", {
+        id: "task-event-rejected",
+        at: "2026-01-01T00:00:01.000Z",
+        type: "assistant",
+        text: "must not be written"
+      }),
+      /read-only/i
+    );
+    const after = new DatabaseSync(dbPath, { readOnly: true });
+    const afterCount = after.prepare("SELECT COUNT(*) AS count FROM task_events").get().count;
+    after.close();
+    assert.equal(afterCount, beforeCount);
+
+    const stats = await client.getSidecarStats();
+    assert.equal(stats.readOnly, true);
+    assert.equal(stats.failures, 1);
   } finally {
     await client.close();
     fs.rmSync(dir, { recursive: true, force: true });

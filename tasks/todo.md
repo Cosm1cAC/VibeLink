@@ -34,8 +34,9 @@
 - [x] Measure the current Node compression hot path and retain contract-only status because no material bottleneck was observed.
 - [x] Run workspace-tree against two additional repositories and fix locale-sensitive result ordering.
 - [x] Replace workspace-tree process-per-miss canary routing with an optional persistent Rust sidecar and retain two-level fallback.
+- [x] Define and implement the isolated Rust PCM preprocessing contract without changing production live-call routing.
 - [ ] Audit all canary claims against current remote CI and runtime evidence.
 - [ ] Advance any remaining server-side work that does not touch Android/live-call.
-- [ ] Reconcile live-call changes before beginning the audio contract.
+- [ ] Reconcile live-call changes before beginning audio production opt-in routing.
 - [ ] Implement and stage the audio pipeline after concurrent testing completes.
 - [ ] Prove every manifest promotion gate before declaring the full Rust migration goal complete.

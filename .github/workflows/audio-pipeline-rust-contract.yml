@@ -1,0 +1,76 @@
+name: Audio Pipeline Rust Contract
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/audio-pipeline-rust-contract.yml"
+      - "apps/windows/src/audio_pipeline_sidecar.rs"
+      - "apps/windows/src/main.rs"
+      - "apps/windows/Cargo.*"
+      - "docs/audio-pipeline-sidecar.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/audioPipelineContract.js"
+      - "test/fixtures/audio-pipeline-json-sidecar.js"
+      - "test/rustAudioPipelineContract.test.js"
+      - "tools/check-rust-migration-status.mjs"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/audio-pipeline-rust-contract.yml"
+      - "apps/windows/src/audio_pipeline_sidecar.rs"
+      - "apps/windows/src/main.rs"
+      - "apps/windows/Cargo.*"
+      - "docs/audio-pipeline-sidecar.md"
+      - "docs/rust-migration-status.*"
+      - "package.json"
+      - "package-lock.json"
+      - "src/audioPipelineContract.js"
+      - "test/fixtures/audio-pipeline-json-sidecar.js"
+      - "test/rustAudioPipelineContract.test.js"
+      - "tools/check-rust-migration-status.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audio-pipeline-rust-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audio-pipeline-rust-contract:
+    name: Fixture and Rust PCM parity
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build release sidecar
+        run: cargo build --release --manifest-path apps/windows/Cargo.toml
+
+      - name: Check migration manifest
+        run: npm run rust:migration:check
+
+      - name: Run cross-language audio contract
+        run: npm run audio-pipeline:contract
+
+      - name: Run Rust audio unit tests
+        run: cargo test --manifest-path apps/windows/Cargo.toml audio_pipeline_sidecar

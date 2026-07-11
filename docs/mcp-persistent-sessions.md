@@ -78,9 +78,22 @@ npm run mcp-session:real-canary -- --calls 3 --output .tmp/mcp-session-real-cana
 
 The 2026-07-11 `codebase-memory-mcp` run discovered 8 graph tools and completed 3 `get_architecture` calls against the repository's indexed project. Calls averaged 32.6ms with a 45.5ms maximum. Auto mode started one Rust sidecar, recorded zero failures, fallbacks, backpressure rejections, and pending requests, then closed the single real MCP session and terminated the sidecar cleanly. The output records counts and timings but does not persist tool response content.
 
+The same harness accepts an explicit stdio MCP implementation. Use repeatable `--server-arg` options on Windows; `--server-args-json` remains available for programmatic callers. Explicit servers default to an empty tool-arguments object, while `--arguments-json` can provide a non-empty object. Artifacts record only argument keys, never argument values or tool response content.
+
+```powershell
+node tools/mcp-session/real-canary.mjs `
+  --server headroom `
+  --server-command "$HOME\.local\bin\headroom.exe" `
+  --server-arg mcp --server-arg serve `
+  --tool headroom_stats --calls 3 `
+  --output .tmp/mcp-session-headroom-real-canary.json
+```
+
+The 2026-07-11 Headroom run discovered `headroom_compress`, `headroom_retrieve`, and `headroom_stats`, then completed 3/3 read-only stats calls. Calls averaged 1462.3ms with a 1567ms maximum. The Rust route started one sidecar, recorded zero failures, fallbacks, backpressure rejections, and pending requests, closed one session, and left no active sidecar. This satisfies the second real MCP implementation gate without exercising compression mutations.
+
 `.github/workflows/mcp-session-rust-canary.yml` rebuilds the release sidecar on Windows, runs contract/runtime/canary tests, executes the same 12-call workload, and uploads `.tmp/mcp-session-canary-ci.json`.
 
 ## Next Slices
 
-- Run the real-session canary against at least one additional MCP server implementation and keep monitoring the Windows gate before considering default-on.
+- Keep monitoring the Windows gate and representative auto-mode sessions, then verify packaged-command resolution and rollback behavior before considering default-on.
 - Decide whether to keep the sidecar process model or replace it with a native module after Windows packaging costs are known.

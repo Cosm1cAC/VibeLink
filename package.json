@@ -28,12 +28,13 @@
         "rust:migration:check": "node tools/check-rust-migration-status.mjs",
         "rust:test": "cargo test --manifest-path apps/windows/Cargo.toml",
         "workspace-tree:canary": "node tools/workspace-tree/canary.mjs",
+        "mcp-session:canary": "node tools/mcp-session/canary.mjs",
         "test:event-store": "node --test test/eventStoreContract.test.js test/eventStoreWorker.test.js test/eventStoreWorkerAppend.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js test/eventStoreBatchAppend.test.js test/eventStoreBatcher.test.js test/eventStoreMetrics.test.js",
         "event-store:canary": "node tools/event-store/canary.mjs",
         "event-store:runtime-canary": "node tools/event-store/runtime-canary.mjs",
         "event-store:server-canary": "node tools/event-store/server-canary.mjs",
         "event-store:canary:all": "npm run event-store:canary -- --rounds 24 --batch-size 100 --latency-margin-ms 10 --output .tmp/event-store-local-canary-ci.json && npm run event-store:runtime-canary -- --output .tmp/event-store-runtime-canary-ci.json && npm run event-store:server-canary -- --output .tmp/event-store-server-canary-ci.json",
-        "test:rust-sidecars": "node --test test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js"
+        "test:rust-sidecars": "node --test test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js"
     },
     "dependencies": {
         "@vitejs/plugin-react": "^4.3.4",

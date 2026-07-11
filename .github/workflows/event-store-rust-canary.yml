@@ -76,6 +76,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: event-store-canary-results
-          path: .tmp/event-store-*-canary-ci.json
-          if-no-files-found: ignore
+          path: |
+            .tmp/event-store-local-canary-ci.json
+            .tmp/event-store-runtime-canary-ci.json
+            .tmp/event-store-server-canary-ci.json
+          if-no-files-found: error
           retention-days: 30

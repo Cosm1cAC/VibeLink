@@ -2,6 +2,8 @@ name: Event Store Rust Canary
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
   pull_request:
     paths:
       - ".github/workflows/event-store-rust-canary.yml"
@@ -76,3 +78,4 @@ jobs:
           name: event-store-canary-results
           path: .tmp/event-store-*-canary-ci.json
           if-no-files-found: ignore
+          retention-days: 30

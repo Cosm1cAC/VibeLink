@@ -9,6 +9,7 @@ Complete the repository's staged Rust migration without disturbing the concurren
 - Pull requests #1 (`codex/mcp-sidecar-concurrency`), #2 (`codex/workspace-rust-ignore-paths`), and #3 (`codex/event-store-rust-sidecar`) are merged into `main`; `gh pr list --state open` is empty.
 - Event store, workspace tree, and persistent MCP sessions are at `canary` with passing Windows workflows.
 - Workspace tree now has exact metadata/context parity across VibeLink, ok-wuthering-waves, and meetily plus a persistent Rust sidecar that keeps cold totals at 53.7-80.3ms with one process and zero session fallback; it remains limited `canary` pending remote/interactive evidence.
+- Workspace Tree and Event Store remote canaries now run weekly at staggered UTC times and retain JSON evidence for 30 days; interactive/human promotion gates remain separate.
 - MCP now has passing read-only real-session canaries against codebase-memory and Headroom. Both reused one Rust sidecar with zero failures, fallbacks, backpressure, or pending work and clean session drain.
 - MCP now also has a five-session auto-mode soak: 65 baseline spawns fell to 5, all sessions drained cleanly, health counters stayed at zero, and scheduled Windows CI repeats it weekly.
 - The Rust Windows bridge now injects its current executable as the packaged MCP/event/workspace sidecar command while preserving deployment overrides, removing the development-target path dependency.

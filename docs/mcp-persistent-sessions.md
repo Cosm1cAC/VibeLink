@@ -80,6 +80,19 @@ npm run mcp-session:server-canary -- --calls 12 --output .tmp/mcp-session-server
 
 The 2026-07-12 release run completed 1 authenticated HTTP probe and 12/12 authenticated HTTP tool calls. Calls averaged 16.8ms with an 18.5ms maximum and each returned a tool-run id. The route started one Rust sidecar and one MCP server, sent one `initialize`, one `tools/list`, and 12 `tools/call` requests, and recorded zero sidecar failures, fallbacks, pending requests, and client backpressure rejects. The artifact stores only counts, argument keys, timings, and status; it excludes login tokens, argument values, and tool response content.
 
+The server-route harness also accepts an installed stdio implementation through `--server`, `--server-command`, repeatable `--server-arg` or `--server-args-json`, `--tool`, and `--arguments-json`. Explicit implementations are not added to CI because hosted runners do not install them. The default fixture remains instrumented so CI still verifies one MCP process, one initialization, one tool-list request, and persistent-session reuse.
+
+On 2026-07-12, installed `codebase-memory-mcp` and Headroom implementations both passed this stronger authenticated HTTP route. Each completed one probe and 3/3 read-only tool calls through `src/server.js` and Rust auto mode with one sidecar, zero failures, fallbacks, pending requests, or backpressure rejects. Codebase-memory discovered 8 tools and `get_architecture` averaged 51.7ms with an 82ms maximum. Headroom discovered 3 tools and `headroom_stats` averaged 3023.3ms with a 3241.3ms maximum. Artifacts omit server commands, argument values, login tokens, and response content.
+
+```powershell
+npm run mcp-session:server-canary -- `
+  --server headroom `
+  --server-command "$HOME\.local\bin\headroom.exe" `
+  --server-arg mcp --server-arg serve `
+  --tool headroom_stats --arguments-json '{}' `
+  --calls 3 --delete-temp
+```
+
 Run a read-only real-session canary against an installed MCP server and an existing indexed project:
 
 ```bash
@@ -113,5 +126,5 @@ The 2026-07-11 final soak passed 5/5 sessions. The baseline spawned 65 MCP serve
 
 ## Next Slices
 
-- Keep the weekly Windows server-route canary and soak green, then collect limited installed-production auto-mode evidence before considering default-on; packaged-command resolution and explicit override precedence are covered by the Rust launcher test.
+- Keep the weekly Windows server-route canary and soak green, then observe limited natural production sessions before considering default-on; authenticated HTTP calls against two installed implementations now satisfy the installed-production harness gate.
 - Decide whether to keep the sidecar process model or replace it with a native module after Windows packaging costs are known.

@@ -1,27 +1,25 @@
 {
-  "schemaVersion": 1,
-  "updatedAt": "2026-07-12",
+  "schemaVersion": 2,
+  "report": "docs/rust-migration-report.md",
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
       "id": "workspace-tree",
-      "title": "Workspace tree scanner",
+      "title": "Workspace 目录扫描器",
       "priority": "P1",
       "status": "canary",
-      "rollout": "persistent-session canary with one-shot and Node rollback",
       "featureFlags": [
-        { "name": "VIBELINK_RUST_WORKSPACE_TREE", "requiredInCode": true },
-        { "name": "VIBELINK_RUST_BIN", "requiredInCode": true },
-        { "name": "VIBELINK_RUST_BIN_ARGS_JSON", "requiredInCode": true },
-        { "name": "VIBELINK_RUST_WORKSPACE_TREE_SESSION", "requiredInCode": true },
-        { "name": "VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS", "requiredInCode": true },
-        { "name": "VIBELINK_WORKSPACE_TREE_SIDECAR_MAX_PENDING_REQUESTS", "requiredInCode": true }
+        "VIBELINK_RUST_WORKSPACE_TREE",
+        "VIBELINK_RUST_BIN",
+        "VIBELINK_RUST_BIN_ARGS_JSON",
+        "VIBELINK_RUST_WORKSPACE_TREE_SESSION",
+        "VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS",
+        "VIBELINK_WORKSPACE_TREE_SIDECAR_MAX_PENDING_REQUESTS"
       ],
-      "nodeEntry": "src/workspaces.js and src/workspaceTreeSidecarClient.js",
+      "nodeEntry": "src/workspaces.js",
       "rustEntry": "apps/windows/src/main.rs",
-      "sidecarCommand": "vibelink workspace-tree-sidecar (persistent) or vibelink workspace-tree (one-shot fallback)",
-      "nodeFallback": "A failed persistent session falls back to the one-shot Rust CLI; src/workspaces.js listDirectory() is used when Rust is off, missing, invalid, truncated, or both Rust routes fail. Auto mode skips a missing binary without recording failure.",
-      "runtimeStats": "rustWorkspaceTree stats expose mode, availability, route/cache/budget outcomes and nested session mode, active/ready state, starts, failures, fallbacks, last error, pending, request/response, timeout, backpressure, and termination counters.",
+      "sidecarCommand": "vibelink workspace-tree-sidecar",
+      "fallback": "持久 sidecar -> 一次性 Rust CLI -> Node listDirectory()",
       "tests": [
         "test/workspacesRustTree.test.js",
         "test/workspaceTreeCanary.test.js",
@@ -30,33 +28,24 @@
         "test/workspaceTreeSidecarContract.test.js",
         "test/workspaceTreeSidecarClient.test.js"
       ],
-      "docs": [
-        "README.md",
-        "docs/workspace-tree-rust.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Rust one-shot CLI and persistent JSONL sidecar, Node opt-in/auto routing, sidecar-to-one-shot-to-Node fallback, bounded pending requests, runtime session stats, root routing, supported-subset parity, inherited/nested gitignore rules, Windows metadata parity, Node-compatible locale/BFS ordering, conservative fallback for truncated Rust subsets, signature/cache behavior, content-safe file caching, contract/client/integration tests, three-repository plus authenticated HTTP server-route canaries, and an independent weekly Windows CI gate exist. Persistent runs preserved exact parity, full cache reuse, one sidecar start, clean pending drain/termination, and zero route/session failures or fallbacks. A 2026-07-12 server-route canary added authenticated tree/context/status coverage with 3 Rust misses, 3 cache hits, one sidecar, and zero failures, fallbacks, pending requests, or backpressure.",
-      "nextAction": "Keep the weekly Windows server-route canary green and run limited interactive sessions before considering default-on with the one-shot and Node rollback paths retained. Remote artifacts are retained for 30 days.",
-      "promotionGate": "Can move to default-on only after CI and limited real/interactive sessions preserve exact supported-subset parity, one ready persistent sidecar, zero route/session failures and fallbacks, bounded pending drain, clean termination, warm cache reuse, nested gitignore invalidation, acceptable cold/warm latency, and tested session-to-one-shot-to-Node rollback."
+      "nextAction": "保持每周 canary 通过，完成有限交互会话后再评估 default-on。"
     },
     {
       "id": "mcp-session-sidecar",
-      "title": "Persistent MCP stdio sessions",
+      "title": "MCP 持久 stdio 会话",
       "priority": "P1",
       "status": "canary",
-      "rollout": "auto-mode canary with manual rollback flag",
       "featureFlags": [
-        { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
-        { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
-        { "name": "VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
-        { "name": "VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS", "requiredInCode": true },
-        { "name": "VIBELINK_MCP_PERSISTENT_SESSIONS", "requiredInCode": true }
+        "VIBELINK_MCP_RUST_SIDECAR",
+        "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
+        "VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON",
+        "VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS",
+        "VIBELINK_MCP_PERSISTENT_SESSIONS"
       ],
       "nodeEntry": "src/mcpRuntime.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink mcp-session-sidecar",
-      "nodeFallback": "src/mcpRuntime.js falls back to the existing Node stdio probe/call path and closes the failed Rust sidecar client on readiness, probe, or call failure. VIBELINK_MCP_RUST_SIDECAR=auto skips a missing command without marking a Rust failure.",
-      "runtimeStats": "getMcpRustSidecarStats() exposes enabled, mode, auto/available/active/ready/failed state, command, args, starts, failures, fallbacks, last failure, last error, and client stats.",
+      "fallback": "Rust readiness/probe/call 失败后回退现有 Node stdio 路径",
       "tests": [
         "test/mcpRuntime.test.js",
         "test/mcpSessionSidecarContract.test.js",
@@ -65,35 +54,27 @@
         "test/mcpSessionServerCanary.test.js",
         "test/mcpSessionSoak.test.js"
       ],
-      "docs": [
-        "docs/mcp-persistent-sessions.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Node manager, JSONL client, real Rust mcp-session-sidecar, auto readiness routing, contract/burst/timeout/crash/backpressure tests, synthetic/generic real-session/multi-session soak/authenticated HTTP server-route harnesses, packaged-command resolution, and an independent scheduled Windows CI gate exist. The Rust launcher supplies its current executable as the default MCP/event/workspace command while preserving explicit overrides. The synthetic canary reduced MCP server spawns from 13 to 1. A five-session soak reduced 65 baseline MCP spawns to 5, with 5/5 clean sessions and zero failures/fallbacks/backpressure/pending. A 2026-07-12 fixture server-route canary completed 1 authenticated probe and 12/12 authenticated tool calls through src/server.js, starting one sidecar and one MCP server with zero failures, fallbacks, backpressure, or pending requests. The generalized server-route harness then completed 3/3 authenticated read-only calls against each installed codebase-memory and Headroom implementation, again with one sidecar and zero failures, fallbacks, pending requests, or backpressure. The installed-production harness gate is satisfied; the slice remains canary pending limited natural production-session evidence.",
-      "nextAction": "Keep the weekly Windows server-route canary and soak green, then observe limited natural production sessions before considering default-on. Authenticated HTTP calls against two installed implementations, multi-session stability, packaged-command resolution, and explicit rollback gates are satisfied.",
-      "promotionGate": "Can move to default-on only after CI and limited real MCP sessions preserve zero readiness fallback after command availability, zero client and sidecar backpressure under normal load, material spawn reduction, cached tools/list behavior, clean pending drain, and tested fallback without task-visible failure. Rollback with VIBELINK_MCP_RUST_SIDECAR=0 must remain documented and tested."
+      "nextAction": "保持 server canary 与 soak 通过，观察有限自然生产会话后再评估 default-on。"
     },
     {
       "id": "event-store-sidecar",
-      "title": "Event store append/replay sidecar",
+      "title": "事件存储 append/replay sidecar",
       "priority": "P0",
       "status": "canary",
-      "rollout": "auto readiness canary with manual rollback flag",
       "featureFlags": [
-        { "name": "VIBELINK_EVENT_STORE_WORKER", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_BATCH_APPEND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS", "requiredInCode": true }
+        "VIBELINK_EVENT_STORE_WORKER",
+        "VIBELINK_EVENT_STORE_BATCH_APPEND",
+        "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND",
+        "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS"
       ],
       "nodeEntry": "src/db.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink event-store-sidecar <db-path>",
-      "nodeFallback": "src/db.js prefers the Rust sidecar when VIBELINK_EVENT_STORE_RUST_SIDECAR=1, or when VIBELINK_EVENT_STORE_RUST_SIDECAR=auto and the command exists. Missing binary in manual mode, bad health, timeout, invalid JSON, request failure, or sidecar exit falls back to the Node Worker when enabled, otherwise sync SQLite. Missing binary in auto mode skips Rust without marking failure.",
-      "runtimeStats": "getEventStoreRuntimeStats() in src/db.js exposes mode, rustSidecar enabled/auto/available/active/ready/failed, starts/failures/fallbacks/lastError/client stats, worker status, batch append stats, and eventStore metrics.",
+      "fallback": "Rust sidecar -> Node Worker（启用时）-> 同步 SQLite",
       "tests": [
         "test/eventStoreContract.test.js",
         "test/eventStoreWorker.test.js",
@@ -105,69 +86,45 @@
         "test/eventStoreMetrics.test.js",
         "test/eventStoreRealDataCanary.test.js"
       ],
-      "docs": [
-        "docs/event-store-worker.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, real Rust event-store-sidecar command, read-only/query-only mode, contract and write-rejection tests, explicit opt-in runtime routing, auto readiness, Worker/sync fallback tests, rollback docs, robust canary thresholds, local/runtime/server/real-data harnesses, and a weekly Windows CI gate exist. A 2026-07-11 canary read the approximately 1.01GB existing database and preserved exact task/tool/live list, unified, and replay-window parity across 9 comparisons with zero failures/pending. Rust batch append avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
-      "nextAction": "Keep the weekly remote canary green and run limited human-driven real-session canaries with runtime stats capture before broader default exposure. Remote artifacts are retained for 30 days.",
-      "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across automated and human-driven representative runtime sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
+      "nextAction": "保持远端 canary 通过，完成有限真人运行会话和前后 runtime stats 采集。"
     },
     {
       "id": "audio-pipeline",
-      "title": "Live audio low-latency pipeline",
+      "title": "实时音频低延迟管线",
       "priority": "P1",
       "status": "contract",
-      "rollout": "contract-only; no production routing",
       "featureFlags": [
         { "name": "VIBELINK_AUDIO_RUST_PIPELINE", "requiredInCode": false }
       ],
       "nodeEntry": "src/liveCallAudioPipeline.js",
       "rustEntry": "apps/windows/src/audio_pipeline_sidecar.rs",
       "sidecarCommand": "vibelink audio-pipeline-sidecar",
-      "nodeFallback": "Existing live-call audio and ASR paths remain Node/provider-owned because no production router exists. A future opt-in client must fall back on missing command, bad health, timeout, invalid JSON, request failure, or exit.",
-      "runtimeStats": "Contract-side stats expose processed/dropped/buffered/evicted chunks, samples, and bytes; sequence gaps/duplicates/out-of-order; backpressure, request/response/failure, pending, timestamps, limits, and last error. Production routing stats do not exist yet.",
+      "fallback": "没有生产路由，现有 live-call 音频与 ASR 路径保持不变",
       "tests": [
         "test/liveCallAudioPipeline.test.js",
         "test/liveCallAudio.test.js",
         "test/rustAudioPipelineContract.test.js",
         "test/audioPipelineBenchmark.test.js"
       ],
-      "docs": [
-        "README.md",
-        "docs/audio-pipeline-sidecar.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust audio-pipeline-sidecar, deterministic PCM16 level/peak/RMS and silence behavior, safe sequence accounting, bounded ring eviction/backpressure counters, structured validation errors, Rust unit tests, cross-language contract tests, a representative live-call benchmark, and an independent Windows CI gate exist. A 2026-07-12 run measured production Node 48kHz stereo resampling p95 at 0.031-0.151ms and a complete 2-second VAD sequence using production defaults at 0.332ms p95. Persistent Rust JSONL RMS p95 was 0.290-0.641ms in the same run. All Node workloads remained below the 1ms material-bottleneck threshold, so no production client or live-call/ASR routing was added.",
-      "nextAction": "Keep processing contract-only because measured RMS, bounded resampling, and VAD workloads show no material Node bottleneck or Rust speedup. Re-run the benchmark only if production telemetry or workload shape changes materially. Keep ASR/provider behavior out of this slice.",
-      "promotionGate": "Can move to opt-in only after new representative measurements show a material Node bottleneck or Rust benefit for the proposed workload, an optional bounded client exists behind VIBELINK_AUDIO_RUST_PIPELINE=1, all missing/bad/timeout/invalid/exit paths fall back to current Node behavior, and runtime metrics plus real PCM canaries remain healthy."
+      "nextAction": "保持 contract；仅在生产遥测出现实质 Node 瓶颈时重新评估。"
     },
     {
       "id": "compression-adapter",
-      "title": "Compression and context budget helper",
+      "title": "压缩与上下文预算辅助器",
       "priority": "P2",
       "status": "contract",
-      "rollout": "contract-only; no production routing",
       "featureFlags": [
         { "name": "VIBELINK_RUST_COMPRESSION", "requiredInCode": false }
       ],
-      "nodeEntry": "src/compressionContract.js defines protocol constants for tests; no production router exists",
+      "nodeEntry": "src/compressionContract.js",
       "rustEntry": "apps/windows/src/compression_sidecar.rs",
       "sidecarCommand": "vibelink compression-sidecar",
-      "nodeFallback": "Existing src/compactService.js and src/contextBudget.js behavior remains authoritative because no production path routes to this contract-only sidecar.",
-      "runtimeStats": "The Rust stats method exposes requests, responses, failures, bytesIn, bytesOut, timestamps, pending, and lastError.",
+      "fallback": "没有生产路由，src/compactService.js 与 src/contextBudget.js 保持权威",
       "tests": [
         "test/rustCompressionContract.test.js",
         "test/compressionBenchmark.test.js"
       ],
-      "docs": [
-        "README.md",
-        "docs/compression-sidecar.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Protocol v1, shared JavaScript constants, an independent Node fixture, a real Rust compression-sidecar command, UTF-8-safe head/tail byte trimming, overlap-safe head/tail log sampling, structured errors, runtime stats, Rust unit tests, cross-language contract tests, a reproducible Node hot-path benchmark, and an independent Windows CI contract gate exist. Two 2026-07-11 runs measured the existing Node production functions at 0.253-0.353ms combined p95 on the largest real task stream and 0.425-0.547ms p95 on a 1000-event/2,000,000-character synthetic upper bound, below the 10ms material-bottleneck threshold. There is intentionally no production routing, tokenizer claim, or semantic summarization.",
-      "nextAction": "Keep this slice contract-only because current measurements do not justify another process boundary. Re-run the benchmark if runtime telemetry or workload shape changes materially; add an optional fallback-capable client only if contrary evidence exceeds the documented threshold.",
-      "promotionGate": "Can move to opt-in only after measured need is documented, an optional production client exists behind VIBELINK_RUST_COMPRESSION=1, missing/failed/invalid/timeout sidecars preserve current Node behavior, runtime stats expose routing outcomes, and docs continue to state this is not semantic summarization or provider-token precision."
+      "nextAction": "保持 contract；仅在生产负载显著变化并超过 10ms 阈值时重新评估。"
     }
   ]
 }

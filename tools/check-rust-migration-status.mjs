@@ -4,7 +4,6 @@ import path from "node:path";
 
 const root = process.cwd();
 const manifestPath = path.join(root, "docs", "rust-migration-status.json");
-const statusDocPath = path.join(root, "docs", "rust-migration-status.md");
 const skippedDirs = new Set([
   ".git",
   "node_modules",
@@ -87,6 +86,7 @@ function statusRank(statuses, status) {
 const errors = [];
 const warnings = [];
 const manifest = readJson(manifestPath);
+const statusDocPath = path.join(root, manifest.report || "docs/rust-migration-report.md");
 const statusDoc = fs.existsSync(statusDocPath) ? fs.readFileSync(statusDocPath, "utf8") : "";
 const statuses = Array.isArray(manifest.statusOrder) ? manifest.statusOrder : [];
 const slices = Array.isArray(manifest.slices) ? manifest.slices : [];
@@ -114,20 +114,11 @@ for (const slice of slices) {
   if (!slice.title) fail(`${label}: missing title.`);
   if (!statuses.includes(slice.status)) fail(`${label}: unknown status '${slice.status}'.`);
   if (!slice.priority) fail(`${label}: missing priority.`);
-  if (!slice.rollout) fail(`${label}: missing rollout.`);
   if (!slice.nodeEntry) fail(`${label}: missing nodeEntry.`);
   if (!slice.rustEntry) fail(`${label}: missing rustEntry.`);
   if (!slice.sidecarCommand) fail(`${label}: missing sidecarCommand.`);
-  if (!slice.nodeFallback) fail(`${label}: missing nodeFallback.`);
-  if (!slice.currentState) fail(`${label}: missing currentState.`);
+  if (!slice.fallback) fail(`${label}: missing fallback.`);
   if (!slice.nextAction) fail(`${label}: missing nextAction.`);
-  if (!slice.promotionGate) fail(`${label}: missing promotionGate.`);
-
-  const docs = Array.isArray(slice.docs) ? slice.docs : [];
-  if (!docs.length) fail(`${label}: docs must list at least one document.`);
-  for (const doc of docs) {
-    if (!existsRelative(doc)) fail(`${label}: listed doc does not exist: ${doc}`);
-  }
 
   const tests = Array.isArray(slice.tests) ? slice.tests : [];
   if (!tests.length) fail(`${label}: tests must list at least one current or planned test.`);
@@ -142,7 +133,7 @@ for (const slice of slices) {
   if (optInOrHigher && isPlannedReference(slice.rustEntry)) {
     fail(`${label}: opt-in or higher slice cannot have planned rustEntry '${slice.rustEntry}'.`);
   }
-  if (optInOrHigher && (!slice.nodeFallback || isPlannedReference(slice.nodeFallback))) {
+  if (optInOrHigher && (!slice.fallback || isPlannedReference(slice.fallback))) {
     fail(`${label}: opt-in or higher slices must describe an implemented Node fallback.`);
   }
 
@@ -171,7 +162,7 @@ for (const id of requiredIds) {
 }
 
 if (!statusDoc) {
-  fail("docs/rust-migration-status.md is missing or empty.");
+  fail(`${manifest.report || "docs/rust-migration-report.md"} is missing or empty.`);
 } else {
   for (const id of requiredIds) {
     const slice = slices.find((item) => item.id === id);

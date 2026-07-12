@@ -171,10 +171,10 @@ function extractText(item) {
     firstTextFromContent(message.content) ||
     firstTextFromContent(payload.content) ||
     firstTextFromContent(item.content) ||
-    payload.text ||
-    payload.summary ||
-    item.display ||
-    item.summary ||
+    firstTextFromContent(payload.text) ||
+    firstTextFromContent(payload.summary) ||
+    firstTextFromContent(item.display) ||
+    firstTextFromContent(item.summary) ||
     ""
   );
 }
@@ -745,10 +745,12 @@ function summarizeJsonl(filePath, provider, projectPath = "") {
 
     const payload = item.payload || {};
     const message = item.message || payload.message || item;
-    const role = item.role || message.role || payload.role || payload.type || item.type || "";
+    const role = entryRole(item);
     const text = extractText(item);
 
-    if (text && !isPreviewNoiseEntry(item, text)) texts.push({ role, text });
+    if ((role === "user" || role === "assistant") && text && !isPreviewNoiseEntry(item, text)) {
+      texts.push({ role, text });
+    }
   }
 
   const title =

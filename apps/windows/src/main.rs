@@ -24,6 +24,7 @@ use std::{
 
 mod audio_pipeline_sidecar;
 mod compression_sidecar;
+mod public_tunnel;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -57,6 +58,15 @@ enum Mode {
     Pair,
     /// Check bridge health.
     Doctor,
+    /// Validate or run a fixed, allowlisted Cloudflare Tunnel.
+    Tunnel {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        settings: Option<PathBuf>,
+        #[arg(long)]
+        check_only: bool,
+    },
     /// List a workspace directory using the Rust filesystem scanner.
     WorkspaceTree {
         #[arg(long)]
@@ -2238,6 +2248,11 @@ fn run() -> Result<()> {
         Mode::Bridge => run_bridge_role(&cli),
         Mode::Pair => run_pairing_flow(&cli),
         Mode::Doctor => run_doctor(&cli),
+        Mode::Tunnel {
+            config,
+            settings,
+            check_only,
+        } => public_tunnel::run(config.as_deref(), settings.as_deref(), check_only),
         Mode::WorkspaceTree {
             root,
             dir,
@@ -2292,7 +2307,17 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
     }
 
     let executable = env::current_exe().context("Cannot resolve current executable path")?;
-    let mut command = Command::new("node");
+    let data_dir = resolve_data_dir(
+        &root,
+        env::var_os("VIBELINK_DATA_DIR"),
+        env::var_os("LOCALAPPDATA"),
+        Path::exists,
+    );
+    let mut command = Command::new(resolve_node_command(
+        &root,
+        env::var_os("VIBELINK_NODE_COMMAND"),
+        Path::exists,
+    ));
     for (key, value) in missing_sidecar_command_envs(&executable, |key| env::var_os(key)) {
         command.env(key, value);
     }
@@ -2301,6 +2326,7 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
     command
         .arg(&server)
         .current_dir(&root)
+        .env("VIBELINK_DATA_DIR", data_dir)
         .env("MOBILE_AGENT_HOST", &cli.host)
         .env("MOBILE_AGENT_PORT", cli.port.to_string())
         .stdin(Stdio::null());
@@ -2333,6 +2359,40 @@ where
     .filter(|key| existing(key).is_none())
     .map(|key| (key, executable.as_os_str().to_os_string()))
     .collect()
+}
+
+fn resolve_node_command<F>(root: &Path, configured: Option<OsString>, mut exists: F) -> OsString
+where
+    F: FnMut(&Path) -> bool,
+{
+    if let Some(command) = configured.filter(|value| !value.is_empty()) {
+        return command;
+    }
+    let bundled = root.join("runtime").join("node.exe");
+    if exists(&bundled) {
+        return bundled.into_os_string();
+    }
+    OsString::from("node")
+}
+
+fn resolve_data_dir<F>(
+    root: &Path,
+    configured: Option<OsString>,
+    local_app_data: Option<OsString>,
+    mut exists: F,
+) -> PathBuf
+where
+    F: FnMut(&Path) -> bool,
+{
+    if let Some(path) = configured.filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    if exists(&root.join("runtime").join("node.exe")) {
+        if let Some(local) = local_app_data.filter(|value| !value.is_empty()) {
+            return PathBuf::from(local).join("VibeLink");
+        }
+    }
+    root.join(".agent-mobile-terminal")
 }
 
 fn run_pairing_flow(cli: &Cli) -> Result<()> {
@@ -2464,16 +2524,16 @@ fn project_root() -> Result<PathBuf> {
         return Ok(PathBuf::from(root));
     }
 
-    let cwd = env::current_dir().context("Cannot read current directory")?;
-    if let Some(root) = find_project_root_from(&cwd) {
-        return Ok(root);
-    }
-
     let exe = env::current_exe().context("Cannot resolve current executable path")?;
     if let Some(parent) = exe.parent() {
         if let Some(root) = find_project_root_from(parent) {
             return Ok(root);
         }
+    }
+
+    let cwd = env::current_dir().context("Cannot read current directory")?;
+    if let Some(root) = find_project_root_from(&cwd) {
+        return Ok(root);
     }
 
     bail!("Cannot find VibeLink project root. Set VIBELINK_ROOT to the directory containing src/server.js.")
@@ -2523,6 +2583,52 @@ mod tests {
                 ),
                 ("VIBELINK_RUST_BIN", executable.as_os_str().to_os_string())
             ]
+        );
+    }
+
+    #[test]
+    fn packaged_node_runtime_precedes_path_and_preserves_override() {
+        let root = Path::new("C:/Program Files/VibeLink");
+        let bundled = root.join("runtime").join("node.exe");
+
+        assert_eq!(
+            resolve_node_command(root, Some(OsString::from("C:/custom/node.exe")), |_| true),
+            OsString::from("C:/custom/node.exe")
+        );
+        assert_eq!(
+            resolve_node_command(root, None, |path| path == bundled),
+            bundled.as_os_str()
+        );
+        assert_eq!(
+            resolve_node_command(root, None, |_| false),
+            OsString::from("node")
+        );
+    }
+
+    #[test]
+    fn packaged_data_dir_uses_local_app_data_and_preserves_override() {
+        let root = Path::new("C:/Program Files/VibeLink");
+        let local = Path::new("C:/Users/test/AppData/Local");
+        assert_eq!(
+            resolve_data_dir(
+                root,
+                Some(OsString::from("D:/VibeLinkData")),
+                Some(local.as_os_str().to_os_string()),
+                |_| true
+            ),
+            PathBuf::from("D:/VibeLinkData")
+        );
+        assert_eq!(
+            resolve_data_dir(root, None, Some(local.as_os_str().to_os_string()), |path| {
+                path == root.join("runtime").join("node.exe")
+            }),
+            local.join("VibeLink")
+        );
+        assert_eq!(
+            resolve_data_dir(root, None, Some(local.as_os_str().to_os_string()), |_| {
+                false
+            }),
+            root.join(".agent-mobile-terminal")
         );
     }
 

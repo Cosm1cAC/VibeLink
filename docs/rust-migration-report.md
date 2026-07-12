@@ -137,3 +137,15 @@ npm run compression:benchmark -- --require-real
 2. MCP：有限自然生产会话。
 3. Event Store：有限真人运行会话及前后 runtime stats。
 4. Audio/Compression：等待新的瓶颈证据；没有证据时不推进。
+
+## 全量控制面迁移与桌面发布
+
+“全量 Rust 重写”采用 strangler 路线，不做一次性替换：
+
+1. **桌面运行边界**：Rust launcher 已负责进程监督、包内 Node 解析、sidecar 命令注入、配对 QR、doctor 和命名 Cloudflare Tunnel 安全预检/监督。
+2. **可分发包**：`npm run package:windows` 生成 Windows x64 portable ZIP，固定 Node LTS 与 cloudflared 版本，仅安装服务端生产依赖，并输出 SHA256。
+3. **公网入口**：`vibelink tunnel --check-only` 必须验证固定 hostname、loopback upstream、Host allowlist、端口一致、legacy login 禁用和 404 fallback；通过后才允许运行 connector。
+4. **HTTP 路由迁移**：后续按 status/doctor -> pairing/device -> settings/audit -> workspace/tool -> task/live-call 的顺序迁入 Rust。每批保留同一 OpenAPI、Android/Web 契约和 Node 回退。
+5. **删除 Node**：只有路由使用统计为 0、契约/故障/回滚测试齐全、桌面包和公网 canary 连续通过后，才删除对应 Node 实现。最后一批路由移除后，portable 包才取消 Node runtime。
+
+当前桌面包仍是经过验证的 Rust + Node 混合包，不宣称已经完成控制面全量重写。

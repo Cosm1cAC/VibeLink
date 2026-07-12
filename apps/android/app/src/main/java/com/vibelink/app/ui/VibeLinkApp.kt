@@ -14,10 +14,13 @@ import androidx.navigation.navDeepLink
 import com.vibelink.app.data.AppLanguage
 import com.vibelink.app.data.SettingsStore
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.network.ApiClientConnectionBootstrapper
 import com.vibelink.app.network.ConversationItem
+import com.vibelink.app.network.SavedApiConnection
 import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.ui.screens.*
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -31,6 +34,27 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
 
     val context = LocalContext.current
     val settingsStore = remember { SettingsStore(context.applicationContext) }
+    val connectionBootstrapper = remember(settingsStore) {
+        ApiClientConnectionBootstrapper {
+            SavedApiConnection(
+                bridgeUrl = settingsStore.bridgeUrl.first(),
+                token = settingsStore.getTokenSync(),
+            )
+        }
+    }
+    var connectionInitialized by remember { mutableStateOf(false) }
+    LaunchedEffect(apiClient, connectionBootstrapper) {
+        try {
+            connectionBootstrapper.initialize(
+                apiClient = apiClient,
+                restoreToken = initialPairingUri == null,
+            )
+        } finally {
+            connectionInitialized = true
+        }
+    }
+    if (!connectionInitialized) return
+
     // Shared ViewModels (scoped to app-level, retained via remember)
     val sessionListViewModel = remember { SessionListViewModel() }
     val messageListViewModel = remember { MessageListViewModel() }
@@ -125,7 +149,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                     pendingConversation = null
                     navController.popBackStack()
                 },
-                onOpenApprovals = { navController.navigate("settings") },
+                onOpenApprovals = { navController.navigate("settings?section=approvals") },
                 onOpenLiveCall = { navController.navigate("call") },
                 onOpenFileReference = { reference ->
                     workspaceViewModel.openFileReference(apiClient, reference)
@@ -155,11 +179,24 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             )
         }
 
-        composable("settings") {
+        composable(
+            route = "settings?section={section}",
+            arguments = listOf(navArgument("section") {
+                type = NavType.StringType
+                defaultValue = ""
+            }),
+        ) { backStackEntry ->
             SettingsScreen(
                 apiClient = apiClient,
                 viewModel = settingsViewModel,
                 language = appLanguage,
+                initialSection = backStackEntry.arguments?.getString("section").orEmpty(),
+                onApprovalDecision = { response ->
+                    val handled = messageListViewModel.applyApprovalDecision(apiClient, response)
+                    if (handled && (response.approval?.status == "approved" || response.approval?.status == "denied")) {
+                        navController.popBackStack()
+                    }
+                },
                 onLanguageChange = { language ->
                     appScope.launch { settingsStore.setAppLanguage(language) }
                 },

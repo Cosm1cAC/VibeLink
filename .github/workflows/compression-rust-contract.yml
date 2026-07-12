@@ -6,8 +6,8 @@ on:
     paths:
       - ".github/workflows/compression-rust-contract.yml"
       - "apps/windows/**"
-      - "docs/compression-sidecar.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/compactService.js"
@@ -26,8 +26,8 @@ on:
     paths:
       - ".github/workflows/compression-rust-contract.yml"
       - "apps/windows/**"
-      - "docs/compression-sidecar.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/compactService.js"

@@ -8,8 +8,8 @@ on:
     paths:
       - ".github/workflows/workspace-tree-rust-canary.yml"
       - "apps/windows/**"
-      - "docs/workspace-tree-rust.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/workspaces.js"
@@ -28,8 +28,8 @@ on:
     paths:
       - ".github/workflows/workspace-tree-rust-canary.yml"
       - "apps/windows/**"
-      - "docs/workspace-tree-rust.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/workspaces.js"

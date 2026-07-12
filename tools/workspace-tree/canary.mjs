@@ -127,13 +127,24 @@ async function main() {
   const dataDir = path.join(tempRoot, "data");
   writeFixture(fixture);
   process.env.VIBELINK_DATA_DIR = dataDir;
+  let closeRuntime = async () => {};
 
   try {
-    const [{ getWorkspaceContext, getWorkspaceRuntimeStats, getWorkspaceTree }, { upsertWorkspace }] = await Promise.all([
+    const [workspaces, db] = await Promise.all([
       import("../../src/workspaces.js"),
       import("../../src/db.js")
     ]);
-    const workspace = upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "workspace-tree-canary" });
+    const { getWorkspaceContext, getWorkspaceRuntimeStats, getWorkspaceTree } = workspaces;
+    closeRuntime = async () => {
+      await workspaces.closeRustWorkspaceTreeSidecar().catch(() => {});
+      await db.drainEventStoreRuntime().catch(() => {});
+      try {
+        db.initDb().close();
+      } catch {
+        // Cleanup is best effort after the canary result is written.
+      }
+    };
+    const workspace = db.upsertWorkspace({ path: fixture, allowedRoot: fixture, title: "workspace-tree-canary" });
     const settings = { allowedRoots: [fixture] };
 
     delete process.env.VIBELINK_RUST_WORKSPACE_TREE;
@@ -237,6 +248,7 @@ async function main() {
     else printSummary(result);
     process.exitCode = result.evaluation.passed ? 0 : 1;
   } finally {
+    await closeRuntime();
     if (flag("--delete-temp")) {
       try {
         fs.rmSync(tempRoot, { recursive: true, force: true });

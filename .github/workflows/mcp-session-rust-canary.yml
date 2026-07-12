@@ -8,8 +8,8 @@ on:
     paths:
       - ".github/workflows/mcp-session-rust-canary.yml"
       - "apps/windows/**"
-      - "docs/mcp-persistent-sessions.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/mcpRuntime.js"
@@ -31,8 +31,8 @@ on:
     paths:
       - ".github/workflows/mcp-session-rust-canary.yml"
       - "apps/windows/**"
-      - "docs/mcp-persistent-sessions.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/mcpRuntime.js"

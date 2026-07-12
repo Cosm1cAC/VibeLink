@@ -21,7 +21,7 @@ Use a hybrid architecture:
 - **Sidecar first:** Rust modules are introduced as CLI/JSONL sidecars before any native addon or deeper embedding.
 - **Fallback required:** every production Rust path must fall back to the existing Node or Worker path when the binary is missing, startup fails, health checks fail, requests time out, responses are invalid, or the sidecar exits.
 - **Contract first:** Node and Rust communicate through stable JSON contracts. Tests must run the same contract against fixtures and real Rust sidecars before production routing is promoted.
-- **Status-gated promotion:** slice states are tracked in `docs/rust-migration-status.json` and checked by `npm run rust:migration:check` before docs or rollout status are changed.
+- **Status-gated promotion:** slice states are tracked in `docs/rust-migration-status.json`, explained in `docs/rust-migration-report.md`, and checked by `npm run rust:migration:check` before rollout status changes.
 
 ## Consequences
 
@@ -50,7 +50,7 @@ Use a hybrid architecture:
 ## Related files
 
 - `docs/rust-migration-status.json`
-- `docs/rust-migration-status.md`
+- `docs/rust-migration-report.md`
 - `tools/check-rust-migration-status.mjs`
 - `apps/windows/src/main.rs`
 - `src/workspaces.js`

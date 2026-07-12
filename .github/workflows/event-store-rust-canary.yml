@@ -8,8 +8,8 @@ on:
     paths:
       - ".github/workflows/event-store-rust-canary.yml"
       - "apps/windows/**"
-      - "docs/event-store-worker.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/**"
@@ -22,8 +22,8 @@ on:
     paths:
       - ".github/workflows/event-store-rust-canary.yml"
       - "apps/windows/**"
-      - "docs/event-store-worker.md"
-      - "docs/rust-migration-status.*"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
       - "package.json"
       - "package-lock.json"
       - "src/**"

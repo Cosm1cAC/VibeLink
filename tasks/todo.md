@@ -11,4 +11,4 @@
 - [x] Run Node history test and Android unit tests.
 - [x] Build and install latest debug APK.
 - [x] Re-test approval, keyboard, landscape, history, and permission flows on emulator.
-- [ ] Push local commit after GitHub connectivity is restored; review, staging, and commit are complete.
+- [x] Review, stage, commit, and push intended changes.

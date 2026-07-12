@@ -2524,16 +2524,16 @@ fn project_root() -> Result<PathBuf> {
         return Ok(PathBuf::from(root));
     }
 
-    let cwd = env::current_dir().context("Cannot read current directory")?;
-    if let Some(root) = find_project_root_from(&cwd) {
-        return Ok(root);
-    }
-
     let exe = env::current_exe().context("Cannot resolve current executable path")?;
     if let Some(parent) = exe.parent() {
         if let Some(root) = find_project_root_from(parent) {
             return Ok(root);
         }
+    }
+
+    let cwd = env::current_dir().context("Cannot read current directory")?;
+    if let Some(root) = find_project_root_from(&cwd) {
+        return Ok(root);
     }
 
     bail!("Cannot find VibeLink project root. Set VIBELINK_ROOT to the directory containing src/server.js.")

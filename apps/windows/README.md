@@ -1,6 +1,6 @@
 # VibeLink Windows
 
-Rust single-entry launcher for VibeLink on Windows.
+Rust launcher, sidecar host, portable desktop package, and public-tunnel supervisor.
 
 ## User entry
 
@@ -8,7 +8,7 @@ Rust single-entry launcher for VibeLink on Windows.
 vibelink.exe
 ```
 
-The default mode starts the bridge role automatically, waits for the HTTP API to become healthy, then creates and displays an Android pairing QR.
+The default mode starts the packaged or development bridge, waits for the HTTP API, then creates an Android pairing QR. Packaged builds prefer `runtime/node.exe`; `VIBELINK_NODE_COMMAND` remains an explicit override and development falls back to `node` on PATH.
 
 ## Internal modes
 
@@ -16,6 +16,8 @@ The default mode starts the bridge role automatically, waits for the HTTP API to
 vibelink.exe bridge
 vibelink.exe pair
 vibelink.exe doctor
+vibelink.exe tunnel --check-only
+vibelink.exe tunnel
 vibelink.exe workspace-tree --root C:\path\to\repo --dir src --depth 2
 vibelink.exe mcp-session-sidecar
 vibelink.exe event-store-sidecar C:\path\to\mobile-agent.sqlite
@@ -24,6 +26,7 @@ vibelink.exe event-store-sidecar C:\path\to\mobile-agent.sqlite
 - `bridge`: hosts the existing Node bridge in phase 1.
 - `pair`: creates a QR pairing session against a running bridge.
 - `doctor`: checks whether the bridge API is reachable.
+- `tunnel`: validates a named Cloudflare Tunnel, fixed hostname, loopback ingress, Host allowlist, matching port, disabled legacy login, and 404 fallback before launching bundled `cloudflared.exe`.
 - `workspace-tree`: emits the Rust workspace scanner JSON contract used by the Node bridge when `VIBELINK_RUST_WORKSPACE_TREE=1` is enabled.
 - `mcp-session-sidecar`: serves the MCP persistent session JSONL contract for Rust-side stdio session reuse experiments.
 - `event-store-sidecar`: serves the SQLite event-store JSONL contract for explicit Rust-side append/replay experiments.
@@ -31,14 +34,6 @@ vibelink.exe event-store-sidecar C:\path\to\mobile-agent.sqlite
 The user should not need to run internal modes directly.
 
 When `bridge` launches the Node process, it supplies the current `vibelink.exe` path as the default MCP, event-store, and workspace-tree Rust command. Explicit `VIBELINK_MCP_RUST_SIDECAR_COMMAND`, `VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND`, and `VIBELINK_RUST_BIN` values remain authoritative. This keeps packaged installs independent of development-only `apps/windows/target` paths.
-
-## Workspace tree scanner
-
-The scanner skips heavy directories such as `.git`, `node_modules`, `target`, and `.agent-mobile-terminal`. It also honors root and nested `.gitignore` basename rules for literal file names, simple `*` wildcard file patterns, and directory-only rules such as `logs/`.
-
-The JSON response includes a metadata `signature` for the scanned directory window. It also includes `truncated: true` when `--max-entries` prevents the scanner from returning every matching item. The Node bridge records the latest signature, Rust workspace-tree budget hits, and Rust scanner result cache hits/misses/evictions in runtime stats.
-
-Remaining migration work: auto/readiness promotion gates, runtime fallback stats, and moving the reusable scanner cache into a long-lived Rust sidecar/native scanner are still future Rust slices.
 
 ## Build
 
@@ -49,3 +44,13 @@ cargo build --release --manifest-path apps/windows/Cargo.toml
 ```powershell
 cargo test --manifest-path apps/windows/Cargo.toml
 ```
+
+Create the portable Windows package:
+
+```powershell
+npm run package:windows
+```
+
+The ZIP under `artifacts/windows/` contains the Rust launcher, Node LTS runtime, production-only server dependencies, current Web build, and cloudflared. Its adjacent `.sha256` file verifies the archive.
+
+The bridge is still a hybrid package while HTTP routes migrate incrementally from Node to Rust. API compatibility and fallback are required before any Node route is removed.

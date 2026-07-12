@@ -71,6 +71,7 @@ fun LoginScreen(
         }
 
         bridgeUrl = server
+        apiClient.token = ""
         apiClient.baseUrl = server
         settingsStore.setBridgeUrl(server)
         pairingSessionId = session

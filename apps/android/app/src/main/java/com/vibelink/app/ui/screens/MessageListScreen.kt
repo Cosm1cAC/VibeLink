@@ -16,10 +16,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -80,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,6 +104,10 @@ import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+object ComposerLayoutPolicy {
+    fun showSupplementalContent(imeVisible: Boolean): Boolean = !imeVisible
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -172,7 +180,7 @@ fun MessageListScreen(
     }
 
     LaunchedEffect(conversation?.key) {
-        if (conversation != null) viewModel.loadConversation(apiClient, conversation)
+        if (conversation != null) viewModel.ensureConversationLoaded(apiClient, conversation)
     }
 
     LaunchedEffect(messages.size) {
@@ -308,7 +316,6 @@ fun MessageListScreen(
                                 ApprovalRequiredCard(
                                     approval = approval,
                                     onOpenApprovals = onOpenApprovals,
-                                    onRetry = { viewModel.retryPendingApproval(apiClient) },
                                 )
                             }
                         }
@@ -385,12 +392,15 @@ private fun ComposerBar(
     onStop: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    Surface(tonalElevation = 3.dp) {
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val showSupplementalContent = ComposerLayoutPolicy.showSupplementalContent(imeVisible)
+    Surface(modifier = Modifier.imePadding(), tonalElevation = 3.dp) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (!isDesktopRemote) {
+            if (showSupplementalContent && !isDesktopRemote) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(providers, key = { it.id }) { option ->
                         FilterChip(
@@ -401,11 +411,11 @@ private fun ComposerBar(
                         )
                     }
                 }
-            } else {
+            } else if (showSupplementalContent) {
                 AssistChip(onClick = {}, label = { Text(strings.codexRemoteCurrentSettings) })
             }
 
-            if (!isDesktopRemote) {
+            if (showSupplementalContent && !isDesktopRemote) {
                 Text(strings.quickCommands, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(PromptCommandCatalog.commands, key = { it.id }) { command ->
@@ -417,7 +427,7 @@ private fun ComposerBar(
                 }
             }
 
-            if (!isDesktopRemote && promptHistory.isNotEmpty()) {
+            if (showSupplementalContent && !isDesktopRemote && promptHistory.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -436,7 +446,7 @@ private fun ComposerBar(
                 }
             }
 
-            if (showOptions && !isDesktopRemote) {
+            if (showSupplementalContent && showOptions && !isDesktopRemote) {
                 val provider = providerRegistry.providers.firstOrNull { it.id == activeAgent }
                 val models = provider?.models.orEmpty()
                 val efforts = provider?.reasoningEfforts.orEmpty().ifEmpty { listOf("", "low", "medium", "high", "xhigh") }
@@ -484,13 +494,32 @@ private fun ComposerBar(
                 }
             }
 
-            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconButton(onClick = onPickImage, enabled = !isDesktopRemote && !attachmentUploading) {
-                    Icon(Icons.Default.Image, contentDescription = strings.attachImage)
+            if (showSupplementalContent && !isDesktopRemote) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onPickImage, enabled = !attachmentUploading) {
+                        Icon(Icons.Default.Image, contentDescription = strings.attachImage)
+                    }
+                    IconButton(onClick = onPickFile, enabled = !attachmentUploading) {
+                        Icon(Icons.Default.AttachFile, contentDescription = strings.attachFile)
+                    }
+                    IconButton(onClick = onToggleOptions) {
+                        Icon(Icons.Default.Tune, contentDescription = strings.composerOptions)
+                    }
+                    IconButton(onClick = onOpenLiveCall) {
+                        Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)
+                    }
                 }
-                IconButton(onClick = onPickFile, enabled = !isDesktopRemote && !attachmentUploading) {
-                    Icon(Icons.Default.AttachFile, contentDescription = strings.attachFile)
-                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 OutlinedTextField(
                     value = prompt,
                     onValueChange = onPromptChange,
@@ -499,17 +528,16 @@ private fun ComposerBar(
                     minLines = 1,
                     maxLines = 5,
                 )
-                IconButton(onClick = onToggleOptions, enabled = !isDesktopRemote) {
-                    Icon(Icons.Default.Tune, contentDescription = strings.composerOptions)
-                }
-                IconButton(onClick = onOpenLiveCall, enabled = !isDesktopRemote) {
-                    Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)
-                }
-                Button(onClick = onSend, enabled = canSend) {
+                Button(
+                    onClick = onSend,
+                    enabled = canSend,
+                    modifier = Modifier.size(56.dp),
+                    contentPadding = PaddingValues(0.dp),
+                ) {
                     if (sending) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = strings.send)
                     }
                 }
             }
@@ -936,7 +964,6 @@ private fun displayNameForUri(context: Context, uri: Uri): String {
 private fun ApprovalRequiredCard(
     approval: PendingApprovalState,
     onOpenApprovals: () -> Unit,
-    onRetry: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
@@ -946,13 +973,8 @@ private fun ApprovalRequiredCard(
                 color = MaterialTheme.colorScheme.onErrorContainer,
                 style = MaterialTheme.typography.bodySmall,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onOpenApprovals, modifier = Modifier.weight(1f)) {
-                    Text(strings.openApprovals)
-                }
-                OutlinedButton(onClick = onRetry, modifier = Modifier.weight(1f), enabled = approval.retry != null) {
-                    Text(strings.retry)
-                }
+            Button(onClick = onOpenApprovals, modifier = Modifier.fillMaxWidth()) {
+                Text(strings.openApprovals)
             }
         }
     }

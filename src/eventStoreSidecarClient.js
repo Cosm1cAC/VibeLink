@@ -14,7 +14,7 @@ function backpressureError(method, maxPendingRequests) {
   const error = new Error(
     `Event store sidecar backpressure: ${method} rejected because ${maxPendingRequests} request(s) are already pending.`
   );
-  error.code = "EEVENTSTOREBACKPRESSURE";
+  error.code = "EEVENTSTORESIDECARBACKPRESSURE";
   error.maxPendingRequests = maxPendingRequests;
   return error;
 }
@@ -30,14 +30,18 @@ export function createEventStoreSidecarClient({
   args = [],
   cwd = process.cwd(),
   env = process.env,
+  dbPath = "",
   timeoutMs = 10000,
   maxPendingRequests = maxPendingRequestsValue()
 } = {}) {
   if (!command) throw new TypeError("createEventStoreSidecarClient requires command.");
 
+  const childEnv = dbPath
+    ? { ...env, VIBELINK_EVENT_STORE_DB_PATH: dbPath }
+    : env;
   const child = spawn(command, Array.isArray(args) ? args : [], {
     cwd,
-    env,
+    env: childEnv,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"]
   });

@@ -7,6 +7,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ApiException
+import com.vibelink.app.network.ApprovalDecisionResponse
 import com.vibelink.app.network.ChatMessage
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.DesktopRemoteState
@@ -29,18 +30,9 @@ import kotlinx.coroutines.launch
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 
-data class PendingPromptRetry(
-    val prompt: String,
-    val agent: String,
-    val model: String = "",
-    val reasoningEffort: String = "",
-    val cwd: String = "",
-)
-
 data class PendingApprovalState(
     val approvalId: String,
     val message: String,
-    val retry: PendingPromptRetry? = null,
 )
 
 class MessageListViewModel : ViewModel() {
@@ -128,6 +120,11 @@ class MessageListViewModel : ViewModel() {
         }
     }
 
+    fun ensureConversationLoaded(apiClient: ApiClient, conversation: ConversationItem) {
+        if (activeConversation?.key == conversation.key) return
+        loadConversation(apiClient, conversation)
+    }
+
     fun refresh(apiClient: ApiClient) {
         val conversation = activeConversation ?: return
         loadConversation(apiClient, conversation)
@@ -166,8 +163,6 @@ class MessageListViewModel : ViewModel() {
         val conversation = activeConversation ?: return
         val trimmed = prompt.trim()
         if (trimmed.isBlank() || _sending.value) return
-        val retry = PendingPromptRetry(trimmed, agent, model, reasoningEffort, cwd)
-
         viewModelScope.launch {
             _sending.value = true
             _error.value = ""
@@ -183,7 +178,7 @@ class MessageListViewModel : ViewModel() {
                 }
             } catch (error: ApiException) {
                 val notice = TaskApprovalHandoff.noticeFromException(error)
-                if (notice != null) appendApprovalNotice(notice, retry)
+                if (notice != null) appendApprovalNotice(notice)
                 else appendError(TaskApprovalHandoff.messageFor(error))
             } catch (error: Exception) {
                 appendError(error.message ?: "Failed to send prompt")
@@ -193,33 +188,56 @@ class MessageListViewModel : ViewModel() {
         }
     }
 
-    fun retryPendingApproval(apiClient: ApiClient) {
-        val retry = _pendingApproval.value?.retry ?: return
-        val conversation = activeConversation ?: return
-        if (_sending.value) return
-        viewModelScope.launch {
-            _sending.value = true
-            _error.value = ""
-            try {
-                createOrResumeTask(
-                    apiClient = apiClient,
-                    conversation = conversation,
-                    prompt = retry.prompt,
-                    agent = retry.agent,
-                    model = retry.model,
-                    reasoningEffort = retry.reasoningEffort,
-                    cwdOverride = retry.cwd,
-                )
-            } catch (error: ApiException) {
-                val notice = TaskApprovalHandoff.noticeFromException(error)
-                if (notice != null) appendApprovalNotice(notice, retry)
-                else appendError(TaskApprovalHandoff.messageFor(error))
-            } catch (error: Exception) {
-                appendError(error.message ?: "Failed to retry prompt")
-            } finally {
-                _sending.value = false
-            }
+    fun applyApprovalDecision(apiClient: ApiClient, response: ApprovalDecisionResponse): Boolean {
+        val approval = response.approval ?: return false
+        val pending = _pendingApproval.value ?: return false
+        if (pending.approvalId != approval.id) return false
+
+        if (approval.status == "denied") {
+            _pendingApproval.value = null
+            appendSystem("Approval ${approval.id.take(8)} was denied.")
+            return true
         }
+
+        val handoff = TaskApprovalHandoff.approvedTaskFrom(response)
+        if (handoff == null) {
+            if (response.error.isNotBlank()) appendError(response.error)
+            return true
+        }
+
+        val conversation = activeConversation ?: return true
+        _pendingApproval.value = null
+        _error.value = ""
+        _messages.value = _messages.value.filterNot { message ->
+            message.role == "error" && message.text.contains(approval.id)
+        }
+        _currentTaskId.value = handoff.id
+        _running.value = handoff.status == "running"
+        activeConversation = conversation.copy(
+            kind = "task",
+            id = handoff.id,
+            provider = handoff.agent.ifBlank { conversation.provider.ifBlank { "codex" } },
+            title = handoff.title.ifBlank { conversation.title },
+            cwd = handoff.cwd.ifBlank { conversation.cwd },
+            status = handoff.status,
+            sessionId = handoff.sessionId,
+        )
+        appendSystem("Task ${handoff.id.take(8)} started after approval.")
+
+        viewModelScope.launch {
+            runCatching { apiClient.getTask(handoff.id) }
+                .onSuccess { task ->
+                    _currentTaskId.value = task.id
+                    _running.value = task.status == "running"
+                    appendTaskEvents(task.events)
+                    if (task.status == "running") {
+                        followRunningTask(apiClient, task)
+                        followToolEvents(apiClient, task.id)
+                    }
+                }
+                .onFailure { error -> appendError(error.message ?: "Failed to load approved task") }
+        }
+        return true
     }
 
     fun editMessage(target: ChatMessage, nextText: String) {
@@ -393,10 +411,7 @@ class MessageListViewModel : ViewModel() {
             reasoningEffort = reasoningEffort.trim(),
         )
         TaskApprovalHandoff.noticeFromResponse(response)?.let { notice ->
-            appendApprovalNotice(
-                notice,
-                PendingPromptRetry(prompt, resolvedAgent, model, reasoningEffort, resolvedCwd),
-            )
+            appendApprovalNotice(notice)
             return
         }
         if (response.id.isBlank()) {
@@ -537,8 +552,8 @@ class MessageListViewModel : ViewModel() {
         _error.value = text
     }
 
-    private fun appendApprovalNotice(notice: ApprovalNotice, retry: PendingPromptRetry?) {
-        _pendingApproval.value = PendingApprovalState(notice.approvalId, notice.message, retry)
+    private fun appendApprovalNotice(notice: ApprovalNotice) {
+        _pendingApproval.value = PendingApprovalState(notice.approvalId, notice.message)
         appendError(notice.message)
     }
 
@@ -823,6 +838,15 @@ data class ApprovalNotice(
     val message: String,
 )
 
+data class ApprovedTaskHandoff(
+    val id: String,
+    val status: String,
+    val agent: String,
+    val title: String,
+    val cwd: String,
+    val sessionId: String,
+)
+
 object TaskApprovalHandoff {
     fun noticeFromResponse(response: TaskCreateResponse): ApprovalNotice? {
         val approvalId = response.approvalId.ifBlank { response.approval?.id.orEmpty() }
@@ -844,10 +868,26 @@ object TaskApprovalHandoff {
         return noticeFromException(error)?.message ?: error.body.ifBlank { "HTTP ${error.statusCode}" }
     }
 
+    fun approvedTaskFrom(response: ApprovalDecisionResponse): ApprovedTaskHandoff? {
+        val result = response.result ?: return null
+        if (!response.ok || !result.ok) return null
+        val task = result.task
+        val id = task?.id.orEmpty().ifBlank { result.id }
+        if (id.isBlank()) return null
+        return ApprovedTaskHandoff(
+            id = id,
+            status = task?.status.orEmpty().ifBlank { result.status.ifBlank { "running" } },
+            agent = task?.agent.orEmpty(),
+            title = task?.title.orEmpty(),
+            cwd = task?.cwd.orEmpty(),
+            sessionId = task?.sessionId.orEmpty(),
+        )
+    }
+
     private fun approvalMessage(approvalId: String, reason: String): String {
         val idSuffix = if (approvalId.isBlank()) "" else " ($approvalId)"
         val reasonPrefix = reason.ifBlank { "This action needs approval." }
-        return "$reasonPrefix Approval required$idSuffix. Open Settings > Approvals, approve it, then retry this prompt."
+        return "$reasonPrefix Approval required$idSuffix. Open Settings > Approvals; approving starts this task automatically."
     }
 
     private fun parseObject(raw: String): JsonObject? {

@@ -1198,6 +1198,22 @@ async function buildDoctorReport(request) {
   };
 }
 
+async function runDoctorToolRequest(request, url, auth) {
+  const result = await runSystemTool({
+    toolName: "system.doctor",
+    title: "Doctor",
+    input: { host: request.headers.host || "", path: url.pathname },
+    request,
+    url,
+    auth,
+    execute: async () => {
+      const report = await buildDoctorReport(request);
+      return { ok: report.ok, result: report, error: report.ok ? "" : `${report.failures.length} check(s) failed.` };
+    }
+  });
+  return { ...result.result, toolRunId: result.toolRunId };
+}
+
 async function providerRegistryPayload(options = {}) {
   const settingsValue = await settingsWithSecrets(settings);
   const probes = {};
@@ -1757,19 +1773,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/doctor" && request.method === "GET") {
-    const result = await runSystemTool({
-      toolName: "system.doctor",
-      title: "Doctor",
-      input: { host: request.headers.host || "", path: url.pathname },
-      request,
-      url,
-      auth,
-      execute: async () => {
-        const report = await buildDoctorReport(request);
-        return { ok: report.ok, result: report, error: report.ok ? "" : `${report.failures.length} check(s) failed.` };
-      }
-    });
-    sendJson(response, 200, { ...result.result, toolRunId: result.toolRunId });
+    sendJson(response, 200, await runDoctorToolRequest(request, url, auth));
     return;
   }
 
@@ -3443,6 +3447,26 @@ const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
 
   try {
+    if (url.pathname === "/internal/doctor-report" && request.method === "GET") {
+      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
+        sendError(response, 404, "Unknown API route");
+        return;
+      }
+      const deviceIdHeader = request.headers["x-vibelink-device-id"];
+      const deviceId = typeof deviceIdHeader === "string" ? deviceIdHeader.trim() : "";
+      if (!deviceId || deviceId.length > 160) {
+        sendError(response, 400, "Authenticated device context is required.");
+        return;
+      }
+      const originalRequest = originalHostRequest(request);
+      const doctorUrl = new URL("http://localhost/api/doctor");
+      sendJson(response, 200, await runDoctorToolRequest(originalRequest, doctorUrl, {
+        ok: true,
+        device: { id: deviceId }
+      }));
+      return;
+    }
+
     if (url.pathname === "/internal/status-snapshot" && request.method === "GET") {
       if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
         sendError(response, 404, "Unknown API route");

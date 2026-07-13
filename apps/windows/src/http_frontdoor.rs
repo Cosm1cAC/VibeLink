@@ -1,3 +1,4 @@
+use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
 use crate::status_http::{
     parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
 };
@@ -18,6 +19,7 @@ pub fn serve(
     upstream: SocketAddr,
     node: &mut Child,
     status_route: Option<StatusRouteConfig>,
+    doctor_route: Option<DoctorRouteConfig>,
 ) -> Result<()> {
     listener
         .set_nonblocking(true)
@@ -45,8 +47,14 @@ pub fn serve(
 
                 let active = Arc::clone(&active);
                 let status_route = status_route.clone();
+                let doctor_route = doctor_route.clone();
                 thread::spawn(move || {
-                    if let Err(error) = handle_connection(client, upstream, status_route.as_ref()) {
+                    if let Err(error) = handle_connection(
+                        client,
+                        upstream,
+                        status_route.as_ref(),
+                        doctor_route.as_ref(),
+                    ) {
                         eprintln!("Rust HTTP front door connection failed: {error}");
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
@@ -64,19 +72,32 @@ fn handle_connection(
     mut client: TcpStream,
     upstream: SocketAddr,
     status_route: Option<&StatusRouteConfig>,
+    doctor_route: Option<&DoctorRouteConfig>,
 ) -> io::Result<()> {
-    let Some(status_route) = status_route else {
+    if status_route.is_none() && doctor_route.is_none() {
         return proxy_connection(client, upstream);
-    };
+    }
 
     let prefix = read_request_head(&mut client)?;
     if let Ok(request) = parse_request(&prefix) {
-        match route_status_request(&request, status_route) {
-            Ok(Some(response)) => return response.write_to(&mut client),
-            Ok(None) => {}
-            Err(error) => {
-                status_route.record_fallback();
-                eprintln!("Rust Status route falling back to Node: {error:#}");
+        if let Some(status_route) = status_route {
+            match route_status_request(&request, status_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    status_route.record_fallback();
+                    eprintln!("Rust Status route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(doctor_route) = doctor_route {
+            match route_doctor_request(&request, doctor_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    doctor_route.record_fallback();
+                    eprintln!("Rust Doctor route falling back to Node: {error:#}");
+                }
             }
         }
     }
@@ -163,6 +184,7 @@ fn write_service_unavailable(client: &mut TcpStream) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{handle_connection, proxy_connection};
+    use crate::doctor_http::DoctorRouteConfig;
     use crate::status_http::StatusRouteConfig;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
@@ -273,12 +295,55 @@ mod tests {
             StatusRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
-            handle_connection(client, upstream_addr, Some(&status_route)).unwrap();
+            handle_connection(client, upstream_addr, Some(&status_route), None).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
         client
             .write_all(b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        );
+        proxy_thread.join().unwrap();
+        upstream_thread.join().unwrap();
+    }
+
+    #[test]
+    fn doctor_route_pending_replays_the_original_request_to_node() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            assert_eq!(
+                request,
+                b"GET /api/doctor HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
+                .unwrap();
+        });
+
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let missing_data_dir = PathBuf::from("Z:/vibelink-doctor-http-missing");
+        let doctor_route =
+            DoctorRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
+        let proxy_thread = thread::spawn(move || {
+            let (client, _) = frontend.accept().unwrap();
+            handle_connection(client, upstream_addr, None, Some(&doctor_route)).unwrap();
+        });
+
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client
+            .write_all(b"GET /api/doctor HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
             .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut response = Vec::new();

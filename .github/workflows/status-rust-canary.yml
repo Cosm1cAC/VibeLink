@@ -82,6 +82,8 @@ jobs:
         run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --devices-http --output .tmp/devices-http-canary-ci.json --delete-temp
       - name: Run Rust-owned HTTP Device mutations canary
         run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --devices-http --device-mutations-http --output .tmp/device-mutations-http-canary-ci.json --delete-temp
+      - name: Run Rust-owned HTTP Pairing canary
+        run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --pairing-http --output .tmp/pairing-http-canary-ci.json --delete-temp
       - name: Upload canary output
         if: always()
         uses: actions/upload-artifact@v7
@@ -93,5 +95,6 @@ jobs:
             .tmp/doctor-http-canary-ci.json
             .tmp/devices-http-canary-ci.json
             .tmp/device-mutations-http-canary-ci.json
+            .tmp/pairing-http-canary-ci.json
           if-no-files-found: error
           retention-days: 30

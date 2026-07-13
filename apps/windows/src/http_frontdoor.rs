@@ -3,6 +3,7 @@ use crate::device_http::{
     DeviceRouteConfig,
 };
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
+use crate::pairing_http::{route_pairing_request, PairingRouteConfig};
 use crate::status_http::{
     parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
 };
@@ -18,14 +19,55 @@ use std::time::Duration;
 const MAX_ACTIVE_CONNECTIONS: usize = 256;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Default)]
+pub struct FrontdoorRoutes {
+    status: Option<StatusRouteConfig>,
+    doctor: Option<DoctorRouteConfig>,
+    device: Option<DeviceRouteConfig>,
+    device_mutation: Option<DeviceMutationRouteConfig>,
+    pairing: Option<PairingRouteConfig>,
+}
+
+impl FrontdoorRoutes {
+    pub fn with_status(mut self, route: Option<StatusRouteConfig>) -> Self {
+        self.status = route;
+        self
+    }
+
+    pub fn with_doctor(mut self, route: Option<DoctorRouteConfig>) -> Self {
+        self.doctor = route;
+        self
+    }
+
+    pub fn with_device(mut self, route: Option<DeviceRouteConfig>) -> Self {
+        self.device = route;
+        self
+    }
+
+    pub fn with_device_mutation(mut self, route: Option<DeviceMutationRouteConfig>) -> Self {
+        self.device_mutation = route;
+        self
+    }
+
+    pub fn with_pairing(mut self, route: Option<PairingRouteConfig>) -> Self {
+        self.pairing = route;
+        self
+    }
+
+    fn is_empty(&self) -> bool {
+        self.status.is_none()
+            && self.doctor.is_none()
+            && self.device.is_none()
+            && self.device_mutation.is_none()
+            && self.pairing.is_none()
+    }
+}
+
 pub fn serve(
     listener: TcpListener,
     upstream: SocketAddr,
     node: &mut Child,
-    status_route: Option<StatusRouteConfig>,
-    doctor_route: Option<DoctorRouteConfig>,
-    device_route: Option<DeviceRouteConfig>,
-    device_mutation_route: Option<DeviceMutationRouteConfig>,
+    routes: FrontdoorRoutes,
 ) -> Result<()> {
     listener
         .set_nonblocking(true)
@@ -52,19 +94,9 @@ pub fn serve(
                 }
 
                 let active = Arc::clone(&active);
-                let status_route = status_route.clone();
-                let doctor_route = doctor_route.clone();
-                let device_route = device_route.clone();
-                let device_mutation_route = device_mutation_route.clone();
+                let routes = routes.clone();
                 thread::spawn(move || {
-                    if let Err(error) = handle_connection(
-                        client,
-                        upstream,
-                        status_route.as_ref(),
-                        doctor_route.as_ref(),
-                        device_route.as_ref(),
-                        device_mutation_route.as_ref(),
-                    ) {
+                    if let Err(error) = handle_connection(client, upstream, &routes) {
                         eprintln!("Rust HTTP front door connection failed: {error}");
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
@@ -81,16 +113,9 @@ pub fn serve(
 fn handle_connection(
     mut client: TcpStream,
     upstream: SocketAddr,
-    status_route: Option<&StatusRouteConfig>,
-    doctor_route: Option<&DoctorRouteConfig>,
-    device_route: Option<&DeviceRouteConfig>,
-    device_mutation_route: Option<&DeviceMutationRouteConfig>,
+    routes: &FrontdoorRoutes,
 ) -> io::Result<()> {
-    if status_route.is_none()
-        && doctor_route.is_none()
-        && device_route.is_none()
-        && device_mutation_route.is_none()
-    {
+    if routes.is_empty() {
         return proxy_connection(client, upstream);
     }
 
@@ -100,7 +125,7 @@ fn handle_connection(
         .unwrap_or_default();
     let prefix = read_request_head(&mut client)?;
     if let Ok(request) = parse_request(&prefix) {
-        if let Some(status_route) = status_route {
+        if let Some(status_route) = routes.status.as_ref() {
             match route_status_request(&request, status_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
@@ -110,7 +135,7 @@ fn handle_connection(
                 }
             }
         }
-        if let Some(doctor_route) = doctor_route {
+        if let Some(doctor_route) = routes.doctor.as_ref() {
             match route_doctor_request(&request, doctor_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
@@ -120,7 +145,7 @@ fn handle_connection(
                 }
             }
         }
-        if let Some(device_route) = device_route {
+        if let Some(device_route) = routes.device.as_ref() {
             match route_device_request(&request, device_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
@@ -130,7 +155,7 @@ fn handle_connection(
                 }
             }
         }
-        if let Some(device_mutation_route) = device_mutation_route {
+        if let Some(device_mutation_route) = routes.device_mutation.as_ref() {
             match route_device_mutation_request(&request, &peer_ip, device_mutation_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
@@ -139,6 +164,16 @@ fn handle_connection(
                     eprintln!(
                         "Rust Device mutation route falling back before ownership: {error:#}"
                     );
+                }
+            }
+        }
+        if let Some(pairing_route) = routes.pairing.as_ref() {
+            match route_pairing_request(&request, &peer_ip, pairing_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    pairing_route.record_fallback();
+                    eprintln!("Rust Pairing route falling back before ownership: {error:#}");
                 }
             }
         }
@@ -225,9 +260,10 @@ fn write_service_unavailable(client: &mut TcpStream) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_connection, proxy_connection};
+    use super::{handle_connection, proxy_connection, FrontdoorRoutes};
     use crate::device_http::{DeviceMutationRouteConfig, DeviceRouteConfig};
     use crate::doctor_http::DoctorRouteConfig;
+    use crate::pairing_http::PairingRouteConfig;
     use crate::status_http::StatusRouteConfig;
     use std::fs;
     use std::io::{Read, Write};
@@ -351,8 +387,8 @@ mod tests {
         );
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
-            handle_connection(client, upstream_addr, Some(&status_route), None, None, None)
-                .unwrap();
+            let routes = FrontdoorRoutes::default().with_status(Some(status_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
@@ -396,8 +432,8 @@ mod tests {
             DoctorRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
-            handle_connection(client, upstream_addr, None, Some(&doctor_route), None, None)
-                .unwrap();
+            let routes = FrontdoorRoutes::default().with_doctor(Some(doctor_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
@@ -448,8 +484,8 @@ mod tests {
         let device_route = DeviceRouteConfig::new(invalid_data_dir.clone());
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
-            handle_connection(client, upstream_addr, None, None, Some(&device_route), None)
-                .unwrap();
+            let routes = FrontdoorRoutes::default().with_device(Some(device_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
@@ -520,15 +556,8 @@ mod tests {
         let mutation_route = DeviceMutationRouteConfig::new(data_dir.clone());
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
-            handle_connection(
-                client,
-                upstream_addr,
-                None,
-                None,
-                None,
-                Some(&mutation_route),
-            )
-            .unwrap();
+            let routes = FrontdoorRoutes::default().with_device_mutation(Some(mutation_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
@@ -556,6 +585,99 @@ mod tests {
             )
             .unwrap();
         assert!(revoked_at.is_none());
+        drop(database);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn pairing_decision_failure_rolls_back_without_replaying_to_node() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!(
+            "vibelink-pairing-no-replay-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"pairingToken":"PAIR","hostAllowlist":["bridge.test"]}"#,
+        )
+        .unwrap();
+        let database = rusqlite::Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE devices (
+                    id TEXT PRIMARY KEY, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL, last_seen_at TEXT, revoked_at TEXT,
+                    expires_at TEXT, rotated_at TEXT, meta_json TEXT
+                );
+                CREATE TABLE pairing_sessions (
+                    id TEXT PRIMARY KEY, code_hash TEXT NOT NULL, label TEXT, ip TEXT,
+                    user_agent TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL, approved_at TEXT, approved_by_device_id TEXT,
+                    claimed_at TEXT, device_id TEXT, meta_json TEXT
+                );
+                CREATE TABLE audit_log (cursor INTEGER PRIMARY KEY AUTOINCREMENT);",
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO devices (
+                    id, label, token_hash, created_at, last_seen_at, expires_at, meta_json
+                 ) VALUES ('device-admin', 'Admin', ?1, '2026-01-01T00:00:00.000Z',
+                           '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z', '{}')",
+                [crate::status_http::hash_token("admin-token")],
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO pairing_sessions (
+                    id, code_hash, label, status, created_at, expires_at, meta_json
+                 ) VALUES ('pairing-pending', 'hash', 'Phone', 'pending',
+                           '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z', '{}')",
+                [],
+            )
+            .unwrap();
+        drop(database);
+        let pairing_route = PairingRouteConfig::new(data_dir.clone());
+        let proxy_thread = thread::spawn(move || {
+            let (client, _) = frontend.accept().unwrap();
+            let routes = FrontdoorRoutes::default().with_pairing(Some(pairing_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
+        });
+
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client
+            .write_all(b"POST /api/pairing-sessions/pairing-pending/approve HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer admin-token\r\nContent-Length: 2\r\n\r\n{}")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(response.contains("X-VibeLink-Control-Plane: rust"));
+        proxy_thread.join().unwrap();
+        assert_eq!(
+            upstream.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        let database = rusqlite::Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
+        let status = database
+            .query_row(
+                "SELECT status FROM pairing_sessions WHERE id = 'pairing-pending'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
         drop(database);
         fs::remove_dir_all(data_dir).unwrap();
     }

@@ -30,7 +30,8 @@
 - [x] Verify transparent HTTP, SSE, WebSocket, authentication, and shutdown parity.
 - [x] Migrate direct `/api/status` HTTP ownership behind a rollback flag.
 - [x] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
-- [ ] Migrate pairing and device routes.
+- [x] Migrate read-only `GET /api/devices` ownership behind an independent Rust flag.
+- [ ] Migrate pairing and audited device mutation routes.
 - [ ] Migrate settings and audit routes.
 - [ ] Migrate workspace and tool routes.
 - [ ] Migrate task and live-call routes.

@@ -64,7 +64,11 @@ pub fn route_device_request(
     config.metrics.record_response();
     Ok(Some(HttpRouteResponse {
         status: 200,
-        body: json!({ "items": items, "currentDeviceId": current_device_id }),
+        body: json!({
+            "items": items,
+            "currentDeviceId": current_device_id,
+            "controlPlaneRuntime": { "devicesHttp": config.metrics.value() }
+        }),
     }))
 }
 
@@ -323,6 +327,19 @@ mod tests {
             json!({ "id": "device-current", "meta": { "platform": "android" } })
         );
         assert_eq!(filtered.body["currentDeviceId"], "device-current");
+        assert_eq!(
+            filtered.body["controlPlaneRuntime"]["devicesHttp"],
+            json!({
+                "implementation": "rust",
+                "attempts": 4,
+                "responses": 4,
+                "fallbacks": 0,
+                "failures": 0,
+                "hostDenied": 1,
+                "unauthorized": 1,
+                "pending": 0
+            })
+        );
 
         fs::remove_dir_all(data_dir).unwrap();
     }

@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str;
@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_INTERNAL_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HEADERS: usize = 64;
 
 #[derive(Debug)]
@@ -409,11 +410,35 @@ fn fetch_status_snapshot(host: &str, config: &StatusRouteConfig) -> Result<Value
     if !host.is_empty() {
         request = request.set("X-VibeLink-Original-Host", host);
     }
-    request
+    let response = request
         .call()
-        .context("Internal Status snapshot request failed")?
-        .into_json::<Value>()
-        .context("Internal Status snapshot is not valid JSON")
+        .context("Internal Status snapshot request failed")?;
+    read_internal_json(response, "Status snapshot")
+}
+
+pub(crate) fn read_internal_json(response: ureq::Response, label: &str) -> Result<Value> {
+    if response
+        .header("Content-Length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > MAX_INTERNAL_JSON_BYTES)
+    {
+        bail!("Internal {label} exceeds {MAX_INTERNAL_JSON_BYTES} bytes");
+    }
+    read_json_bounded(response.into_reader(), MAX_INTERNAL_JSON_BYTES)
+        .with_context(|| format!("Internal {label} is not valid bounded JSON"))
+}
+
+fn read_json_bounded(mut reader: impl Read, max_bytes: usize) -> Result<Value> {
+    let mut body = Vec::new();
+    reader
+        .by_ref()
+        .take((max_bytes + 1) as u64)
+        .read_to_end(&mut body)
+        .context("Cannot read internal JSON response")?;
+    if body.len() > max_bytes {
+        bail!("Internal JSON response exceeds {max_bytes} bytes");
+    }
+    serde_json::from_slice(&body).context("Internal response is not valid JSON")
 }
 
 pub fn hash_token(token: &str) -> String {
@@ -455,13 +480,13 @@ pub fn authenticate_device(
 #[cfg(test)]
 mod tests {
     use super::{
-        authenticate_device, hash_token, is_host_allowed, parse_request, route_status_request,
-        AuthResult, StatusRouteConfig, MAX_HEADER_BYTES,
+        authenticate_device, hash_token, is_host_allowed, parse_request, read_json_bounded,
+        route_status_request, AuthResult, StatusRouteConfig, MAX_HEADER_BYTES,
     };
     use rusqlite::{params, Connection};
     use serde_json::json;
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{Cursor, Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::thread;
@@ -524,6 +549,15 @@ mod tests {
         let oversized = vec![b'a'; MAX_HEADER_BYTES + 1];
         assert!(parse_request(&oversized).is_err());
         assert!(parse_request(b"GET /api/status HTTP/1.1\r\nHost").is_err());
+    }
+
+    #[test]
+    fn bounds_internal_json_before_deserialization() {
+        let parsed = read_json_bounded(Cursor::new(br#"{"ok":true}"#), 64).unwrap();
+        assert_eq!(parsed, json!({ "ok": true }));
+
+        let error = read_json_bounded(Cursor::new(vec![b' '; 65]), 64).unwrap_err();
+        assert!(error.to_string().contains("exceeds 64 bytes"));
     }
 
     #[test]

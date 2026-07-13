@@ -202,23 +202,23 @@ impl StatusRouteConfig {
     }
 
     fn record_response(&self) {
-        self.metrics.responses.fetch_add(1, Ordering::Relaxed);
+        self.metrics.responses.fetch_add(1, Ordering::SeqCst);
     }
 
     pub(crate) fn record_fallback(&self) {
-        self.metrics.fallbacks.fetch_add(1, Ordering::Relaxed);
-        self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+        self.metrics.fallbacks.fetch_add(1, Ordering::SeqCst);
+        self.metrics.failures.fetch_add(1, Ordering::SeqCst);
     }
 
     fn metrics_value(&self) -> Value {
         json!({
             "implementation": "rust",
-            "attempts": self.metrics.attempts.load(Ordering::Relaxed),
-            "responses": self.metrics.responses.load(Ordering::Relaxed),
-            "fallbacks": self.metrics.fallbacks.load(Ordering::Relaxed),
-            "failures": self.metrics.failures.load(Ordering::Relaxed),
-            "hostDenied": self.metrics.host_denied.load(Ordering::Relaxed),
-            "unauthorized": self.metrics.unauthorized.load(Ordering::Relaxed),
+            "attempts": self.metrics.attempts.load(Ordering::SeqCst),
+            "responses": self.metrics.responses.load(Ordering::SeqCst),
+            "fallbacks": self.metrics.fallbacks.load(Ordering::SeqCst),
+            "failures": self.metrics.failures.load(Ordering::SeqCst),
+            "hostDenied": self.metrics.host_denied.load(Ordering::SeqCst),
+            "unauthorized": self.metrics.unauthorized.load(Ordering::SeqCst),
             "pending": 0
         })
     }
@@ -249,7 +249,7 @@ impl StatusRouteResponse {
         };
         write!(
             writer,
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n\r\n",
             self.status,
             reason,
             body.len()
@@ -306,10 +306,10 @@ pub fn route_status_request(
         return Ok(None);
     }
 
-    config.metrics.attempts.fetch_add(1, Ordering::Relaxed);
+    config.metrics.attempts.fetch_add(1, Ordering::SeqCst);
 
     if !is_host_allowed(request.host(), &settings.host_allowlist) {
-        config.metrics.host_denied.fetch_add(1, Ordering::Relaxed);
+        config.metrics.host_denied.fetch_add(1, Ordering::SeqCst);
         config.record_response();
         return Ok(Some(StatusRouteResponse::error(
             403,
@@ -323,7 +323,7 @@ pub fn route_status_request(
         .context("Cannot authenticate Status request")?
         == AuthResult::Unauthorized
     {
-        config.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
+        config.metrics.unauthorized.fetch_add(1, Ordering::SeqCst);
         config.record_response();
         return Ok(Some(StatusRouteResponse::error(401, "Unauthorized")));
     }
@@ -670,13 +670,13 @@ mod tests {
 
         let anonymous =
             parse_request(b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
-        assert_eq!(
-            route_status_request(&anonymous, &config)
-                .unwrap()
-                .unwrap()
-                .status,
-            401
-        );
+        let anonymous_response = route_status_request(&anonymous, &config).unwrap().unwrap();
+        assert_eq!(anonymous_response.status, 401);
+        let mut anonymous_wire = Vec::new();
+        anonymous_response.write_to(&mut anonymous_wire).unwrap();
+        assert!(String::from_utf8(anonymous_wire)
+            .unwrap()
+            .contains("\r\nX-VibeLink-Control-Plane: rust\r\n"));
 
         let authenticated = parse_request(
             b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer active-token\r\n\r\n",

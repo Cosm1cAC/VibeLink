@@ -104,7 +104,11 @@ async function request(baseUrl, pathname, { method = "GET", token = "", body } =
     signal: AbortSignal.timeout(30000)
   });
   const text = await response.text();
-  return { status: response.status, payload: text ? JSON.parse(text) : null };
+  return {
+    status: response.status,
+    implementation: response.headers.get("x-vibelink-control-plane") || "",
+    payload: text ? JSON.parse(text) : null
+  };
 }
 
 async function waitForRustStatus(baseUrl, token, afterAttempts = -1) {
@@ -124,10 +128,11 @@ async function exerciseRustDenial(baseUrl, token, baseline) {
   let runtime = baseline;
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const anonymous = await request(baseUrl, "/api/status");
-    runtime = await waitForRustStatus(baseUrl, token, runtime.attempts);
-    if (anonymous.status === 401 && runtime.unauthorized > baseline.unauthorized) {
+    if (anonymous.status === 401 && anonymous.implementation === "rust") {
+      runtime = await waitForRustStatus(baseUrl, token, runtime.attempts);
       return { anonymous, runtime };
     }
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Rust did not own an anonymous Status denial before the canary deadline");
 }
@@ -195,7 +200,7 @@ async function main() {
       { name: "proxied login", pass: login.status === 200, detail: `status=${login.status}` },
       { name: "Rust Status ownership", pass: runtime.implementation === "rust" && runtime.attempts - denial.runtime.attempts === 3 && runtime.responses === runtime.attempts, detail: `authenticated direct=${runtime.attempts - denial.runtime.attempts}, attempts=${runtime.attempts}, responses=${runtime.responses}` },
       { name: "Rust Status fallback", pass: runtime.fallbacks === 0 && runtime.failures === 0 && runtime.pending === 0, detail: `fallbacks=${runtime.fallbacks}, failures=${runtime.failures}` },
-      { name: "Rust Status denial", pass: denial.anonymous.status === 401 && denial.runtime.unauthorized - baseline.unauthorized === 1, detail: `status=${denial.anonymous.status}, unauthorized delta=${denial.runtime.unauthorized - baseline.unauthorized}` },
+      { name: "Rust Status denial", pass: denial.anonymous.status === 401 && denial.anonymous.implementation === "rust" && denial.runtime.unauthorized - baseline.unauthorized === 1, detail: `status=${denial.anonymous.status}, implementation=${denial.anonymous.implementation || "node"}, unauthorized delta=${denial.runtime.unauthorized - baseline.unauthorized}` },
       { name: "Node Doctor forwarding", pass: doctor.status === 200 && Array.isArray(doctor.payload?.checks), detail: `status=${doctor.status}, checks=${doctor.payload?.checks?.length || 0}` },
       { name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` }
     ];

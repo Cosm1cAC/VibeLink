@@ -23,6 +23,7 @@ use std::{
 };
 
 mod audio_pipeline_sidecar;
+mod audit_http;
 mod compression_sidecar;
 mod device_http;
 mod doctor_http;
@@ -73,6 +74,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_pairing_http: bool,
+
+    #[arg(long, global = true)]
+    rust_audit_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2402,6 +2406,10 @@ fn rust_pairing_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_pairing_http
 }
 
+fn rust_audit_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_audit_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -2458,9 +2466,11 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| device_http::DeviceRouteConfig::new(route_data_dir.clone()));
     let device_mutation_route = rust_device_mutations_http_enabled(cli)
         .then(|| device_http::DeviceMutationRouteConfig::new(route_data_dir.clone()));
+    let audit_route = rust_audit_http_enabled(cli)
+        .then(|| audit_http::AuditRouteConfig::new(route_data_dir.clone()));
     let pairing_route = if rust_pairing_http_enabled(cli) {
         Some(
-            pairing_http::PairingRouteConfig::new(route_data_dir).with_internal_settings(
+            pairing_http::PairingRouteConfig::new(route_data_dir.clone()).with_internal_settings(
                 upstream,
                 internal_token
                     .clone()
@@ -2481,6 +2491,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_doctor(doctor_route)
         .with_device(device_route)
         .with_device_mutation(device_mutation_route)
+        .with_audit(audit_route)
         .with_pairing(pairing_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
     if node
@@ -2663,6 +2674,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_pairing_http {
         command.arg("--rust-pairing-http");
+    }
+    if cli.rust_audit_http {
+        command.arg("--rust-audit-http");
     }
     command
         .arg("bridge")
@@ -3002,6 +3016,24 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-pairing-http", "bridge"]).unwrap();
         assert!(pairing_only.rust_pairing_http);
         assert!(!rust_pairing_http_enabled(&pairing_only));
+    }
+
+    #[test]
+    fn rust_audit_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-audit-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_audit_http);
+        assert!(rust_audit_http_enabled(&enabled));
+
+        let audit_only =
+            Cli::try_parse_from(["vibelink", "--rust-audit-http", "bridge"]).unwrap();
+        assert!(audit_only.rust_audit_http);
+        assert!(!rust_audit_http_enabled(&audit_only));
     }
 
     #[test]

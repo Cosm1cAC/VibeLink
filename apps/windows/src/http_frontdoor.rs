@@ -1,3 +1,4 @@
+use crate::audit_http::{route_audit_request, AuditRouteConfig};
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
     DeviceRouteConfig,
@@ -29,6 +30,7 @@ pub struct FrontdoorRoutes {
     doctor: Option<DoctorRouteConfig>,
     device: Option<DeviceRouteConfig>,
     device_mutation: Option<DeviceMutationRouteConfig>,
+    audit: Option<AuditRouteConfig>,
     pairing: Option<PairingRouteConfig>,
 }
 
@@ -53,6 +55,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_audit(mut self, route: Option<AuditRouteConfig>) -> Self {
+        self.audit = route;
+        self
+    }
+
     pub fn with_pairing(mut self, route: Option<PairingRouteConfig>) -> Self {
         self.pairing = route;
         self
@@ -63,6 +70,7 @@ impl FrontdoorRoutes {
             && self.doctor.is_none()
             && self.device.is_none()
             && self.device_mutation.is_none()
+            && self.audit.is_none()
             && self.pairing.is_none()
     }
 }
@@ -168,6 +176,16 @@ fn handle_connection(
                     eprintln!(
                         "Rust Device mutation route falling back before ownership: {error:#}"
                     );
+                }
+            }
+        }
+        if let Some(audit_route) = routes.audit.as_ref() {
+            match route_audit_request(&request, &peer_ip, audit_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    audit_route.record_fallback();
+                    eprintln!("Rust Audit route falling back to Node: {error:#}");
                 }
             }
         }
@@ -322,6 +340,7 @@ fn write_service_unavailable(client: &mut TcpStream) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{handle_connection, proxy_connection, read_request_body, FrontdoorRoutes};
+    use crate::audit_http::AuditRouteConfig;
     use crate::device_http::{DeviceMutationRouteConfig, DeviceRouteConfig};
     use crate::doctor_http::DoctorRouteConfig;
     use crate::pairing_http::PairingRouteConfig;
@@ -511,7 +530,15 @@ mod tests {
 
         let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let frontend_addr = frontend.local_addr().unwrap();
-        let missing_data_dir = std::path::PathBuf::from("Z:/vibelink-doctor-http-missing");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let missing_data_dir = std::env::temp_dir().join(format!(
+            "vibelink-doctor-http-missing-{}-{nonce}",
+            std::process::id()
+        ));
+        assert!(!missing_data_dir.exists());
         let doctor_route =
             DoctorRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
         let proxy_thread = thread::spawn(move || {
@@ -575,6 +602,59 @@ mod tests {
         let mut client = TcpStream::connect(frontend_addr).unwrap();
         client
             .write_all(b"GET /api/devices HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        );
+        proxy_thread.join().unwrap();
+        upstream_thread.join().unwrap();
+        fs::remove_dir_all(invalid_data_dir).unwrap();
+    }
+
+    #[test]
+    fn audit_route_failure_replays_the_original_request_to_node() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            assert_eq!(
+                request,
+                b"GET /api/audit-log?limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
+                .unwrap();
+        });
+
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let invalid_data_dir = std::env::temp_dir().join(format!(
+            "vibelink-audit-http-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&invalid_data_dir).unwrap();
+        fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
+        let audit_route = AuditRouteConfig::new(invalid_data_dir.clone());
+        let proxy_thread = thread::spawn(move || {
+            let (client, _) = frontend.accept().unwrap();
+            let routes = FrontdoorRoutes::default().with_audit(Some(audit_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
+        });
+
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client
+            .write_all(b"GET /api/audit-log?limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
             .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut response = Vec::new();

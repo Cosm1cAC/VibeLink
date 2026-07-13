@@ -49,7 +49,7 @@
 - [x] Migrate pairing status/list/approve/deny routes.
 - [x] Migrate pairing create/claim routes with bounded JSON bodies and one-time token safety.
 - [ ] Migrate settings read, validation, dry-run, and mutation routes.
-- [ ] Migrate audit-log read, pagination, and field-projection routes.
+- [x] Migrate audit-log read, bounded pagination, and field-projection routes.
 - [ ] Migrate workspace read/tree and registry routes.
 - [ ] Migrate approvals, commands, Git actions, and tool-run routes.
 - [ ] Migrate tool-event and unified-event SSE streams.

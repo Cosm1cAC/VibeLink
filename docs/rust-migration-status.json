@@ -184,6 +184,27 @@
       "nextAction": "完整本地 release canary 已通过 Rust create/status/list/approve/claim；远端 CI、便携包与公网拒绝路径通过后保持 opt-in，下一 route family 为 settings/audit。"
     },
     {
+      "id": "audit-http-route",
+      "title": "Audit Log 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-audit-http"
+      ],
+      "nodeEntry": "src/server.js#/api/audit-log",
+      "rustEntry": "apps/windows/src/audit_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-audit-http bridge",
+      "fallback": "初始化、鉴权存储、拒绝审计或读取失败可完整回放 Node；Rust 成功写入拒绝审计后直接返回 401/403",
+      "tests": [
+        "apps/windows/src/audit_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0007-rust-audit-http-route.md"
+      ],
+      "nextAction": "本地 release canary 已通过拒绝审计、严格 after、limit 和 fields；等待远端 CI、便携包与公网拒绝路径证据。"
+    },
+    {
       "id": "mcp-session-sidecar",
       "title": "MCP 持久 stdio 会话",
       "priority": "P1",

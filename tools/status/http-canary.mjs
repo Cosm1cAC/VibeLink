@@ -58,7 +58,7 @@ function writeSettings(dataDir, port, pairingToken) {
   }, null, 2)}\n`, "utf8");
 }
 
-function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp) {
+function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp) {
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
@@ -69,6 +69,7 @@ function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMuta
   if (devicesHttp) args.push("--rust-devices-http");
   if (deviceMutationsHttp) args.push("--rust-device-mutations-http");
   if (pairingHttp) args.push("--rust-pairing-http");
+  if (auditHttp) args.push("--rust-audit-http");
   args.push("bridge");
   const child = spawn(command, args, {
     cwd: rootDir,
@@ -191,8 +192,9 @@ async function main() {
   const devicesHttp = process.argv.includes("--devices-http");
   const deviceMutationsHttp = process.argv.includes("--device-mutations-http");
   const pairingHttp = process.argv.includes("--pairing-http");
+  const auditHttp = process.argv.includes("--audit-http");
   writeSettings(dataDir, port, pairingToken);
-  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp);
+  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp);
   const baseUrl = `http://127.0.0.1:${port}`;
   let shutdown = null;
 
@@ -317,6 +319,22 @@ async function main() {
         pairingAudit
       };
     }
+    let auditEvidence = null;
+    if (auditHttp) {
+      const anonymousAudit = await request(baseUrl, "/api/audit-log?limit=1");
+      const firstPage = await request(
+        baseUrl,
+        "/api/audit-log?after=0&limit=1&fields=cursor,type,ip,path,success,reason,meta",
+        { token: activeToken }
+      );
+      const cursor = firstPage.payload?.items?.[0]?.cursor || 0;
+      const afterPage = await request(
+        baseUrl,
+        `/api/audit-log?after=${encodeURIComponent(cursor)}&limit=1`,
+        { token: activeToken }
+      );
+      auditEvidence = { anonymousAudit, firstPage, afterPage, cursor };
+    }
     const doctorAnonymous = doctorHttp ? await request(baseUrl, "/api/doctor") : null;
     const doctor = await request(baseUrl, "/api/doctor", { token: activeToken });
     const doctorRuntime = doctor.payload?.controlPlaneRuntime?.doctorHttp || {};
@@ -392,11 +410,19 @@ async function main() {
         { name: "Pairing audit continuity", pass: pairingEvidence?.pairingAudit?.status === 200 && Boolean(approveAudit?.deviceId) && Boolean(claimAudit?.deviceId), detail: `approve=${Boolean(approveAudit)}, claim=${Boolean(claimAudit)}` }
       );
     }
+    if (auditHttp) {
+      const first = auditEvidence?.firstPage?.payload?.items?.[0] || {};
+      checks.push(
+        { name: "Rust Audit denial", pass: auditEvidence?.anonymousAudit?.status === 401 && auditEvidence.anonymousAudit.implementation === "rust", detail: `status=${auditEvidence?.anonymousAudit?.status || 0}, implementation=${auditEvidence?.anonymousAudit?.implementation || "node"}` },
+        { name: "Rust Audit ownership", pass: auditEvidence?.firstPage?.status === 200 && auditEvidence.firstPage.implementation === "rust" && first.type === "auth.failed" && first.path === "/api/audit-log" && first.success === false && Number(first.cursor) > 0, detail: `status=${auditEvidence?.firstPage?.status || 0}, type=${first.type || "missing"}, cursor=${first.cursor || 0}` },
+        { name: "Rust Audit cursor and fields", pass: auditEvidence?.afterPage?.status === 200 && auditEvidence.afterPage.implementation === "rust" && Array.isArray(auditEvidence.afterPage.payload?.items) && auditEvidence.afterPage.payload.items.length === 0 && Object.keys(first).every((key) => ["cursor", "type", "ip", "path", "success", "reason", "meta"].includes(key)), detail: `after=${auditEvidence?.cursor || 0}, items=${auditEvidence?.afterPage?.payload?.items?.length ?? -1}, fields=${Object.keys(first).join(",") || "missing"}` }
+      );
+    }
     checks.push({ name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` });
     const result = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : "", pairingHttp ? "/api/pairing-sessions*" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
+      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : "", pairingHttp ? "/api/pairing-sessions*" : "", auditHttp ? "/api/audit-log" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
       runtime,
       doctorRuntime: doctorHttp ? doctorRuntime : undefined,
       deviceMutations: deviceMutationsHttp ? {
@@ -408,6 +434,11 @@ async function main() {
         publicStatus: pairingEvidence?.pending?.payload?.session?.status || "",
         approved: pairingEvidence?.approved?.payload?.session?.status === "approved",
         claimed: pairingEvidence?.claimedStatus?.payload?.session?.status === "claimed"
+      } : undefined,
+      audit: auditHttp ? {
+        denied: auditEvidence?.anonymousAudit?.status === 401,
+        cursor: auditEvidence?.cursor || 0,
+        strictAfter: auditEvidence?.afterPage?.payload?.items?.length === 0
       } : undefined,
       shutdown,
       checks,

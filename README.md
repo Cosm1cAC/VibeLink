@@ -102,7 +102,7 @@ Live Call Assistant
 
 ## Rust 化性能架构
 
-VibeLink 正从 Node control plane + Rust data plane 的混合架构迁移为 Rust 桌面服务。Workspace、MCP 和 Event Store 已进入 `canary`；Status、Doctor、Devices、设备令牌写操作和完整配对生命周期已有独立 Rust HTTP 开关。迁移期间保留 Node/Worker 回退，只有全部产品职责完成 Rust 所有权和观察窗口后才移除捆绑 Node。Audio/Compression 的旧性能 sidecar 因没有测得收益保持 `contract`，但实时通话等产品职责仍在全量迁移范围内。
+VibeLink 正从 Node control plane + Rust data plane 的混合架构迁移为 Rust 桌面服务。Workspace、MCP 和 Event Store 已进入 `canary`；Status、Doctor、Devices、设备令牌写操作、完整配对生命周期和 Audit Log 已有独立 Rust HTTP 开关。迁移期间保留 Node/Worker 回退，只有全部产品职责完成 Rust 所有权和观察窗口后才移除捆绑 Node。Audio/Compression 的旧性能 sidecar 因没有测得收益保持 `contract`，但实时通话等产品职责仍在全量迁移范围内。
 
 Windows portable 包可用 `vibelink.exe --rust-canary`（或 `start-vibelink-canary.cmd`）显式启用当前 Status、Workspace、MCP 和 Event Store canary。普通 `vibelink.exe` 保持保守默认值，不会自动开启实验路径。
 

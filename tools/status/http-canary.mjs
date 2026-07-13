@@ -41,6 +41,7 @@ function writeSettings(dataDir, port, pairingToken) {
     host: "127.0.0.1",
     port,
     pairingToken,
+    allowLegacyPairingTokenLogin: true,
     defaultCwd: rootDir,
     allowedRoots: [rootDir],
     hostAllowlist: [],
@@ -57,7 +58,7 @@ function writeSettings(dataDir, port, pairingToken) {
   }, null, 2)}\n`, "utf8");
 }
 
-function startServer(dataDir, port, command, doctorHttp, devicesHttp) {
+function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp) {
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
@@ -66,6 +67,7 @@ function startServer(dataDir, port, command, doctorHttp, devicesHttp) {
   ];
   if (doctorHttp) args.push("--rust-doctor-http");
   if (devicesHttp) args.push("--rust-devices-http");
+  if (deviceMutationsHttp) args.push("--rust-device-mutations-http");
   args.push("bridge");
   const child = spawn(command, args, {
     cwd: rootDir,
@@ -114,6 +116,12 @@ async function request(baseUrl, pathname, { method = "GET", token = "", body } =
   return {
     status: response.status,
     implementation: response.headers.get("x-vibelink-control-plane") || "",
+    rateLimit: {
+      limit: response.headers.get("x-ratelimit-limit") || "",
+      remaining: response.headers.get("x-ratelimit-remaining") || "",
+      reset: response.headers.get("x-ratelimit-reset") || "",
+      retryAfter: response.headers.get("retry-after") || ""
+    },
     payload: text ? JSON.parse(text) : null
   };
 }
@@ -180,8 +188,9 @@ async function main() {
   const pairingToken = crypto.randomBytes(24).toString("hex");
   const doctorHttp = process.argv.includes("--doctor-http");
   const devicesHttp = process.argv.includes("--devices-http");
+  const deviceMutationsHttp = process.argv.includes("--device-mutations-http");
   writeSettings(dataDir, port, pairingToken);
-  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp);
+  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp);
   const baseUrl = `http://127.0.0.1:${port}`;
   let shutdown = null;
 
@@ -202,19 +211,79 @@ async function main() {
     for (let index = 0; index < 3; index += 1) {
       runtime = await waitForRustStatus(baseUrl, login.payload.token, runtime.attempts);
     }
+    let activeToken = login.payload.token;
+    let mutationEvidence = null;
+    if (deviceMutationsHttp) {
+      const secondLogin = await request(baseUrl, "/api/login", {
+        method: "POST",
+        body: { pairingToken, deviceLabel: "device-mutation-target" }
+      });
+      if (secondLogin.status !== 200 || !secondLogin.payload?.device?.id) {
+        throw new Error(`second login failed: ${secondLogin.status} ${JSON.stringify(secondLogin.payload)}`);
+      }
+      const anonymousMutation = await request(baseUrl, "/api/devices/current/rotate", {
+        method: "POST",
+        body: {}
+      });
+      const originalToken = activeToken;
+      const rotations = [];
+      for (let index = 0; index < 6; index += 1) {
+        const rotation = await request(baseUrl, "/api/devices/current/rotate", {
+          method: "POST",
+          token: activeToken,
+          body: {}
+        });
+        rotations.push(rotation);
+        if (rotation.status !== 200 || !rotation.payload?.token) break;
+        activeToken = rotation.payload.token;
+      }
+      const rateDenied = await request(baseUrl, "/api/devices/current/rotate", {
+        method: "POST",
+        token: activeToken,
+        body: {}
+      });
+      const oldTokenStatus = await request(baseUrl, "/api/status", { token: originalToken });
+      const activeTokenStatus = await request(baseUrl, "/api/status", { token: activeToken });
+      const revoke = await request(baseUrl, `/api/devices/${encodeURIComponent(secondLogin.payload.device.id)}/revoke`, {
+        method: "POST",
+        token: activeToken,
+        body: {}
+      });
+      const revokeAgain = await request(baseUrl, `/api/devices/${encodeURIComponent(secondLogin.payload.device.id)}/revoke`, {
+        method: "POST",
+        token: activeToken,
+        body: {}
+      });
+      const mutationAudit = await request(
+        baseUrl,
+        "/api/audit-log?limit=40&fields=type,target,deviceId,path,success,reason",
+        { token: activeToken }
+      );
+      mutationEvidence = {
+        secondLogin,
+        anonymousMutation,
+        rotations,
+        rateDenied,
+        oldTokenStatus,
+        activeTokenStatus,
+        revoke,
+        revokeAgain,
+        mutationAudit
+      };
+    }
     const doctorAnonymous = doctorHttp ? await request(baseUrl, "/api/doctor") : null;
-    const doctor = await request(baseUrl, "/api/doctor", { token: login.payload.token });
+    const doctor = await request(baseUrl, "/api/doctor", { token: activeToken });
     const doctorRuntime = doctor.payload?.controlPlaneRuntime?.doctorHttp || {};
     const doctorToolRun = doctorHttp && doctor.payload?.toolRunId
-      ? await request(baseUrl, `/api/tool-runs/${encodeURIComponent(doctor.payload.toolRunId)}`, { token: login.payload.token })
+      ? await request(baseUrl, `/api/tool-runs/${encodeURIComponent(doctor.payload.toolRunId)}`, { token: activeToken })
       : null;
     const audit = doctorHttp
-      ? await request(baseUrl, "/api/audit-log?limit=20&fields=type,target,deviceId,path", { token: login.payload.token })
+      ? await request(baseUrl, "/api/audit-log?limit=20&fields=type,target,deviceId,path", { token: activeToken })
       : null;
     const devicesAnonymous = devicesHttp ? await request(baseUrl, "/api/devices") : null;
-    const devices = devicesHttp ? await request(baseUrl, "/api/devices", { token: login.payload.token }) : null;
+    const devices = devicesHttp ? await request(baseUrl, "/api/devices", { token: activeToken }) : null;
     const devicesFiltered = devicesHttp
-      ? await request(baseUrl, "/api/devices?fields=id,label", { token: login.payload.token })
+      ? await request(baseUrl, "/api/devices?fields=id,label", { token: activeToken })
       : null;
     shutdown = await stopServer(server);
     const checks = [
@@ -246,13 +315,33 @@ async function main() {
         { name: "Rust Devices fallback", pass: devicesRuntime.attempts === 3 && devicesRuntime.responses === 3 && devicesRuntime.fallbacks === 0 && devicesRuntime.failures === 0 && devicesRuntime.pending === 0, detail: `attempts=${devicesRuntime.attempts}, responses=${devicesRuntime.responses}, fallbacks=${devicesRuntime.fallbacks}, failures=${devicesRuntime.failures}` }
       );
     }
+    if (deviceMutationsHttp) {
+      const rotations = mutationEvidence?.rotations || [];
+      const auditItems = mutationEvidence?.mutationAudit?.payload?.items || [];
+      const rotateAudits = auditItems.filter((item) => item.type === "device.rotate" && item.success === true);
+      const rateAudit = auditItems.find((item) => item.type === "rate_limit" && item.reason === "device.rotate");
+      const revokeAudits = auditItems.filter((item) => item.type === "device.revoke" && item.target === mutationEvidence?.secondLogin?.payload?.device?.id);
+      checks.push(
+        { name: "Rust Device mutation denial", pass: mutationEvidence?.anonymousMutation?.status === 401 && mutationEvidence.anonymousMutation.implementation === "rust", detail: `status=${mutationEvidence?.anonymousMutation?.status || 0}, implementation=${mutationEvidence?.anonymousMutation?.implementation || "node"}` },
+        { name: "Rust Device rotation ownership", pass: rotations.length === 6 && rotations.every((item) => item.status === 200 && item.implementation === "rust" && /^[0-9a-f]{64}$/.test(item.payload?.token || "")), detail: `successful=${rotations.filter((item) => item.status === 200).length}, rust=${rotations.filter((item) => item.implementation === "rust").length}` },
+        { name: "Device token replacement", pass: mutationEvidence?.oldTokenStatus?.status === 401 && mutationEvidence?.oldTokenStatus?.implementation === "rust" && mutationEvidence?.activeTokenStatus?.status === 200, detail: `old=${mutationEvidence?.oldTokenStatus?.status || 0}, active=${mutationEvidence?.activeTokenStatus?.status || 0}` },
+        { name: "Device rotation rate limit", pass: mutationEvidence?.rateDenied?.status === 429 && mutationEvidence.rateDenied.implementation === "rust" && mutationEvidence.rateDenied.rateLimit.limit === "6" && Boolean(mutationEvidence.rateDenied.rateLimit.retryAfter), detail: `status=${mutationEvidence?.rateDenied?.status || 0}, remaining=${mutationEvidence?.rateDenied?.rateLimit?.remaining || "missing"}, retryAfter=${mutationEvidence?.rateDenied?.rateLimit?.retryAfter || "missing"}` },
+        { name: "Rust Device revoke idempotence", pass: mutationEvidence?.revoke?.status === 200 && mutationEvidence.revoke.implementation === "rust" && mutationEvidence.revoke.payload?.ok === true && mutationEvidence?.revokeAgain?.status === 200 && mutationEvidence.revokeAgain.payload?.ok === false, detail: `first=${mutationEvidence?.revoke?.payload?.ok}, second=${mutationEvidence?.revokeAgain?.payload?.ok}` },
+        { name: "Device mutation audit", pass: mutationEvidence?.mutationAudit?.status === 200 && rotateAudits.length === 6 && Boolean(rateAudit) && revokeAudits.length === 2, detail: `rotate=${rotateAudits.length}, rateLimit=${Boolean(rateAudit)}, revoke=${revokeAudits.length}` }
+      );
+    }
     checks.push({ name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` });
     const result = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
+      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
       runtime,
       doctorRuntime: doctorHttp ? doctorRuntime : undefined,
+      deviceMutations: deviceMutationsHttp ? {
+        rotations: mutationEvidence?.rotations?.length || 0,
+        rateLimited: mutationEvidence?.rateDenied?.status === 429,
+        revokeIdempotent: mutationEvidence?.revoke?.payload?.ok === true && mutationEvidence?.revokeAgain?.payload?.ok === false
+      } : undefined,
       shutdown,
       checks,
       passed: checks.every((check) => check.pass)

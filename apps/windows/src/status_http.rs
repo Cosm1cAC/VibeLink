@@ -117,7 +117,7 @@ pub fn parse_request(bytes: &[u8]) -> Result<ParsedRequest, String> {
     })
 }
 
-fn clean_host(value: &str) -> String {
+pub(crate) fn clean_host(value: &str) -> String {
     let mut host = value.trim().to_ascii_lowercase();
     if let Some(value) = host
         .strip_prefix("http://")
@@ -228,6 +228,10 @@ impl RouteMetrics {
         self.failures.fetch_add(1, Ordering::SeqCst);
     }
 
+    pub(crate) fn record_failure(&self) {
+        self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub(crate) fn record_host_denied(&self) {
         self.host_denied.fetch_add(1, Ordering::SeqCst);
     }
@@ -277,6 +281,7 @@ impl StatusRouteConfig {
 pub struct HttpRouteResponse {
     pub status: u16,
     pub body: Value,
+    headers: Vec<(String, String)>,
 }
 
 impl HttpRouteResponse {
@@ -284,7 +289,29 @@ impl HttpRouteResponse {
         Self {
             status,
             body: json!({ "error": message }),
+            headers: Vec::new(),
         }
+    }
+
+    pub(crate) fn json(status: u16, body: Value) -> Self {
+        Self {
+            status,
+            body,
+            headers: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     pub fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
@@ -292,17 +319,30 @@ impl HttpRouteResponse {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let reason = match self.status {
             200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
             401 => "Unauthorized",
             403 => "Forbidden",
+            404 => "Not Found",
+            409 => "Conflict",
+            410 => "Gone",
+            413 => "Content Too Large",
+            428 => "Precondition Required",
+            429 => "Too Many Requests",
+            503 => "Service Unavailable",
             _ => "Internal Server Error",
         };
         write!(
             writer,
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n",
             self.status,
             reason,
             body.len()
         )?;
+        for (name, value) in &self.headers {
+            write!(writer, "{name}: {value}\r\n")?;
+        }
+        write!(writer, "\r\n")?;
         writer.write_all(&body)?;
         writer.flush()
     }
@@ -349,7 +389,7 @@ pub fn route_status_request(
         .context("Rendered Status controlPlaneRuntime must be an object")?;
     config.record_response();
     runtime.insert("statusHttp".to_string(), config.metrics_value());
-    Ok(Some(HttpRouteResponse { status: 200, body }))
+    Ok(Some(HttpRouteResponse::json(200, body)))
 }
 
 pub(crate) fn authenticate_route_request(

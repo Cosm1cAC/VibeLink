@@ -45,6 +45,16 @@
 - [ ] Add Rust task/live-call ownership with provider boundary parity.
 - [ ] Make Rust the default bridge server and keep Node as explicit rollback.
 - [ ] Remove Node runtime from the portable package after observation and recovery evidence.
+- [x] Migrate audited device mutation routes with transaction-bound fallback semantics.
+- [ ] Migrate pairing create/status/claim/approve/deny routes.
+- [ ] Migrate settings read, validation, dry-run, and mutation routes.
+- [ ] Migrate audit-log read, pagination, and field-projection routes.
+- [ ] Migrate workspace read/tree and registry routes.
+- [ ] Migrate approvals, commands, Git actions, and tool-run routes.
+- [ ] Migrate tool-event and unified-event SSE streams.
+- [ ] Migrate task, history, and terminal routes.
+- [ ] Migrate provider-process ownership out of Node.
+- [ ] Migrate live-call HTTP and WebSocket/audio routes.
 
 ## Retirement And Desktop Release
 

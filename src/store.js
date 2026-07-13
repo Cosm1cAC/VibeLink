@@ -530,7 +530,7 @@ function readTailText(filePath, limit) {
   if (!limit || limit <= 0) return fs.readFileSync(filePath, "utf8");
 
   const stat = fs.statSync(filePath);
-  const chunkSize = 512 * 1024;
+  const chunkSize = tailReadChunkSize(limit);
   let position = stat.size;
   let chunks = [];
   let newlineCount = 0;
@@ -553,3 +553,11 @@ function readTailText(filePath, limit) {
 
   return Buffer.concat(chunks).toString("utf8");
 }
+
+function tailReadChunkSize(limit) {
+  return limit <= 100 ? 64 * 1024 : 512 * 1024;
+}
+
+export const __testInternals = {
+  tailReadChunkSize
+};

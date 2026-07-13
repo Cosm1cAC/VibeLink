@@ -1025,6 +1025,7 @@ data class ApprovalRequestItem(
     val reason: String = "",
     val status: String = "",
     @SerializedName("toolRunId") val toolRunId: String = "",
+    @SerializedName("workspaceId") val workspaceId: String = "",
     val request: Map<String, Any?>? = null,
     val risk: Map<String, Any?>? = null,
     @SerializedName("createdAt") val createdAt: String = "",
@@ -1049,6 +1050,8 @@ data class ApprovalTaskExecutionResult(
     val ok: Boolean = false,
     val id: String = "",
     val status: String = "",
+    @SerializedName("toolRunId") val toolRunId: String = "",
+    val session: TerminalSessionInfo? = null,
     val task: ApprovalTaskResult? = null,
 )
 

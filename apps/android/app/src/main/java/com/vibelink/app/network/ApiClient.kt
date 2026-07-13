@@ -666,4 +666,15 @@ class ApiClient(
     }
 }
 
-class ApiException(val statusCode: Int, val body: String) : Exception("HTTP $statusCode: $body")
+class ApiException(val statusCode: Int, val body: String) : Exception(apiExceptionMessage(statusCode, body))
+
+private fun apiExceptionMessage(statusCode: Int, body: String): String {
+    val serverMessage = runCatching {
+        JsonParser.parseString(body).asJsonObject
+            .get("error")
+            ?.takeIf { !it.isJsonNull }
+            ?.asString
+            .orEmpty()
+    }.getOrDefault("")
+    return "HTTP $statusCode: ${serverMessage.ifBlank { body.ifBlank { "Request failed" } }}"
+}

@@ -72,6 +72,7 @@ import com.vibelink.app.network.WorkspaceItem
 fun WorkspaceScreen(
     apiClient: ApiClient,
     viewModel: WorkspaceViewModel,
+    onOpenApprovals: () -> Unit,
     onBack: () -> Unit,
 ) {
     val workspaces by viewModel.workspaces.collectAsState()
@@ -87,6 +88,7 @@ fun WorkspaceScreen(
     val commandRunning by viewModel.commandRunning.collectAsState()
     val gitActionRunning by viewModel.gitActionRunning.collectAsState()
     val terminal by viewModel.terminal.collectAsState()
+    val pendingApproval by viewModel.pendingApproval.collectAsState()
     val error by viewModel.error.collectAsState()
 
     var command by remember { mutableStateOf("git status --short --branch") }
@@ -145,6 +147,8 @@ fun WorkspaceScreen(
                     gitActionRunning = gitActionRunning,
                     commandResult = commandResult,
                     error = error,
+                    pendingApproval = pendingApproval,
+                    onOpenApprovals = onOpenApprovals,
                     onCommandChange = { command = it },
                     testCommand = testCommand,
                     onTestCommandChange = { testCommand = it },
@@ -179,6 +183,8 @@ private fun WorkspaceContent(
     gitActionRunning: Boolean,
     commandResult: CommandResult?,
     error: String,
+    pendingApproval: WorkspaceApprovalNotice?,
+    onOpenApprovals: () -> Unit,
     onCommandChange: (String) -> Unit,
     testCommand: String,
     onTestCommandChange: (String) -> Unit,
@@ -212,7 +218,13 @@ private fun WorkspaceContent(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         if (error.isNotBlank()) {
-            item { ErrorCard(error) }
+            item {
+                ErrorCard(
+                    message = error,
+                    actionText = if (pendingApproval == null) "" else "Open approvals",
+                    onAction = onOpenApprovals,
+                )
+            }
         }
 
         item {
@@ -978,7 +990,7 @@ private fun WorkspaceTerminalCard(
             item {
                 Button(
                     onClick = onStart,
-                    enabled = enabled && terminal.status !in setOf("running", "starting", "pending"),
+                    enabled = enabled && terminal.status !in setOf("running", "starting", "pending", "approval_required"),
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
@@ -1076,14 +1088,18 @@ private fun CodeBlock(text: String, maxLines: Int) {
 }
 
 @Composable
-private fun ErrorCard(message: String) {
+private fun ErrorCard(message: String, actionText: String = "", onAction: () -> Unit = {}) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        Text(
-            text = message,
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            color = MaterialTheme.colorScheme.onErrorContainer,
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (actionText.isNotBlank()) {
+                TextButton(onClick = onAction) { Text(actionText) }
+            }
+        }
     }
 }
 

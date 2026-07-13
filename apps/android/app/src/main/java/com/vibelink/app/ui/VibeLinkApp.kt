@@ -175,6 +175,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             WorkspaceScreen(
                 apiClient = apiClient,
                 viewModel = workspaceViewModel,
+                onOpenApprovals = { navController.navigate("settings?section=approvals") },
                 onBack = { navController.popBackStack() },
             )
         }
@@ -192,7 +193,9 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 language = appLanguage,
                 initialSection = backStackEntry.arguments?.getString("section").orEmpty(),
                 onApprovalDecision = { response ->
-                    val handled = messageListViewModel.applyApprovalDecision(apiClient, response)
+                    val messageHandled = messageListViewModel.applyApprovalDecision(apiClient, response)
+                    val workspaceHandled = workspaceViewModel.applyApprovalDecision(apiClient, response)
+                    val handled = messageHandled || workspaceHandled
                     if (handled && (response.approval?.status == "approved" || response.approval?.status == "denied")) {
                         navController.popBackStack()
                     }

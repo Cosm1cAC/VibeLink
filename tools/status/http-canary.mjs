@@ -86,7 +86,11 @@ async function waitForServer(baseUrl, logs) {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${baseUrl}/api/status`, { signal: AbortSignal.timeout(1000) });
+      // Route ownership is selected when the transparent front door accepts a connection.
+      const response = await fetch(`${baseUrl}/api/status`, {
+        headers: { Connection: "close" },
+        signal: AbortSignal.timeout(1000)
+      });
       if (response.status === 401) return;
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -95,7 +99,7 @@ async function waitForServer(baseUrl, logs) {
 }
 
 async function request(baseUrl, pathname, { method = "GET", token = "", body } = {}) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", Connection: "close" };
   if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${baseUrl}${pathname}`, {
     method,

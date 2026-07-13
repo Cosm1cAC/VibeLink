@@ -10,27 +10,49 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.vibelink.app.mobile.NotificationPermissionPolicy
 import com.vibelink.app.ui.VibeLinkApp
 import com.vibelink.app.ui.theme.VibeLinkTheme
 
 class MainActivity : ComponentActivity() {
+    private var pairingUri by mutableStateOf<String?>(null)
+    private var sharedText by mutableStateOf("")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermissionIfNeeded(activityRecreated = savedInstanceState != null)
-        val sharedText = sharedContentText(intent)
+        applyIncomingIntent(intent)
         setContent {
             VibeLinkTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     VibeLinkApp(
-                        initialPairingUri = intent?.data?.takeIf { it.scheme == "vibelink" }?.toString(),
+                        initialPairingUri = pairingUri,
                         initialSharedText = sharedText,
+                        onSharedContentConsumed = ::consumeSharedContent,
                     )
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyIncomingIntent(intent)
+    }
+
+    internal fun applyIncomingIntent(intent: Intent?) {
+        intent?.data
+            ?.takeIf { it.scheme == "vibelink" }
+            ?.let { pairingUri = it.toString() }
+        sharedContentText(intent)
+            .takeIf { it.isNotBlank() }
+            ?.let { sharedText = it }
     }
 
     private fun requestNotificationPermissionIfNeeded(activityRecreated: Boolean) {
@@ -59,6 +81,15 @@ class MainActivity : ComponentActivity() {
             text.takeIf { it.isNotBlank() },
             stream?.let { uri -> "Shared ${type.ifBlank { "file" }}: $uri" },
         ).joinToString("\n")
+    }
+
+    private fun consumeSharedContent() {
+        sharedText = ""
+        setIntent(Intent(intent).apply {
+            action = null
+            removeExtra(Intent.EXTRA_TEXT)
+            removeExtra(Intent.EXTRA_STREAM)
+        })
     }
 
     companion object {

@@ -21,14 +21,20 @@ import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.ui.screens.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Root composable for VibeLink Android.
  * Navigation: login 鈫?sessionList 鈫?messageList / call
  */
 @Composable
-fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "") {
+fun VibeLinkApp(
+    initialPairingUri: String? = null,
+    initialSharedText: String = "",
+    onSharedContentConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val apiClient = remember { ApiClient() }
 
@@ -43,6 +49,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
         }
     }
     var connectionInitialized by remember { mutableStateOf(false) }
+    var authenticated by remember { mutableStateOf(false) }
     LaunchedEffect(apiClient, connectionBootstrapper) {
         try {
             connectionBootstrapper.initialize(
@@ -79,6 +86,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 settingsStore = settingsStore,
                 initialPairingUri = initialPairingUri,
                 onLoginSuccess = {
+                    authenticated = true
                     navController.navigate("sessionList") {
                         popUpTo("login") { inclusive = true }
                     }
@@ -107,8 +115,16 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                     navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
                 },
                 onLogout = {
-                    navController.navigate("login") {
-                        popUpTo("sessionList") { inclusive = true }
+                    appScope.launch {
+                        settingsStore.clearSession()
+                        withContext(Dispatchers.Main.immediate) {
+                            apiClient.token = ""
+                            authenticated = false
+                            pendingConversation = null
+                            navController.navigate("login") {
+                                popUpTo("sessionList") { inclusive = true }
+                            }
+                        }
                     }
                 },
                 onOpenLiveCall = {
@@ -208,9 +224,9 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
         }
     }
 
-    LaunchedEffect(initialSharedText) {
+    LaunchedEffect(initialSharedText, authenticated) {
         val text = initialSharedText.trim()
-        if (text.isBlank()) return@LaunchedEffect
+        if (text.isBlank() || !authenticated) return@LaunchedEffect
         val conversation = ConversationItem(
             key = "share:${System.currentTimeMillis()}",
             kind = "new",
@@ -221,6 +237,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
         )
         pendingConversation = conversation
         navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
+        onSharedContentConsumed()
     }
     }
 }

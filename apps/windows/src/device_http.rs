@@ -640,7 +640,7 @@ fn list_devices(data_dir: &Path) -> Result<Vec<Value>> {
     .collect()
 }
 
-fn apply_fields(value: Value, fields: Option<&str>) -> Value {
+pub(crate) fn apply_fields(value: Value, fields: Option<&str>) -> Value {
     let Some(fields) = fields else {
         return value;
     };

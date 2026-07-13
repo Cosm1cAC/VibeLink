@@ -27,6 +27,7 @@ mod compression_sidecar;
 mod device_http;
 mod doctor_http;
 mod http_frontdoor;
+mod pairing_http;
 mod public_tunnel;
 mod status_http;
 mod status_sidecar;
@@ -69,6 +70,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_device_mutations_http: bool,
+
+    #[arg(long, global = true)]
+    rust_pairing_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2394,6 +2398,10 @@ fn rust_device_mutations_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_device_mutations_http
 }
 
+fn rust_pairing_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_pairing_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -2447,22 +2455,22 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let device_route = rust_devices_http_enabled(cli)
         .then(|| device_http::DeviceRouteConfig::new(route_data_dir.clone()));
     let device_mutation_route = rust_device_mutations_http_enabled(cli)
-        .then(|| device_http::DeviceMutationRouteConfig::new(route_data_dir));
+        .then(|| device_http::DeviceMutationRouteConfig::new(route_data_dir.clone()));
+    let pairing_route = rust_pairing_http_enabled(cli)
+        .then(|| pairing_http::PairingRouteConfig::new(route_data_dir));
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
         "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
         cli.host, cli.port, upstream
     );
-    let result = http_frontdoor::serve(
-        listener,
-        upstream,
-        &mut node,
-        status_route,
-        doctor_route,
-        device_route,
-        device_mutation_route,
-    );
+    let routes = http_frontdoor::FrontdoorRoutes::default()
+        .with_status(status_route)
+        .with_doctor(doctor_route)
+        .with_device(device_route)
+        .with_device_mutation(device_mutation_route)
+        .with_pairing(pairing_route);
+    let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
     if node
         .try_wait()
         .context("Failed to inspect Node bridge after front-door shutdown")?
@@ -2640,6 +2648,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_device_mutations_http {
         command.arg("--rust-device-mutations-http");
+    }
+    if cli.rust_pairing_http {
+        command.arg("--rust-pairing-http");
     }
     command
         .arg("bridge")
@@ -2961,6 +2972,24 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-device-mutations-http", "bridge"]).unwrap();
         assert!(mutations_only.rust_device_mutations_http);
         assert!(!rust_device_mutations_http_enabled(&mutations_only));
+    }
+
+    #[test]
+    fn rust_pairing_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-pairing-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_pairing_http);
+        assert!(rust_pairing_http_enabled(&enabled));
+
+        let pairing_only =
+            Cli::try_parse_from(["vibelink", "--rust-pairing-http", "bridge"]).unwrap();
+        assert!(pairing_only.rust_pairing_http);
+        assert!(!rust_pairing_http_enabled(&pairing_only));
     }
 
     #[test]

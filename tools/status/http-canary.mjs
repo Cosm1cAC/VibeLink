@@ -58,7 +58,7 @@ function writeSettings(dataDir, port, pairingToken) {
   }, null, 2)}\n`, "utf8");
 }
 
-function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp) {
+function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp) {
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
@@ -68,6 +68,7 @@ function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMuta
   if (doctorHttp) args.push("--rust-doctor-http");
   if (devicesHttp) args.push("--rust-devices-http");
   if (deviceMutationsHttp) args.push("--rust-device-mutations-http");
+  if (pairingHttp) args.push("--rust-pairing-http");
   args.push("bridge");
   const child = spawn(command, args, {
     cwd: rootDir,
@@ -189,8 +190,9 @@ async function main() {
   const doctorHttp = process.argv.includes("--doctor-http");
   const devicesHttp = process.argv.includes("--devices-http");
   const deviceMutationsHttp = process.argv.includes("--device-mutations-http");
+  const pairingHttp = process.argv.includes("--pairing-http");
   writeSettings(dataDir, port, pairingToken);
-  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp);
+  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp);
   const baseUrl = `http://127.0.0.1:${port}`;
   let shutdown = null;
 
@@ -271,6 +273,50 @@ async function main() {
         mutationAudit
       };
     }
+    let pairingEvidence = null;
+    if (pairingHttp) {
+      const created = await request(baseUrl, "/api/pairing-sessions", {
+        method: "POST",
+        body: { deviceLabel: "pairing-http-canary" }
+      });
+      if (created.status !== 201 || !created.payload?.session?.id || !created.payload?.session?.code) {
+        throw new Error(`pairing create failed: ${created.status} ${JSON.stringify(created.payload)}`);
+      }
+      const sessionId = created.payload.session.id;
+      const pending = await request(baseUrl, `/api/pairing-sessions/${encodeURIComponent(sessionId)}`);
+      const adminList = await request(
+        baseUrl,
+        "/api/pairing-sessions?status=pending&fields=id,status,label",
+        { token: activeToken }
+      );
+      const approved = await request(baseUrl, `/api/pairing-sessions/${encodeURIComponent(sessionId)}/approve`, {
+        method: "POST",
+        token: activeToken,
+        body: {}
+      });
+      const approvedStatus = await request(baseUrl, `/api/pairing-sessions/${encodeURIComponent(sessionId)}`);
+      const claimed = await request(baseUrl, `/api/pairing-sessions/${encodeURIComponent(sessionId)}/claim`, {
+        method: "POST",
+        body: { code: created.payload.session.code, deviceLabel: "pairing-http-claimed" }
+      });
+      const claimedStatus = await request(baseUrl, `/api/pairing-sessions/${encodeURIComponent(sessionId)}`);
+      const pairingAudit = await request(
+        baseUrl,
+        "/api/audit-log?limit=30&fields=type,target,deviceId,path,success,reason",
+        { token: activeToken }
+      );
+      pairingEvidence = {
+        created,
+        sessionId,
+        pending,
+        adminList,
+        approved,
+        approvedStatus,
+        claimed,
+        claimedStatus,
+        pairingAudit
+      };
+    }
     const doctorAnonymous = doctorHttp ? await request(baseUrl, "/api/doctor") : null;
     const doctor = await request(baseUrl, "/api/doctor", { token: activeToken });
     const doctorRuntime = doctor.payload?.controlPlaneRuntime?.doctorHttp || {};
@@ -330,17 +376,38 @@ async function main() {
         { name: "Device mutation audit", pass: mutationEvidence?.mutationAudit?.status === 200 && rotateAudits.length === 6 && Boolean(rateAudit) && revokeAudits.length === 2, detail: `rotate=${rotateAudits.length}, rateLimit=${Boolean(rateAudit)}, revoke=${revokeAudits.length}` }
       );
     }
+    if (pairingHttp) {
+      const sessionId = pairingEvidence?.sessionId;
+      const listed = pairingEvidence?.adminList?.payload?.items?.find((item) => item.id === sessionId);
+      const auditItems = pairingEvidence?.pairingAudit?.payload?.items || [];
+      const approveAudit = auditItems.find((item) => item.type === "pairing.approve" && item.target === sessionId && item.success === true);
+      const claimAudit = auditItems.find((item) => item.type === "pairing.claim" && item.target === sessionId && item.success === true);
+      checks.push(
+        { name: "Pairing create Node fallback", pass: pairingEvidence?.created?.status === 201 && pairingEvidence.created.implementation === "", detail: `status=${pairingEvidence?.created?.status || 0}, implementation=${pairingEvidence?.created?.implementation || "node"}` },
+        { name: "Rust Pairing public status", pass: pairingEvidence?.pending?.status === 200 && pairingEvidence.pending.implementation === "rust" && pairingEvidence.pending.payload?.session?.status === "pending", detail: `status=${pairingEvidence?.pending?.status || 0}, state=${pairingEvidence?.pending?.payload?.session?.status || "missing"}` },
+        { name: "Rust Pairing admin list", pass: pairingEvidence?.adminList?.status === 200 && pairingEvidence.adminList.implementation === "rust" && listed?.status === "pending", detail: `status=${pairingEvidence?.adminList?.status || 0}, listed=${Boolean(listed)}` },
+        { name: "Rust Pairing approval", pass: pairingEvidence?.approved?.status === 200 && pairingEvidence.approved.implementation === "rust" && pairingEvidence.approved.payload?.session?.status === "approved" && pairingEvidence?.approvedStatus?.payload?.session?.status === "approved", detail: `status=${pairingEvidence?.approved?.status || 0}, state=${pairingEvidence?.approved?.payload?.session?.status || "missing"}` },
+        { name: "Pairing claim Node fallback", pass: pairingEvidence?.claimed?.status === 200 && pairingEvidence.claimed.implementation === "" && /^[0-9a-f]{64}$/.test(pairingEvidence.claimed.payload?.token || ""), detail: `status=${pairingEvidence?.claimed?.status || 0}, implementation=${pairingEvidence?.claimed?.implementation || "node"}` },
+        { name: "Rust Pairing claimed status", pass: pairingEvidence?.claimedStatus?.status === 200 && pairingEvidence.claimedStatus.implementation === "rust" && pairingEvidence.claimedStatus.payload?.session?.status === "claimed", detail: `status=${pairingEvidence?.claimedStatus?.status || 0}, state=${pairingEvidence?.claimedStatus?.payload?.session?.status || "missing"}` },
+        { name: "Pairing audit continuity", pass: pairingEvidence?.pairingAudit?.status === 200 && Boolean(approveAudit?.deviceId) && Boolean(claimAudit?.deviceId), detail: `approve=${Boolean(approveAudit)}, claim=${Boolean(claimAudit)}` }
+      );
+    }
     checks.push({ name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` });
     const result = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
+      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : "", pairingHttp ? "/api/pairing-sessions*" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
       runtime,
       doctorRuntime: doctorHttp ? doctorRuntime : undefined,
       deviceMutations: deviceMutationsHttp ? {
         rotations: mutationEvidence?.rotations?.length || 0,
         rateLimited: mutationEvidence?.rateDenied?.status === 429,
         revokeIdempotent: mutationEvidence?.revoke?.payload?.ok === true && mutationEvidence?.revokeAgain?.payload?.ok === false
+      } : undefined,
+      pairing: pairingHttp ? {
+        publicStatus: pairingEvidence?.pending?.payload?.session?.status || "",
+        approved: pairingEvidence?.approved?.payload?.session?.status === "approved",
+        claimed: pairingEvidence?.claimedStatus?.payload?.session?.status === "claimed"
       } : undefined,
       shutdown,
       checks,

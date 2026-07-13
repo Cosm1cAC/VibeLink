@@ -163,6 +163,27 @@
       "nextAction": "代表性本地/公网交互证据已通过；继续扩大自然交互观察窗口后再评估 default-on。"
     },
     {
+      "id": "pairing-read-decisions-http-route",
+      "title": "Pairing 查询与决策原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-pairing-http"
+      ],
+      "nodeEntry": "src/server.js#/api/pairing-sessions",
+      "rustEntry": "apps/windows/src/pairing_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-pairing-http bridge",
+      "fallback": "公开状态和认证列表的初始化/读取错误可回放 Node；Rust 认领 approve/deny 后决策与审计同事务，失败返回 Rust 500 且不回放；create/claim 在本阶段保持 Node",
+      "tests": [
+        "apps/windows/src/pairing_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0006-rust-pairing-http-routes.md"
+      ],
+      "nextAction": "本地 release 混合 canary 已通过 Node create -> Rust status/list/approve -> Node claim -> Rust claimed status；下一提交增加有界 JSON body 并迁移 create/claim。"
+    },
+    {
       "id": "mcp-session-sidecar",
       "title": "MCP 持久 stdio 会话",
       "priority": "P1",

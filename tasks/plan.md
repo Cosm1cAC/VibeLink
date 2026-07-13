@@ -123,7 +123,7 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 **Execution order:**
 
 1. `POST /api/devices/current/rotate`, `POST /api/devices/:id/rotate`, and `POST /api/devices/:id/revoke`.
-2. Pairing session create/status/claim/approve/deny routes.
+2. Pairing status/list/approve/deny routes, followed by bounded-body create/claim routes.
 3. Settings read, validation, dry-run, and mutation routes.
 4. Audit-log reads, pagination, and field projection.
 

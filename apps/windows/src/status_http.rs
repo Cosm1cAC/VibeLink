@@ -196,6 +196,12 @@ pub(crate) enum RouteAuthentication {
     Device(String),
 }
 
+pub(crate) enum RoutePreparation {
+    Pending,
+    HostDenied,
+    Ready(Connection),
+}
+
 #[derive(Debug, Clone)]
 pub struct StatusRouteConfig {
     data_dir: PathBuf,
@@ -396,11 +402,31 @@ pub(crate) fn authenticate_route_request(
     request: &ParsedRequest,
     data_dir: &Path,
 ) -> Result<RouteAuthentication> {
+    let connection = match prepare_route_request(request, data_dir)? {
+        RoutePreparation::Pending => return Ok(RouteAuthentication::Pending),
+        RoutePreparation::HostDenied => return Ok(RouteAuthentication::HostDenied),
+        RoutePreparation::Ready(connection) => connection,
+    };
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let now = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    match authenticate_device(&connection, true, &request.token(), &now)
+        .context("Cannot authenticate control-plane request")?
+    {
+        AuthResult::Device(id) => Ok(RouteAuthentication::Device(id)),
+        AuthResult::Open => Ok(RouteAuthentication::Unauthorized),
+        AuthResult::Unauthorized => Ok(RouteAuthentication::Unauthorized),
+    }
+}
+
+pub(crate) fn prepare_route_request(
+    request: &ParsedRequest,
+    data_dir: &Path,
+) -> Result<RoutePreparation> {
     let settings_path = data_dir.join("settings.json");
     let settings_source = match fs::read_to_string(&settings_path) {
         Ok(source) => source,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(RouteAuthentication::Pending)
+            return Ok(RoutePreparation::Pending)
         }
         Err(error) => {
             return Err(error).with_context(|| format!("Cannot read {}", settings_path.display()))
@@ -409,12 +435,12 @@ pub(crate) fn authenticate_route_request(
     let settings: StatusHttpSettings = serde_json::from_str(&settings_source)
         .with_context(|| format!("Cannot parse {}", settings_path.display()))?;
     if settings.pairing_token.is_empty() {
-        return Ok(RouteAuthentication::Pending);
+        return Ok(RoutePreparation::Pending);
     }
 
     let database_path = data_dir.join("mobile-agent.sqlite");
     if !database_path.exists() {
-        return Ok(RouteAuthentication::Pending);
+        return Ok(RoutePreparation::Pending);
     }
     let connection = Connection::open_with_flags(
         &database_path,
@@ -434,21 +460,12 @@ pub(crate) fn authenticate_route_request(
         .context("Cannot inspect control-plane authentication schema")?
         .is_some();
     if !devices_ready {
-        return Ok(RouteAuthentication::Pending);
+        return Ok(RoutePreparation::Pending);
     }
     if !is_host_allowed(request.host(), &settings.host_allowlist) {
-        return Ok(RouteAuthentication::HostDenied);
+        return Ok(RoutePreparation::HostDenied);
     }
-
-    let now: DateTime<Utc> = SystemTime::now().into();
-    let now = now.to_rfc3339_opts(SecondsFormat::Millis, true);
-    match authenticate_device(&connection, true, &request.token(), &now)
-        .context("Cannot authenticate control-plane request")?
-    {
-        AuthResult::Device(id) => Ok(RouteAuthentication::Device(id)),
-        AuthResult::Open => Ok(RouteAuthentication::Unauthorized),
-        AuthResult::Unauthorized => Ok(RouteAuthentication::Unauthorized),
-    }
+    Ok(RoutePreparation::Ready(connection))
 }
 
 fn fetch_status_snapshot(host: &str, config: &StatusRouteConfig) -> Result<Value> {

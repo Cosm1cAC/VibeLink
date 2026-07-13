@@ -55,6 +55,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_http_canary: bool,
+
+    #[arg(long, global = true)]
+    rust_status_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2323,7 +2326,7 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
     }
 
     let plan = node_bridge_plan(cli, cli.port);
-    let status = spawn_node_bridge(cli, &root, &server, &plan)?
+    let status = spawn_node_bridge(cli, &root, &server, &plan, None)?
         .wait()
         .context("Failed while waiting for Node bridge")?;
 
@@ -2364,6 +2367,10 @@ fn node_bridge_plan(cli: &Cli, internal_port: u16) -> NodeBridgePlan {
     NodeBridgePlan { persisted, runtime }
 }
 
+fn rust_status_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_status_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -2383,13 +2390,28 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let internal_port = reserve_loopback_port()?;
     let plan = node_bridge_plan(cli, internal_port);
     let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
-    let mut node = spawn_node_bridge(cli, root, server, &plan)?;
+    let internal_token = rust_status_http_enabled(cli)
+        .then(generate_internal_control_token)
+        .transpose()?;
+    let status_route = internal_token.as_ref().map(|token| {
+        status_http::StatusRouteConfig::new(
+            resolve_data_dir(
+                root,
+                env::var_os("VIBELINK_DATA_DIR"),
+                env::var_os("LOCALAPPDATA"),
+                Path::exists,
+            ),
+            upstream,
+            token.clone(),
+        )
+    });
+    let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
         "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
         cli.host, cli.port, upstream
     );
-    let result = http_frontdoor::serve(listener, upstream, &mut node);
+    let result = http_frontdoor::serve(listener, upstream, &mut node, status_route);
     if node
         .try_wait()
         .context("Failed to inspect Node bridge after front-door shutdown")?
@@ -2406,6 +2428,7 @@ fn spawn_node_bridge(
     root: &Path,
     server: &Path,
     plan: &NodeBridgePlan,
+    internal_control_token: Option<&str>,
 ) -> Result<Child> {
     let executable = env::current_exe().context("Cannot resolve current executable path")?;
     let data_dir = resolve_data_dir(
@@ -2440,6 +2463,9 @@ fn spawn_node_bridge(
         command
             .env("VIBELINK_RUNTIME_HOST", &plan.runtime.host)
             .env("VIBELINK_RUNTIME_PORT", plan.runtime.port.to_string());
+    }
+    if let Some(token) = internal_control_token {
+        command.env("VIBELINK_INTERNAL_CONTROL_TOKEN", token);
     }
 
     command
@@ -2552,6 +2578,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     if cli.rust_http_canary {
         command.arg("--rust-http-canary");
     }
+    if cli.rust_status_http {
+        command.arg("--rust-status-http");
+    }
     command
         .arg("bridge")
         .stdin(Stdio::null())
@@ -2562,6 +2591,13 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     command.creation_flags(CREATE_NO_WINDOW);
 
     command.spawn().context("Failed to start bridge role")
+}
+
+fn generate_internal_control_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("Cannot generate internal Status route token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn print_pairing_qr(api_base_url: &str, pairing_base_url: &str, label: &str) -> Result<()> {
@@ -2793,6 +2829,24 @@ mod tests {
         assert_eq!(plan.persisted.host, "0.0.0.0");
         assert_eq!(plan.persisted.port, 8787);
         assert_eq!(plan.runtime, plan.persisted);
+    }
+
+    #[test]
+    fn rust_status_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-status-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_status_http);
+        assert!(rust_status_http_enabled(&enabled));
+
+        let status_only =
+            Cli::try_parse_from(["vibelink", "--rust-status-http", "bridge"]).unwrap();
+        assert!(status_only.rust_status_http);
+        assert!(!rust_status_http_enabled(&status_only));
     }
 
     #[test]

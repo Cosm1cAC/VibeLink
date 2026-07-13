@@ -26,6 +26,8 @@ vibelink.exe --rust-canary --rust-http-canary
 
 `start-vibelink-http-canary.cmd` provides the same packaged entry. Rust owns the configured external TCP listener and binds Node to an ephemeral `127.0.0.1` port. Non-migrated HTTP, SSE, and WebSocket streams are forwarded byte-for-byte; disabling `--rust-http-canary` restores direct Node listening. The front door does not yet mean Status or Doctor route logic is fully Rust-owned.
 
+Use `--rust-status-http` with the front-door flag, or run `start-vibelink-status-http-canary.cmd`, to let Rust own `GET /api/status` authentication and responses while Node supplies the protected loopback snapshot. Disabling only `--rust-status-http` restores transparent Node routing for Status.
+
 ## Internal modes
 
 ```powershell

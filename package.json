@@ -31,6 +31,7 @@
         "rust-http:contract": "node --test test/runtimeBinding.test.js test/supervisorMonitor.test.js && cargo test --manifest-path apps/windows/Cargo.toml http_frontdoor",
         "status:contract": "node --test --test-concurrency=1 test/security.test.js test/statusSidecarContract.test.js test/statusRuntime.test.js test/statusPublicCanary.test.js test/serverStatusRuntime.test.js",
         "status:server-canary": "node tools/status/server-canary.mjs",
+        "status:http-canary": "node tools/status/http-canary.mjs",
         "status:public-canary": "node tools/status/public-canary.mjs",
         "audio-pipeline:contract": "node --test test/rustAudioPipelineContract.test.js test/audioPipelineBenchmark.test.js",
         "audio-pipeline:benchmark": "node tools/audio-pipeline/benchmark.mjs",

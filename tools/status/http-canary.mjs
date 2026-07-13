@@ -1,0 +1,215 @@
+#!/usr/bin/env node
+import crypto from "node:crypto";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+const rootDir = path.resolve(import.meta.dirname, "..", "..");
+
+function stringArg(name, fallback = "") {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? String(process.argv[index + 1] || fallback) : fallback;
+}
+
+function defaultRustCommand() {
+  const binary = process.platform === "win32" ? "vibelink.exe" : "vibelink";
+  for (const profile of ["release", "debug"]) {
+    const command = path.join(rootDir, "apps", "windows", "target", profile, binary);
+    if (fs.existsSync(command)) return command;
+  }
+  return path.join(rootDir, "apps", "windows", "target", "release", binary);
+}
+
+function reservePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.unref();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      probe.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+function writeSettings(dataDir, port, pairingToken) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, "settings.json"), `${JSON.stringify({
+    host: "127.0.0.1",
+    port,
+    pairingToken,
+    defaultCwd: rootDir,
+    allowedRoots: [rootDir],
+    hostAllowlist: [],
+    security: {
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
+      networkAccess: false,
+      requireTrustedWorkspace: false,
+      trustedWorkspaces: [rootDir]
+    },
+    codebaseMemory: { autoMcp: false },
+    mcp: { servers: [] },
+    toolEvents: { autoPrune: false }
+  }, null, 2)}\n`, "utf8");
+}
+
+function startServer(dataDir, port, command) {
+  const child = spawn(command, [
+    "--host", "127.0.0.1",
+    "--port", String(port),
+    "--rust-http-canary",
+    "--rust-status-http",
+    "bridge"
+  ], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      VIBELINK_ROOT: rootDir,
+      VIBELINK_DATA_DIR: dataDir,
+      VIBELINK_NODE_COMMAND: process.execPath,
+      VIBELINK_RUST_STATUS: "0"
+    },
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const logs = [];
+  child.stdout.on("data", (chunk) => logs.push(chunk.toString()));
+  child.stderr.on("data", (chunk) => logs.push(chunk.toString()));
+  return { child, logs };
+}
+
+async function waitForServer(baseUrl, logs) {
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${baseUrl}/api/status`, { signal: AbortSignal.timeout(1000) });
+      if (response.status === 401) return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Rust Status HTTP canary did not become ready\n${logs.join("").slice(-4000)}`);
+}
+
+async function request(baseUrl, pathname, { method = "GET", token = "", body } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(30000)
+  });
+  const text = await response.text();
+  return { status: response.status, payload: text ? JSON.parse(text) : null };
+}
+
+async function waitForRustStatus(baseUrl, token) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const response = await request(baseUrl, "/api/status", { token });
+    const runtime = response.payload?.controlPlaneRuntime?.statusHttp;
+    if (response.status === 200 && runtime?.implementation === "rust") return runtime;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Rust did not take ownership of /api/status before the canary deadline");
+}
+
+function stopServer(server) {
+  if (server.child.exitCode !== null) return Promise.resolve({ code: server.child.exitCode, signal: null });
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (server.child.exitCode === null) server.child.kill();
+      resolve({ code: server.child.exitCode, signal: "timeout" });
+    }, 10000);
+    server.child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+    server.child.kill("SIGTERM");
+  });
+}
+
+async function removeTempRoot(tempRoot) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      return;
+    } catch (error) {
+      if (!["EBUSY", "EPERM", "ENOTEMPTY"].includes(error?.code) || attempt === 19) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
+
+async function main() {
+  const command = path.resolve(stringArg("--command", defaultRustCommand()));
+  if (!fs.existsSync(command)) throw new Error(`Rust bridge command is missing: ${command}`);
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-status-http-canary-"));
+  const dataDir = path.join(tempRoot, "data");
+  const port = await reservePort();
+  const pairingToken = crypto.randomBytes(24).toString("hex");
+  writeSettings(dataDir, port, pairingToken);
+  const server = startServer(dataDir, port, command);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let shutdown = null;
+
+  try {
+    await waitForServer(baseUrl, server.logs);
+    const anonymous = await request(baseUrl, "/api/status");
+    const login = await request(baseUrl, "/api/login", {
+      method: "POST",
+      body: { pairingToken, deviceLabel: "status-http-canary" }
+    });
+    if (login.status !== 200 || !login.payload?.token) {
+      throw new Error(`login failed: ${login.status} ${JSON.stringify(login.payload)}`);
+    }
+
+    const baseline = await waitForRustStatus(baseUrl, login.payload.token);
+    const directAnonymous = await request(baseUrl, "/api/status");
+    const statuses = [];
+    for (let index = 0; index < 3; index += 1) {
+      const response = await request(baseUrl, "/api/status", { token: login.payload.token });
+      if (response.status !== 200) throw new Error(`status request failed: ${response.status}`);
+      statuses.push(response.payload);
+    }
+    const doctor = await request(baseUrl, "/api/doctor", { token: login.payload.token });
+    const runtime = statuses.at(-1)?.controlPlaneRuntime?.statusHttp || {};
+    shutdown = await stopServer(server);
+    const checks = [
+      { name: "anonymous auth", pass: anonymous.status === 401, detail: `status=${anonymous.status}` },
+      { name: "proxied login", pass: login.status === 200, detail: `status=${login.status}` },
+      { name: "Rust Status ownership", pass: runtime.implementation === "rust" && runtime.attempts - baseline.attempts === 4 && runtime.responses - baseline.responses === 4, detail: `attempts delta=${runtime.attempts - baseline.attempts}, responses delta=${runtime.responses - baseline.responses}` },
+      { name: "Rust Status fallback", pass: runtime.fallbacks === 0 && runtime.failures === 0 && runtime.pending === 0, detail: `fallbacks=${runtime.fallbacks}, failures=${runtime.failures}` },
+      { name: "Rust Status denial", pass: directAnonymous.status === 401 && runtime.unauthorized - baseline.unauthorized === 1, detail: `status=${directAnonymous.status}, unauthorized delta=${runtime.unauthorized - baseline.unauthorized}` },
+      { name: "Node Doctor forwarding", pass: doctor.status === 200 && Array.isArray(doctor.payload?.checks), detail: `status=${doctor.status}, checks=${doctor.payload?.checks?.length || 0}` },
+      { name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` }
+    ];
+    const result = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      source: { route: "/api/status", implementation: "rust-http", command },
+      runtime,
+      shutdown,
+      checks,
+      passed: checks.every((check) => check.pass)
+    };
+    const output = stringArg("--output", "");
+    if (output) {
+      fs.mkdirSync(path.dirname(path.resolve(output)), { recursive: true });
+      fs.writeFileSync(path.resolve(output), `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    }
+    console.log("Status Rust HTTP canary");
+    for (const check of checks) console.log(`- ${check.pass ? "PASS" : "FAIL"} ${check.name}: ${check.detail}`);
+    console.log(`Result: ${result.passed ? "PASS" : "FAIL"}`);
+    if (!result.passed) process.exitCode = 1;
+  } finally {
+    if (!shutdown) await stopServer(server);
+    if (process.argv.includes("--delete-temp")) await removeTempRoot(tempRoot);
+  }
+}
+
+await main();

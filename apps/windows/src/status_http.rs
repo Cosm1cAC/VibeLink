@@ -1,6 +1,17 @@
-use rusqlite::{Connection, OptionalExtension};
+use anyhow::{Context, Result};
+use chrono::{DateTime, SecondsFormat, Utc};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use serde::Deserialize;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::{self, Write};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HEADERS: usize = 64;
@@ -137,8 +148,9 @@ pub fn is_host_allowed(value: &str, configured: &[String]) -> bool {
     }
     configured.iter().any(|entry| {
         let allowed = clean_host(entry);
-        if let Some(suffix) = allowed.strip_prefix('*') {
-            !suffix.is_empty() && host.ends_with(suffix) && host.len() > suffix.len()
+        if let Some(suffix) = allowed.strip_prefix("*.") {
+            host.strip_suffix(suffix)
+                .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
         } else {
             host == allowed
         }
@@ -150,6 +162,206 @@ pub enum AuthResult {
     Open,
     Device(String),
     Unauthorized,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusHttpSettings {
+    #[serde(default)]
+    pairing_token: String,
+    #[serde(default)]
+    host_allowlist: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusRouteConfig {
+    data_dir: PathBuf,
+    upstream: SocketAddr,
+    internal_token: String,
+    metrics: Arc<StatusRouteMetrics>,
+}
+
+#[derive(Debug, Default)]
+struct StatusRouteMetrics {
+    attempts: AtomicU64,
+    responses: AtomicU64,
+    fallbacks: AtomicU64,
+    failures: AtomicU64,
+    host_denied: AtomicU64,
+    unauthorized: AtomicU64,
+}
+
+impl StatusRouteConfig {
+    pub fn new(data_dir: PathBuf, upstream: SocketAddr, internal_token: String) -> Self {
+        Self {
+            data_dir,
+            upstream,
+            internal_token,
+            metrics: Arc::new(StatusRouteMetrics::default()),
+        }
+    }
+
+    fn record_response(&self) {
+        self.metrics.responses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_fallback(&self) {
+        self.metrics.fallbacks.fetch_add(1, Ordering::Relaxed);
+        self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn metrics_value(&self) -> Value {
+        json!({
+            "implementation": "rust",
+            "attempts": self.metrics.attempts.load(Ordering::Relaxed),
+            "responses": self.metrics.responses.load(Ordering::Relaxed),
+            "fallbacks": self.metrics.fallbacks.load(Ordering::Relaxed),
+            "failures": self.metrics.failures.load(Ordering::Relaxed),
+            "hostDenied": self.metrics.host_denied.load(Ordering::Relaxed),
+            "unauthorized": self.metrics.unauthorized.load(Ordering::Relaxed),
+            "pending": 0
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct StatusRouteResponse {
+    pub status: u16,
+    pub body: Value,
+}
+
+impl StatusRouteResponse {
+    fn error(status: u16, message: &str) -> Self {
+        Self {
+            status,
+            body: json!({ "error": message }),
+        }
+    }
+
+    pub fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        let body = serde_json::to_vec(&self.body)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let reason = match self.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            _ => "Internal Server Error",
+        };
+        write!(
+            writer,
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+            self.status,
+            reason,
+            body.len()
+        )?;
+        writer.write_all(&body)?;
+        writer.flush()
+    }
+}
+
+pub fn route_status_request(
+    request: &ParsedRequest,
+    config: &StatusRouteConfig,
+) -> Result<Option<StatusRouteResponse>> {
+    if request.method != "GET" || request.path() != "/api/status" {
+        return Ok(None);
+    }
+
+    let settings_path = config.data_dir.join("settings.json");
+    let settings_source = match fs::read_to_string(&settings_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Cannot read {}", settings_path.display()))
+        }
+    };
+    let settings: StatusHttpSettings = serde_json::from_str(&settings_source)
+        .with_context(|| format!("Cannot parse {}", settings_path.display()))?;
+
+    if settings.pairing_token.is_empty() {
+        return Ok(None);
+    }
+    let database_path = config.data_dir.join("mobile-agent.sqlite");
+    if !database_path.exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(
+        &database_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Cannot open {}", database_path.display()))?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .context("Cannot configure Status authentication database timeout")?;
+    let devices_ready = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'devices'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("Cannot inspect Status authentication schema")?
+        .is_some();
+    if !devices_ready {
+        return Ok(None);
+    }
+
+    config.metrics.attempts.fetch_add(1, Ordering::Relaxed);
+
+    if !is_host_allowed(request.host(), &settings.host_allowlist) {
+        config.metrics.host_denied.fetch_add(1, Ordering::Relaxed);
+        config.record_response();
+        return Ok(Some(StatusRouteResponse::error(
+            403,
+            "Host is not allowed.",
+        )));
+    }
+
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let now = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    if authenticate_device(&connection, true, &request.token(), &now)
+        .context("Cannot authenticate Status request")?
+        == AuthResult::Unauthorized
+    {
+        config.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
+        config.record_response();
+        return Ok(Some(StatusRouteResponse::error(401, "Unauthorized")));
+    }
+
+    let snapshot = fetch_status_snapshot(request.host(), config)?;
+    let mut body = crate::status_sidecar::render_status_snapshot(snapshot)
+        .context("Invalid internal Status snapshot")?;
+    let object = body
+        .as_object_mut()
+        .context("Rendered Status response must be an object")?;
+    let runtime = object
+        .entry("controlPlaneRuntime")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("Rendered Status controlPlaneRuntime must be an object")?;
+    config.record_response();
+    runtime.insert("statusHttp".to_string(), config.metrics_value());
+    Ok(Some(StatusRouteResponse { status: 200, body }))
+}
+
+fn fetch_status_snapshot(host: &str, config: &StatusRouteConfig) -> Result<Value> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout_read(Duration::from_secs(5))
+        .timeout_write(Duration::from_secs(2))
+        .build();
+    let url = format!("http://{}/internal/status-snapshot", config.upstream);
+    let mut request = agent
+        .get(&url)
+        .set("X-VibeLink-Internal-Token", &config.internal_token);
+    if !host.is_empty() {
+        request = request.set("X-VibeLink-Original-Host", host);
+    }
+    request
+        .call()
+        .context("Internal Status snapshot request failed")?
+        .into_json::<Value>()
+        .context("Internal Status snapshot is not valid JSON")
 }
 
 pub fn hash_token(token: &str) -> String {
@@ -191,10 +403,17 @@ pub fn authenticate_device(
 #[cfg(test)]
 mod tests {
     use super::{
-        authenticate_device, hash_token, is_host_allowed, parse_request, AuthResult,
-        MAX_HEADER_BYTES,
+        authenticate_device, hash_token, is_host_allowed, parse_request, route_status_request,
+        AuthResult, StatusRouteConfig, MAX_HEADER_BYTES,
     };
     use rusqlite::{params, Connection};
+    use serde_json::json;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn device_database() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -210,6 +429,19 @@ mod tests {
             )
             .unwrap();
         connection
+    }
+
+    fn temporary_data_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "vibelink-status-http-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 
     #[test]
@@ -255,6 +487,10 @@ mod tests {
         assert!(is_host_allowed("bridge.vibelink.cloud", &allowlist));
         assert!(is_host_allowed("mobile.trusted.example", &allowlist));
         assert!(!is_host_allowed("trusted.example", &allowlist));
+        assert!(!is_host_allowed(
+            "eviltrusted.example",
+            &["*trusted.example".to_string()]
+        ));
         assert!(!is_host_allowed("attacker.example", &allowlist));
     }
 
@@ -347,5 +583,167 @@ mod tests {
             )
             .unwrap();
         assert_eq!(last_seen, "2026-07-13T00:00:00.000Z");
+    }
+
+    #[test]
+    fn routes_only_authenticated_status_requests_through_the_internal_snapshot() {
+        let data_dir = temporary_data_dir();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"pairingToken":"PAIR","hostAllowlist":["bridge.test"]}"#,
+        )
+        .unwrap();
+        let database = Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE devices (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    last_seen_at TEXT,
+                    revoked_at TEXT,
+                    expires_at TEXT
+                );",
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO devices (id, token_hash, last_seen_at, revoked_at, expires_at)
+                 VALUES (?1, ?2, '', NULL, '')",
+                params!["device-active", hash_token("active-token")],
+            )
+            .unwrap();
+        drop(database);
+
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let snapshot = json!({
+            "ok": true,
+            "settings": {},
+            "providerRegistry": {},
+            "storage": { "sqlite": "mobile-agent.sqlite" },
+            "security": {},
+            "notifications": {},
+            "workspaces": [],
+            "workspaceRuntime": {},
+            "controlPlaneRuntime": {},
+            "network": [],
+            "tasks": []
+        });
+        let snapshot_body = serde_json::to_vec(&snapshot).unwrap();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /internal/status-snapshot HTTP/1.1\r\n"));
+            assert!(request.contains("X-VibeLink-Internal-Token: internal-secret\r\n"));
+            assert!(request.contains("X-VibeLink-Original-Host: bridge.test\r\n"));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                snapshot_body.len()
+            )
+            .unwrap();
+            stream.write_all(&snapshot_body).unwrap();
+        });
+
+        let config = StatusRouteConfig::new(
+            data_dir.clone(),
+            upstream_addr,
+            "internal-secret".to_string(),
+        );
+        let other =
+            parse_request(b"GET /api/doctor HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
+        assert!(route_status_request(&other, &config).unwrap().is_none());
+
+        let blocked = parse_request(
+            b"GET /api/status HTTP/1.1\r\nHost: attacker.test\r\nAuthorization: Bearer active-token\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            route_status_request(&blocked, &config)
+                .unwrap()
+                .unwrap()
+                .status,
+            403
+        );
+
+        let anonymous =
+            parse_request(b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
+        assert_eq!(
+            route_status_request(&anonymous, &config)
+                .unwrap()
+                .unwrap()
+                .status,
+            401
+        );
+
+        let authenticated = parse_request(
+            b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer active-token\r\n\r\n",
+        )
+        .unwrap();
+        let response = route_status_request(&authenticated, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], snapshot["ok"]);
+        assert_eq!(
+            response.body["controlPlaneRuntime"]["statusHttp"],
+            json!({
+                "implementation": "rust",
+                "attempts": 3,
+                "responses": 3,
+                "fallbacks": 0,
+                "failures": 0,
+                "hostDenied": 1,
+                "unauthorized": 1,
+                "pending": 0
+            })
+        );
+        upstream_thread.join().unwrap();
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn waits_for_the_node_database_before_owning_authenticated_status() {
+        let data_dir = temporary_data_dir();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"pairingToken":"PAIR","hostAllowlist":[]}"#,
+        )
+        .unwrap();
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let config = StatusRouteConfig::new(
+            data_dir.clone(),
+            upstream.local_addr().unwrap(),
+            "internal-secret".to_string(),
+        );
+        let request =
+            parse_request(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+
+        assert!(route_status_request(&request, &config).unwrap().is_none());
+        assert!(!data_dir.join("mobile-agent.sqlite").exists());
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn waits_for_node_to_generate_the_pairing_token_before_owning_status() {
+        let data_dir = temporary_data_dir();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"pairingToken":"","hostAllowlist":[]}"#,
+        )
+        .unwrap();
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let config = StatusRouteConfig::new(
+            data_dir.clone(),
+            upstream.local_addr().unwrap(),
+            "internal-secret".to_string(),
+        );
+        let request =
+            parse_request(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+
+        assert!(route_status_request(&request, &config).unwrap().is_none());
+        fs::remove_dir_all(data_dir).unwrap();
     }
 }

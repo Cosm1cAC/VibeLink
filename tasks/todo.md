@@ -31,10 +31,16 @@
 - [x] Migrate direct `/api/status` HTTP ownership behind a rollback flag.
 - [x] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
 - [x] Migrate read-only `GET /api/devices` ownership behind an independent Rust flag.
-- [ ] Migrate pairing and audited device mutation routes.
-- [ ] Migrate settings and audit routes.
-- [ ] Migrate workspace and tool routes.
-- [ ] Migrate task and live-call routes.
+- [ ] Migrate audited device mutation routes with transaction-bound fallback semantics.
+- [ ] Migrate pairing create/status/claim/approve/deny routes.
+- [ ] Migrate settings read, validation, dry-run, and mutation routes.
+- [ ] Migrate audit-log read, pagination, and field-projection routes.
+- [ ] Migrate workspace read/tree and registry routes.
+- [ ] Migrate approvals, commands, Git actions, and tool-run routes.
+- [ ] Migrate tool-event and unified-event SSE streams.
+- [ ] Migrate task, history, and terminal routes.
+- [ ] Migrate provider-process ownership out of Node.
+- [ ] Migrate live-call HTTP and WebSocket/audio routes.
 
 ## Retirement And Desktop Release
 

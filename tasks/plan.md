@@ -78,20 +78,20 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 ## Task 4: Rust Status And Doctor HTTP Routes
 
-**Description:** Move direct HTTP handling for `/api/status` and `/api/doctor` into Rust while Node continues supplying any not-yet-migrated dynamic sources through a typed boundary.
+**Description:** Move direct HTTP handling for `/api/status`, `/api/doctor`, and the read-only device list into Rust while Node continues supplying not-yet-migrated routes through the loopback fallback.
 
 **Acceptance criteria:**
 
 - [x] An explicit Rust front-door canary owns the external listener while Node binds only to an ephemeral loopback port.
 - [x] Transparent forwarding preserves HTTP, SSE, WebSocket, Host, authentication, and shutdown behavior for non-migrated routes.
-- [ ] Rust directly owns authentication, validation, response serialization, and HTTP status codes for both routes.
-- [ ] Contract fixtures match the current Node responses and failure semantics.
-- [ ] Separate feature flags switch the front door, Status ownership, and Doctor ownership immediately back to Node.
+- [x] Rust directly owns authentication, validation, response serialization, and HTTP status codes for Status, Doctor, and device-list requests.
+- [x] Contract fixtures match the current Node responses and failure semantics.
+- [x] Separate feature flags switch the front door and each direct route immediately back to Node.
 
 **Verification:**
 
-- [ ] OpenAPI contract, anonymous/authenticated route tests, malformed-input tests, and failure injection pass.
-- [ ] Public canary remains within 20% of baseline p95 with no new errors.
+- [x] OpenAPI contract, anonymous/authenticated route tests, malformed-input tests, and failure injection pass.
+- [x] Public anonymous canaries pass; authenticated device-list evidence is verified locally because no production plaintext device token is retained.
 
 **Dependencies:** Tasks 2 and 3 evidence foundation.
 
@@ -101,13 +101,15 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 ## Task 5: Identity And Administrative Routes
 
-**Description:** Migrate `pairing/device` and then `settings/audit` route families with unchanged device-token and approval semantics.
+**Description:** Migrate identity and administration in four independently reversible slices: audited device mutations, pairing lifecycle, settings validation/mutation, then audit queries.
 
 **Acceptance criteria:**
 
 - [ ] Pairing, approval, token rotation/revocation, settings validation, and audit writes preserve current contracts.
 - [ ] Security tests cover replay, expiry, invalid hosts, rate limits, and secret redaction.
 - [ ] Node fallback remains independently deployable until production canaries pass.
+- [ ] Device mutations never replay to Node after a Rust transaction commits; only pre-commit failures may use the loopback fallback.
+- [ ] Token plaintext is returned exactly once, never logged or stored, while only SHA-256 hashes reach SQLite.
 
 **Verification:**
 
@@ -118,11 +120,18 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Files likely touched:** Rust HTTP modules, Node route adapters, security/store modules, tests, and OpenAPI.
 
-**Estimated scope:** Large; execute as four medium slices.
+**Execution order:**
+
+1. `POST /api/devices/current/rotate`, `POST /api/devices/:id/rotate`, and `POST /api/devices/:id/revoke`.
+2. Pairing session create/status/claim/approve/deny routes.
+3. Settings read, validation, dry-run, and mutation routes.
+4. Audit-log reads, pagination, and field projection.
+
+**Estimated scope:** Large; execute as four medium slices with a commit, contract archive, package, and rollback flag per slice.
 
 ## Task 6: Workspace And Tool Routes
 
-**Description:** Migrate workspace browsing, Git/command orchestration, approvals, tool runs, and tool-event streams without weakening filesystem or command safety.
+**Description:** Migrate workspace browsing, Git/command orchestration, approvals, tool registry/runs, and tool-event streams without weakening filesystem or command safety.
 
 **Acceptance criteria:**
 
@@ -139,11 +148,13 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Files likely touched:** Rust HTTP/workspace/tool modules, Node adapters, tests, and OpenAPI.
 
-**Estimated scope:** Large; split by read-only, Git, command, and event slices.
+**Execution order:** read-only workspace/tree routes; tool and command registries; approvals; dry-run and command execution; Git actions; tool runs/events and SSE replay.
+
+**Estimated scope:** Large; split by read-only, registry, approval, Git/command, and event slices.
 
 ## Task 7: Task And Live-Call Routes
 
-**Description:** Migrate task lifecycle, provider orchestration boundaries, live-call sessions, and streaming events after lower-level identity, tool, and event routes are stable.
+**Description:** Migrate task/history/terminal lifecycle, unified event streaming, provider orchestration boundaries, and live-call sessions after lower-level identity, tool, and event routes are stable.
 
 **Acceptance criteria:**
 
@@ -160,7 +171,9 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Files likely touched:** Rust task/live-call modules, Node provider adapters, tests, and OpenAPI.
 
-**Estimated scope:** Large; split by task lifecycle, providers, and live-call.
+**Execution order:** task/history reads; task mutations; terminal sessions; unified SSE; provider processes; live-call HTTP; live-call WebSocket/audio.
+
+**Estimated scope:** Large; split by task lifecycle, terminals/events, providers, and live-call.
 
 ## Task 8: Retire Node And Ship Native Shell
 
@@ -197,6 +210,13 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 - [ ] Both implementations pass the same contract suite.
 - [ ] Canary error rate stays within 10% and p95 within 20% of baseline.
 - [ ] Rollback is tested before advancing ownership.
+
+### Mutation Safety
+
+- [ ] Every write uses a SQLite transaction containing the domain write and audit record.
+- [ ] Pre-commit failures may fall back; post-commit failures return a Rust error and never replay the request.
+- [ ] Rate limits, idempotency expectations, dry-run behavior, and secret redaction match Node.
+- [ ] Failure-injection tests prove both sides of the commit boundary.
 
 ### Node Retirement
 

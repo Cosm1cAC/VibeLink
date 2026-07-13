@@ -28,8 +28,11 @@
         "openapi:gen": "node tools/gen-openapi.mjs > docs/openapi.json",
         "rust:migration:check": "node tools/check-rust-migration-status.mjs",
         "rust:test": "cargo test --manifest-path apps/windows/Cargo.toml",
-        "status:contract": "node --test --test-concurrency=1 test/statusSidecarContract.test.js test/statusRuntime.test.js test/serverStatusRuntime.test.js",
+        "rust-http:contract": "node --test test/runtimeBinding.test.js test/supervisorMonitor.test.js && cargo test --manifest-path apps/windows/Cargo.toml http_frontdoor",
+        "status:contract": "node --test --test-concurrency=1 test/security.test.js test/statusSidecarContract.test.js test/statusRuntime.test.js test/statusPublicCanary.test.js test/serverStatusRuntime.test.js",
         "status:server-canary": "node tools/status/server-canary.mjs",
+        "status:http-canary": "node tools/status/http-canary.mjs",
+        "status:public-canary": "node tools/status/public-canary.mjs",
         "audio-pipeline:contract": "node --test test/rustAudioPipelineContract.test.js test/audioPipelineBenchmark.test.js",
         "audio-pipeline:benchmark": "node tools/audio-pipeline/benchmark.mjs",
         "compression:contract": "node --test test/rustCompressionContract.test.js test/compressionBenchmark.test.js",
@@ -47,7 +50,7 @@
         "event-store:server-canary": "node tools/event-store/server-canary.mjs",
         "event-store:real-data-canary": "node tools/event-store/real-data-canary.mjs",
         "event-store:canary:all": "npm run event-store:canary -- --rounds 24 --batch-size 100 --latency-margin-ms 10 --output .tmp/event-store-local-canary-ci.json && npm run event-store:runtime-canary -- --output .tmp/event-store-runtime-canary-ci.json && npm run event-store:server-canary -- --output .tmp/event-store-server-canary-ci.json",
-        "test:rust-sidecars": "node --test --test-concurrency=1 test/statusSidecarContract.test.js test/statusRuntime.test.js test/statusServerCanary.test.js test/serverStatusRuntime.test.js test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js test/workspaceTreeServerCanary.test.js test/workspaceTreeSidecarContract.test.js test/workspaceTreeSidecarClient.test.js test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/mcpSessionRealCanary.test.js test/mcpSessionServerCanary.test.js test/mcpSessionSoak.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js test/eventStoreRealDataCanary.test.js test/rustCompressionContract.test.js test/compressionBenchmark.test.js test/rustAudioPipelineContract.test.js test/audioPipelineBenchmark.test.js"
+        "test:rust-sidecars": "node --test --test-concurrency=1 test/statusSidecarContract.test.js test/statusRuntime.test.js test/statusPublicCanary.test.js test/statusServerCanary.test.js test/serverStatusRuntime.test.js test/workspacesRustTree.test.js test/workspaceTreeCanary.test.js test/workspaceTreeRealCanary.test.js test/workspaceTreeServerCanary.test.js test/workspaceTreeSidecarContract.test.js test/workspaceTreeSidecarClient.test.js test/mcpRuntime.test.js test/mcpSessionSidecarContract.test.js test/mcpSessionCanary.test.js test/mcpSessionRealCanary.test.js test/mcpSessionServerCanary.test.js test/mcpSessionSoak.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js test/eventStoreRealDataCanary.test.js test/rustCompressionContract.test.js test/compressionBenchmark.test.js test/rustAudioPipelineContract.test.js test/audioPipelineBenchmark.test.js"
     },
     "dependencies": {
         "@vitejs/plugin-react": "^4.3.4",

@@ -4,10 +4,33 @@
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
+      "id": "rust-http-frontdoor",
+      "title": "Rust HTTP 前门",
+      "priority": "P0",
+      "status": "canary",
+      "featureFlags": [
+        "--rust-http-canary",
+        "VIBELINK_RUNTIME_HOST",
+        "VIBELINK_RUNTIME_PORT",
+        "VIBELINK_SUPERVISOR_PID"
+      ],
+      "nodeEntry": "src/server.js",
+      "rustEntry": "apps/windows/src/http_frontdoor.rs",
+      "sidecarCommand": "vibelink --rust-http-canary bridge",
+      "fallback": "关闭 --rust-http-canary 后 Node 恢复直接监听原 host:port；旧 portable 包保留为进程级回滚",
+      "tests": [
+        "apps/windows/src/http_frontdoor.rs",
+        "test/runtimeBinding.test.js",
+        "test/supervisorMonitor.test.js",
+        "test/statusPublicCanary.test.js"
+      ],
+      "nextAction": "保持公网透明转发 canary 稳定，并验证独立 Status 原生路由 opt-in 不影响其他 HTTP/SSE/WebSocket 流量。"
+    },
+    {
       "id": "status-response-sidecar",
       "title": "状态响应契约组装",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "canary",
       "featureFlags": [
         "VIBELINK_RUST_STATUS",
         "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
@@ -21,10 +44,33 @@
       "tests": [
         "test/statusSidecarContract.test.js",
         "test/statusRuntime.test.js",
+        "test/statusPublicCanary.test.js",
         "test/statusServerCanary.test.js",
         "test/serverStatusRuntime.test.js"
       ],
-      "nextAction": "保持认证 server canary 通过，收集有限公网 status 请求后再评估 canary。"
+      "nextAction": "继续作为 Node 动态快照的强类型契约层；直接 Status HTTP 路由稳定后复用该边界迁移 Doctor。"
+    },
+    {
+      "id": "status-http-route",
+      "title": "Status 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-status-http",
+        "VIBELINK_INTERNAL_CONTROL_TOKEN"
+      ],
+      "nodeEntry": "src/server.js#/internal/status-snapshot",
+      "rustEntry": "apps/windows/src/status_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-status-http bridge",
+      "fallback": "Rust 解析/快照/校验失败后逐字节重放原请求到 Node；关闭 --rust-status-http 后所有 Status 请求透明转发",
+      "tests": [
+        "apps/windows/src/status_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/internalControl.test.js",
+        "tools/status/http-canary.mjs"
+      ],
+      "nextAction": "远端 CI 与公网认证 canary 保持零失败/零回退后晋级 canary，再开始 /api/doctor 原生路由。"
     },
     {
       "id": "workspace-tree",
@@ -51,7 +97,7 @@
         "test/workspaceTreeSidecarContract.test.js",
         "test/workspaceTreeSidecarClient.test.js"
       ],
-      "nextAction": "保持每周 canary 通过，完成有限交互会话后再评估 default-on。"
+      "nextAction": "代表性本地/公网交互证据已通过；继续扩大自然交互观察窗口后再评估 default-on。"
     },
     {
       "id": "mcp-session-sidecar",
@@ -77,7 +123,7 @@
         "test/mcpSessionServerCanary.test.js",
         "test/mcpSessionSoak.test.js"
       ],
-      "nextAction": "保持 server canary 与 soak 通过，观察有限自然生产会话后再评估 default-on。"
+      "nextAction": "受控真实 server、installed MCP 和 soak 已通过；继续观察自然生产会话后再评估 default-on。"
     },
     {
       "id": "event-store-sidecar",
@@ -109,7 +155,7 @@
         "test/eventStoreMetrics.test.js",
         "test/eventStoreRealDataCanary.test.js"
       ],
-      "nextAction": "保持远端 canary 通过，完成有限真人运行会话和前后 runtime stats 采集。"
+      "nextAction": "真实大库与公网审批命令证据已通过；继续扩大自然运行窗口并采集前后 runtime stats。"
     },
     {
       "id": "audio-pipeline",

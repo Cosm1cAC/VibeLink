@@ -104,6 +104,10 @@ Live Call Assistant
 
 VibeLink 采用 Node control plane + Rust data plane 的混合架构。Workspace、MCP 和 Event Store 已进入 `canary`；Audio 和 Compression 因没有测得生产收益，保持 `contract` 且不接入生产路由。所有 Rust 生产路径都保留 Node 或 Worker 回退。
 
+Windows portable 包可用 `vibelink.exe --rust-canary`（或 `start-vibelink-canary.cmd`）显式启用当前 Status、Workspace、MCP 和 Event Store canary。普通 `vibelink.exe` 保持保守默认值，不会自动开启实验路径。
+
+服务端 HTTP 前门使用独立的 `--rust-http-canary` 逐步迁入 Rust；管理界面规划为原生 Win32 `windows-rs` 托盘/窗口，不新增 Web 管理后台，也不嵌入 WebView。
+
 完整状态、证据、阈值、回滚和命令统一见 `docs/rust-migration-report.md`；机器清单为 `docs/rust-migration-status.json`。推进前运行：
 
 ```bash

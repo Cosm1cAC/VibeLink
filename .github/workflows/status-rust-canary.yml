@@ -70,11 +70,15 @@ jobs:
         run: cargo test --manifest-path apps/windows/Cargo.toml status_sidecar
       - name: Run authenticated status canary
         run: npm run status:server-canary -- --output .tmp/status-server-canary-ci.json --delete-temp
+      - name: Run Rust-owned HTTP status canary
+        run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --output .tmp/status-http-canary-ci.json --delete-temp
       - name: Upload canary output
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: status-rust-canary-result
-          path: .tmp/status-server-canary-ci.json
+          path: |
+            .tmp/status-server-canary-ci.json
+            .tmp/status-http-canary-ci.json
           if-no-files-found: error
           retention-days: 30

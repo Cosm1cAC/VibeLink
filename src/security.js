@@ -142,6 +142,13 @@ export function pairDevice({ pairingToken, settings, label }) {
   return createDevice({ label: label || "Browser" });
 }
 
+export function pairingTokenLogValue({ settings = {}, devices = [] } = {}) {
+  if (!settings.pairingToken) return "[not configured]";
+  const hasActiveDevice = devices.some((device) => !device.revokedAt && !device.expired);
+  if (settings.allowLegacyPairingTokenLogin || !hasActiveDevice) return settings.pairingToken;
+  return "[hidden; use device pairing]";
+}
+
 export function checkRateLimit(key, { limit = 30, windowMs = 60_000 } = {}) {
   const now = Date.now();
   const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + windowMs };

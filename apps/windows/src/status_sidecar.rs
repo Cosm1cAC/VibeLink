@@ -151,17 +151,9 @@ impl Runtime {
             .first()
             .cloned()
             .context("Missing status sidecar snapshot")?;
-        validate_status_shape(&value)?;
-        let snapshot: StatusSnapshot =
-            serde_json::from_value(value).context("Invalid status snapshot")?;
-        if !snapshot.ok {
-            bail!("Status snapshot ok must be true");
-        }
-        if snapshot.storage.sqlite.trim().is_empty() {
-            bail!("Status snapshot storage.sqlite must not be empty");
-        }
+        let rendered = render_status_snapshot(value)?;
         self.renders += 1;
-        serde_json::to_value(snapshot).context("Cannot serialize status snapshot")
+        Ok(rendered)
     }
 
     fn stats(&self) -> Value {
@@ -180,6 +172,19 @@ impl Runtime {
             "lastError": self.last_error
         })
     }
+}
+
+pub(crate) fn render_status_snapshot(value: Value) -> Result<Value> {
+    validate_status_shape(&value)?;
+    let snapshot: StatusSnapshot =
+        serde_json::from_value(value).context("Invalid status snapshot")?;
+    if !snapshot.ok {
+        bail!("Status snapshot ok must be true");
+    }
+    if snapshot.storage.sqlite.trim().is_empty() {
+        bail!("Status snapshot storage.sqlite must not be empty");
+    }
+    serde_json::to_value(snapshot).context("Cannot serialize status snapshot")
 }
 
 fn validate_status_shape(value: &Value) -> Result<()> {

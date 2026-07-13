@@ -15,7 +15,7 @@ use std::{
     env,
     ffi::OsString,
     hash::{Hash, Hasher},
-    net::UdpSocket,
+    net::{SocketAddr, TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     thread,
@@ -24,7 +24,9 @@ use std::{
 
 mod audio_pipeline_sidecar;
 mod compression_sidecar;
+mod http_frontdoor;
 mod public_tunnel;
+mod status_http;
 mod status_sidecar;
 
 #[cfg(windows)]
@@ -47,6 +49,15 @@ struct Cli {
 
     #[arg(long, global = true, default_value = "VibeLink Windows")]
     device_label: String,
+
+    #[arg(long, global = true)]
+    rust_canary: bool,
+
+    #[arg(long, global = true)]
+    rust_http_canary: bool,
+
+    #[arg(long, global = true)]
+    rust_status_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2310,6 +2321,115 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
         bail!("Cannot find bridge server at {}", server.display());
     }
 
+    if cli.rust_http_canary {
+        return run_rust_http_frontdoor(cli, &root, &server);
+    }
+
+    let plan = node_bridge_plan(cli, cli.port);
+    let status = spawn_node_bridge(cli, &root, &server, &plan, None)?
+        .wait()
+        .context("Failed while waiting for Node bridge")?;
+
+    if !status.success() {
+        bail!("Node bridge exited with status {status}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NodeBridgeBinding {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NodeBridgePlan {
+    persisted: NodeBridgeBinding,
+    runtime: NodeBridgeBinding,
+}
+
+fn node_bridge_plan(cli: &Cli, internal_port: u16) -> NodeBridgePlan {
+    let persisted = NodeBridgeBinding {
+        host: cli.host.clone(),
+        port: cli.port,
+    };
+    let runtime = if cli.rust_http_canary {
+        NodeBridgeBinding {
+            host: "127.0.0.1".to_string(),
+            port: internal_port,
+        }
+    } else {
+        NodeBridgeBinding {
+            host: persisted.host.clone(),
+            port: persisted.port,
+        }
+    };
+    NodeBridgePlan { persisted, runtime }
+}
+
+fn rust_status_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_status_http
+}
+
+fn reserve_loopback_port() -> Result<u16> {
+    let reservation = TcpListener::bind(("127.0.0.1", 0))
+        .context("Failed to reserve loopback port for Node bridge")?;
+    Ok(reservation
+        .local_addr()
+        .context("Failed to inspect reserved loopback port")?
+        .port())
+}
+
+fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> {
+    let listener = TcpListener::bind((cli.host.as_str(), cli.port)).with_context(|| {
+        format!(
+            "Failed to bind Rust HTTP front door on {}:{}",
+            cli.host, cli.port
+        )
+    })?;
+    let internal_port = reserve_loopback_port()?;
+    let plan = node_bridge_plan(cli, internal_port);
+    let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
+    let internal_token = rust_status_http_enabled(cli)
+        .then(generate_internal_control_token)
+        .transpose()?;
+    let status_route = internal_token.as_ref().map(|token| {
+        status_http::StatusRouteConfig::new(
+            resolve_data_dir(
+                root,
+                env::var_os("VIBELINK_DATA_DIR"),
+                env::var_os("LOCALAPPDATA"),
+                Path::exists,
+            ),
+            upstream,
+            token.clone(),
+        )
+    });
+    let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
+
+    println!(
+        "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
+        cli.host, cli.port, upstream
+    );
+    let result = http_frontdoor::serve(listener, upstream, &mut node, status_route);
+    if node
+        .try_wait()
+        .context("Failed to inspect Node bridge after front-door shutdown")?
+        .is_none()
+    {
+        let _ = node.kill();
+        let _ = node.wait();
+    }
+    result
+}
+
+fn spawn_node_bridge(
+    cli: &Cli,
+    root: &Path,
+    server: &Path,
+    plan: &NodeBridgePlan,
+    internal_control_token: Option<&str>,
+) -> Result<Child> {
     let executable = env::current_exe().context("Cannot resolve current executable path")?;
     let data_dir = resolve_data_dir(
         &root,
@@ -2325,26 +2445,32 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
     for (key, value) in missing_sidecar_command_envs(&executable, |key| env::var_os(key)) {
         command.env(key, value);
     }
+    for (key, value) in missing_rust_canary_envs(cli.rust_canary, |key| env::var_os(key)) {
+        command.env(key, value);
+    }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command
         .arg(&server)
         .current_dir(&root)
         .env("VIBELINK_DATA_DIR", data_dir)
-        .env("MOBILE_AGENT_HOST", &cli.host)
-        .env("MOBILE_AGENT_PORT", cli.port.to_string())
+        .env("VIBELINK_SUPERVISOR_PID", std::process::id().to_string())
+        .env("MOBILE_AGENT_HOST", &plan.persisted.host)
+        .env("MOBILE_AGENT_PORT", plan.persisted.port.to_string())
         .stdin(Stdio::null());
 
-    let status = command
-        .spawn()
-        .context("Failed to launch Node bridge. Is node.exe on PATH?")?
-        .wait()
-        .context("Failed while waiting for Node bridge")?;
-
-    if !status.success() {
-        bail!("Node bridge exited with status {status}");
+    if cli.rust_http_canary {
+        command
+            .env("VIBELINK_RUNTIME_HOST", &plan.runtime.host)
+            .env("VIBELINK_RUNTIME_PORT", plan.runtime.port.to_string());
     }
-    Ok(())
+    if let Some(token) = internal_control_token {
+        command.env("VIBELINK_INTERNAL_CONTROL_TOKEN", token);
+    }
+
+    command
+        .spawn()
+        .context("Failed to launch Node bridge. Is node.exe on PATH?")
 }
 
 fn missing_sidecar_command_envs<F>(
@@ -2363,6 +2489,30 @@ where
     .into_iter()
     .filter(|key| existing(key).is_none())
     .map(|key| (key, executable.as_os_str().to_os_string()))
+    .collect()
+}
+
+fn missing_rust_canary_envs<F>(enabled: bool, mut existing: F) -> Vec<(&'static str, OsString)>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    if !enabled {
+        return Vec::new();
+    }
+    [
+        ("VIBELINK_RUST_STATUS", "1"),
+        ("VIBELINK_RUST_WORKSPACE_TREE", "auto"),
+        ("VIBELINK_RUST_WORKSPACE_TREE_SESSION", "auto"),
+        ("VIBELINK_MCP_RUST_SIDECAR", "auto"),
+        ("VIBELINK_MCP_PERSISTENT_SESSIONS", "1"),
+        ("VIBELINK_EVENT_STORE_RUST_SIDECAR", "auto"),
+        ("VIBELINK_EVENT_STORE_BATCH_APPEND", "1"),
+        ("VIBELINK_EVENT_STORE_BATCH_TASK_APPEND", "1"),
+        ("VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", "1"),
+    ]
+    .into_iter()
+    .filter(|(key, _)| existing(key).is_none())
+    .map(|(key, value)| (key, OsString::from(value)))
     .collect()
 }
 
@@ -2421,7 +2571,17 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
         .arg("--host")
         .arg(&cli.host)
         .arg("--port")
-        .arg(cli.port.to_string())
+        .arg(cli.port.to_string());
+    if cli.rust_canary {
+        command.arg("--rust-canary");
+    }
+    if cli.rust_http_canary {
+        command.arg("--rust-http-canary");
+    }
+    if cli.rust_status_http {
+        command.arg("--rust-status-http");
+    }
+    command
         .arg("bridge")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2431,6 +2591,13 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     command.creation_flags(CREATE_NO_WINDOW);
 
     command.spawn().context("Failed to start bridge role")
+}
+
+fn generate_internal_control_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("Cannot generate internal Status route token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn print_pairing_qr(api_base_url: &str, pairing_base_url: &str, label: &str) -> Result<()> {
@@ -2594,6 +2761,92 @@ mod tests {
                 ("VIBELINK_RUST_BIN", executable.as_os_str().to_os_string())
             ]
         );
+    }
+
+    #[test]
+    fn rust_canary_envs_enable_current_slices_and_preserve_overrides() {
+        let values = missing_rust_canary_envs(true, |_| None);
+        assert_eq!(
+            values,
+            vec![
+                ("VIBELINK_RUST_STATUS", OsString::from("1")),
+                ("VIBELINK_RUST_WORKSPACE_TREE", OsString::from("auto")),
+                (
+                    "VIBELINK_RUST_WORKSPACE_TREE_SESSION",
+                    OsString::from("auto")
+                ),
+                ("VIBELINK_MCP_RUST_SIDECAR", OsString::from("auto")),
+                ("VIBELINK_MCP_PERSISTENT_SESSIONS", OsString::from("1")),
+                ("VIBELINK_EVENT_STORE_RUST_SIDECAR", OsString::from("auto")),
+                ("VIBELINK_EVENT_STORE_BATCH_APPEND", OsString::from("1")),
+                (
+                    "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND",
+                    OsString::from("1")
+                ),
+                (
+                    "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND",
+                    OsString::from("1")
+                )
+            ]
+        );
+
+        let overridden = missing_rust_canary_envs(true, |key| {
+            (key == "VIBELINK_RUST_STATUS").then(|| OsString::from("0"))
+        });
+        assert!(overridden
+            .iter()
+            .all(|(key, _)| *key != "VIBELINK_RUST_STATUS"));
+        assert!(missing_rust_canary_envs(false, |_| None).is_empty());
+    }
+
+    #[test]
+    fn rust_canary_is_an_additive_global_cli_flag() {
+        let enabled = Cli::try_parse_from(["vibelink", "--rust-canary", "bridge"]).unwrap();
+        assert!(enabled.rust_canary);
+        assert!(matches!(enabled.command, Some(Mode::Bridge)));
+
+        let defaulted = Cli::try_parse_from(["vibelink", "bridge"]).unwrap();
+        assert!(!defaulted.rust_canary);
+    }
+
+    #[test]
+    fn rust_http_canary_is_additive_and_keeps_node_on_loopback() {
+        let enabled = Cli::try_parse_from(["vibelink", "--rust-http-canary", "bridge"]).unwrap();
+        assert!(enabled.rust_http_canary);
+
+        let plan = node_bridge_plan(&enabled, 49_152);
+        assert_eq!(plan.persisted.host, "0.0.0.0");
+        assert_eq!(plan.persisted.port, 8787);
+        assert_eq!(plan.runtime.host, "127.0.0.1");
+        assert_eq!(plan.runtime.port, 49_152);
+
+        let defaulted =
+            Cli::try_parse_from(["vibelink", "--host", "0.0.0.0", "--port", "8787", "bridge"])
+                .unwrap();
+        assert!(!defaulted.rust_http_canary);
+
+        let plan = node_bridge_plan(&defaulted, 49_152);
+        assert_eq!(plan.persisted.host, "0.0.0.0");
+        assert_eq!(plan.persisted.port, 8787);
+        assert_eq!(plan.runtime, plan.persisted);
+    }
+
+    #[test]
+    fn rust_status_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-status-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_status_http);
+        assert!(rust_status_http_enabled(&enabled));
+
+        let status_only =
+            Cli::try_parse_from(["vibelink", "--rust-status-http", "bridge"]).unwrap();
+        assert!(status_only.rust_status_http);
+        assert!(!rust_status_http_enabled(&status_only));
     }
 
     #[test]

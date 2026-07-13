@@ -84,6 +84,7 @@ import {
   isHostAllowed,
   isPublicHost,
   pairDevice,
+  pairingTokenLogValue,
   publicAccessWarnings,
   rateLimitKey,
   requestIp,
@@ -92,7 +93,10 @@ import {
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
 import { buildProviderRegistry } from "./providerRegistry.js";
+import { internalControlAuthorized, originalHostRequest } from "./internalControl.js";
+import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
 import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
+import { startSupervisorMonitor } from "./supervisorMonitor.js";
 import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
@@ -120,6 +124,7 @@ import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, Bro
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
+settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
 restoreTasks();
 const restoredLiveCallSessions = restoreLiveCallSessions();
@@ -1215,6 +1220,33 @@ async function providerRegistryPayload(options = {}) {
   return buildProviderRegistry({ settings: settingsValue, probes });
 }
 
+async function buildStatusSnapshot(request) {
+  const publicSettingsValue = await publicSettings(settings);
+  const providerRegistry = await providerRegistryPayload();
+  return {
+    ok: true,
+    settings: publicSettingsValue,
+    providerRegistry,
+    storage: {
+      sqlite: getDbPath()
+    },
+    security: {
+      warnings: publicAccessWarnings(request, settings),
+      devices: listDevices(),
+      cloudflare: cloudflareGuide(request, settings)
+    },
+    notifications: {
+      webPush: publicSettingsValue.webPush,
+      emailFallback: { configured: Boolean(settings.notificationEmail) }
+    },
+    workspaces: getWorkspaces(settings),
+    workspaceRuntime: getWorkspaceRuntimeStats(),
+    controlPlaneRuntime: getStatusRuntimeStats(),
+    network: getNetworkAddresses(settings.port),
+    tasks: conversationTasks()
+  };
+}
+
 function serveStatic(request, response, url) {
   const requested = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
   const safePath = path.normalize(requested).replace(/^(\.\.[/\\])+/, "");
@@ -1549,31 +1581,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/status" && request.method === "GET") {
-    const publicSettingsValue = await publicSettings(settings);
-    const providerRegistry = await providerRegistryPayload();
-    const statusPayload = {
-      ok: true,
-      settings: publicSettingsValue,
-      providerRegistry,
-      storage: {
-        sqlite: getDbPath()
-      },
-      security: {
-        warnings: publicAccessWarnings(request, settings),
-        devices: listDevices(),
-        cloudflare: cloudflareGuide(request, settings)
-      },
-      notifications: {
-        webPush: publicSettingsValue.webPush,
-        emailFallback: { configured: Boolean(settings.notificationEmail) }
-      },
-      workspaces: getWorkspaces(settings),
-      workspaceRuntime: getWorkspaceRuntimeStats(),
-      controlPlaneRuntime: getStatusRuntimeStats(),
-      network: getNetworkAddresses(settings.port),
-      tasks: conversationTasks()
-    };
-    sendJson(response, 200, await renderStatusPayload(statusPayload));
+    sendJson(response, 200, await renderStatusPayload(await buildStatusSnapshot(request)));
     return;
   }
 
@@ -3435,6 +3443,15 @@ const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
 
   try {
+    if (url.pathname === "/internal/status-snapshot" && request.method === "GET") {
+      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
+        sendError(response, 404, "Unknown API route");
+        return;
+      }
+      sendJson(response, 200, await buildStatusSnapshot(originalHostRequest(request)));
+      return;
+    }
+
     if (!isHostAllowed(request, settings)) {
       sendError(response, 403, "Host is not allowed.");
       return;
@@ -3505,6 +3522,8 @@ process.once("SIGTERM", () => {
   });
 });
 
+startSupervisorMonitor({ onExit: shutdown });
+
 // WebSocket upgrade handler — only used for /api/live-calls/:id/audio today.
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", async (request, socket, head) => {
@@ -3544,6 +3563,6 @@ scheduleToolEventsPrune();
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;
   console.log(`VibeLink listening on ${local}`);
-  console.log(`Pairing token: ${settings.pairingToken}`);
+  console.log(`Pairing token: ${pairingTokenLogValue({ settings, devices: listDevices() })}`);
   for (const item of getNetworkAddresses(settings.port)) console.log(`LAN: ${item.url}`);
 });

@@ -3,7 +3,10 @@ use crate::device_http::{
     DeviceRouteConfig,
 };
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
-use crate::pairing_http::{route_pairing_request, PairingRouteConfig};
+use crate::pairing_http::{
+    pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
+    PairingRouteConfig,
+};
 use crate::status_http::{
     parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
 };
@@ -18,6 +21,7 @@ use std::time::Duration;
 
 const MAX_ACTIVE_CONNECTIONS: usize = 256;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_DIRECT_JSON_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Default)]
 pub struct FrontdoorRoutes {
@@ -123,7 +127,7 @@ fn handle_connection(
         .peer_addr()
         .map(|address| address.ip().to_string())
         .unwrap_or_default();
-    let prefix = read_request_head(&mut client)?;
+    let mut prefix = read_request_head(&mut client)?;
     if let Ok(request) = parse_request(&prefix) {
         if let Some(status_route) = routes.status.as_ref() {
             match route_status_request(&request, status_route) {
@@ -168,7 +172,20 @@ fn handle_connection(
             }
         }
         if let Some(pairing_route) = routes.pairing.as_ref() {
-            match route_pairing_request(&request, &peer_ip, pairing_route) {
+            let body = if pairing_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let result = if let Some(body) = body.as_deref() {
+                route_pairing_request_with_body(&request, &peer_ip, Some(body), pairing_route)
+            } else {
+                route_pairing_request(&request, &peer_ip, pairing_route)
+            };
+            match result {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
@@ -179,6 +196,50 @@ fn handle_connection(
         }
     }
     proxy_connection_with_prefix(client, upstream, prefix)
+}
+
+fn read_request_body(
+    client: &mut TcpStream,
+    prefix: &mut Vec<u8>,
+    request: &crate::status_http::ParsedRequest,
+) -> io::Result<Option<Vec<u8>>> {
+    if request.header("transfer-encoding").is_some() {
+        return Ok(None);
+    }
+    let content_length = match request.header("content-length") {
+        Some(value) => match value.parse::<usize>() {
+            Ok(length) if length <= MAX_DIRECT_JSON_BODY_BYTES => length,
+            _ => return Ok(None),
+        },
+        None => 0,
+    };
+    let header_length = request.header_length();
+    if prefix.len() < header_length {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "parsed header length exceeds request prefix",
+        ));
+    }
+    let available = prefix.len() - header_length;
+    if available < content_length {
+        let mut remaining = content_length - available;
+        let mut chunk = [0_u8; 8192];
+        while remaining > 0 {
+            let read_length = remaining.min(chunk.len());
+            let size = client.read(&mut chunk[..read_length])?;
+            if size == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "request body ended before Content-Length",
+                ));
+            }
+            prefix.extend_from_slice(&chunk[..size]);
+            remaining -= size;
+        }
+    }
+    Ok(Some(
+        prefix[header_length..header_length + content_length].to_vec(),
+    ))
 }
 
 fn read_request_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -260,7 +321,7 @@ fn write_service_unavailable(client: &mut TcpStream) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_connection, proxy_connection, FrontdoorRoutes};
+    use super::{handle_connection, proxy_connection, read_request_body, FrontdoorRoutes};
     use crate::device_http::{DeviceMutationRouteConfig, DeviceRouteConfig};
     use crate::doctor_http::DoctorRouteConfig;
     use crate::pairing_http::PairingRouteConfig;
@@ -349,6 +410,29 @@ mod tests {
         client.shutdown(Shutdown::Both).unwrap();
         proxy_thread.join().unwrap();
         upstream_thread.join().unwrap();
+    }
+
+    #[test]
+    fn reads_fragmented_content_length_body_and_preserves_request_bytes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .write_all(b"POST /api/pairing-sessions HTTP/1.1\r\nHost: bridge.test\r\nContent-Length: 19\r\n\r\n{\"device")
+                .unwrap();
+            thread::sleep(std::time::Duration::from_millis(50));
+            stream.write_all(b"Label\":\"A\"}").unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut prefix = super::read_request_head(&mut stream).unwrap();
+        let request = crate::status_http::parse_request(&prefix).unwrap();
+        let body = read_request_body(&mut stream, &mut prefix, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, br#"{"deviceLabel":"A"}"#);
+        assert!(prefix.ends_with(&body));
+        client.join().unwrap();
     }
 
     #[test]

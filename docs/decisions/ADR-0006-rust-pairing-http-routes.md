@@ -1,4 +1,4 @@
-# ADR-0006: Staged Rust Pairing HTTP Ownership
+# ADR-0006: Rust Pairing HTTP Ownership
 
 ## Status
 
@@ -11,11 +11,12 @@ Pairing combines public polling, authenticated administration, JSON request bodi
 ## Decision
 
 - Add `--rust-pairing-http`, effective only with `--rust-http-canary`.
-- First migrate public `GET /api/pairing-sessions/:id`, authenticated `GET /api/pairing-sessions`, and authenticated approve/deny operations. Creation and claim remain byte-for-byte Node fallbacks in this stage.
+- Migrate public create/status/claim and authenticated list/approve/deny behind one route-family flag.
+- Direct JSON bodies use a 1 MiB bounded `Content-Length` reader which appends consumed bytes to the replay prefix. Unsupported transfer encodings, invalid lengths, and larger bodies remain byte-for-byte Node fallbacks during canary.
 - Preserve stored-status filtering, computed expiry, field projection, authentication, polling rate limits, response codes, and audit records.
 - Pairing decisions and their audit records share a SQLite transaction. Once Rust authenticates and claims approve/deny, failures return Rust `500` and never replay to Node.
-- The next stage adds a bounded request-body reader and migrates create/claim. Claim must acquire any Node-owned public settings snapshot before committing the one-time token transaction, so a post-commit dependency failure cannot strand the caller without its token.
+- Claim acquires the Node-owned public settings snapshot through a loopback-only, process-token-protected endpoint before committing the one-time token transaction, so a post-commit dependency failure cannot strand the caller without its token. The settings migration removes this internal dependency later.
 
 ## Consequences
 
-The feature flag temporarily owns a documented subset of the pairing family while create/claim remain reversible Node paths. This gives Android polling and native administration an independently testable Rust slice without weakening one-time token handling.
+The feature flag owns the pairing family for normal Web/Android requests while preserving Node replay for unsupported body framing and pre-commit dependency failures. Rust-generated codes and tokens exist in plaintext only in their single response; SQLite stores hashes.

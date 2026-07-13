@@ -33,7 +33,7 @@
 - [x] Migrate read-only `GET /api/devices` ownership behind an independent Rust flag.
 - [x] Migrate audited device mutation routes with transaction-bound fallback semantics.
 - [x] Migrate pairing status/list/approve/deny routes.
-- [ ] Migrate pairing create/claim routes with bounded JSON bodies and one-time token safety.
+- [x] Migrate pairing create/claim routes with bounded JSON bodies and one-time token safety.
 - [ ] Migrate settings read, validation, dry-run, and mutation routes.
 - [ ] Migrate audit-log read, pagination, and field-projection routes.
 - [ ] Migrate workspace read/tree and registry routes.

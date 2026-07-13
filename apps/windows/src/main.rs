@@ -47,6 +47,9 @@ struct Cli {
 
     #[arg(long, global = true, default_value = "VibeLink Windows")]
     device_label: String,
+
+    #[arg(long, global = true)]
+    rust_canary: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2325,6 +2328,9 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
     for (key, value) in missing_sidecar_command_envs(&executable, |key| env::var_os(key)) {
         command.env(key, value);
     }
+    for (key, value) in missing_rust_canary_envs(cli.rust_canary, |key| env::var_os(key)) {
+        command.env(key, value);
+    }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command
@@ -2363,6 +2369,30 @@ where
     .into_iter()
     .filter(|key| existing(key).is_none())
     .map(|key| (key, executable.as_os_str().to_os_string()))
+    .collect()
+}
+
+fn missing_rust_canary_envs<F>(enabled: bool, mut existing: F) -> Vec<(&'static str, OsString)>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    if !enabled {
+        return Vec::new();
+    }
+    [
+        ("VIBELINK_RUST_STATUS", "1"),
+        ("VIBELINK_RUST_WORKSPACE_TREE", "auto"),
+        ("VIBELINK_RUST_WORKSPACE_TREE_SESSION", "auto"),
+        ("VIBELINK_MCP_RUST_SIDECAR", "auto"),
+        ("VIBELINK_MCP_PERSISTENT_SESSIONS", "1"),
+        ("VIBELINK_EVENT_STORE_RUST_SIDECAR", "auto"),
+        ("VIBELINK_EVENT_STORE_BATCH_APPEND", "1"),
+        ("VIBELINK_EVENT_STORE_BATCH_TASK_APPEND", "1"),
+        ("VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", "1"),
+    ]
+    .into_iter()
+    .filter(|(key, _)| existing(key).is_none())
+    .map(|(key, value)| (key, OsString::from(value)))
     .collect()
 }
 
@@ -2421,7 +2451,11 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
         .arg("--host")
         .arg(&cli.host)
         .arg("--port")
-        .arg(cli.port.to_string())
+        .arg(cli.port.to_string());
+    if cli.rust_canary {
+        command.arg("--rust-canary");
+    }
+    command
         .arg("bridge")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2594,6 +2628,52 @@ mod tests {
                 ("VIBELINK_RUST_BIN", executable.as_os_str().to_os_string())
             ]
         );
+    }
+
+    #[test]
+    fn rust_canary_envs_enable_current_slices_and_preserve_overrides() {
+        let values = missing_rust_canary_envs(true, |_| None);
+        assert_eq!(
+            values,
+            vec![
+                ("VIBELINK_RUST_STATUS", OsString::from("1")),
+                ("VIBELINK_RUST_WORKSPACE_TREE", OsString::from("auto")),
+                (
+                    "VIBELINK_RUST_WORKSPACE_TREE_SESSION",
+                    OsString::from("auto")
+                ),
+                ("VIBELINK_MCP_RUST_SIDECAR", OsString::from("auto")),
+                ("VIBELINK_MCP_PERSISTENT_SESSIONS", OsString::from("1")),
+                ("VIBELINK_EVENT_STORE_RUST_SIDECAR", OsString::from("auto")),
+                ("VIBELINK_EVENT_STORE_BATCH_APPEND", OsString::from("1")),
+                (
+                    "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND",
+                    OsString::from("1")
+                ),
+                (
+                    "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND",
+                    OsString::from("1")
+                )
+            ]
+        );
+
+        let overridden = missing_rust_canary_envs(true, |key| {
+            (key == "VIBELINK_RUST_STATUS").then(|| OsString::from("0"))
+        });
+        assert!(overridden
+            .iter()
+            .all(|(key, _)| *key != "VIBELINK_RUST_STATUS"));
+        assert!(missing_rust_canary_envs(false, |_| None).is_empty());
+    }
+
+    #[test]
+    fn rust_canary_is_an_additive_global_cli_flag() {
+        let enabled = Cli::try_parse_from(["vibelink", "--rust-canary", "bridge"]).unwrap();
+        assert!(enabled.rust_canary);
+        assert!(matches!(enabled.command, Some(Mode::Bridge)));
+
+        let defaulted = Cli::try_parse_from(["vibelink", "bridge"]).unwrap();
+        assert!(!defaulted.rust_canary);
     }
 
     #[test]

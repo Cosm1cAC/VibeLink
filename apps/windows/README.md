@@ -10,6 +10,14 @@ vibelink.exe
 
 The default mode starts the packaged or development bridge, waits for the HTTP API, then creates an Android pairing QR. Packaged builds prefer `runtime/node.exe`; `VIBELINK_NODE_COMMAND` remains an explicit override and development falls back to `node` on PATH.
 
+Use the explicit canary profile to enable the currently promoted Rust Status, Workspace, MCP, and Event Store paths while preserving every existing environment override and Node/Worker fallback:
+
+```powershell
+vibelink.exe --rust-canary
+```
+
+Portable packages also include `start-vibelink-canary.cmd`. The normal `vibelink.exe` and `start-vibelink.cmd` entry points remain conservative and do not enable canary routes.
+
 ## Internal modes
 
 ```powershell

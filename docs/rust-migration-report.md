@@ -93,7 +93,7 @@
 
 实现：`src/statusRuntime.js`、`apps/windows/src/status_sidecar.rs`、`vibelink status-sidecar`。当前为 `opt-in`：Node 保留 Host/鉴权和动态状态采集，Rust 负责强类型校验及最终响应组装；首次 health、持久进程复用、超时、失败熔断和 Node 原快照回退均有自动测试。
 
-认证 HTTP canary 连续请求 `/api/status`，要求匿名访问为 401、Rust readiness 成功、单一 sidecar、失败/回退/pending/背压均为 0。下一步是有限公网请求观察；各状态源迁入 Rust 后，同一契约处理器再提升为直接 HTTP 路由。
+认证 HTTP canary 连续请求 `/api/status`，要求匿名访问为 401、Rust readiness 成功、单一 sidecar、失败/回退/pending/背压均为 0。公网 canary 使用真实 HTTPS origin 和设备 token，校验 Rust runtime 计数增量、历史故障计数、pending 排空和公网 p95；token 只能通过 `VIBELINK_PUBLIC_CANARY_TOKEN` 环境变量传入，不进入命令行或 JSON 产物。完成有限公网请求观察后再评估 `canary`；各状态源迁入 Rust 后，同一契约处理器再提升为直接 HTTP 路由。
 
 ## Audio Pipeline
 
@@ -118,6 +118,7 @@ npm run rust:migration:check
 npm run test:rust-sidecars
 
 npm run status:server-canary -- --delete-temp
+$env:VIBELINK_PUBLIC_CANARY_TOKEN="<device-token>"; npm run status:public-canary -- --base-url https://bridge.example.com --requests 10 --max-p95-ms 2000 --output .tmp/status-public-canary.json
 
 npm run workspace-tree:canary
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs

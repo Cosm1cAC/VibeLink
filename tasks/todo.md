@@ -4,10 +4,10 @@
 
 - [x] Audit the current Status sidecar, route canary, public process, Tunnel, and package state.
 - [x] Write the staged migration, verification, and rollback plan.
-- [ ] Add a failing test for public Status runtime evidence.
-- [ ] Implement the public authenticated Status canary.
-- [ ] Add degraded-runtime and latency-threshold coverage.
-- [ ] Run Status Node/Rust contract and server-route verification.
+- [x] Add a failing test for public Status runtime evidence.
+- [x] Implement the public authenticated Status canary.
+- [x] Add degraded-runtime and latency-threshold coverage.
+- [x] Run Status Node/Rust contract and server-route verification.
 - [ ] Build a portable package from the current commit and verify its manifest/checksum.
 - [ ] Preflight the named Tunnel and preserve the current rollback commands.
 - [ ] Restart the public bridge with `VIBELINK_RUST_STATUS=1` under the Rust launcher.

@@ -21,6 +21,7 @@
       "tests": [
         "test/statusSidecarContract.test.js",
         "test/statusRuntime.test.js",
+        "test/statusPublicCanary.test.js",
         "test/statusServerCanary.test.js",
         "test/serverStatusRuntime.test.js"
       ],

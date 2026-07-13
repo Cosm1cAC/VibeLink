@@ -3,6 +3,8 @@ package com.vibelink.app.ui.screens
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.network.ApiException
+import com.vibelink.app.network.ApprovalDecisionResponse
 import com.vibelink.app.network.CommandResult
 import com.vibelink.app.network.GitDiffResponse
 import com.vibelink.app.network.GitStatusResponse
@@ -70,6 +72,9 @@ class WorkspaceViewModel : ViewModel() {
     private val _terminal = MutableStateFlow(WorkspaceTerminalUiState())
     val terminal: StateFlow<WorkspaceTerminalUiState> = _terminal.asStateFlow()
 
+    private val _pendingApproval = MutableStateFlow<WorkspaceApprovalNotice?>(null)
+    val pendingApproval: StateFlow<WorkspaceApprovalNotice?> = _pendingApproval.asStateFlow()
+
     private var terminalPollJob: Job? = null
 
     private val _error = MutableStateFlow("")
@@ -99,6 +104,7 @@ class WorkspaceViewModel : ViewModel() {
         viewModelScope.launch {
             terminalPollJob?.cancel()
             _terminal.value = WorkspaceTerminalUiState()
+            _pendingApproval.value = null
             _selectedWorkspaceId.value = workspaceId
             _currentDir.value = ""
             _selectedFile.value = null
@@ -339,16 +345,61 @@ class WorkspaceViewModel : ViewModel() {
         if (workspaceId.isBlank()) return
         viewModelScope.launch {
             _error.value = ""
+            _pendingApproval.value = null
             try {
                 val result = apiClient.startTerminalSession(workspaceId, shell = shell.trim(), mode = mode)
                 val sessionId = result.toolRunId.ifBlank { result.session?.id.orEmpty() }
                 if (sessionId.isBlank()) error("Terminal session did not return an id")
                 _terminal.value = terminalState(result.session, sessionId, output = "")
                 pollTerminal(apiClient, sessionId)
+            } catch (error: ApiException) {
+                val notice = WorkspaceApprovalHandoff.noticeFromException(error)
+                if (notice == null) {
+                    _error.value = error.message ?: "Terminal session failed to start"
+                } else {
+                    _pendingApproval.value = notice
+                    _terminal.value = WorkspaceTerminalUiState(
+                        sessionId = notice.toolRunId,
+                        status = "approval_required",
+                    )
+                    _error.value = notice.message
+                }
             } catch (error: Exception) {
                 _error.value = error.message ?: "Terminal session failed to start"
             }
         }
+    }
+
+    fun applyApprovalDecision(apiClient: ApiClient, response: ApprovalDecisionResponse): Boolean {
+        if (!WorkspaceApprovalHandoff.isTerminalDecision(response)) return false
+        val approval = response.approval ?: return false
+        val pending = _pendingApproval.value
+        if (pending != null && pending.approvalId != approval.id) return false
+        if (approval.workspaceId.isNotBlank() && approval.workspaceId != _selectedWorkspaceId.value) return false
+
+        if (approval.status == "denied") {
+            _pendingApproval.value = null
+            _terminal.value = WorkspaceTerminalUiState()
+            _error.value = "Terminal approval ${approval.id.take(8)} was denied."
+            return true
+        }
+
+        val handoff = WorkspaceApprovalHandoff.approvedTerminalFrom(response)
+        if (handoff == null) {
+            _error.value = response.error.ifBlank { "Approved terminal did not return a session." }
+            return true
+        }
+
+        _pendingApproval.value = null
+        _error.value = ""
+        _terminal.value = terminalState(
+            session = handoff.session,
+            sessionId = handoff.toolRunId,
+            output = "",
+            fallbackStatus = handoff.status,
+        )
+        pollTerminal(apiClient, handoff.toolRunId)
+        return true
     }
 
     fun sendTerminalInput(apiClient: ApiClient, text: String) {

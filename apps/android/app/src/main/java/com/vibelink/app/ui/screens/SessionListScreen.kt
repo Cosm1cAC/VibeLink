@@ -245,6 +245,15 @@ fun SessionListScreen(
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
+                            if (SessionListErrorPolicy.showCachedContentError(error, conversations.size)) {
+                                item(key = "cached-refresh-error") {
+                                    CachedRefreshError(
+                                        message = error,
+                                        retryText = strings.retry,
+                                        onRetry = { viewModel.load(apiClient, isRefresh = true) },
+                                    )
+                                }
+                            }
                             items(items = conversations, key = { it.key }) { item ->
                                 ConversationCard(
                                     item = item,
@@ -302,6 +311,31 @@ fun SessionListScreen(
                 forkTarget = null
             },
         )
+    }
+}
+
+object SessionListErrorPolicy {
+    fun showCachedContentError(error: String, conversationCount: Int): Boolean {
+        return error.isNotBlank() && conversationCount > 0
+    }
+}
+
+@Composable
+private fun CachedRefreshError(message: String, retryText: String, onRetry: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = onRetry) { Text(retryText) }
+        }
     }
 }
 

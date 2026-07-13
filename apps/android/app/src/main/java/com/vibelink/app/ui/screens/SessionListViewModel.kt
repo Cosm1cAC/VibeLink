@@ -52,13 +52,20 @@ class SessionListViewModel : ViewModel() {
             if (isRefresh) _refreshing.value = true else _loading.value = true
             _error.value = ""
             try {
-                val histories = apiClient.listHistories()
-                val tasks = apiClient.listTasks()
-                val threadState = runCatching { apiClient.getThreadState() }.getOrElse { ThreadStateResponse() }
-                val desktop = runCatching { apiClient.getDesktopRemoteStatus(fresh = isRefresh) }.getOrNull()
+                val snapshot = loadSessionListSnapshot(
+                    loadHistories = apiClient::listHistories,
+                    loadTasks = apiClient::listTasks,
+                    loadThreadState = apiClient::getThreadState,
+                    loadDesktop = { apiClient.getDesktopRemoteStatus(fresh = isRefresh) },
+                )
 
-                _desktopStatus.value = desktopStatusText(desktop)
-                _allConversations.value = buildConversationItems(histories, tasks, threadState, desktop)
+                _desktopStatus.value = desktopStatusText(snapshot.desktop)
+                _allConversations.value = buildConversationItems(
+                    snapshot.histories,
+                    snapshot.tasks,
+                    snapshot.threadState,
+                    snapshot.desktop,
+                )
                 applyFilters()
             } catch (error: Exception) {
                 _error.value = error.message ?: "加载会话失败"

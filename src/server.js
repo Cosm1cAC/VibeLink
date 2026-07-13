@@ -92,6 +92,7 @@ import {
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
 import { buildProviderRegistry } from "./providerRegistry.js";
+import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
 import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
@@ -1550,7 +1551,7 @@ async function routeApi(request, response, url) {
   if (url.pathname === "/api/status" && request.method === "GET") {
     const publicSettingsValue = await publicSettings(settings);
     const providerRegistry = await providerRegistryPayload();
-    sendJson(response, 200, {
+    const statusPayload = {
       ok: true,
       settings: publicSettingsValue,
       providerRegistry,
@@ -1568,9 +1569,11 @@ async function routeApi(request, response, url) {
       },
       workspaces: getWorkspaces(settings),
       workspaceRuntime: getWorkspaceRuntimeStats(),
+      controlPlaneRuntime: getStatusRuntimeStats(),
       network: getNetworkAddresses(settings.port),
       tasks: conversationTasks()
-    });
+    };
+    sendJson(response, 200, await renderStatusPayload(statusPayload));
     return;
   }
 
@@ -3478,6 +3481,7 @@ async function shutdown(signal) {
   try {
     await drainEventStoreRuntime();
     await closePersistentMcpSessions();
+    await closeStatusRuntime();
   } catch (error) {
     console.error(`[shutdown] runtime drain failed: ${error.stack || error.message}`);
   }

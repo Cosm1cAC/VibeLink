@@ -10,4 +10,6 @@ test("/api/status exposes workspace runtime scanner stats", () => {
 
   assert.match(source, /getWorkspaceRuntimeStats/);
   assert.match(source, /workspaceRuntime:\s*getWorkspaceRuntimeStats\(\)/);
+  assert.match(source, /controlPlaneRuntime:\s*getStatusRuntimeStats\(\)/);
+  assert.match(source, /renderStatusPayload\(statusPayload\)/);
 });

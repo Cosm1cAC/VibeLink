@@ -25,6 +25,7 @@ use std::{
 mod audio_pipeline_sidecar;
 mod compression_sidecar;
 mod public_tunnel;
+mod status_sidecar;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -91,6 +92,8 @@ enum Mode {
     },
     /// Run the deterministic compression helper JSONL sidecar.
     CompressionSidecar,
+    /// Validate and assemble status snapshots as a persistent JSONL sidecar.
+    StatusSidecar,
     /// Run deterministic PCM preprocessing as a bounded JSONL sidecar.
     AudioPipelineSidecar {
         #[arg(long = "max-buffered-samples", default_value_t = 48_000)]
@@ -2265,6 +2268,7 @@ fn run() -> Result<()> {
             run_event_store_sidecar(&db_path, read_only)
         }
         Mode::CompressionSidecar => compression_sidecar::run(),
+        Mode::StatusSidecar => status_sidecar::run(),
         Mode::AudioPipelineSidecar {
             max_buffered_samples,
             max_samples_per_chunk,
@@ -2353,6 +2357,7 @@ where
     [
         "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
         "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
         "VIBELINK_RUST_BIN",
     ]
     .into_iter()
@@ -2562,6 +2567,7 @@ mod tests {
             vec![
                 "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
                 "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+                "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
                 "VIBELINK_RUST_BIN"
             ]
         );
@@ -2579,6 +2585,10 @@ mod tests {
             vec![
                 (
                     "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+                    executable.as_os_str().to_os_string()
+                ),
+                (
+                    "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
                     executable.as_os_str().to_os_string()
                 ),
                 ("VIBELINK_RUST_BIN", executable.as_os_str().to_os_string())

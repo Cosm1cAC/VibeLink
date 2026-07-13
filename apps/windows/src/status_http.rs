@@ -22,6 +22,7 @@ pub struct ParsedRequest {
     pub method: String,
     target: String,
     headers: Vec<(String, String)>,
+    header_length: usize,
 }
 
 impl ParsedRequest {
@@ -69,6 +70,10 @@ impl ParsedRequest {
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
+
+    pub(crate) fn header_length(&self) -> usize {
+        self.header_length
+    }
 }
 
 fn decode_query_component(value: &str) -> Option<String> {
@@ -84,10 +89,10 @@ pub fn parse_request(bytes: &[u8]) -> Result<ParsedRequest, String> {
     }
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut request = httparse::Request::new(&mut headers);
-    match request.parse(bytes).map_err(|error| error.to_string())? {
-        httparse::Status::Complete(_) => {}
+    let header_length = match request.parse(bytes).map_err(|error| error.to_string())? {
+        httparse::Status::Complete(length) => length,
         httparse::Status::Partial => return Err("request headers are incomplete".to_string()),
-    }
+    };
     let method = request
         .method
         .ok_or_else(|| "request method is missing".to_string())?
@@ -114,6 +119,7 @@ pub fn parse_request(bytes: &[u8]) -> Result<ParsedRequest, String> {
         method,
         target,
         headers: parsed_headers,
+        header_length,
     })
 }
 

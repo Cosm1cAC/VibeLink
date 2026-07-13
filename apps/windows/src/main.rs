@@ -2421,9 +2421,11 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let internal_port = reserve_loopback_port()?;
     let plan = node_bridge_plan(cli, internal_port);
     let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
-    let internal_token = (rust_status_http_enabled(cli) || rust_doctor_http_enabled(cli))
-        .then(generate_internal_control_token)
-        .transpose()?;
+    let internal_token = (rust_status_http_enabled(cli)
+        || rust_doctor_http_enabled(cli)
+        || rust_pairing_http_enabled(cli))
+    .then(generate_internal_control_token)
+    .transpose()?;
     let route_data_dir = resolve_data_dir(
         root,
         env::var_os("VIBELINK_DATA_DIR"),
@@ -2456,8 +2458,18 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| device_http::DeviceRouteConfig::new(route_data_dir.clone()));
     let device_mutation_route = rust_device_mutations_http_enabled(cli)
         .then(|| device_http::DeviceMutationRouteConfig::new(route_data_dir.clone()));
-    let pairing_route = rust_pairing_http_enabled(cli)
-        .then(|| pairing_http::PairingRouteConfig::new(route_data_dir));
+    let pairing_route = if rust_pairing_http_enabled(cli) {
+        Some(
+            pairing_http::PairingRouteConfig::new(route_data_dir).with_internal_settings(
+                upstream,
+                internal_token
+                    .clone()
+                    .context("Pairing route internal token is missing")?,
+            ),
+        )
+    } else {
+        None
+    };
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(

@@ -181,7 +181,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0006-rust-pairing-http-routes.md"
       ],
-      "nextAction": "完整本地 release canary 已通过 Rust create/status/list/approve/claim；远端 CI、便携包与公网拒绝路径通过后保持 opt-in，下一 route family 为 settings/audit。"
+      "nextAction": "完整本地/包内 canary、6 条远端 CI 和公网只读拒绝路径均已通过；保持 opt-in 观察，下一 route family 为 settings/audit。"
     },
     {
       "id": "mcp-session-sidecar",

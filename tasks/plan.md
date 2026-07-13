@@ -1,60 +1,222 @@
-# Android Defect Remediation Plan
+# VibeLink Rust Control-Plane Migration Plan
 
 ## Overview
 
-Fix every application-owned defect reproduced during the Android 16 emulator audit: task approval handoff, approval navigation, message composer keyboard behavior, landscape login, history preview leakage, and repeated notification permission prompts. External Mobile MCP crash-list behavior and an emulator camera source that produces black frames are tracked as environment constraints, not VibeLink source defects.
+Migrate VibeLink from the current Node control plane plus Rust data-plane sidecars to a Rust-owned HTTP control plane through reversible vertical slices. The immediate milestone is to deploy the current Rust status assembler, collect authenticated public-canary evidence, and promote it only when failure, fallback, timeout, pending, and backpressure counters remain zero. Later route families follow the same contract-first and canary-first process.
 
 ## Architecture Decisions
 
-- Treat approval as an asynchronous execution handoff. The approval endpoint already starts the stored tool run, so Android consumes its typed task result instead of creating a second request.
-- Sanitize history at the server boundary so every client receives only user-visible user/assistant preview text.
-- Keep responsive decisions explicit: supplemental composer controls collapse while the IME is visible, while the prompt and send command remain reachable.
-- Persist the notification prompt decision locally so Activity recreation cannot repeat an already answered permission request.
+- Preserve the current OpenAPI and Web/Android HTTP/SSE contracts throughout the migration.
+- Keep Node as an automatic fallback until the matching Rust route has representative production evidence and zero Node route usage.
+- Migrate one route family at a time in this order: `status/doctor`, `pairing/device`, `settings/audit`, `workspace/tool`, then `task/live-call`.
+- Keep Audio and Compression on Node unless new production telemetry proves a material bottleneck.
+- Build and deploy the portable Windows package from a reproducible commit; archive the commit, checksum, canary output, and rollback command together.
 
-## Task List
+## Task 1: Public Status Canary
 
-### Phase 1: Data And Contract Safety
+**Description:** Add a secret-safe canary that exercises the real public `/api/status` route with anonymous and device-token requests, measures latency, and verifies Rust runtime deltas.
 
-- [x] Task 1: Sanitize history previews and add Node regression coverage.
-- [x] Task 2: Model approval execution results and add Android handoff tests.
+**Acceptance criteria:**
 
-### Checkpoint: Contracts
+- [ ] Anonymous requests return `401` and authenticated requests return `200`.
+- [ ] Rust attempts and responses increase together with zero fallback, failure, timeout, pending, or backpressure counts.
+- [ ] The JSON artifact contains no credential and fails when the latency or runtime thresholds are exceeded.
 
-- [x] Focused Node and Android tests pass.
-- [x] Approval response remains backward compatible with existing fields.
+**Verification:**
 
-### Phase 2: Workflow And Layout
+- [ ] Red/green Node tests cover healthy and degraded runtime evidence.
+- [ ] `npm run status:public-canary -- --base-url <url> --output <path>` passes against the deployed bridge.
 
-- [x] Task 3: Preserve approval state, deep-link Settings to Pending Approvals, and attach the automatically started task.
-- [x] Task 4: Make login content scrollable in portrait, landscape, and scanner states.
-- [x] Task 5: Keep the composer usable with the IME open and give the prompt a stable minimum width.
-- [x] Task 6: Prevent repeated notification permission prompts after the first automatic request.
+**Dependencies:** None.
 
-### Checkpoint: Android
+**Files likely touched:** `tools/status/public-canary.mjs`, `test/statusPublicCanary.test.js`, `package.json`.
 
-- [x] Android unit suite passes.
-- [x] Debug APK builds successfully.
-- [x] Approval, keyboard, rotation, and permission scenarios pass on `Codex_API_36`.
+**Estimated scope:** Medium.
 
-### Phase 3: Verification And Delivery
+## Task 2: Reproducible Canary Deployment
 
-- [x] Task 7: Run full focused verification, inspect the diff, and perform a quality review.
-- [x] Task 8: Stage only intended files, commit, and push the current branch.
+**Description:** Build the Rust launcher and portable package from the current commit, enable the Status opt-in only for the supervised bridge process, and preserve an immediate Node fallback.
 
-The full Node suite also exposed an existing event-store sidecar contract defect. The client now forwards its optional database path to the child process and uses the sidecar-specific backpressure error code; the existing regression tests pass.
+**Acceptance criteria:**
 
-The intended files were staged, committed, and pushed after GitHub CLI authentication was routed through SSH on port 443.
+- [ ] Rust and Node focused tests pass before the running public process changes.
+- [ ] Tunnel `--check-only`, package checksum, release-manifest commit, and local health checks pass.
+- [ ] A restart failure restores the previous Node bridge and public route.
+
+**Verification:**
+
+- [ ] `npm run status:contract`, Rust status tests, and authenticated server canary pass.
+- [ ] Public root returns `200`, anonymous status returns `401`, and the authenticated public canary passes.
+
+**Dependencies:** Task 1.
+
+**Files likely touched:** `tools/windows/package-portable.ps1`, deployment evidence under `.tmp/`, and release documentation.
+
+**Estimated scope:** Medium.
+
+## Task 3: Promote Existing Data-Plane Canaries
+
+**Description:** Collect representative Workspace, MCP, and Event Store production evidence before changing their defaults.
+
+**Acceptance criteria:**
+
+- [ ] Workspace interactive sessions show parity and zero fallback.
+- [ ] MCP natural sessions show stable reuse, zero readiness fallback, and drained pending work.
+- [ ] Event Store real sessions meet correctness and latency thresholds with zero fallback.
+
+**Verification:**
+
+- [ ] Existing Workspace, MCP, and Event Store canary commands pass and archive JSON artifacts.
+- [ ] Each default-on decision updates `docs/rust-migration-status.json` and the migration report.
+
+**Dependencies:** Task 2.
+
+**Files likely touched:** existing sidecar clients, canary tools, migration status and report.
+
+**Estimated scope:** Large; execute as three independent medium slices.
+
+## Task 4: Rust Status And Doctor HTTP Routes
+
+**Description:** Move direct HTTP handling for `/api/status` and `/api/doctor` into Rust while Node continues supplying any not-yet-migrated dynamic sources through a typed boundary.
+
+**Acceptance criteria:**
+
+- [ ] Rust directly owns authentication, validation, response serialization, and HTTP status codes for both routes.
+- [ ] Contract fixtures match the current Node responses and failure semantics.
+- [ ] A feature flag switches immediately between Rust and Node ownership.
+
+**Verification:**
+
+- [ ] OpenAPI contract, anonymous/authenticated route tests, malformed-input tests, and failure injection pass.
+- [ ] Public canary remains within 20% of baseline p95 with no new errors.
+
+**Dependencies:** Tasks 2 and 3 evidence foundation.
+
+**Files likely touched:** `apps/windows/src/`, `src/server.js`, status runtime/client, tests, and OpenAPI generation.
+
+**Estimated scope:** Large; split Status and Doctor into separate commits.
+
+## Task 5: Identity And Administrative Routes
+
+**Description:** Migrate `pairing/device` and then `settings/audit` route families with unchanged device-token and approval semantics.
+
+**Acceptance criteria:**
+
+- [ ] Pairing, approval, token rotation/revocation, settings validation, and audit writes preserve current contracts.
+- [ ] Security tests cover replay, expiry, invalid hosts, rate limits, and secret redaction.
+- [ ] Node fallback remains independently deployable until production canaries pass.
+
+**Verification:**
+
+- [ ] Contract suites pass against both implementations.
+- [ ] Staged public canaries pass at each route-family boundary.
+
+**Dependencies:** Task 4.
+
+**Files likely touched:** Rust HTTP modules, Node route adapters, security/store modules, tests, and OpenAPI.
+
+**Estimated scope:** Large; execute as four medium slices.
+
+## Task 6: Workspace And Tool Routes
+
+**Description:** Migrate workspace browsing, Git/command orchestration, approvals, tool runs, and tool-event streams without weakening filesystem or command safety.
+
+**Acceptance criteria:**
+
+- [ ] Allowed-root, path traversal, command-risk, approval, cancellation, and SSE replay behavior remain equivalent.
+- [ ] Rust reuses promoted Workspace/Event Store paths rather than duplicating implementations.
+- [ ] All mutating routes retain dry-run and audit guarantees.
+
+**Verification:**
+
+- [ ] Contract, security, real-repository, Git, command, SSE, and rollback tests pass.
+- [ ] Production canary records zero correctness mismatches and zero unrecovered failures.
+
+**Dependencies:** Tasks 3 and 5.
+
+**Files likely touched:** Rust HTTP/workspace/tool modules, Node adapters, tests, and OpenAPI.
+
+**Estimated scope:** Large; split by read-only, Git, command, and event slices.
+
+## Task 7: Task And Live-Call Routes
+
+**Description:** Migrate task lifecycle, provider orchestration boundaries, live-call sessions, and streaming events after lower-level identity, tool, and event routes are stable.
+
+**Acceptance criteria:**
+
+- [ ] Start/resume/stop/recovery and live-call replay preserve task and event ordering.
+- [ ] Provider subprocess failure and bridge restart behavior remain recoverable within current product limits.
+- [ ] Android and Web clients require no migration-specific changes.
+
+**Verification:**
+
+- [ ] Task, provider, SSE, event replay, and live-call suites pass against both implementations.
+- [ ] Long-running public canary meets error and latency thresholds with rollback ready.
+
+**Dependencies:** Task 6.
+
+**Files likely touched:** Rust task/live-call modules, Node provider adapters, tests, and OpenAPI.
+
+**Estimated scope:** Large; split by task lifecycle, providers, and live-call.
+
+## Task 8: Retire Node And Ship Native Shell
+
+**Description:** Remove Node route implementations only after usage reaches zero, then replace the console launcher with a native tray/window shell and publish a reproducible desktop release.
+
+**Acceptance criteria:**
+
+- [ ] Every migrated route reports zero Node fallback and zero Node ownership for the full observation window.
+- [ ] Portable package no longer includes Node only after all route families and provider boundaries no longer require it.
+- [ ] Native tray/window startup, shutdown, pairing, doctor, updates, and rollback are verified on Windows.
+
+**Verification:**
+
+- [ ] Full Node/Rust contract archive, desktop smoke tests, package provenance, checksum, and public canary pass.
+- [ ] Release tag, changelog, rollback artifact, and recovery instructions are published.
+
+**Dependencies:** Tasks 4-7.
+
+**Files likely touched:** launcher UI, packaging, release workflow, documentation, and retired Node modules.
+
+**Estimated scope:** Large; execute removal and native-shell work as separate releases.
+
+## Checkpoints
+
+### Public Status Canary
+
+- [ ] Focused tests and Rust migration manifest pass.
+- [ ] Reproducible package and rollback artifact exist.
+- [ ] Public authenticated evidence passes with zero Rust fallback.
+
+### Route Family Promotion
+
+- [ ] Both implementations pass the same contract suite.
+- [ ] Canary error rate stays within 10% and p95 within 20% of baseline.
+- [ ] Rollback is tested before advancing ownership.
+
+### Node Retirement
+
+- [ ] Node route usage is zero for the agreed observation window.
+- [ ] Full tests, package, desktop smoke, public canary, and recovery drill pass.
+- [ ] Documentation, release manifest, changelog, and tag match the shipped commit.
+
+## Rollback Strategy
+
+- Status canary rollback: unset `VIBELINK_RUST_STATUS` and restart the supervised bridge.
+- Direct-route rollback: disable the route-family Rust ownership flag and restore Node routing.
+- Deployment rollback: stop the new supervised processes, start the previous verified package, then verify local and public health.
+- Data-plane rollback: retain the existing Rust-to-Worker-to-sync or Rust-to-Node fallback chains until the observation window completes.
 
 ## Risks And Mitigations
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Approval result shape changes | High | Additive typed fields matching the existing JSON; retain current response fields. |
-| Shared ViewModel attaches the wrong task | High | Match the approval ID and clear only the active pending approval. |
-| IME inset changes regress non-keyboard layout | Medium | Hide only supplemental controls while IME is visible; manually verify both states. |
-| History filtering removes legitimate content | Medium | Keep only normalized user/assistant roles and test both visible and internal entries. |
-| Permission prompt cannot be recovered | Low | Automatic prompt becomes one-shot; users can still grant permission from Android settings. |
+| Public deployment runs a stale commit | High | Compare process start, release manifest commit, HEAD, and public canary artifact on every deploy. |
+| Rust and Node contracts drift | High | Execute shared fixtures against both implementations and regenerate OpenAPI only from reviewed contracts. |
+| Authentication regression exposes local data | Critical | Keep anonymous checks, fixed-host Tunnel validation, device-token tests, and immediate Node rollback. |
+| Sidecar boundaries add latency without value | Medium | Require measured p95 improvement or operational benefit before promotion. |
+| Removing Node breaks provider integrations | High | Track provider/runtime ownership separately from HTTP route ownership and remove Node last. |
 
 ## Open Questions
 
-- None blocking. Mobile MCP's `list_crashes` device lookup and the emulator's black camera feed are outside this repository; ADB crash logs and non-QR token pairing remain the verification fallback.
+- The observation window for each `default-on` and Node-removal promotion must be set from actual request volume; until then use at least one representative interactive session plus the scheduled canary evidence.

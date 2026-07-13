@@ -24,6 +24,7 @@ use std::{
 
 mod audio_pipeline_sidecar;
 mod compression_sidecar;
+mod device_http;
 mod doctor_http;
 mod http_frontdoor;
 mod public_tunnel;
@@ -62,6 +63,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_doctor_http: bool,
+
+    #[arg(long, global = true)]
+    rust_devices_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2379,6 +2383,10 @@ fn rust_doctor_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_doctor_http
 }
 
+fn rust_devices_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_devices_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -2420,7 +2428,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     };
     let doctor_route = if rust_doctor_http_enabled(cli) {
         Some(doctor_http::DoctorRouteConfig::new(
-            route_data_dir,
+            route_data_dir.clone(),
             upstream,
             internal_token
                 .clone()
@@ -2429,13 +2437,22 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     } else {
         None
     };
+    let device_route =
+        rust_devices_http_enabled(cli).then(|| device_http::DeviceRouteConfig::new(route_data_dir));
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
         "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
         cli.host, cli.port, upstream
     );
-    let result = http_frontdoor::serve(listener, upstream, &mut node, status_route, doctor_route);
+    let result = http_frontdoor::serve(
+        listener,
+        upstream,
+        &mut node,
+        status_route,
+        doctor_route,
+        device_route,
+    );
     if node
         .try_wait()
         .context("Failed to inspect Node bridge after front-door shutdown")?
@@ -2607,6 +2624,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_doctor_http {
         command.arg("--rust-doctor-http");
+    }
+    if cli.rust_devices_http {
+        command.arg("--rust-devices-http");
     }
     command
         .arg("bridge")
@@ -2892,6 +2912,24 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-doctor-http", "bridge"]).unwrap();
         assert!(doctor_only.rust_doctor_http);
         assert!(!rust_doctor_http_enabled(&doctor_only));
+    }
+
+    #[test]
+    fn rust_devices_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-devices-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_devices_http);
+        assert!(rust_devices_http_enabled(&enabled));
+
+        let devices_only =
+            Cli::try_parse_from(["vibelink", "--rust-devices-http", "bridge"]).unwrap();
+        assert!(devices_only.rust_devices_http);
+        assert!(!rust_devices_http_enabled(&devices_only));
     }
 
     #[test]

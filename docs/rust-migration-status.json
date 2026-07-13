@@ -4,6 +4,29 @@
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
+      "id": "status-response-sidecar",
+      "title": "状态响应契约组装",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "VIBELINK_RUST_STATUS",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_ARGS_JSON",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_TIMEOUT_MS"
+      ],
+      "nodeEntry": "src/statusRuntime.js",
+      "rustEntry": "apps/windows/src/status_sidecar.rs",
+      "sidecarCommand": "vibelink status-sidecar",
+      "fallback": "Rust readiness 或 renderStatus 失败后熔断，并返回 Node 已组装的原始 status 快照",
+      "tests": [
+        "test/statusSidecarContract.test.js",
+        "test/statusRuntime.test.js",
+        "test/statusServerCanary.test.js",
+        "test/serverStatusRuntime.test.js"
+      ],
+      "nextAction": "保持认证 server canary 通过，收集有限公网 status 请求后再评估 canary。"
+    },
+    {
       "id": "workspace-tree",
       "title": "Workspace 目录扫描器",
       "priority": "P1",

@@ -89,6 +89,12 @@
 
 晋级要求：有限真人运行会话继续满足上述门槛，并保留 Rust -> Worker -> 同步 SQLite 回滚路径。
 
+## 状态响应契约组装
+
+实现：`src/statusRuntime.js`、`apps/windows/src/status_sidecar.rs`、`vibelink status-sidecar`。当前为 `opt-in`：Node 保留 Host/鉴权和动态状态采集，Rust 负责强类型校验及最终响应组装；首次 health、持久进程复用、超时、失败熔断和 Node 原快照回退均有自动测试。
+
+认证 HTTP canary 连续请求 `/api/status`，要求匿名访问为 401、Rust readiness 成功、单一 sidecar、失败/回退/pending/背压均为 0。下一步是有限公网请求观察；各状态源迁入 Rust 后，同一契约处理器再提升为直接 HTTP 路由。
+
 ## Audio Pipeline
 
 实现：`src/liveCallAudioPipeline.js` 的协议常量、`apps/windows/src/audio_pipeline_sidecar.rs`、`vibelink audio-pipeline-sidecar`。协议 v1 只处理确定性 PCM16 level/peak/RMS、序号、ring buffer 和背压，不包含 ASR、Provider、重采样或 VAD。
@@ -111,6 +117,8 @@
 npm run rust:migration:check
 npm run test:rust-sidecars
 
+npm run status:server-canary -- --delete-temp
+
 npm run workspace-tree:canary
 npm run workspace-tree:real-canary -- --workspace . --paths src,docs
 npm run workspace-tree:server-canary -- --delete-temp
@@ -127,16 +135,17 @@ npm run audio-pipeline:benchmark
 npm run compression:benchmark -- --require-real
 ```
 
-五条独立 Windows workflow 分别覆盖 Workspace、MCP、Event Store、Audio 和 Compression。相关文档或实现变更会触发对应 workflow，定时 canary 产物保留 30 天。
+六条独立 Windows workflow 分别覆盖 Status、Workspace、MCP、Event Store、Audio 和 Compression。相关文档或实现变更会触发对应 workflow，定时 canary 产物保留 30 天。
 
 ## 剩余计划
 
 无需人工参与的代表性 canary、故障测试、回退测试和 CI gate 已基本齐备。剩余工作不是继续增加 sidecar，而是：
 
-1. Workspace：有限交互会话。
-2. MCP：有限自然生产会话。
-3. Event Store：有限真人运行会话及前后 runtime stats。
-4. Audio/Compression：等待新的瓶颈证据；没有证据时不推进。
+1. Status：有限公网请求及 runtime stats。
+2. Workspace：有限交互会话。
+3. MCP：有限自然生产会话。
+4. Event Store：有限真人运行会话及前后 runtime stats。
+5. Audio/Compression：等待新的瓶颈证据；没有证据时不推进。
 
 ## 全量控制面迁移与桌面发布
 

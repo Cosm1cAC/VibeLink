@@ -107,15 +107,29 @@ async function request(baseUrl, pathname, { method = "GET", token = "", body } =
   return { status: response.status, payload: text ? JSON.parse(text) : null };
 }
 
-async function waitForRustStatus(baseUrl, token) {
+async function waitForRustStatus(baseUrl, token, afterAttempts = -1) {
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
     const response = await request(baseUrl, "/api/status", { token });
     const runtime = response.payload?.controlPlaneRuntime?.statusHttp;
-    if (response.status === 200 && runtime?.implementation === "rust") return runtime;
+    if (response.status === 200 && runtime?.implementation === "rust" && runtime.attempts > afterAttempts) {
+      return runtime;
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Rust did not take ownership of /api/status before the canary deadline");
+}
+
+async function exerciseRustDenial(baseUrl, token, baseline) {
+  let runtime = baseline;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const anonymous = await request(baseUrl, "/api/status");
+    runtime = await waitForRustStatus(baseUrl, token, runtime.attempts);
+    if (anonymous.status === 401 && runtime.unauthorized > baseline.unauthorized) {
+      return { anonymous, runtime };
+    }
+  }
+  throw new Error("Rust did not own an anonymous Status denial before the canary deadline");
 }
 
 function stopServer(server) {
@@ -169,22 +183,19 @@ async function main() {
     }
 
     const baseline = await waitForRustStatus(baseUrl, login.payload.token);
-    const directAnonymous = await request(baseUrl, "/api/status");
-    const statuses = [];
+    const denial = await exerciseRustDenial(baseUrl, login.payload.token, baseline);
+    let runtime = denial.runtime;
     for (let index = 0; index < 3; index += 1) {
-      const response = await request(baseUrl, "/api/status", { token: login.payload.token });
-      if (response.status !== 200) throw new Error(`status request failed: ${response.status}`);
-      statuses.push(response.payload);
+      runtime = await waitForRustStatus(baseUrl, login.payload.token, runtime.attempts);
     }
     const doctor = await request(baseUrl, "/api/doctor", { token: login.payload.token });
-    const runtime = statuses.at(-1)?.controlPlaneRuntime?.statusHttp || {};
     shutdown = await stopServer(server);
     const checks = [
       { name: "anonymous auth", pass: anonymous.status === 401, detail: `status=${anonymous.status}` },
       { name: "proxied login", pass: login.status === 200, detail: `status=${login.status}` },
-      { name: "Rust Status ownership", pass: runtime.implementation === "rust" && runtime.attempts - baseline.attempts === 4 && runtime.responses - baseline.responses === 4, detail: `attempts delta=${runtime.attempts - baseline.attempts}, responses delta=${runtime.responses - baseline.responses}` },
+      { name: "Rust Status ownership", pass: runtime.implementation === "rust" && runtime.attempts - denial.runtime.attempts === 3 && runtime.responses === runtime.attempts, detail: `authenticated direct=${runtime.attempts - denial.runtime.attempts}, attempts=${runtime.attempts}, responses=${runtime.responses}` },
       { name: "Rust Status fallback", pass: runtime.fallbacks === 0 && runtime.failures === 0 && runtime.pending === 0, detail: `fallbacks=${runtime.fallbacks}, failures=${runtime.failures}` },
-      { name: "Rust Status denial", pass: directAnonymous.status === 401 && runtime.unauthorized - baseline.unauthorized === 1, detail: `status=${directAnonymous.status}, unauthorized delta=${runtime.unauthorized - baseline.unauthorized}` },
+      { name: "Rust Status denial", pass: denial.anonymous.status === 401 && denial.runtime.unauthorized - baseline.unauthorized === 1, detail: `status=${denial.anonymous.status}, unauthorized delta=${denial.runtime.unauthorized - baseline.unauthorized}` },
       { name: "Node Doctor forwarding", pass: doctor.status === 200 && Array.isArray(doctor.payload?.checks), detail: `status=${doctor.status}, checks=${doctor.payload?.checks?.length || 0}` },
       { name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` }
     ];

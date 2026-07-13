@@ -80,7 +80,7 @@ pub fn route_doctor_request(
         .context("Doctor controlPlaneRuntime must be an object")?;
     config.metrics.record_response();
     runtime.insert("doctorHttp".to_string(), config.metrics.value());
-    Ok(Some(HttpRouteResponse { status: 200, body }))
+    Ok(Some(HttpRouteResponse::json(200, body)))
 }
 
 fn fetch_doctor_report(

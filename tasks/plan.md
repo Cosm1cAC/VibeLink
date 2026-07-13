@@ -9,7 +9,7 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 - Preserve the current OpenAPI and Web/Android HTTP/SSE contracts throughout the migration.
 - Keep Node as an automatic fallback until the matching Rust route has representative production evidence and zero Node route usage.
 - Migrate one route family at a time in this order: `status/doctor`, `pairing/device`, `settings/audit`, `workspace/tool`, then `task/live-call`.
-- Keep Audio and Compression on Node unless new production telemetry proves a material bottleneck.
+- Keep the unconnected Audio and Compression performance sidecars at `contract` unless telemetry justifies them, while still migrating every product-required live-call/audio responsibility needed to remove bundled Node.
 - Build and deploy the portable Windows package from a reproducible commit; archive the commit, checksum, canary output, and rollback command together.
 
 ## Task 1: Public Status Canary

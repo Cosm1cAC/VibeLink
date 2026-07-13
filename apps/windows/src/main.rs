@@ -66,6 +66,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_devices_http: bool,
+
+    #[arg(long, global = true)]
+    rust_device_mutations_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2387,6 +2390,10 @@ fn rust_devices_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_devices_http
 }
 
+fn rust_device_mutations_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_device_mutations_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -2437,8 +2444,10 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     } else {
         None
     };
-    let device_route =
-        rust_devices_http_enabled(cli).then(|| device_http::DeviceRouteConfig::new(route_data_dir));
+    let device_route = rust_devices_http_enabled(cli)
+        .then(|| device_http::DeviceRouteConfig::new(route_data_dir.clone()));
+    let device_mutation_route = rust_device_mutations_http_enabled(cli)
+        .then(|| device_http::DeviceMutationRouteConfig::new(route_data_dir));
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
@@ -2452,6 +2461,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         status_route,
         doctor_route,
         device_route,
+        device_mutation_route,
     );
     if node
         .try_wait()
@@ -2627,6 +2637,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_devices_http {
         command.arg("--rust-devices-http");
+    }
+    if cli.rust_device_mutations_http {
+        command.arg("--rust-device-mutations-http");
     }
     command
         .arg("bridge")
@@ -2930,6 +2943,24 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-devices-http", "bridge"]).unwrap();
         assert!(devices_only.rust_devices_http);
         assert!(!rust_devices_http_enabled(&devices_only));
+    }
+
+    #[test]
+    fn rust_device_mutations_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-device-mutations-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_device_mutations_http);
+        assert!(rust_device_mutations_http_enabled(&enabled));
+
+        let mutations_only =
+            Cli::try_parse_from(["vibelink", "--rust-device-mutations-http", "bridge"]).unwrap();
+        assert!(mutations_only.rust_device_mutations_http);
+        assert!(!rust_device_mutations_http_enabled(&mutations_only));
     }
 
     #[test]

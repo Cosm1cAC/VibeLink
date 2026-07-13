@@ -115,6 +115,27 @@
       "nextAction": "本地认证 release canary 通过；远端 CI 与公网认证 canary 通过后晋级 canary，再单独迁移审计化设备写操作。"
     },
     {
+      "id": "device-mutations-http-route",
+      "title": "Devices 审计化写操作原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-device-mutations-http"
+      ],
+      "nodeEntry": "src/server.js#/api/devices/*/(rotate|revoke)",
+      "rustEntry": "apps/windows/src/device_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-device-mutations-http bridge",
+      "fallback": "仅初始化或认证前错误可回放 Node；Rust 认领后设备变更与审计同事务提交，任何失败返回 Rust 500 且绝不回放；关闭独立开关恢复后续请求的 Node 所有权",
+      "tests": [
+        "apps/windows/src/device_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0005-rust-device-mutation-http-routes.md"
+      ],
+      "nextAction": "本地 release canary 已通过六次轮换、第七次限流、旧令牌失效、吊销幂等和审计回查；远端 CI、便携包与公网受控 canary 通过后晋级。"
+    },
+    {
       "id": "workspace-tree",
       "title": "Workspace 目录扫描器",
       "priority": "P1",

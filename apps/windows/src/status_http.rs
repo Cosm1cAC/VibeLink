@@ -44,16 +44,23 @@ impl ParsedRequest {
                 return authorization[7..].trim().to_string();
             }
         }
+        self.query_parameter("token").unwrap_or_default()
+    }
+
+    pub(crate) fn query_parameter(&self, name: &str) -> Option<String> {
         self.target
             .split_once('?')
             .map(|(_, query)| query)
             .unwrap_or("")
             .split('&')
-            .filter_map(|part| part.split_once('='))
-            .find(|(key, _)| *key == "token")
-            .and_then(|(_, value)| urlencoding::decode(value).ok())
-            .map(|value| value.into_owned())
-            .unwrap_or_default()
+            .filter_map(|part| {
+                let (key, value) = part.split_once('=').unwrap_or((part, ""));
+                let key = decode_query_component(key)?;
+                (key == name)
+                    .then(|| decode_query_component(value))
+                    .flatten()
+            })
+            .next()
     }
 
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
@@ -62,6 +69,13 @@ impl ParsedRequest {
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
+}
+
+fn decode_query_component(value: &str) -> Option<String> {
+    let form_value = value.replace('+', " ");
+    urlencoding::decode(&form_value)
+        .ok()
+        .map(|value| value.into_owned())
 }
 
 pub fn parse_request(bytes: &[u8]) -> Result<ParsedRequest, String> {
@@ -534,10 +548,18 @@ mod tests {
         assert_eq!(request.token(), "header-token");
 
         let query_only = parse_request(
-            b"GET /api/status?token=query%2Dtoken HTTP/1.1\r\nHost: 127.0.0.1:8787\r\n\r\n",
+            b"GET /api/status?token=query%2Dtoken&fields=id%2Clabel&note=last+seen HTTP/1.1\r\nHost: 127.0.0.1:8787\r\n\r\n",
         )
         .unwrap();
         assert_eq!(query_only.token(), "query-token");
+        assert_eq!(
+            query_only.query_parameter("fields").as_deref(),
+            Some("id,label")
+        );
+        assert_eq!(
+            query_only.query_parameter("note").as_deref(),
+            Some("last seen")
+        );
 
         let unicode_authorization = parse_request(
             "GET /api/status?token=query-token HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: 令牌值\r\n\r\n"

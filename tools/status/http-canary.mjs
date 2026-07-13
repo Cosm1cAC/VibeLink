@@ -57,7 +57,7 @@ function writeSettings(dataDir, port, pairingToken) {
   }, null, 2)}\n`, "utf8");
 }
 
-function startServer(dataDir, port, command, doctorHttp) {
+function startServer(dataDir, port, command, doctorHttp, devicesHttp) {
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
@@ -65,6 +65,7 @@ function startServer(dataDir, port, command, doctorHttp) {
     "--rust-status-http"
   ];
   if (doctorHttp) args.push("--rust-doctor-http");
+  if (devicesHttp) args.push("--rust-devices-http");
   args.push("bridge");
   const child = spawn(command, args, {
     cwd: rootDir,
@@ -178,8 +179,9 @@ async function main() {
   const port = await reservePort();
   const pairingToken = crypto.randomBytes(24).toString("hex");
   const doctorHttp = process.argv.includes("--doctor-http");
+  const devicesHttp = process.argv.includes("--devices-http");
   writeSettings(dataDir, port, pairingToken);
-  const server = startServer(dataDir, port, command, doctorHttp);
+  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp);
   const baseUrl = `http://127.0.0.1:${port}`;
   let shutdown = null;
 
@@ -209,6 +211,11 @@ async function main() {
     const audit = doctorHttp
       ? await request(baseUrl, "/api/audit-log?limit=20&fields=type,target,deviceId,path", { token: login.payload.token })
       : null;
+    const devicesAnonymous = devicesHttp ? await request(baseUrl, "/api/devices") : null;
+    const devices = devicesHttp ? await request(baseUrl, "/api/devices", { token: login.payload.token }) : null;
+    const devicesFiltered = devicesHttp
+      ? await request(baseUrl, "/api/devices?fields=id,label", { token: login.payload.token })
+      : null;
     shutdown = await stopServer(server);
     const checks = [
       { name: "anonymous auth", pass: anonymous.status === 401, detail: `status=${anonymous.status}` },
@@ -229,11 +236,21 @@ async function main() {
     } else {
       checks.push({ name: "Node Doctor forwarding", pass: doctor.status === 200 && doctor.implementation === "" && Array.isArray(doctor.payload?.checks), detail: `status=${doctor.status}, checks=${doctor.payload?.checks?.length || 0}` });
     }
+    if (devicesHttp) {
+      const filteredItem = devicesFiltered?.payload?.items?.[0] || {};
+      const devicesRuntime = devicesFiltered?.payload?.controlPlaneRuntime?.devicesHttp || {};
+      checks.push(
+        { name: "Rust Devices ownership", pass: devices?.status === 200 && devices.implementation === "rust" && Array.isArray(devices.payload?.items) && devices.payload?.currentDeviceId === login.payload?.device?.id, detail: `status=${devices?.status || 0}, implementation=${devices?.implementation || "node"}, items=${devices?.payload?.items?.length || 0}` },
+        { name: "Rust Devices denial", pass: devicesAnonymous?.status === 401 && devicesAnonymous?.implementation === "rust", detail: `status=${devicesAnonymous?.status || 0}, implementation=${devicesAnonymous?.implementation || "node"}` },
+        { name: "Rust Devices fields", pass: devicesFiltered?.status === 200 && devicesFiltered.implementation === "rust" && Object.keys(filteredItem).every((key) => key === "id" || key === "label") && Boolean(filteredItem.id), detail: `status=${devicesFiltered?.status || 0}, fields=${Object.keys(filteredItem).join(",") || "missing"}` },
+        { name: "Rust Devices fallback", pass: devicesRuntime.attempts === 3 && devicesRuntime.responses === 3 && devicesRuntime.fallbacks === 0 && devicesRuntime.failures === 0 && devicesRuntime.pending === 0, detail: `attempts=${devicesRuntime.attempts}, responses=${devicesRuntime.responses}, fallbacks=${devicesRuntime.fallbacks}, failures=${devicesRuntime.failures}` }
+      );
+    }
     checks.push({ name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` });
     const result = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      source: { route: doctorHttp ? "/api/status,/api/doctor" : "/api/status", implementation: "rust-http", command },
+      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
       runtime,
       doctorRuntime: doctorHttp ? doctorRuntime : undefined,
       shutdown,

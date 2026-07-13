@@ -24,7 +24,7 @@
         "test/supervisorMonitor.test.js",
         "test/statusPublicCanary.test.js"
       ],
-      "nextAction": "保持公网透明转发 canary 稳定，并验证独立 Status/Doctor 原生路由 opt-in 不影响其他 HTTP/SSE/WebSocket 流量。"
+      "nextAction": "保持公网透明转发 canary 稳定，并验证独立 Status/Doctor/Devices 原生路由 opt-in 不影响其他 HTTP/SSE/WebSocket 流量。"
     },
     {
       "id": "status-response-sidecar",
@@ -93,6 +93,26 @@
         "tools/status/http-canary.mjs"
       ],
       "nextAction": "本地 release 已通过；远端 CI 与公网认证 canary 保持 24 项检查、tool run、审计和零失败/零回退后晋级 canary。"
+    },
+    {
+      "id": "devices-http-route",
+      "title": "Devices 只读原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-devices-http"
+      ],
+      "nodeEntry": "src/server.js#/api/devices",
+      "rustEntry": "apps/windows/src/device_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-devices-http bridge",
+      "fallback": "Rust 解析/设置/鉴权/SQLite 映射失败后逐字节重放原请求到 Node；关闭 --rust-devices-http 后设备列表透明转发",
+      "tests": [
+        "apps/windows/src/device_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs"
+      ],
+      "nextAction": "本地认证 release canary 通过；远端 CI 与公网认证 canary 通过后晋级 canary，再单独迁移审计化设备写操作。"
     },
     {
       "id": "workspace-tree",

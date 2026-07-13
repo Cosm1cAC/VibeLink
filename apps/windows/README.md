@@ -30,6 +30,8 @@ Use `--rust-status-http` with the front-door flag, or run `start-vibelink-status
 
 Use `--rust-doctor-http` with the front-door flag, or run `start-vibelink-doctor-http-canary.cmd`, to let Rust own `GET /api/doctor` Host validation, device authentication, and HTTP responses. Node keeps the protected diagnostic executor so the existing checks, tool run, and audit records remain unchanged. The Doctor flag can be disabled independently.
 
+Use `--rust-devices-http` with the front-door flag to let Rust own the read-only `GET /api/devices` route directly from SQLite. `start-vibelink-devices-http-canary.cmd` enables Status, Doctor, and Devices ownership cumulatively. Device revocation, rotation, and pairing mutations remain Node-owned and independently reversible.
+
 ## Internal modes
 
 ```powershell

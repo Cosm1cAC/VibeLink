@@ -82,9 +82,11 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Acceptance criteria:**
 
+- [ ] An explicit Rust front-door canary owns the external listener while Node binds only to an ephemeral loopback port.
+- [ ] Transparent forwarding preserves HTTP, SSE, WebSocket, Host, authentication, and shutdown behavior for non-migrated routes.
 - [ ] Rust directly owns authentication, validation, response serialization, and HTTP status codes for both routes.
 - [ ] Contract fixtures match the current Node responses and failure semantics.
-- [ ] A feature flag switches immediately between Rust and Node ownership.
+- [ ] Separate feature flags switch the front door, Status ownership, and Doctor ownership immediately back to Node.
 
 **Verification:**
 
@@ -95,7 +97,7 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Files likely touched:** `apps/windows/src/`, `src/server.js`, status runtime/client, tests, and OpenAPI generation.
 
-**Estimated scope:** Large; split Status and Doctor into separate commits.
+**Estimated scope:** Large; split front door, Status, and Doctor into separate commits.
 
 ## Task 5: Identity And Administrative Routes
 
@@ -162,13 +164,14 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 ## Task 8: Retire Node And Ship Native Shell
 
-**Description:** Remove Node route implementations only after usage reaches zero, then replace the console launcher with a native tray/window shell and publish a reproducible desktop release.
+**Description:** Remove Node route implementations only after usage reaches zero, then replace the console launcher with a native Win32 tray/window shell and publish a reproducible desktop release. Do not add a WebView or Web administration dashboard.
 
 **Acceptance criteria:**
 
 - [ ] Every migrated route reports zero Node fallback and zero Node ownership for the full observation window.
 - [ ] Portable package no longer includes Node only after all route families and provider boundaries no longer require it.
 - [ ] Native tray/window startup, shutdown, pairing, doctor, updates, and rollback are verified on Windows.
+- [ ] Idle and active Private Working Set measurements meet the native-shell budget without an embedded browser process.
 
 **Verification:**
 

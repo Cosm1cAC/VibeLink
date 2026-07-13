@@ -28,6 +28,7 @@
         "openapi:gen": "node tools/gen-openapi.mjs > docs/openapi.json",
         "rust:migration:check": "node tools/check-rust-migration-status.mjs",
         "rust:test": "cargo test --manifest-path apps/windows/Cargo.toml",
+        "rust-http:contract": "node --test test/runtimeBinding.test.js test/supervisorMonitor.test.js && cargo test --manifest-path apps/windows/Cargo.toml http_frontdoor",
         "status:contract": "node --test --test-concurrency=1 test/security.test.js test/statusSidecarContract.test.js test/statusRuntime.test.js test/statusPublicCanary.test.js test/serverStatusRuntime.test.js",
         "status:server-canary": "node tools/status/server-canary.mjs",
         "status:public-canary": "node tools/status/public-canary.mjs",

@@ -15,7 +15,7 @@ use std::{
     env,
     ffi::OsString,
     hash::{Hash, Hasher},
-    net::UdpSocket,
+    net::{SocketAddr, TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     thread,
@@ -24,6 +24,7 @@ use std::{
 
 mod audio_pipeline_sidecar;
 mod compression_sidecar;
+mod http_frontdoor;
 mod public_tunnel;
 mod status_sidecar;
 
@@ -50,6 +51,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_canary: bool,
+
+    #[arg(long, global = true)]
+    rust_http_canary: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2313,6 +2317,95 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
         bail!("Cannot find bridge server at {}", server.display());
     }
 
+    if cli.rust_http_canary {
+        return run_rust_http_frontdoor(cli, &root, &server);
+    }
+
+    let plan = node_bridge_plan(cli, cli.port);
+    let status = spawn_node_bridge(cli, &root, &server, &plan)?
+        .wait()
+        .context("Failed while waiting for Node bridge")?;
+
+    if !status.success() {
+        bail!("Node bridge exited with status {status}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NodeBridgeBinding {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NodeBridgePlan {
+    persisted: NodeBridgeBinding,
+    runtime: NodeBridgeBinding,
+}
+
+fn node_bridge_plan(cli: &Cli, internal_port: u16) -> NodeBridgePlan {
+    let persisted = NodeBridgeBinding {
+        host: cli.host.clone(),
+        port: cli.port,
+    };
+    let runtime = if cli.rust_http_canary {
+        NodeBridgeBinding {
+            host: "127.0.0.1".to_string(),
+            port: internal_port,
+        }
+    } else {
+        NodeBridgeBinding {
+            host: persisted.host.clone(),
+            port: persisted.port,
+        }
+    };
+    NodeBridgePlan { persisted, runtime }
+}
+
+fn reserve_loopback_port() -> Result<u16> {
+    let reservation = TcpListener::bind(("127.0.0.1", 0))
+        .context("Failed to reserve loopback port for Node bridge")?;
+    Ok(reservation
+        .local_addr()
+        .context("Failed to inspect reserved loopback port")?
+        .port())
+}
+
+fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> {
+    let listener = TcpListener::bind((cli.host.as_str(), cli.port)).with_context(|| {
+        format!(
+            "Failed to bind Rust HTTP front door on {}:{}",
+            cli.host, cli.port
+        )
+    })?;
+    let internal_port = reserve_loopback_port()?;
+    let plan = node_bridge_plan(cli, internal_port);
+    let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
+    let mut node = spawn_node_bridge(cli, root, server, &plan)?;
+
+    println!(
+        "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
+        cli.host, cli.port, upstream
+    );
+    let result = http_frontdoor::serve(listener, upstream, &mut node);
+    if node
+        .try_wait()
+        .context("Failed to inspect Node bridge after front-door shutdown")?
+        .is_none()
+    {
+        let _ = node.kill();
+        let _ = node.wait();
+    }
+    result
+}
+
+fn spawn_node_bridge(
+    cli: &Cli,
+    root: &Path,
+    server: &Path,
+    plan: &NodeBridgePlan,
+) -> Result<Child> {
     let executable = env::current_exe().context("Cannot resolve current executable path")?;
     let data_dir = resolve_data_dir(
         &root,
@@ -2337,20 +2430,20 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
         .arg(&server)
         .current_dir(&root)
         .env("VIBELINK_DATA_DIR", data_dir)
-        .env("MOBILE_AGENT_HOST", &cli.host)
-        .env("MOBILE_AGENT_PORT", cli.port.to_string())
+        .env("VIBELINK_SUPERVISOR_PID", std::process::id().to_string())
+        .env("MOBILE_AGENT_HOST", &plan.persisted.host)
+        .env("MOBILE_AGENT_PORT", plan.persisted.port.to_string())
         .stdin(Stdio::null());
 
-    let status = command
-        .spawn()
-        .context("Failed to launch Node bridge. Is node.exe on PATH?")?
-        .wait()
-        .context("Failed while waiting for Node bridge")?;
-
-    if !status.success() {
-        bail!("Node bridge exited with status {status}");
+    if cli.rust_http_canary {
+        command
+            .env("VIBELINK_RUNTIME_HOST", &plan.runtime.host)
+            .env("VIBELINK_RUNTIME_PORT", plan.runtime.port.to_string());
     }
-    Ok(())
+
+    command
+        .spawn()
+        .context("Failed to launch Node bridge. Is node.exe on PATH?")
 }
 
 fn missing_sidecar_command_envs<F>(
@@ -2454,6 +2547,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
         .arg(cli.port.to_string());
     if cli.rust_canary {
         command.arg("--rust-canary");
+    }
+    if cli.rust_http_canary {
+        command.arg("--rust-http-canary");
     }
     command
         .arg("bridge")
@@ -2674,6 +2770,28 @@ mod tests {
 
         let defaulted = Cli::try_parse_from(["vibelink", "bridge"]).unwrap();
         assert!(!defaulted.rust_canary);
+    }
+
+    #[test]
+    fn rust_http_canary_is_additive_and_keeps_node_on_loopback() {
+        let enabled = Cli::try_parse_from(["vibelink", "--rust-http-canary", "bridge"]).unwrap();
+        assert!(enabled.rust_http_canary);
+
+        let plan = node_bridge_plan(&enabled, 49_152);
+        assert_eq!(plan.persisted.host, "0.0.0.0");
+        assert_eq!(plan.persisted.port, 8787);
+        assert_eq!(plan.runtime.host, "127.0.0.1");
+        assert_eq!(plan.runtime.port, 49_152);
+
+        let defaulted =
+            Cli::try_parse_from(["vibelink", "--host", "0.0.0.0", "--port", "8787", "bridge"])
+                .unwrap();
+        assert!(!defaulted.rust_http_canary);
+
+        let plan = node_bridge_plan(&defaulted, 49_152);
+        assert_eq!(plan.persisted.host, "0.0.0.0");
+        assert_eq!(plan.persisted.port, 8787);
+        assert_eq!(plan.runtime, plan.persisted);
     }
 
     #[test]

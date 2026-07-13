@@ -26,6 +26,8 @@
 
 ## Rust HTTP Ownership
 
+- [ ] Add an opt-in Rust external front door with a loopback-only Node backend.
+- [ ] Verify transparent HTTP, SSE, WebSocket, authentication, and shutdown parity.
 - [ ] Migrate direct `/api/status` HTTP ownership behind a rollback flag.
 - [ ] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
 - [ ] Migrate pairing and device routes.
@@ -38,5 +40,6 @@
 - [ ] Confirm zero Node route ownership and fallback during the observation window.
 - [ ] Remove retired Node route implementations in reversible slices.
 - [ ] Remove bundled Node only after provider/runtime ownership permits it.
-- [ ] Replace the console surface with a native Windows tray/window.
+- [ ] Replace the console surface with a native Win32 `windows-rs` tray/window without WebView/HTML.
+- [ ] Measure idle and active native GUI Private Working Set.
 - [ ] Publish a tagged, checksummed, reproducible desktop release with rollback instructions.

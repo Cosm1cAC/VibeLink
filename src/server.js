@@ -93,7 +93,9 @@ import {
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
 import { buildProviderRegistry } from "./providerRegistry.js";
+import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
 import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
+import { startSupervisorMonitor } from "./supervisorMonitor.js";
 import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
@@ -121,6 +123,7 @@ import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, Bro
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
+settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
 restoreTasks();
 const restoredLiveCallSessions = restoreLiveCallSessions();
@@ -3505,6 +3508,8 @@ process.once("SIGTERM", () => {
     process.exit(1);
   });
 });
+
+startSupervisorMonitor({ onExit: shutdown });
 
 // WebSocket upgrade handler — only used for /api/live-calls/:id/audio today.
 const wss = new WebSocketServer({ noServer: true });

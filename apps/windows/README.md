@@ -18,6 +18,14 @@ vibelink.exe --rust-canary
 
 Portable packages also include `start-vibelink-canary.cmd`. The normal `vibelink.exe` and `start-vibelink.cmd` entry points remain conservative and do not enable canary routes.
 
+Use the separate HTTP front-door canary only when validating control-plane migration:
+
+```powershell
+vibelink.exe --rust-canary --rust-http-canary
+```
+
+`start-vibelink-http-canary.cmd` provides the same packaged entry. Rust owns the configured external TCP listener and binds Node to an ephemeral `127.0.0.1` port. Non-migrated HTTP, SSE, and WebSocket streams are forwarded byte-for-byte; disabling `--rust-http-canary` restores direct Node listening. The front door does not yet mean Status or Doctor route logic is fully Rust-owned.
+
 ## Internal modes
 
 ```powershell
@@ -64,3 +72,5 @@ npm run package:windows
 The ZIP under `artifacts/windows/` contains the Rust launcher, Node LTS runtime, production-only server dependencies, current Web build, and cloudflared. Its adjacent `.sha256` file verifies the archive.
 
 The bridge is still a hybrid package while HTTP routes migrate incrementally from Node to Rust. API compatibility and fallback are required before any Node route is removed.
+
+The planned administration shell is native Win32 through `windows-rs`, without WebView, HTML, Tauri, or Electron. See `docs/decisions/ADR-0002-rust-frontdoor-native-win32-admin.md`.

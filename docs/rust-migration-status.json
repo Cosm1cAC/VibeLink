@@ -112,7 +112,7 @@
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "本地认证 release canary 通过；远端 CI 与公网认证 canary 通过后晋级 canary，再单独迁移审计化设备写操作。"
+      "nextAction": "本地认证 release canary、远端 CI 与公网拒绝路径已通过；设备写操作已在独立 slice 迁移，两个 slice 都等待受控公网认证证据后晋级。"
     },
     {
       "id": "device-mutations-http-route",
@@ -133,7 +133,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0005-rust-device-mutation-http-routes.md"
       ],
-      "nextAction": "本地 release canary 已通过六次轮换、第七次限流、旧令牌失效、吊销幂等和审计回查；远端 CI、便携包与公网受控 canary 通过后晋级。"
+      "nextAction": "本地、包内和远端 CI canary 已通过，提交 43e03fc 已部署且公网拒绝路径归 Rust；没有生产明文 token，保持 opt-in，待受控公网认证证据后晋级。"
     },
     {
       "id": "workspace-tree",

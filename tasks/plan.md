@@ -41,7 +41,7 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 - [x] Rust and Node focused tests pass before the running public process changes.
 - [x] Tunnel `--check-only`, package checksum, release-manifest commit, and local health checks pass.
-- [ ] A restart failure restores the previous Node bridge and public route.
+- [x] A restart failure restores the previous verified bridge and public route with the production data directory explicit.
 
 **Verification:**
 

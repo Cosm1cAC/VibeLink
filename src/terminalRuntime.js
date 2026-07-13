@@ -39,7 +39,17 @@ function commandAvailableOnPath(command) {
 
 function defaultShell() {
   if (process.platform === "win32") {
-    if (commandAvailableOnPath("powershell.exe")) return { command: "powershell.exe", args: ["-NoLogo"] };
+    if (commandAvailableOnPath("powershell.exe")) {
+      return {
+        command: "powershell.exe",
+        args: [
+          "-NoLogo",
+          "-NoExit",
+          "-Command",
+          "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [Console]::OutputEncoding"
+        ]
+      };
+    }
     return { command: "cmd.exe", args: [] };
   }
   return { command: process.env.SHELL || (commandAvailableOnPath("bash") ? "bash" : "sh"), args: [] };

@@ -2,20 +2,22 @@
 
 最后更新：2026-07-13
 
-本文是 Rust 迁移唯一的人工维护报告。机器可读状态保存在 `docs/rust-migration-status.json`，架构决策见 `docs/decisions/ADR-0001-rust-data-plane-sidecars.md`。
+本文是 Rust 迁移唯一的人工维护报告。机器可读状态保存在 `docs/rust-migration-status.json`，架构决策见 `docs/decisions/ADR-0001-rust-data-plane-sidecars.md` 和 `docs/decisions/ADR-0002-rust-frontdoor-native-win32-admin.md`。
 
 ## 迁移原则
 
-- Node 继续负责 HTTP API、认证、配对、审批、Provider 编排、REST/SSE 和产品状态机。
+- Rust canary 已可负责外部 TCP/HTTP 监听；Node 退到 loopback backend，继续负责尚未迁移的 HTTP API、认证、配对、审批、Provider 编排、REST/SSE 和产品状态机。
 - Rust 只承接经过测量的高频、流式或 CPU/IO 热路径，优先使用 JSONL sidecar。
 - 所有生产 Rust 路径必须保留 Node 或 Worker 回退；缺少二进制、健康检查失败、超时、无效 JSON 和进程退出都不能破坏用户任务。
 - 状态按 `planned -> contract -> opt-in -> canary -> default-on` 推进。没有真实收益或代表性运行证据时不得升级。
 - Android/Web 继续使用现有 HTTP/SSE 契约，不感知底层执行语言。
+- 不新增 Web 管理后台；未来桌面管理壳使用原生 Win32 `windows-rs`，不嵌 WebView。
 
 ## 当前状态
 
 | Slice | 状态 | 生产路由 | 下一步 |
 | --- | --- | --- | --- |
+| Rust HTTP 前门 | `canary` | Rust 外部监听，Node loopback backend | 将 Status 从透明转发迁为 Rust 原生路由 |
 | 状态响应契约组装 | `canary` | 公网 bridge 显式开启，Node 快照回退 | 持续定时与自然请求观察后迁移直接 HTTP 路由 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |
@@ -24,6 +26,18 @@
 | 压缩与上下文预算辅助器 | `contract` | 无 | 仅在生产负载显著变化时重评 |
 
 当前没有任何 slice 达到 `default-on`。Audio 和 Compression 不是“尚未接线”，而是测量结果明确不支持增加生产 sidecar 边界。
+
+## Rust HTTP 前门
+
+实现：`apps/windows/src/http_frontdoor.rs`、`src/runtimeBinding.js`、`src/supervisorMonitor.js`，显式入口为 `vibelink.exe --rust-canary --rust-http-canary` 或 `start-vibelink-http-canary.cmd`。
+
+Rust 在 canary 模式下直接占用外部 `host:port`，Node 只绑定每次启动重新分配的 `127.0.0.1` 端口。前门逐字节双向转发非迁移 HTTP、SSE 和 WebSocket 连接，限制最多 256 条活动连接，上游 2 秒不可达时返回不含内部细节的 JSON `503`。关闭 `--rust-http-canary` 后 Node 立即恢复直接监听；Rust 进程退出时，Node 通过 supervisor PID 监控执行现有排空逻辑，避免孤儿进程。
+
+2026-07-13 的本地进程验证覆盖 Keep-Alive、页面、未认证 API、SSE、WebSocket Upgrade、非法 Host、认证 Status/Doctor、连续 ephemeral 端口重启、全新设置目录和关闭前门后的 Node 直接监听回滚。两个首次发现的问题——Windows accepted socket 继承 nonblocking 导致 `WSAEWOULDBLOCK`，以及 persisted port 覆盖新 ephemeral port——均先以失败测试复现，再修复并通过回归。
+
+公网部署使用提交 `ec2a26311102e225001874bccedee86851641120`，Windows x64 ZIP SHA256 为 `6a6749d7b1d704ce935c0984d8b3e1d08eb07d2831804720a72bace24001cf42`。`8787` 当前由 Rust 前门监听，Node 仅监听 `127.0.0.1:50369`；公网根路径为 200，未认证 Status 为 401，认证 Status 5/5 通过且 p95 为 3275.1ms，Doctor 返回 24 项检查，失败、回退、超时、背压和 pending 均为 0。Rust 前门观测时 Working Set 约 6.7MiB、Private Memory 约 1.1MiB，错误日志为空，配对 token 日志保持隐藏。
+
+该 slice 只证明外部监听、隔离与透明转发已 Rust 化；Status、Doctor 的鉴权、状态码和业务响应仍由 Node route 实现，不计为直接 Rust HTTP 所有权。下一步先迁移 `/api/status`，再迁移 `/api/doctor`。
 
 ## Workspace Tree
 
@@ -105,7 +119,7 @@
 
 提交 `981fc5ebcfd1ee90bdfead13b0e76cacb005c8a5` 为 Windows launcher 增加全局 `--rust-canary`，portable 包同时生成 `start-vibelink-canary.cmd`。该配置只为未显式设置的变量启用当前 Status、Workspace、MCP、Event Store 与三个事件 batch canary，现有环境覆盖仍优先，普通 `vibelink.exe` 默认行为不变。
 
-对应 Windows x64 ZIP SHA256 为 `61841ac3f92ea70dd65f07bbcc0698c969595037df67a4f93bfcbe62d1e45c3a`。公网 bridge 当前由该包的 `vibelink.exe --rust-canary bridge --host 0.0.0.0 --port 8787` 监督；暖态认证探针确认 Status、Workspace 和 Event Store ready，MCP persistent session/sidecar 可用，全部 pending、failure 和 fallback 为 0，三个事件 batch 开关均已启用。新包下 5 次认证公网 Status canary 的 p95 为 2020.43ms，Rust attempt/response 各增加 5，错误计数仍为 0。公网根路径为 200，未认证本地/公网 status 均为 401，配对 token 日志保持隐藏。
+对应 Windows x64 ZIP SHA256 为 `61841ac3f92ea70dd65f07bbcc0698c969595037df67a4f93bfcbe62d1e45c3a`。该包此前以 `vibelink.exe --rust-canary bridge --host 0.0.0.0 --port 8787` 监督公网 bridge；暖态认证探针确认 Status、Workspace 和 Event Store ready，MCP persistent session/sidecar 可用，全部 pending、failure 和 fallback 为 0，三个事件 batch 开关均已启用。该阶段 5 次认证公网 Status canary 的 p95 为 2020.43ms，Rust attempt/response 各增加 5，错误计数仍为 0。公网根路径为 200，未认证本地/公网 status 均为 401，配对 token 日志保持隐藏。
 
 ## Audio Pipeline
 
@@ -128,6 +142,9 @@
 ```bash
 npm run rust:migration:check
 npm run test:rust-sidecars
+npm run rust-http:contract
+
+vibelink.exe --rust-canary --rust-http-canary bridge --host 0.0.0.0 --port 8787
 
 npm run status:server-canary -- --delete-temp
 $env:VIBELINK_PUBLIC_CANARY_TOKEN="<device-token>"; npm run status:public-canary -- --base-url https://bridge.example.com --requests 10 --max-p95-ms 2000 --output .tmp/status-public-canary.json

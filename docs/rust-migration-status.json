@@ -4,6 +4,29 @@
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
+      "id": "rust-http-frontdoor",
+      "title": "Rust HTTP 前门",
+      "priority": "P0",
+      "status": "canary",
+      "featureFlags": [
+        "--rust-http-canary",
+        "VIBELINK_RUNTIME_HOST",
+        "VIBELINK_RUNTIME_PORT",
+        "VIBELINK_SUPERVISOR_PID"
+      ],
+      "nodeEntry": "src/server.js",
+      "rustEntry": "apps/windows/src/http_frontdoor.rs",
+      "sidecarCommand": "vibelink --rust-http-canary bridge",
+      "fallback": "关闭 --rust-http-canary 后 Node 恢复直接监听原 host:port；旧 portable 包保留为进程级回滚",
+      "tests": [
+        "apps/windows/src/http_frontdoor.rs",
+        "test/runtimeBinding.test.js",
+        "test/supervisorMonitor.test.js",
+        "test/statusPublicCanary.test.js"
+      ],
+      "nextAction": "保持公网透明转发 canary 稳定，先将 /api/status 从 Node forwarding 迁为 Rust 原生路由。"
+    },
+    {
       "id": "status-response-sidecar",
       "title": "状态响应契约组装",
       "priority": "P0",

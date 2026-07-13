@@ -82,8 +82,8 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Acceptance criteria:**
 
-- [ ] An explicit Rust front-door canary owns the external listener while Node binds only to an ephemeral loopback port.
-- [ ] Transparent forwarding preserves HTTP, SSE, WebSocket, Host, authentication, and shutdown behavior for non-migrated routes.
+- [x] An explicit Rust front-door canary owns the external listener while Node binds only to an ephemeral loopback port.
+- [x] Transparent forwarding preserves HTTP, SSE, WebSocket, Host, authentication, and shutdown behavior for non-migrated routes.
 - [ ] Rust directly owns authentication, validation, response serialization, and HTTP status codes for both routes.
 - [ ] Contract fixtures match the current Node responses and failure semantics.
 - [ ] Separate feature flags switch the front door, Status ownership, and Doctor ownership immediately back to Node.

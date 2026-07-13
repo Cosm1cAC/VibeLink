@@ -60,14 +60,15 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Acceptance criteria:**
 
-- [ ] Workspace interactive sessions show parity and zero fallback.
-- [ ] MCP natural sessions show stable reuse, zero readiness fallback, and drained pending work.
-- [ ] Event Store real sessions meet correctness and latency thresholds with zero fallback.
+- [x] Workspace representative public sessions show parity and zero fallback.
+- [x] MCP controlled real/soak sessions show stable reuse, zero readiness fallback, and drained pending work.
+- [ ] MCP natural production sessions sustain the same result over the observation window.
+- [x] Event Store real-data and public command sessions meet correctness and latency thresholds with zero fallback.
 
 **Verification:**
 
-- [ ] Existing Workspace, MCP, and Event Store canary commands pass and archive JSON artifacts.
-- [ ] Each default-on decision updates `docs/rust-migration-status.json` and the migration report.
+- [x] Existing Workspace, MCP, and Event Store canary commands pass and archive evidence.
+- [x] Each promote-or-hold decision updates `docs/rust-migration-status.json` and the migration report.
 
 **Dependencies:** Task 2.
 

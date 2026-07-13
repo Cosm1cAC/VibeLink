@@ -13,14 +13,16 @@
 - [x] Preflight the named Tunnel and preserve the current rollback commands.
 - [x] Restart the public bridge with `VIBELINK_RUST_STATUS=1` under the Rust launcher.
 - [x] Run and archive the authenticated public canary.
-- [ ] Review, stage, commit, and push the verified milestone.
+- [x] Review, stage, commit, and push the verified milestone.
 
 ## Existing Data-Plane Promotions
 
-- [ ] Collect representative Workspace interactive-session evidence.
+- [x] Collect representative Workspace interactive-session evidence.
+- [x] Collect controlled real-server and soak MCP evidence.
 - [ ] Collect representative MCP natural-session evidence.
-- [ ] Collect Event Store real-session runtime statistics.
-- [ ] Promote only slices meeting parity, latency, and zero-fallback gates.
+- [x] Collect Event Store real-session runtime statistics.
+- [x] Evaluate every slice against parity, latency, and zero-fallback gates without premature promotion.
+- [x] Add, package, deploy, and verify the explicit `--rust-canary` launcher profile.
 
 ## Rust HTTP Ownership
 

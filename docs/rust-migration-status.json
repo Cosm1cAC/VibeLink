@@ -25,7 +25,7 @@
         "test/statusServerCanary.test.js",
         "test/serverStatusRuntime.test.js"
       ],
-      "nextAction": "保持认证 server/public canary 与自然请求稳定，准备 Status/Doctor 直接 Rust HTTP 路由。"
+      "nextAction": "通过显式 --rust-canary 配置持续观察认证公网请求；保持零回退后准备 Status/Doctor 直接 Rust HTTP 路由。"
     },
     {
       "id": "workspace-tree",
@@ -52,7 +52,7 @@
         "test/workspaceTreeSidecarContract.test.js",
         "test/workspaceTreeSidecarClient.test.js"
       ],
-      "nextAction": "保持每周 canary 通过，完成有限交互会话后再评估 default-on。"
+      "nextAction": "代表性本地/公网交互证据已通过；继续扩大自然交互观察窗口后再评估 default-on。"
     },
     {
       "id": "mcp-session-sidecar",
@@ -78,7 +78,7 @@
         "test/mcpSessionServerCanary.test.js",
         "test/mcpSessionSoak.test.js"
       ],
-      "nextAction": "保持 server canary 与 soak 通过，观察有限自然生产会话后再评估 default-on。"
+      "nextAction": "受控真实 server、installed MCP 和 soak 已通过；继续观察自然生产会话后再评估 default-on。"
     },
     {
       "id": "event-store-sidecar",
@@ -110,7 +110,7 @@
         "test/eventStoreMetrics.test.js",
         "test/eventStoreRealDataCanary.test.js"
       ],
-      "nextAction": "保持远端 canary 通过，完成有限真人运行会话和前后 runtime stats 采集。"
+      "nextAction": "真实大库与公网审批命令证据已通过；继续扩大自然运行窗口并采集前后 runtime stats。"
     },
     {
       "id": "audio-pipeline",

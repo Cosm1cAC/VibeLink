@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -55,7 +55,7 @@ impl ParsedRequest {
             .unwrap_or_default()
     }
 
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
@@ -173,16 +173,24 @@ struct StatusHttpSettings {
     host_allowlist: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RouteAuthentication {
+    Pending,
+    HostDenied,
+    Unauthorized,
+    Device(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct StatusRouteConfig {
     data_dir: PathBuf,
     upstream: SocketAddr,
     internal_token: String,
-    metrics: Arc<StatusRouteMetrics>,
+    metrics: Arc<RouteMetrics>,
 }
 
 #[derive(Debug, Default)]
-struct StatusRouteMetrics {
+pub(crate) struct RouteMetrics {
     attempts: AtomicU64,
     responses: AtomicU64,
     fallbacks: AtomicU64,
@@ -191,47 +199,73 @@ struct StatusRouteMetrics {
     unauthorized: AtomicU64,
 }
 
+impl RouteMetrics {
+    pub(crate) fn record_attempt(&self) {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record_response(&self) {
+        self.responses.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record_fallback(&self) {
+        self.fallbacks.fetch_add(1, Ordering::SeqCst);
+        self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record_host_denied(&self) {
+        self.host_denied.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record_unauthorized(&self) {
+        self.unauthorized.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn value(&self) -> Value {
+        json!({
+            "implementation": "rust",
+            "attempts": self.attempts.load(Ordering::SeqCst),
+            "responses": self.responses.load(Ordering::SeqCst),
+            "fallbacks": self.fallbacks.load(Ordering::SeqCst),
+            "failures": self.failures.load(Ordering::SeqCst),
+            "hostDenied": self.host_denied.load(Ordering::SeqCst),
+            "unauthorized": self.unauthorized.load(Ordering::SeqCst),
+            "pending": 0
+        })
+    }
+}
+
 impl StatusRouteConfig {
     pub fn new(data_dir: PathBuf, upstream: SocketAddr, internal_token: String) -> Self {
         Self {
             data_dir,
             upstream,
             internal_token,
-            metrics: Arc::new(StatusRouteMetrics::default()),
+            metrics: Arc::new(RouteMetrics::default()),
         }
     }
 
     fn record_response(&self) {
-        self.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        self.metrics.record_response();
     }
 
     pub(crate) fn record_fallback(&self) {
-        self.metrics.fallbacks.fetch_add(1, Ordering::SeqCst);
-        self.metrics.failures.fetch_add(1, Ordering::SeqCst);
+        self.metrics.record_fallback();
     }
 
     fn metrics_value(&self) -> Value {
-        json!({
-            "implementation": "rust",
-            "attempts": self.metrics.attempts.load(Ordering::SeqCst),
-            "responses": self.metrics.responses.load(Ordering::SeqCst),
-            "fallbacks": self.metrics.fallbacks.load(Ordering::SeqCst),
-            "failures": self.metrics.failures.load(Ordering::SeqCst),
-            "hostDenied": self.metrics.host_denied.load(Ordering::SeqCst),
-            "unauthorized": self.metrics.unauthorized.load(Ordering::SeqCst),
-            "pending": 0
-        })
+        self.metrics.value()
     }
 }
 
 #[derive(Debug)]
-pub struct StatusRouteResponse {
+pub struct HttpRouteResponse {
     pub status: u16,
     pub body: Value,
 }
 
-impl StatusRouteResponse {
-    fn error(status: u16, message: &str) -> Self {
+impl HttpRouteResponse {
+    pub(crate) fn error(status: u16, message: &str) -> Self {
         Self {
             status,
             body: json!({ "error": message }),
@@ -262,70 +296,29 @@ impl StatusRouteResponse {
 pub fn route_status_request(
     request: &ParsedRequest,
     config: &StatusRouteConfig,
-) -> Result<Option<StatusRouteResponse>> {
+) -> Result<Option<HttpRouteResponse>> {
     if request.method != "GET" || request.path() != "/api/status" {
         return Ok(None);
     }
 
-    let settings_path = config.data_dir.join("settings.json");
-    let settings_source = match fs::read_to_string(&settings_path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| format!("Cannot read {}", settings_path.display()))
+    let authentication = authenticate_route_request(request, &config.data_dir)?;
+    if authentication == RouteAuthentication::Pending {
+        return Ok(None);
+    }
+    config.metrics.record_attempt();
+    match authentication {
+        RouteAuthentication::HostDenied => {
+            config.metrics.record_host_denied();
+            config.record_response();
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")));
         }
-    };
-    let settings: StatusHttpSettings = serde_json::from_str(&settings_source)
-        .with_context(|| format!("Cannot parse {}", settings_path.display()))?;
-
-    if settings.pairing_token.is_empty() {
-        return Ok(None);
-    }
-    let database_path = config.data_dir.join("mobile-agent.sqlite");
-    if !database_path.exists() {
-        return Ok(None);
-    }
-    let connection = Connection::open_with_flags(
-        &database_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("Cannot open {}", database_path.display()))?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .context("Cannot configure Status authentication database timeout")?;
-    let devices_ready = connection
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'devices'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()
-        .context("Cannot inspect Status authentication schema")?
-        .is_some();
-    if !devices_ready {
-        return Ok(None);
-    }
-
-    config.metrics.attempts.fetch_add(1, Ordering::SeqCst);
-
-    if !is_host_allowed(request.host(), &settings.host_allowlist) {
-        config.metrics.host_denied.fetch_add(1, Ordering::SeqCst);
-        config.record_response();
-        return Ok(Some(StatusRouteResponse::error(
-            403,
-            "Host is not allowed.",
-        )));
-    }
-
-    let now: DateTime<Utc> = SystemTime::now().into();
-    let now = now.to_rfc3339_opts(SecondsFormat::Millis, true);
-    if authenticate_device(&connection, true, &request.token(), &now)
-        .context("Cannot authenticate Status request")?
-        == AuthResult::Unauthorized
-    {
-        config.metrics.unauthorized.fetch_add(1, Ordering::SeqCst);
-        config.record_response();
-        return Ok(Some(StatusRouteResponse::error(401, "Unauthorized")));
+        RouteAuthentication::Unauthorized => {
+            config.metrics.record_unauthorized();
+            config.record_response();
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")));
+        }
+        RouteAuthentication::Device(_) => {}
+        RouteAuthentication::Pending => unreachable!(),
     }
 
     let snapshot = fetch_status_snapshot(request.host(), config)?;
@@ -341,7 +334,66 @@ pub fn route_status_request(
         .context("Rendered Status controlPlaneRuntime must be an object")?;
     config.record_response();
     runtime.insert("statusHttp".to_string(), config.metrics_value());
-    Ok(Some(StatusRouteResponse { status: 200, body }))
+    Ok(Some(HttpRouteResponse { status: 200, body }))
+}
+
+pub(crate) fn authenticate_route_request(
+    request: &ParsedRequest,
+    data_dir: &Path,
+) -> Result<RouteAuthentication> {
+    let settings_path = data_dir.join("settings.json");
+    let settings_source = match fs::read_to_string(&settings_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(RouteAuthentication::Pending)
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("Cannot read {}", settings_path.display()))
+        }
+    };
+    let settings: StatusHttpSettings = serde_json::from_str(&settings_source)
+        .with_context(|| format!("Cannot parse {}", settings_path.display()))?;
+    if settings.pairing_token.is_empty() {
+        return Ok(RouteAuthentication::Pending);
+    }
+
+    let database_path = data_dir.join("mobile-agent.sqlite");
+    if !database_path.exists() {
+        return Ok(RouteAuthentication::Pending);
+    }
+    let connection = Connection::open_with_flags(
+        &database_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Cannot open {}", database_path.display()))?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .context("Cannot configure control-plane authentication database timeout")?;
+    let devices_ready = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'devices'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("Cannot inspect control-plane authentication schema")?
+        .is_some();
+    if !devices_ready {
+        return Ok(RouteAuthentication::Pending);
+    }
+    if !is_host_allowed(request.host(), &settings.host_allowlist) {
+        return Ok(RouteAuthentication::HostDenied);
+    }
+
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let now = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    match authenticate_device(&connection, true, &request.token(), &now)
+        .context("Cannot authenticate control-plane request")?
+    {
+        AuthResult::Device(id) => Ok(RouteAuthentication::Device(id)),
+        AuthResult::Open => Ok(RouteAuthentication::Unauthorized),
+        AuthResult::Unauthorized => Ok(RouteAuthentication::Unauthorized),
+    }
 }
 
 fn fetch_status_snapshot(host: &str, config: &StatusRouteConfig) -> Result<Value> {

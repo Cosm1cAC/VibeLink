@@ -16,9 +16,15 @@ export function internalControlAuthorized(request, configuredToken) {
 }
 
 export function originalHostRequest(request) {
-  const originalHostHeader = request?.headers?.["x-vibelink-original-host"];
-  const originalHost = typeof originalHostHeader === "string" ? originalHostHeader.trim() : "";
   const headers = { ...request.headers };
-  if (originalHost && originalHost.length <= 255) headers.host = originalHost;
+  for (const [source, target, maxLength] of [
+    ["x-vibelink-original-host", "host", 255],
+    ["x-vibelink-original-user-agent", "user-agent", 512],
+    ["x-vibelink-original-forwarded-for", "x-forwarded-for", 1024]
+  ]) {
+    const raw = request?.headers?.[source];
+    const value = typeof raw === "string" ? raw.trim() : "";
+    if (value && value.length <= maxLength) headers[target] = value;
+  }
   return { ...request, headers };
 }

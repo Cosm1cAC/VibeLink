@@ -24,6 +24,7 @@ use std::{
 
 mod audio_pipeline_sidecar;
 mod compression_sidecar;
+mod doctor_http;
 mod http_frontdoor;
 mod public_tunnel;
 mod status_http;
@@ -58,6 +59,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_status_http: bool,
+
+    #[arg(long, global = true)]
+    rust_doctor_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -2371,6 +2375,10 @@ fn rust_status_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_status_http
 }
 
+fn rust_doctor_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_doctor_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -2390,28 +2398,44 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let internal_port = reserve_loopback_port()?;
     let plan = node_bridge_plan(cli, internal_port);
     let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
-    let internal_token = rust_status_http_enabled(cli)
+    let internal_token = (rust_status_http_enabled(cli) || rust_doctor_http_enabled(cli))
         .then(generate_internal_control_token)
         .transpose()?;
-    let status_route = internal_token.as_ref().map(|token| {
-        status_http::StatusRouteConfig::new(
-            resolve_data_dir(
-                root,
-                env::var_os("VIBELINK_DATA_DIR"),
-                env::var_os("LOCALAPPDATA"),
-                Path::exists,
-            ),
+    let route_data_dir = resolve_data_dir(
+        root,
+        env::var_os("VIBELINK_DATA_DIR"),
+        env::var_os("LOCALAPPDATA"),
+        Path::exists,
+    );
+    let status_route = if rust_status_http_enabled(cli) {
+        Some(status_http::StatusRouteConfig::new(
+            route_data_dir.clone(),
             upstream,
-            token.clone(),
-        )
-    });
+            internal_token
+                .clone()
+                .context("Status route internal token is missing")?,
+        ))
+    } else {
+        None
+    };
+    let doctor_route = if rust_doctor_http_enabled(cli) {
+        Some(doctor_http::DoctorRouteConfig::new(
+            route_data_dir,
+            upstream,
+            internal_token
+                .clone()
+                .context("Doctor route internal token is missing")?,
+        ))
+    } else {
+        None
+    };
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
         "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
         cli.host, cli.port, upstream
     );
-    let result = http_frontdoor::serve(listener, upstream, &mut node, status_route);
+    let result = http_frontdoor::serve(listener, upstream, &mut node, status_route, doctor_route);
     if node
         .try_wait()
         .context("Failed to inspect Node bridge after front-door shutdown")?
@@ -2432,13 +2456,13 @@ fn spawn_node_bridge(
 ) -> Result<Child> {
     let executable = env::current_exe().context("Cannot resolve current executable path")?;
     let data_dir = resolve_data_dir(
-        &root,
+        root,
         env::var_os("VIBELINK_DATA_DIR"),
         env::var_os("LOCALAPPDATA"),
         Path::exists,
     );
     let mut command = Command::new(resolve_node_command(
-        &root,
+        root,
         env::var_os("VIBELINK_NODE_COMMAND"),
         Path::exists,
     ));
@@ -2451,8 +2475,8 @@ fn spawn_node_bridge(
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command
-        .arg(&server)
-        .current_dir(&root)
+        .arg(server)
+        .current_dir(root)
         .env("VIBELINK_DATA_DIR", data_dir)
         .env("VIBELINK_SUPERVISOR_PID", std::process::id().to_string())
         .env("MOBILE_AGENT_HOST", &plan.persisted.host)
@@ -2580,6 +2604,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_status_http {
         command.arg("--rust-status-http");
+    }
+    if cli.rust_doctor_http {
+        command.arg("--rust-doctor-http");
     }
     command
         .arg("bridge")
@@ -2847,6 +2874,24 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-status-http", "bridge"]).unwrap();
         assert!(status_only.rust_status_http);
         assert!(!rust_status_http_enabled(&status_only));
+    }
+
+    #[test]
+    fn rust_doctor_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-doctor-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_doctor_http);
+        assert!(rust_doctor_http_enabled(&enabled));
+
+        let doctor_only =
+            Cli::try_parse_from(["vibelink", "--rust-doctor-http", "bridge"]).unwrap();
+        assert!(doctor_only.rust_doctor_http);
+        assert!(!rust_doctor_http_enabled(&doctor_only));
     }
 
     #[test]

@@ -28,6 +28,8 @@ vibelink.exe --rust-canary --rust-http-canary
 
 Use `--rust-status-http` with the front-door flag, or run `start-vibelink-status-http-canary.cmd`, to let Rust own `GET /api/status` authentication and responses while Node supplies the protected loopback snapshot. Disabling only `--rust-status-http` restores transparent Node routing for Status.
 
+Use `--rust-doctor-http` with the front-door flag, or run `start-vibelink-doctor-http-canary.cmd`, to let Rust own `GET /api/doctor` Host validation, device authentication, and HTTP responses. Node keeps the protected diagnostic executor so the existing checks, tool run, and audit records remain unchanged. The Doctor flag can be disabled independently.
+
 ## Internal modes
 
 ```powershell

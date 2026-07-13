@@ -29,7 +29,7 @@
 - [x] Add an opt-in Rust external front door with a loopback-only Node backend.
 - [x] Verify transparent HTTP, SSE, WebSocket, authentication, and shutdown parity.
 - [x] Migrate direct `/api/status` HTTP ownership behind a rollback flag.
-- [ ] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
+- [x] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
 - [ ] Migrate pairing and device routes.
 - [ ] Migrate settings and audit routes.
 - [ ] Migrate workspace and tool routes.

@@ -57,14 +57,16 @@ function writeSettings(dataDir, port, pairingToken) {
   }, null, 2)}\n`, "utf8");
 }
 
-function startServer(dataDir, port, command) {
-  const child = spawn(command, [
+function startServer(dataDir, port, command, doctorHttp) {
+  const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
     "--rust-http-canary",
-    "--rust-status-http",
-    "bridge"
-  ], {
+    "--rust-status-http"
+  ];
+  if (doctorHttp) args.push("--rust-doctor-http");
+  args.push("bridge");
+  const child = spawn(command, args, {
     cwd: rootDir,
     env: {
       ...process.env,
@@ -175,8 +177,9 @@ async function main() {
   const dataDir = path.join(tempRoot, "data");
   const port = await reservePort();
   const pairingToken = crypto.randomBytes(24).toString("hex");
+  const doctorHttp = process.argv.includes("--doctor-http");
   writeSettings(dataDir, port, pairingToken);
-  const server = startServer(dataDir, port, command);
+  const server = startServer(dataDir, port, command, doctorHttp);
   const baseUrl = `http://127.0.0.1:${port}`;
   let shutdown = null;
 
@@ -197,22 +200,42 @@ async function main() {
     for (let index = 0; index < 3; index += 1) {
       runtime = await waitForRustStatus(baseUrl, login.payload.token, runtime.attempts);
     }
+    const doctorAnonymous = doctorHttp ? await request(baseUrl, "/api/doctor") : null;
     const doctor = await request(baseUrl, "/api/doctor", { token: login.payload.token });
+    const doctorRuntime = doctor.payload?.controlPlaneRuntime?.doctorHttp || {};
+    const doctorToolRun = doctorHttp && doctor.payload?.toolRunId
+      ? await request(baseUrl, `/api/tool-runs/${encodeURIComponent(doctor.payload.toolRunId)}`, { token: login.payload.token })
+      : null;
+    const audit = doctorHttp
+      ? await request(baseUrl, "/api/audit-log?limit=20&fields=type,target,deviceId,path", { token: login.payload.token })
+      : null;
     shutdown = await stopServer(server);
     const checks = [
       { name: "anonymous auth", pass: anonymous.status === 401, detail: `status=${anonymous.status}` },
       { name: "proxied login", pass: login.status === 200, detail: `status=${login.status}` },
       { name: "Rust Status ownership", pass: runtime.implementation === "rust" && runtime.attempts - denial.runtime.attempts === 3 && runtime.responses === runtime.attempts, detail: `authenticated direct=${runtime.attempts - denial.runtime.attempts}, attempts=${runtime.attempts}, responses=${runtime.responses}` },
       { name: "Rust Status fallback", pass: runtime.fallbacks === 0 && runtime.failures === 0 && runtime.pending === 0, detail: `fallbacks=${runtime.fallbacks}, failures=${runtime.failures}` },
-      { name: "Rust Status denial", pass: denial.anonymous.status === 401 && denial.anonymous.implementation === "rust" && denial.runtime.unauthorized - baseline.unauthorized === 1, detail: `status=${denial.anonymous.status}, implementation=${denial.anonymous.implementation || "node"}, unauthorized delta=${denial.runtime.unauthorized - baseline.unauthorized}` },
-      { name: "Node Doctor forwarding", pass: doctor.status === 200 && Array.isArray(doctor.payload?.checks), detail: `status=${doctor.status}, checks=${doctor.payload?.checks?.length || 0}` },
-      { name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` }
+      { name: "Rust Status denial", pass: denial.anonymous.status === 401 && denial.anonymous.implementation === "rust" && denial.runtime.unauthorized - baseline.unauthorized === 1, detail: `status=${denial.anonymous.status}, implementation=${denial.anonymous.implementation || "node"}, unauthorized delta=${denial.runtime.unauthorized - baseline.unauthorized}` }
     ];
+    if (doctorHttp) {
+      const auditItem = audit?.payload?.items?.find((item) => item.type === "system.doctor" && item.target === doctor.payload?.toolRunId);
+      checks.push(
+        { name: "Rust Doctor ownership", pass: doctor.status === 200 && doctor.implementation === "rust" && Array.isArray(doctor.payload?.checks) && Boolean(doctor.payload?.toolRunId), detail: `status=${doctor.status}, implementation=${doctor.implementation || "node"}, checks=${doctor.payload?.checks?.length || 0}` },
+        { name: "Rust Doctor denial", pass: doctorAnonymous?.status === 401 && doctorAnonymous?.implementation === "rust" && doctorRuntime.unauthorized === 1, detail: `status=${doctorAnonymous?.status || 0}, implementation=${doctorAnonymous?.implementation || "node"}, unauthorized=${doctorRuntime.unauthorized}` },
+        { name: "Rust Doctor fallback", pass: doctorRuntime.attempts === 2 && doctorRuntime.responses === 2 && doctorRuntime.fallbacks === 0 && doctorRuntime.failures === 0, detail: `attempts=${doctorRuntime.attempts}, responses=${doctorRuntime.responses}, fallbacks=${doctorRuntime.fallbacks}, failures=${doctorRuntime.failures}` },
+        { name: "Doctor tool run", pass: doctorToolRun?.status === 200 && doctorToolRun.payload?.toolRun?.id === doctor.payload?.toolRunId && doctorToolRun.payload?.toolRun?.toolName === "system.doctor", detail: `status=${doctorToolRun?.status || 0}, tool=${doctorToolRun?.payload?.toolRun?.toolName || "missing"}` },
+        { name: "Doctor audit", pass: audit?.status === 200 && Boolean(auditItem?.deviceId) && auditItem?.path === "/api/doctor", detail: `status=${audit?.status || 0}, device=${auditItem?.deviceId || "missing"}, path=${auditItem?.path || "missing"}` }
+      );
+    } else {
+      checks.push({ name: "Node Doctor forwarding", pass: doctor.status === 200 && doctor.implementation === "" && Array.isArray(doctor.payload?.checks), detail: `status=${doctor.status}, checks=${doctor.payload?.checks?.length || 0}` });
+    }
+    checks.push({ name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` });
     const result = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      source: { route: "/api/status", implementation: "rust-http", command },
+      source: { route: doctorHttp ? "/api/status,/api/doctor" : "/api/status", implementation: "rust-http", command },
       runtime,
+      doctorRuntime: doctorHttp ? doctorRuntime : undefined,
       shutdown,
       checks,
       passed: checks.every((check) => check.pass)

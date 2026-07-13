@@ -24,7 +24,7 @@
         "test/supervisorMonitor.test.js",
         "test/statusPublicCanary.test.js"
       ],
-      "nextAction": "保持公网透明转发 canary 稳定，并验证独立 Status 原生路由 opt-in 不影响其他 HTTP/SSE/WebSocket 流量。"
+      "nextAction": "保持公网透明转发 canary 稳定，并验证独立 Status/Doctor 原生路由 opt-in 不影响其他 HTTP/SSE/WebSocket 流量。"
     },
     {
       "id": "status-response-sidecar",
@@ -48,7 +48,7 @@
         "test/statusServerCanary.test.js",
         "test/serverStatusRuntime.test.js"
       ],
-      "nextAction": "继续作为 Node 动态快照的强类型契约层；直接 Status HTTP 路由稳定后复用该边界迁移 Doctor。"
+      "nextAction": "继续作为 Status 动态快照的强类型契约层，并保持 Node 快照回退。"
     },
     {
       "id": "status-http-route",
@@ -70,7 +70,29 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "远端 CI 与公网认证 canary 保持零失败/零回退后晋级 canary，再开始 /api/doctor 原生路由。"
+      "nextAction": "远端 CI 已通过；公网认证 canary 保持零失败/零回退后晋级 canary。"
+    },
+    {
+      "id": "doctor-http-route",
+      "title": "Doctor 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-doctor-http",
+        "VIBELINK_INTERNAL_CONTROL_TOKEN"
+      ],
+      "nodeEntry": "src/server.js#/internal/doctor-report",
+      "rustEntry": "apps/windows/src/doctor_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-doctor-http bridge",
+      "fallback": "Rust 解析/内部诊断/契约校验失败后逐字节重放原请求到 Node；关闭 --rust-doctor-http 后所有 Doctor 请求透明转发",
+      "tests": [
+        "apps/windows/src/doctor_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/internalControl.test.js",
+        "tools/status/http-canary.mjs"
+      ],
+      "nextAction": "本地 release 已通过；远端 CI 与公网认证 canary 保持 24 项检查、tool run、审计和零失败/零回退后晋级 canary。"
     },
     {
       "id": "workspace-tree",

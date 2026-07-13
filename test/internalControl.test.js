@@ -18,14 +18,40 @@ test("internal control requires loopback and an exact non-empty process token", 
   assert.equal(internalControlAuthorized(request("127.0.0.1", configuredToken), ""), false);
 });
 
-test("internal snapshot request restores only the authenticated original host", () => {
+test("internal control request restores bounded original audit headers", () => {
   const request = {
-    headers: { host: "127.0.0.1:49152", "x-vibelink-original-host": "bridge.vibelink.cloud" },
+    headers: {
+      host: "127.0.0.1:49152",
+      "user-agent": "internal-client",
+      "x-forwarded-for": "127.0.0.1",
+      "x-vibelink-original-host": "bridge.vibelink.cloud",
+      "x-vibelink-original-user-agent": "VibeLink Android",
+      "x-vibelink-original-forwarded-for": "203.0.113.7"
+    },
     socket: { remoteAddress: "127.0.0.1" }
   };
   const restored = originalHostRequest(request);
 
   assert.equal(restored.headers.host, "bridge.vibelink.cloud");
+  assert.equal(restored.headers["user-agent"], "VibeLink Android");
+  assert.equal(restored.headers["x-forwarded-for"], "203.0.113.7");
   assert.equal(request.headers.host, "127.0.0.1:49152");
+  assert.equal(request.headers["user-agent"], "internal-client");
   assert.equal(restored.socket, request.socket);
+});
+
+test("internal control request ignores oversized restored headers", () => {
+  const request = {
+    headers: {
+      host: "127.0.0.1:49152",
+      "x-vibelink-original-host": "x".repeat(256),
+      "x-vibelink-original-user-agent": "u".repeat(513),
+      "x-vibelink-original-forwarded-for": "f".repeat(1025)
+    }
+  };
+  const restored = originalHostRequest(request);
+
+  assert.equal(restored.headers.host, "127.0.0.1:49152");
+  assert.equal(restored.headers["user-agent"], undefined);
+  assert.equal(restored.headers["x-forwarded-for"], undefined);
 });

@@ -18,14 +18,14 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Acceptance criteria:**
 
-- [ ] Anonymous requests return `401` and authenticated requests return `200`.
-- [ ] Rust attempts and responses increase together with zero fallback, failure, timeout, pending, or backpressure counts.
-- [ ] The JSON artifact contains no credential and fails when the latency or runtime thresholds are exceeded.
+- [x] Anonymous requests return `401` and authenticated requests return `200`.
+- [x] Rust attempts and responses increase together with zero fallback, failure, timeout, pending, or backpressure counts.
+- [x] The JSON artifact contains no credential and fails when the latency or runtime thresholds are exceeded.
 
 **Verification:**
 
-- [ ] Red/green Node tests cover healthy and degraded runtime evidence.
-- [ ] `npm run status:public-canary -- --base-url <url> --output <path>` passes against the deployed bridge.
+- [x] Red/green Node tests cover healthy and degraded runtime evidence.
+- [x] `npm run status:public-canary -- --base-url <url> --output <path>` passes against the deployed bridge.
 
 **Dependencies:** None.
 
@@ -39,14 +39,14 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 **Acceptance criteria:**
 
-- [ ] Rust and Node focused tests pass before the running public process changes.
-- [ ] Tunnel `--check-only`, package checksum, release-manifest commit, and local health checks pass.
+- [x] Rust and Node focused tests pass before the running public process changes.
+- [x] Tunnel `--check-only`, package checksum, release-manifest commit, and local health checks pass.
 - [ ] A restart failure restores the previous Node bridge and public route.
 
 **Verification:**
 
-- [ ] `npm run status:contract`, Rust status tests, and authenticated server canary pass.
-- [ ] Public root returns `200`, anonymous status returns `401`, and the authenticated public canary passes.
+- [x] `npm run status:contract`, Rust status tests, and authenticated server canary pass.
+- [x] Public root returns `200`, anonymous status returns `401`, and the authenticated public canary passes.
 
 **Dependencies:** Task 1.
 
@@ -184,9 +184,9 @@ Migrate VibeLink from the current Node control plane plus Rust data-plane sideca
 
 ### Public Status Canary
 
-- [ ] Focused tests and Rust migration manifest pass.
-- [ ] Reproducible package and rollback artifact exist.
-- [ ] Public authenticated evidence passes with zero Rust fallback.
+- [x] Focused tests and Rust migration manifest pass.
+- [x] Reproducible package and rollback artifact exist.
+- [x] Public authenticated evidence passes with zero Rust fallback.
 
 ### Route Family Promotion
 

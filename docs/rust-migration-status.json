@@ -7,7 +7,7 @@
       "id": "status-response-sidecar",
       "title": "状态响应契约组装",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "canary",
       "featureFlags": [
         "VIBELINK_RUST_STATUS",
         "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
@@ -25,7 +25,7 @@
         "test/statusServerCanary.test.js",
         "test/serverStatusRuntime.test.js"
       ],
-      "nextAction": "保持认证 server canary 通过，收集有限公网 status 请求后再评估 canary。"
+      "nextAction": "保持认证 server/public canary 与自然请求稳定，准备 Status/Doctor 直接 Rust HTTP 路由。"
     },
     {
       "id": "workspace-tree",

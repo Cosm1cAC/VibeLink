@@ -1,6 +1,6 @@
 # VibeLink Rust 迁移报告
 
-最后更新：2026-07-12
+最后更新：2026-07-13
 
 本文是 Rust 迁移唯一的人工维护报告。机器可读状态保存在 `docs/rust-migration-status.json`，架构决策见 `docs/decisions/ADR-0001-rust-data-plane-sidecars.md`。
 
@@ -16,6 +16,7 @@
 
 | Slice | 状态 | 生产路由 | 下一步 |
 | --- | --- | --- | --- |
+| 状态响应契约组装 | `canary` | 公网 bridge 显式开启，Node 快照回退 | 持续定时与自然请求观察后迁移直接 HTTP 路由 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |
 | 事件存储 append/replay sidecar | `canary` | `auto`/显式开启，可回退 Worker/同步 SQLite | 有限真人运行会话并采集统计 |
@@ -91,9 +92,11 @@
 
 ## 状态响应契约组装
 
-实现：`src/statusRuntime.js`、`apps/windows/src/status_sidecar.rs`、`vibelink status-sidecar`。当前为 `opt-in`：Node 保留 Host/鉴权和动态状态采集，Rust 负责强类型校验及最终响应组装；首次 health、持久进程复用、超时、失败熔断和 Node 原快照回退均有自动测试。
+实现：`src/statusRuntime.js`、`apps/windows/src/status_sidecar.rs`、`vibelink status-sidecar`。当前为 `canary`：Node 保留 Host/鉴权和动态状态采集，Rust 负责强类型校验及最终响应组装；首次 health、持久进程复用、超时、失败熔断和 Node 原快照回退均有自动测试。
 
-认证 HTTP canary 连续请求 `/api/status`，要求匿名访问为 401、Rust readiness 成功、单一 sidecar、失败/回退/pending/背压均为 0。公网 canary 使用真实 HTTPS origin 和设备 token，校验 Rust runtime 计数增量、历史故障计数、pending 排空和公网 p95；token 只能通过 `VIBELINK_PUBLIC_CANARY_TOKEN` 环境变量传入，不进入命令行或 JSON 产物。完成有限公网请求观察后再评估 `canary`；各状态源迁入 Rust 后，同一契约处理器再提升为直接 HTTP 路由。
+认证 HTTP canary 连续请求 `/api/status`，要求匿名访问为 401、Rust readiness 成功、单一 sidecar、失败/回退/pending/背压均为 0。公网 canary 使用真实 HTTPS origin 和设备 token，校验 Rust runtime 计数增量、历史故障计数、pending 排空和公网 p95；token 只能通过 `VIBELINK_PUBLIC_CANARY_TOKEN` 环境变量传入，不进入命令行或 JSON 产物。
+
+2026-07-13 在 `https://bridge.vibelink.cloud` 对提交 `5a04f25295b28da2cf54158edeb927f4440f76e4` 完成 10 次认证公网请求：attempt、Rust response 和 sidecar request 均增加 10，fallback、failure、timeout、backpressure 和 pending 均为 0，公网 p95 为 3678.07ms。当前 Cloudflare 网络往返主导总延迟，因此本轮使用 5000ms 异常上限；进入直接 HTTP 路由前必须以同一网络基线做 20% 回归比较。下一步是保持定时 canary 和自然请求稳定，再迁移 Status/Doctor 的直接 Rust HTTP 所有权。
 
 ## Audio Pipeline
 
@@ -142,7 +145,7 @@ npm run compression:benchmark -- --require-real
 
 无需人工参与的代表性 canary、故障测试、回退测试和 CI gate 已基本齐备。剩余工作不是继续增加 sidecar，而是：
 
-1. Status：有限公网请求及 runtime stats。
+1. Status：保持公网 canary 与 runtime stats 稳定，准备直接 Rust HTTP 路由契约。
 2. Workspace：有限交互会话。
 3. MCP：有限自然生产会话。
 4. Event Store：有限真人运行会话及前后 runtime stats。

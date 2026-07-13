@@ -11,8 +11,8 @@
 - [x] Hide pairing tokens from startup logs after device pairing.
 - [x] Build a portable package from the current commit and verify its manifest/checksum.
 - [x] Preflight the named Tunnel and preserve the current rollback commands.
-- [ ] Restart the public bridge with `VIBELINK_RUST_STATUS=1` under the Rust launcher.
-- [ ] Run and archive the authenticated public canary.
+- [x] Restart the public bridge with `VIBELINK_RUST_STATUS=1` under the Rust launcher.
+- [x] Run and archive the authenticated public canary.
 - [ ] Review, stage, commit, and push the verified milestone.
 
 ## Existing Data-Plane Promotions

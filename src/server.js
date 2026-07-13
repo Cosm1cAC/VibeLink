@@ -84,6 +84,7 @@ import {
   isHostAllowed,
   isPublicHost,
   pairDevice,
+  pairingTokenLogValue,
   publicAccessWarnings,
   rateLimitKey,
   requestIp,
@@ -3544,6 +3545,6 @@ scheduleToolEventsPrune();
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;
   console.log(`VibeLink listening on ${local}`);
-  console.log(`Pairing token: ${settings.pairingToken}`);
+  console.log(`Pairing token: ${pairingTokenLogValue({ settings, devices: listDevices() })}`);
   for (const item of getNetworkAddresses(settings.port)) console.log(`LAN: ${item.url}`);
 });

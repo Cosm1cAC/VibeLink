@@ -62,6 +62,51 @@ test("public status evidence accepts healthy Rust runtime deltas", () => {
   assert.equal(result.checks.every((check) => check.pass), true);
 });
 
+test("public status evidence accounts for one cold-start health request", () => {
+  const result = evaluatePublicStatusEvidence({
+    anonymousStatus: 401,
+    authenticatedStatuses: [200, 200, 200, 200],
+    baselineRuntime: {
+      enabled: true,
+      available: true,
+      ready: false,
+      failed: false,
+      mode: "rust-pending",
+      attempts: 0,
+      rustResponses: 0,
+      fallbacks: 0,
+      lastError: "",
+      client: null
+    },
+    finalRuntime: {
+      enabled: true,
+      available: true,
+      ready: true,
+      failed: false,
+      mode: "rust-sidecar",
+      attempts: 3,
+      rustResponses: 3,
+      fallbacks: 0,
+      lastError: "",
+      client: {
+        pending: 0,
+        requests: 4,
+        responses: 4,
+        failures: 0,
+        timeouts: 0,
+        backpressureRejects: 0,
+        terminated: false
+      }
+    },
+    sampleLatenciesMs: [80, 90, 100],
+    expectedRequests: 3,
+    maxP95Ms: 250
+  });
+
+  assert.equal(result.passed, true);
+  assert.equal(result.metrics.requestDelta, 4);
+});
+
 test("public status evidence rejects historical fallback and timeout counters", () => {
   const baselineRuntime = {
     enabled: true,

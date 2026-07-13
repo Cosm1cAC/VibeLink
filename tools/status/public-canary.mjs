@@ -40,6 +40,7 @@ export function evaluatePublicStatusEvidence({
     timeoutDelta: delta(baselineClient.timeouts, finalClient.timeouts),
     backpressureDelta: delta(baselineClient.backpressureRejects, finalClient.backpressureRejects)
   };
+  const expectedSidecarRequests = expectedRequests + (baselineRuntime.ready === true ? 0 : 1);
   const checks = [
     { name: "anonymous auth", pass: anonymousStatus === 401, detail: `status=${anonymousStatus}` },
     {
@@ -60,8 +61,8 @@ export function evaluatePublicStatusEvidence({
     },
     {
       name: "sidecar request parity",
-      pass: metrics.requestDelta === expectedRequests && metrics.responseDelta === expectedRequests,
-      detail: `requests=${metrics.requestDelta}, responses=${metrics.responseDelta}`
+      pass: metrics.requestDelta === expectedSidecarRequests && metrics.responseDelta === expectedSidecarRequests,
+      detail: `requests=${metrics.requestDelta}, responses=${metrics.responseDelta}, expected=${expectedSidecarRequests}`
     },
     {
       name: "fallback and failures",

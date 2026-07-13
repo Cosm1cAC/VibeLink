@@ -26,6 +26,7 @@ mod audio_pipeline_sidecar;
 mod compression_sidecar;
 mod http_frontdoor;
 mod public_tunnel;
+mod status_http;
 mod status_sidecar;
 
 #[cfg(windows)]

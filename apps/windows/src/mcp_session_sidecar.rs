@@ -1,9 +1,9 @@
-#[cfg(windows)]
-use crate::CREATE_NO_WINDOW;
-use crate::{
+use crate::sidecar_protocol::{
     now_iso, sidecar_arg, sidecar_arg_or_default, write_sidecar_error, write_sidecar_result,
     SidecarRequest,
 };
+#[cfg(windows)]
+use crate::CREATE_NO_WINDOW;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

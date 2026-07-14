@@ -1,4 +1,6 @@
-use crate::{now_iso, sidecar_arg, write_sidecar_error, write_sidecar_result, SidecarRequest};
+use crate::sidecar_protocol::{
+    now_iso, sidecar_arg, write_sidecar_error, write_sidecar_result, SidecarRequest,
+};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

@@ -1,11 +1,7 @@
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::io::{self, Write};
 use std::{
     env,
     ffi::OsString,
@@ -29,6 +25,7 @@ mod public_tunnel;
 mod settings_contract;
 mod settings_credentials;
 mod settings_http;
+mod sidecar_protocol;
 mod status_http;
 mod status_sidecar;
 mod workspace_tree;
@@ -159,61 +156,6 @@ struct PairingSession {
     expires_at: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct SidecarRequest {
-    #[serde(default)]
-    id: Value,
-    method: String,
-    #[serde(default)]
-    args: Vec<Value>,
-}
-
-fn write_sidecar_result(stdout: &mut io::Stdout, id: &Value, result: Value) -> Result<()> {
-    writeln!(stdout, "{}", json!({ "id": id, "result": result }))?;
-    stdout.flush()?;
-    Ok(())
-}
-
-fn write_sidecar_error(stdout: &mut io::Stdout, id: &Value, message: &str) -> Result<()> {
-    writeln!(
-        stdout,
-        "{}",
-        json!({
-            "id": id,
-            "error": {
-                "name": "Error",
-                "message": message,
-                "stack": "",
-                "code": ""
-            }
-        })
-    )?;
-    stdout.flush()?;
-    Ok(())
-}
-
-fn sidecar_arg<T: DeserializeOwned>(args: &[Value], index: usize) -> Result<T> {
-    let value = args
-        .get(index)
-        .cloned()
-        .with_context(|| format!("Missing sidecar arg {index}"))?;
-    Ok(serde_json::from_value(value)?)
-}
-
-fn sidecar_arg_or_default<T: DeserializeOwned + Default>(
-    args: &[Value],
-    index: usize,
-) -> Result<T> {
-    match args.get(index) {
-        Some(value) if !value.is_null() => Ok(serde_json::from_value(value.clone())?),
-        _ => Ok(T::default()),
-    }
-}
-
-fn now_iso() -> String {
-    let datetime: DateTime<Utc> = std::time::SystemTime::now().into();
-    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
 
 fn main() {
     if let Err(error) = run() {

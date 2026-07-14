@@ -3500,6 +3500,19 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (url.pathname === "/internal/reload-settings" && request.method === "POST") {
+      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
+        sendError(response, 404, "Unknown API route");
+        return;
+      }
+      settings = ensureNotificationSettings(await loadSettings());
+      await saveSettings(settings);
+      ensureDefaultWorkspaces(settings);
+      scheduleToolEventsPrune();
+      sendJson(response, 200, await publicSettings(settings));
+      return;
+    }
+
     if (!isHostAllowed(request, settings)) {
       sendError(response, 403, "Host is not allowed.");
       return;

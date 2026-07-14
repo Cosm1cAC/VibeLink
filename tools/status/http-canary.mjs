@@ -58,7 +58,7 @@ function writeSettings(dataDir, port, pairingToken) {
   }, null, 2)}\n`, "utf8");
 }
 
-function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp) {
+function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp, settingsHttp) {
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
@@ -70,6 +70,7 @@ function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMuta
   if (deviceMutationsHttp) args.push("--rust-device-mutations-http");
   if (pairingHttp) args.push("--rust-pairing-http");
   if (auditHttp) args.push("--rust-audit-http");
+  if (settingsHttp) args.push("--rust-settings-http");
   args.push("bridge");
   const child = spawn(command, args, {
     cwd: rootDir,
@@ -193,8 +194,9 @@ async function main() {
   const deviceMutationsHttp = process.argv.includes("--device-mutations-http");
   const pairingHttp = process.argv.includes("--pairing-http");
   const auditHttp = process.argv.includes("--audit-http");
+  const settingsHttp = process.argv.includes("--settings-http");
   writeSettings(dataDir, port, pairingToken);
-  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp);
+  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp, settingsHttp);
   const baseUrl = `http://127.0.0.1:${port}`;
   let shutdown = null;
 
@@ -335,6 +337,57 @@ async function main() {
       );
       auditEvidence = { anonymousAudit, firstPage, afterPage, cursor };
     }
+    let settingsEvidence = null;
+    if (settingsHttp) {
+      const settingsPath = path.join(dataDir, "settings.json");
+      const beforeDryRun = fs.readFileSync(settingsPath, "utf8");
+      const anonymousExport = await request(baseUrl, "/api/settings/export");
+      const exported = await request(baseUrl, "/api/settings/export", { token: activeToken });
+      const dryRun = await request(baseUrl, "/api/settings?dryRun=1", {
+        method: "POST",
+        token: activeToken,
+        body: { defaultCwd: "C:/vibelink-settings-dry-run" }
+      });
+      const afterDryRun = fs.readFileSync(settingsPath, "utf8");
+      const updated = await request(baseUrl, "/api/settings", {
+        method: "POST",
+        token: activeToken,
+        body: {
+          defaultCwd: "C:/vibelink-settings-rust",
+          apiKeys: { openai: "settings-canary-secret" }
+        }
+      });
+      const savedAfterUpdate = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      const secretPath = path.join(dataDir, "secrets", "openai.dpapi");
+      const encryptedSecret = fs.existsSync(secretPath) ? fs.readFileSync(secretPath, "utf8") : "";
+      const importDryRun = await request(baseUrl, "/api/settings/import?dryRun=1", {
+        method: "POST",
+        token: activeToken,
+        body: { settings: { defaultCwd: "C:/vibelink-settings-import-preview" } }
+      });
+      const imported = await request(baseUrl, "/api/settings/import", {
+        method: "POST",
+        token: activeToken,
+        body: { settings: { defaultCwd: rootDir } }
+      });
+      const settingsAudit = await request(
+        baseUrl,
+        "/api/audit-log?limit=30&fields=type,deviceId,path,success,meta",
+        { token: activeToken }
+      );
+      settingsEvidence = {
+        anonymousExport,
+        exported,
+        dryRun,
+        dryRunPreservedFile: beforeDryRun === afterDryRun,
+        updated,
+        savedAfterUpdate,
+        secretStored: Boolean(encryptedSecret) && !encryptedSecret.includes("settings-canary-secret"),
+        importDryRun,
+        imported,
+        settingsAudit
+      };
+    }
     const doctorAnonymous = doctorHttp ? await request(baseUrl, "/api/doctor") : null;
     const doctor = await request(baseUrl, "/api/doctor", { token: activeToken });
     const doctorRuntime = doctor.payload?.controlPlaneRuntime?.doctorHttp || {};
@@ -418,11 +471,27 @@ async function main() {
         { name: "Rust Audit cursor and fields", pass: auditEvidence?.afterPage?.status === 200 && auditEvidence.afterPage.implementation === "rust" && Array.isArray(auditEvidence.afterPage.payload?.items) && auditEvidence.afterPage.payload.items.length === 0 && Object.keys(first).every((key) => ["cursor", "type", "ip", "path", "success", "reason", "meta"].includes(key)), detail: `after=${auditEvidence?.cursor || 0}, items=${auditEvidence?.afterPage?.payload?.items?.length ?? -1}, fields=${Object.keys(first).join(",") || "missing"}` }
       );
     }
+    if (settingsHttp) {
+      const auditItems = settingsEvidence?.settingsAudit?.payload?.items || [];
+      const exportAudit = auditItems.find((item) => item.type === "settings.export" && item.success === true);
+      const updateAudit = auditItems.find((item) => item.type === "settings.update" && item.success === true);
+      const importAudit = auditItems.find((item) => item.type === "settings.import" && item.success === true);
+      checks.push(
+        { name: "Rust Settings denial", pass: settingsEvidence?.anonymousExport?.status === 401 && settingsEvidence.anonymousExport.implementation === "rust", detail: `status=${settingsEvidence?.anonymousExport?.status || 0}, implementation=${settingsEvidence?.anonymousExport?.implementation || "node"}` },
+        { name: "Rust Settings export", pass: settingsEvidence?.exported?.status === 200 && settingsEvidence.exported.implementation === "rust" && settingsEvidence.exported.payload?.kind === "vibelink.settings.export" && !settingsEvidence.exported.payload?.settings?.apiKeys, detail: `status=${settingsEvidence?.exported?.status || 0}, kind=${settingsEvidence?.exported?.payload?.kind || "missing"}` },
+        { name: "Rust Settings dry run", pass: settingsEvidence?.dryRun?.status === 200 && settingsEvidence.dryRun.implementation === "rust" && settingsEvidence.dryRun.payload?.dryRun === true && settingsEvidence.dryRun.payload?.wouldChange === true && settingsEvidence.dryRunPreservedFile, detail: `status=${settingsEvidence?.dryRun?.status || 0}, preserved=${settingsEvidence?.dryRunPreservedFile}` },
+        { name: "Rust Settings update", pass: settingsEvidence?.updated?.status === 200 && settingsEvidence.updated.implementation === "rust" && settingsEvidence.updated.payload?.settings?.defaultCwd === "C:/vibelink-settings-rust" && settingsEvidence.savedAfterUpdate?.defaultCwd === "C:/vibelink-settings-rust", detail: `status=${settingsEvidence?.updated?.status || 0}, cwd=${settingsEvidence?.updated?.payload?.settings?.defaultCwd || "missing"}` },
+        { name: "Settings credentials use DPAPI", pass: settingsEvidence?.updated?.payload?.settings?.hasOpenAIKey === true && settingsEvidence.savedAfterUpdate?.apiKeys?.openai === "" && settingsEvidence.secretStored, detail: `configured=${settingsEvidence?.updated?.payload?.settings?.hasOpenAIKey}, plaintext=${Boolean(settingsEvidence?.savedAfterUpdate?.apiKeys?.openai)}, encrypted=${settingsEvidence?.secretStored}` },
+        { name: "Rust Settings import preview", pass: settingsEvidence?.importDryRun?.status === 200 && settingsEvidence.importDryRun.implementation === "rust" && settingsEvidence.importDryRun.payload?.dryRun === true && settingsEvidence.importDryRun.payload?.changedKeys?.includes("defaultCwd") && settingsEvidence.importDryRun.payload?.settings?.defaultCwd === "C:/vibelink-settings-import-preview", detail: `status=${settingsEvidence?.importDryRun?.status || 0}, changed=${settingsEvidence?.importDryRun?.payload?.changedKeys?.join(",") || "none"}` },
+        { name: "Rust Settings import", pass: settingsEvidence?.imported?.status === 200 && settingsEvidence.imported.implementation === "rust" && settingsEvidence.imported.payload?.settings?.defaultCwd === rootDir, detail: `status=${settingsEvidence?.imported?.status || 0}, cwd=${settingsEvidence?.imported?.payload?.settings?.defaultCwd || "missing"}` },
+        { name: "Settings audit continuity", pass: settingsEvidence?.settingsAudit?.status === 200 && Boolean(exportAudit?.deviceId) && Boolean(updateAudit?.deviceId) && Boolean(importAudit?.deviceId), detail: `export=${Boolean(exportAudit)}, update=${Boolean(updateAudit)}, import=${Boolean(importAudit)}` }
+      );
+    }
     checks.push({ name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` });
     const result = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : "", pairingHttp ? "/api/pairing-sessions*" : "", auditHttp ? "/api/audit-log" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
+      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : "", pairingHttp ? "/api/pairing-sessions*" : "", auditHttp ? "/api/audit-log" : "", settingsHttp ? "/api/settings*" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
       runtime,
       doctorRuntime: doctorHttp ? doctorRuntime : undefined,
       deviceMutations: deviceMutationsHttp ? {
@@ -439,6 +508,12 @@ async function main() {
         denied: auditEvidence?.anonymousAudit?.status === 401,
         cursor: auditEvidence?.cursor || 0,
         strictAfter: auditEvidence?.afterPage?.payload?.items?.length === 0
+      } : undefined,
+      settings: settingsHttp ? {
+        exported: settingsEvidence?.exported?.status === 200,
+        updated: settingsEvidence?.updated?.status === 200,
+        imported: settingsEvidence?.imported?.status === 200,
+        dpapi: settingsEvidence?.secretStored === true
       } : undefined,
       shutdown,
       checks,

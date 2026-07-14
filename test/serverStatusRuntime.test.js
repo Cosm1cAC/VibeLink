@@ -15,3 +15,13 @@ test("/api/status and the internal snapshot share one status builder", () => {
   assert.match(source, /internalControlAuthorized\(request, process\.env\.VIBELINK_INTERNAL_CONTROL_TOKEN\)/);
   assert.match(source, /buildStatusSnapshot\(originalHostRequest\(request\)\)/);
 });
+
+test("the hybrid settings reload is internal-only and rehydrates runtime state", () => {
+  const source = fs.readFileSync(path.join(rootDir, "src", "server.js"), "utf8");
+
+  assert.match(source, /url\.pathname === "\/internal\/reload-settings" && request\.method === "POST"/);
+  assert.match(source, /internalControlAuthorized\(request, process\.env\.VIBELINK_INTERNAL_CONTROL_TOKEN\)/);
+  assert.match(source, /settings = ensureNotificationSettings\(await loadSettings\(\)\)/);
+  assert.match(source, /scheduleToolEventsPrune\(\)/);
+  assert.match(source, /sendJson\(response, 200, await publicSettings\(settings\)\)/);
+});

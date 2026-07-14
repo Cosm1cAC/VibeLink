@@ -79,6 +79,7 @@ async function writeWindowsSecret(key, value) {
   fs.mkdirSync(secretDir, { recursive: true });
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    "Import-Module \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1\" -Force",
     "$secure = ConvertTo-SecureString $env:VIBELINK_SECRET_VALUE -AsPlainText -Force",
     "$encrypted = $secure | ConvertFrom-SecureString",
     "Set-Content -LiteralPath $env:VIBELINK_SECRET_FILE -Value $encrypted -Encoding UTF8"
@@ -97,7 +98,8 @@ async function readWindowsSecret(key) {
   if (!fs.existsSync(filePath)) return "";
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    "$encrypted = Get-Content -LiteralPath $env:VIBELINK_SECRET_FILE -Raw",
+    "Import-Module \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1\" -Force",
+    "$encrypted = (Get-Content -LiteralPath $env:VIBELINK_SECRET_FILE -Raw).Trim()",
     "$secure = ConvertTo-SecureString $encrypted",
     "$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)",
     "try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }"

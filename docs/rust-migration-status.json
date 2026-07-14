@@ -181,7 +181,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0006-rust-pairing-http-routes.md"
       ],
-      "nextAction": "完整本地/包内 canary、6 条远端 CI 和公网只读拒绝路径均已通过；保持 opt-in 观察，下一 route family 为 settings/audit。"
+      "nextAction": "完整本地/包内 canary、6 条远端 CI 和公网只读拒绝路径均已通过；保持 opt-in 观察，继续迁移 workspace/registry/MCP/tool-events。"
     },
     {
       "id": "audit-http-route",
@@ -202,7 +202,32 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0007-rust-audit-http-route.md"
       ],
-      "nextAction": "本地/包内 canary、6 条远端 CI、自动回滚和公网拒绝路径均已通过；保持 opt-in 观察，继续迁移 settings。"
+      "nextAction": "本地/包内 canary、6 条远端 CI、自动回滚和公网拒绝路径均已通过；保持 opt-in 观察，继续迁移 workspace/registry/MCP/tool-events。"
+    },
+    {
+      "id": "settings-http-route",
+      "title": "Settings 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-settings-http",
+        "VIBELINK_INTERNAL_CONTROL_TOKEN"
+      ],
+      "nodeEntry": "src/server.js#/internal/reload-settings",
+      "rustEntry": "apps/windows/src/settings_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-settings-http bridge",
+      "fallback": "初始化、鉴权前错误或 unsupported/chunked/超限 body 可回放 Node；Rust 认领 mutation body 后设置/DPAPI/Node 内存同步/审计失败全部回滚并返回 Rust 500，绝不重放",
+      "tests": [
+        "apps/windows/src/settings_contract.rs",
+        "apps/windows/src/settings_credentials.rs",
+        "apps/windows/src/settings_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/settingsImportExport.test.js",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0008-rust-settings-http-routes.md"
+      ],
+      "nextAction": "本地 unit/release canary 已覆盖导出、dry-run、并发写、DPAPI、回滚、导入和审计；等待远端 CI、包内 canary 与公网拒绝路径证据。"
     },
     {
       "id": "mcp-session-sidecar",

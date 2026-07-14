@@ -8,6 +8,10 @@ use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
 };
+use crate::settings_http::{
+    route_settings_request, route_settings_request_with_body, settings_request_requires_body,
+    SettingsRouteConfig,
+};
 use crate::status_http::{
     parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
 };
@@ -31,6 +35,7 @@ pub struct FrontdoorRoutes {
     device: Option<DeviceRouteConfig>,
     device_mutation: Option<DeviceMutationRouteConfig>,
     audit: Option<AuditRouteConfig>,
+    settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
 }
 
@@ -60,6 +65,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_settings(mut self, route: Option<SettingsRouteConfig>) -> Self {
+        self.settings = route;
+        self
+    }
+
     pub fn with_pairing(mut self, route: Option<PairingRouteConfig>) -> Self {
         self.pairing = route;
         self
@@ -71,6 +81,7 @@ impl FrontdoorRoutes {
             && self.device.is_none()
             && self.device_mutation.is_none()
             && self.audit.is_none()
+            && self.settings.is_none()
             && self.pairing.is_none()
     }
 }
@@ -186,6 +197,29 @@ fn handle_connection(
                 Err(error) => {
                     audit_route.record_fallback();
                     eprintln!("Rust Audit route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(settings_route) = routes.settings.as_ref() {
+            let body = if settings_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let result = if let Some(body) = body.as_deref() {
+                route_settings_request_with_body(&request, &peer_ip, Some(body), settings_route)
+            } else {
+                route_settings_request(&request, &peer_ip, settings_route)
+            };
+            match result {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    settings_route.record_fallback();
+                    eprintln!("Rust Settings route falling back before ownership: {error:#}");
                 }
             }
         }

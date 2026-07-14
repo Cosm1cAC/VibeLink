@@ -184,6 +184,11 @@ $manifest = [ordered]@{
   "@echo off`r`ncd /d %~dp0`r`nvibelink.exe --rust-canary --rust-http-canary --rust-status-http --rust-doctor-http --rust-devices-http --rust-device-mutations-http --rust-pairing-http --rust-audit-http %*`r`n",
   [Text.Encoding]::ASCII
 )
+[IO.File]::WriteAllText(
+  (Join-Path $stageRoot "start-vibelink-settings-http-canary.cmd"),
+  "@echo off`r`ncd /d %~dp0`r`nvibelink.exe --rust-canary --rust-http-canary --rust-status-http --rust-doctor-http --rust-devices-http --rust-device-mutations-http --rust-pairing-http --rust-audit-http --rust-settings-http %*`r`n",
+  [Text.Encoding]::ASCII
+)
 
 $archive = Join-Path $outputRoot "VibeLink-$($sourcePackage.version)-windows-x64.zip"
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }

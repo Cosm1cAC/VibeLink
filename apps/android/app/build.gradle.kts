@@ -65,6 +65,7 @@ dependencies {
 
     // Unit tests
     testImplementation(kotlin("test"))
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     // Device tests
     androidTestImplementation(composeBom)

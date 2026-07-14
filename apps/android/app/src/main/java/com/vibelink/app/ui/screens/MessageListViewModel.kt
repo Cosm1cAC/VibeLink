@@ -21,6 +21,7 @@ import com.vibelink.app.network.TaskEvent
 import com.vibelink.app.network.ToolCallSummary
 import com.vibelink.app.network.ToolEvent
 import com.vibelink.app.network.ToolOutputEvent
+import com.vibelink.app.mobile.EventStreamRecoveryPolicy
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,6 +76,13 @@ class MessageListViewModel : ViewModel() {
     private var taskEventSource: EventSource? = null
     private var toolEventSource: EventSource? = null
     private var pollJob: Job? = null
+    private var taskReconnectJob: Job? = null
+    private var toolReconnectJob: Job? = null
+    private var streamGeneration = 0L
+    private var taskCursor = 0
+    private var toolCursor = 0
+    private var taskReconnectAttempt = 0
+    private var toolReconnectAttempt = 0
     private var loadSequence = 0L
     private var activeConversation: ConversationItem? = null
     private val seenTaskEvents = mutableSetOf<String>()
@@ -89,6 +97,8 @@ class MessageListViewModel : ViewModel() {
         seenTaskEvents.clear()
         seenToolEvents.clear()
         toolEventsByRun.clear()
+        taskCursor = 0
+        toolCursor = 0
 
         viewModelScope.launch {
             _loading.value = true
@@ -282,28 +292,69 @@ class MessageListViewModel : ViewModel() {
 
     fun followToolEvents(apiClient: ApiClient, taskId: String) {
         if (taskId.isBlank()) return
-        toolEventSource?.cancel()
+        subscribeToolEvents(apiClient, taskId, streamGeneration)
+    }
+
+    private fun subscribeToolEvents(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration) return
+        val previous = toolEventSource
+        toolEventSource = null
+        previous?.cancel()
         toolEventSource = apiClient.subscribeToolEvents(
             taskId = taskId,
-            after = 0,
+            after = toolCursor,
             listener = object : EventSourceListener() {
                 override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                    if (eventSource !== this@MessageListViewModel.toolEventSource) return
                     runCatching {
                         val event = gson.fromJson(data, ToolEvent::class.java)
+                        toolReconnectAttempt = 0
                         appendToolEvent(event)
                     }
+                }
+
+                override fun onClosed(eventSource: EventSource) {
+                    if (eventSource !== this@MessageListViewModel.toolEventSource) return
+                    scheduleToolReconnect(apiClient, taskId, generation)
+                }
+
+                override fun onFailure(eventSource: EventSource, t: Throwable?, response: okhttp3.Response?) {
+                    if (eventSource !== this@MessageListViewModel.toolEventSource) return
+                    scheduleToolReconnect(apiClient, taskId, generation)
                 }
             },
         )
     }
 
+    private fun scheduleToolReconnect(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration || !_running.value || toolReconnectJob?.isActive == true) return
+        val delayMs = EventStreamRecoveryPolicy.retryDelayMs(toolReconnectAttempt++)
+        toolReconnectJob = viewModelScope.launch {
+            delay(delayMs)
+            if (generation != streamGeneration || !_running.value) return@launch
+            runCatching { apiClient.fetchToolEvents(taskId = taskId, after = toolCursor) }
+                .onSuccess { events -> events.forEach(::appendToolEvent) }
+            toolReconnectJob = null
+            subscribeToolEvents(apiClient, taskId, generation)
+        }
+    }
+
     fun stopStreaming() {
-        taskEventSource?.cancel()
+        streamGeneration += 1
+        val previousTaskSource = taskEventSource
         taskEventSource = null
-        toolEventSource?.cancel()
+        previousTaskSource?.cancel()
+        val previousToolSource = toolEventSource
         toolEventSource = null
+        previousToolSource?.cancel()
         pollJob?.cancel()
         pollJob = null
+        taskReconnectJob?.cancel()
+        taskReconnectJob = null
+        toolReconnectJob?.cancel()
+        toolReconnectJob = null
+        taskReconnectAttempt = 0
+        toolReconnectAttempt = 0
     }
 
     private suspend fun loadProviderRegistry(apiClient: ApiClient) {
@@ -473,6 +524,7 @@ class MessageListViewModel : ViewModel() {
     }
 
     private fun followRunningTask(apiClient: ApiClient, task: TaskDetail) {
+        val generation = streamGeneration
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (true) {
@@ -491,12 +543,21 @@ class MessageListViewModel : ViewModel() {
             }
         }
 
-        val cursor = task.events.maxOfOrNull { it.cursor } ?: 0
-        taskEventSource?.cancel()
-        taskEventSource = apiClient.subscribeTaskEvents(task.id, after = cursor, object : EventSourceListener() {
+        taskCursor = EventStreamRecoveryPolicy.nextCursor(taskCursor, task.events.maxOfOrNull { it.cursor } ?: 0)
+        subscribeTaskEvents(apiClient, task.id, generation)
+    }
+
+    private fun subscribeTaskEvents(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration || !_running.value) return
+        val previous = taskEventSource
+        taskEventSource = null
+        previous?.cancel()
+        taskEventSource = apiClient.subscribeTaskEvents(taskId, after = taskCursor, object : EventSourceListener() {
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                if (eventSource !== this@MessageListViewModel.taskEventSource) return
                 runCatching {
                     val event = gson.fromJson(data, TaskEvent::class.java)
+                    taskReconnectAttempt = 0
                     appendTaskEvents(listOf(event))
                     if (event.type == "system" && event.text.contains("Exited")) {
                         _running.value = false
@@ -504,7 +565,28 @@ class MessageListViewModel : ViewModel() {
                     }
                 }
             }
+
+            override fun onClosed(eventSource: EventSource) {
+                if (eventSource !== this@MessageListViewModel.taskEventSource) return
+                scheduleTaskReconnect(apiClient, taskId, generation)
+            }
+
+            override fun onFailure(eventSource: EventSource, t: Throwable?, response: okhttp3.Response?) {
+                if (eventSource !== this@MessageListViewModel.taskEventSource) return
+                scheduleTaskReconnect(apiClient, taskId, generation)
+            }
         })
+    }
+
+    private fun scheduleTaskReconnect(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration || !_running.value || taskReconnectJob?.isActive == true) return
+        val delayMs = EventStreamRecoveryPolicy.retryDelayMs(taskReconnectAttempt++)
+        taskReconnectJob = viewModelScope.launch {
+            delay(delayMs)
+            if (generation != streamGeneration || !_running.value) return@launch
+            taskReconnectJob = null
+            subscribeTaskEvents(apiClient, taskId, generation)
+        }
     }
 
     private suspend fun loadHistoryMessages(apiClient: ApiClient, provider: String, sessionId: String): List<ChatMessage> {
@@ -518,12 +600,14 @@ class MessageListViewModel : ViewModel() {
     }
 
     private fun appendTaskEvents(events: List<TaskEvent>) {
+        events.forEach { event -> taskCursor = EventStreamRecoveryPolicy.nextCursor(taskCursor, event.cursor) }
         val fresh = events.filter { seenTaskEvents.add(taskEventKey(it)) }
         val newMessages = messagesFromEvents(fresh)
         if (newMessages.isNotEmpty()) _messages.value = mergeMessages(_messages.value, newMessages)
     }
 
     private fun appendToolEvent(event: ToolEvent) {
+        toolCursor = EventStreamRecoveryPolicy.nextCursor(toolCursor, event.cursor)
         if (!seenToolEvents.add(toolEventKey(event))) return
         val runId = event.toolRunId.ifBlank { (event.payload.orEmpty()["toolRunId"] as? String).orEmpty() }.ifBlank { event.id }
         if (runId.isBlank()) return

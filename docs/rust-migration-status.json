@@ -202,7 +202,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0007-rust-audit-http-route.md"
       ],
-      "nextAction": "本地 release canary 已通过拒绝审计、严格 after、limit 和 fields；等待远端 CI、便携包与公网拒绝路径证据。"
+      "nextAction": "本地/包内 canary、6 条远端 CI、自动回滚和公网拒绝路径均已通过；保持 opt-in 观察，继续迁移 settings。"
     },
     {
       "id": "mcp-session-sidecar",

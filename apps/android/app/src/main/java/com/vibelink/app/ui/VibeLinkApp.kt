@@ -17,6 +17,7 @@ import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ApiClientConnectionBootstrapper
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.SavedApiConnection
+import com.vibelink.app.mobile.IncomingSharedContent
 import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.ui.screens.*
@@ -32,7 +33,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun VibeLinkApp(
     initialPairingUri: String? = null,
-    initialSharedText: String = "",
+    initialSharedContent: IncomingSharedContent = IncomingSharedContent(),
     onSharedContentConsumed: () -> Unit = {},
 ) {
     val navController = rememberNavController()
@@ -71,6 +72,7 @@ fun VibeLinkApp(
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
+    var pendingSharedAttachments by remember { mutableStateOf<List<String>>(emptyList()) }
     val conversations by sessionListViewModel.conversations.collectAsState()
     val promptHistory by settingsStore.promptHistory.collectAsState(initial = emptyList())
     val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
@@ -174,6 +176,8 @@ fun VibeLinkApp(
                 promptHistory = promptHistory,
                 onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
                 onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
+                initialAttachmentUris = if (conversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
+                onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
             )
         }
 
@@ -224,9 +228,9 @@ fun VibeLinkApp(
         }
     }
 
-    LaunchedEffect(initialSharedText, authenticated) {
-        val text = initialSharedText.trim()
-        if (text.isBlank() || !authenticated) return@LaunchedEffect
+    LaunchedEffect(initialSharedContent, authenticated) {
+        if (initialSharedContent.isEmpty || !authenticated) return@LaunchedEffect
+        val text = initialSharedContent.composerText
         val conversation = ConversationItem(
             key = "share:${System.currentTimeMillis()}",
             kind = "new",
@@ -236,6 +240,7 @@ fun VibeLinkApp(
             preview = text.take(160),
         )
         pendingConversation = conversation
+        pendingSharedAttachments = initialSharedContent.streamUris
         navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
         onSharedContentConsumed()
     }

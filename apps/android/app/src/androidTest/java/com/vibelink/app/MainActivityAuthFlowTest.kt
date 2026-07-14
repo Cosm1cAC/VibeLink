@@ -18,6 +18,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.printToString
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -28,6 +30,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -59,6 +62,8 @@ class MainActivityAuthFlowTest {
                     val body = when (request.requestUrl?.encodedPath) {
                         "/api/status" -> """{"ok":true}"""
                         "/api/login" -> """{"ok":true,"token":"device-token-under-test"}"""
+                        "/api/attachments" ->
+                            """{"name":"shared-image.xml","markdown":"![shared-image.xml](/api/attachments/shared-image)","preview":""}"""
                         "/api/pairing-sessions/session-under-test" ->
                             """{"ok":true,"session":{"id":"session-under-test","code":"246810","status":"approved"}}"""
                         "/api/pairing-sessions/session-under-test/claim" -> {
@@ -168,6 +173,38 @@ class MainActivityAuthFlowTest {
     }
 
     @Test
+    fun sharedImageIsUploadedAfterLogin() {
+        val sharedImage = Uri.parse("android.resource://com.vibelink.app/drawable/ic_launcher_foreground")
+        val intent = Intent(context, MainActivity::class.java)
+            .setAction(Intent.ACTION_SEND)
+            .setType("image/xml")
+            .putExtra(Intent.EXTRA_STREAM, sharedImage)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+        val scenario = ActivityScenario.launch<MainActivity>(intent)
+        try {
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithText("配对 Token").fetchSemanticsNodes().isNotEmpty()
+            }
+            val bridgeField = composeRule.onNode(hasText("Bridge 地址") and hasSetTextAction())
+            bridgeField.performTextClearance()
+            bridgeField.performTextInput(server.url("/").toString().trimEnd('/'))
+            composeRule.onNode(hasText("配对 Token") and hasSetTextAction())
+                .performTextInput("legacy-pairing-token")
+            composeRule.onNodeWithText("使用 Token 连接").performClick()
+
+            composeRule.waitUntil(30_000) {
+                composeRule.onAllNodes(hasText("![shared-image.xml](/api/attachments/shared-image)") and hasSetTextAction())
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            val uploadRequest = takeRequestWithPath("/api/attachments")
+            assertNotNull(composeRule.onRoot().printToString(), uploadRequest)
+        } finally {
+            scenario.onActivity { activity -> activity.finish() }
+        }
+    }
+
+    @Test
     fun pairingTokenFieldIsPasswordProtected() {
         ActivityScenario.launch(MainActivity::class.java).use {
             composeRule.waitUntil(5_000) {
@@ -240,5 +277,14 @@ class MainActivityAuthFlowTest {
                     .fetchSemanticsNodes().isNotEmpty()
             }
         }
+    }
+
+    private fun takeRequestWithPath(path: String): RecordedRequest? {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            val request = server.takeRequest(500, TimeUnit.MILLISECONDS) ?: continue
+            if (request.requestUrl?.encodedPath == path) return request
+        }
+        return null
     }
 }

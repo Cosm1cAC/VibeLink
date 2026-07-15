@@ -80,6 +80,8 @@ jobs:
         run: cargo test --manifest-path apps/windows/Cargo.toml audit_http
       - name: Run Rust Settings unit tests
         run: cargo test --manifest-path apps/windows/Cargo.toml settings_
+      - name: Run Rust Tool Events unit tests
+        run: cargo test --manifest-path apps/windows/Cargo.toml tool_events_http
       - name: Run Settings compatibility tests
         run: node --test --test-concurrency=1 test/settingsImportExport.test.js test/credentialStoreWindows.test.js test/serverStatusRuntime.test.js
       - name: Run authenticated status canary
@@ -98,6 +100,8 @@ jobs:
         run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --audit-http --output .tmp/audit-http-canary-ci.json --delete-temp
       - name: Run Rust-owned HTTP Settings canary
         run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --audit-http --settings-http --output .tmp/settings-http-canary-ci.json --delete-temp
+      - name: Run Rust-owned HTTP Tool Events canary
+        run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --tool-events-http --output .tmp/tool-events-http-canary-ci.json --delete-temp
       - name: Upload canary output
         if: always()
         uses: actions/upload-artifact@v7
@@ -112,5 +116,6 @@ jobs:
             .tmp/pairing-http-canary-ci.json
             .tmp/audit-http-canary-ci.json
             .tmp/settings-http-canary-ci.json
+            .tmp/tool-events-http-canary-ci.json
           if-no-files-found: error
           retention-days: 30

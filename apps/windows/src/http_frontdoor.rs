@@ -15,6 +15,7 @@ use crate::settings_http::{
 use crate::status_http::{
     parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
 };
+use crate::tool_events_http::{route_tool_events_request, ToolEventsRouteConfig};
 use anyhow::{bail, Context, Result};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -35,6 +36,7 @@ pub struct FrontdoorRoutes {
     device: Option<DeviceRouteConfig>,
     device_mutation: Option<DeviceMutationRouteConfig>,
     audit: Option<AuditRouteConfig>,
+    tool_events: Option<ToolEventsRouteConfig>,
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
 }
@@ -65,6 +67,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_tool_events(mut self, route: Option<ToolEventsRouteConfig>) -> Self {
+        self.tool_events = route;
+        self
+    }
+
     pub fn with_settings(mut self, route: Option<SettingsRouteConfig>) -> Self {
         self.settings = route;
         self
@@ -81,6 +88,7 @@ impl FrontdoorRoutes {
             && self.device.is_none()
             && self.device_mutation.is_none()
             && self.audit.is_none()
+            && self.tool_events.is_none()
             && self.settings.is_none()
             && self.pairing.is_none()
     }
@@ -197,6 +205,16 @@ fn handle_connection(
                 Err(error) => {
                     audit_route.record_fallback();
                     eprintln!("Rust Audit route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(tool_events_route) = routes.tool_events.as_ref() {
+            match route_tool_events_request(&request, &peer_ip, tool_events_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    tool_events_route.record_fallback();
+                    eprintln!("Rust Tool Events route falling back to Node: {error:#}");
                 }
             }
         }
@@ -379,6 +397,7 @@ mod tests {
     use crate::doctor_http::DoctorRouteConfig;
     use crate::pairing_http::PairingRouteConfig;
     use crate::status_http::StatusRouteConfig;
+    use crate::tool_events_http::ToolEventsRouteConfig;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
@@ -689,6 +708,61 @@ mod tests {
         let mut client = TcpStream::connect(frontend_addr).unwrap();
         client
             .write_all(b"GET /api/audit-log?limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        );
+        proxy_thread.join().unwrap();
+        upstream_thread.join().unwrap();
+        fs::remove_dir_all(invalid_data_dir).unwrap();
+    }
+
+    #[test]
+    fn tool_events_route_failure_replays_the_original_request_to_node() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            assert_eq!(
+                request,
+                b"GET /api/tool-events?after=4&limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
+                .unwrap();
+        });
+
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let invalid_data_dir = std::env::temp_dir().join(format!(
+            "vibelink-tool-events-http-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&invalid_data_dir).unwrap();
+        fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
+        let tool_events_route = ToolEventsRouteConfig::new(invalid_data_dir.clone());
+        let proxy_thread = thread::spawn(move || {
+            let (client, _) = frontend.accept().unwrap();
+            let routes = FrontdoorRoutes::default().with_tool_events(Some(tool_events_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
+        });
+
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client
+            .write_all(
+                b"GET /api/tool-events?after=4&limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n",
+            )
             .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut response = Vec::new();

@@ -47,14 +47,12 @@ pub fn route_audit_request(
         return Ok(None);
     }
     config.metrics.record_attempt();
-    let request_ip = forwarded_ip(request).unwrap_or(peer_ip);
     match authentication {
         RouteAuthentication::HostDenied => {
-            audit_only(
+            audit_route_rejection(
                 &config.data_dir,
                 request,
-                request_ip,
-                "",
+                peer_ip,
                 "host.blocked",
                 "Host is not allowed.",
                 &clean_host(request.host()),
@@ -64,11 +62,10 @@ pub fn route_audit_request(
             return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")));
         }
         RouteAuthentication::Unauthorized => {
-            audit_only(
+            audit_route_rejection(
                 &config.data_dir,
                 request,
-                request_ip,
-                "",
+                peer_ip,
                 "auth.failed",
                 if request.token().is_empty() {
                     "missing_token"
@@ -92,7 +89,10 @@ pub fn route_audit_request(
         .map(|item| apply_fields(item, fields.as_deref()))
         .collect::<Vec<_>>();
     config.metrics.record_response();
-    Ok(Some(HttpRouteResponse::json(200, json!({ "items": items }))))
+    Ok(Some(HttpRouteResponse::json(
+        200,
+        json!({ "items": items }),
+    )))
 }
 
 fn forwarded_ip(request: &ParsedRequest) -> Option<&str> {
@@ -101,6 +101,25 @@ fn forwarded_ip(request: &ParsedRequest) -> Option<&str> {
         .and_then(|value| value.split(',').next())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn audit_route_rejection(
+    data_dir: &Path,
+    request: &ParsedRequest,
+    peer_ip: &str,
+    event_type: &str,
+    reason: &str,
+    target: &str,
+) -> Result<()> {
+    audit_only(
+        data_dir,
+        request,
+        forwarded_ip(request).unwrap_or(peer_ip),
+        "",
+        event_type,
+        reason,
+        target,
+    )
 }
 
 fn pagination(request: &ParsedRequest) -> (i64, i64) {
@@ -460,8 +479,7 @@ mod tests {
         .unwrap();
         assert_eq!(pagination(&excessive), (0, 5_000));
         let defaults =
-            parse_request(b"GET /api/audit-log HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
-                .unwrap();
+            parse_request(b"GET /api/audit-log HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
         assert_eq!(pagination(&defaults), (0, 200));
 
         let data_dir = std::env::temp_dir().join(format!(
@@ -476,8 +494,7 @@ mod tests {
         assert!(route_audit_request(&defaults, "127.0.0.1", &config)
             .unwrap()
             .is_none());
-        let other =
-            parse_request(b"GET /api/tasks HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
+        let other = parse_request(b"GET /api/tasks HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
         assert!(route_audit_request(&other, "127.0.0.1", &config)
             .unwrap()
             .is_none());

@@ -5,6 +5,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -63,12 +64,12 @@ fun VibeLinkApp(
     }
     if (!connectionInitialized) return
 
-    // Shared ViewModels (scoped to app-level, retained via remember)
-    val sessionListViewModel = remember { SessionListViewModel() }
-    val messageListViewModel = remember { MessageListViewModel() }
-    val workspaceViewModel = remember { WorkspaceViewModel() }
-    val callViewModel = remember { CallViewModel() }
-    val settingsViewModel = remember { SettingsViewModel() }
+    // Activity-scoped ViewModels survive configuration changes and clear with their owner.
+    val sessionListViewModel: SessionListViewModel = viewModel()
+    val messageListViewModel: MessageListViewModel = viewModel()
+    val workspaceViewModel: WorkspaceViewModel = viewModel()
+    val callViewModel: CallViewModel = viewModel()
+    val settingsViewModel: SettingsViewModel = viewModel()
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }

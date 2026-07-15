@@ -118,6 +118,14 @@ Windows API key 与 FCM 服务账号继续使用当前用户 DPAPI，Rust 显式
 
 本地 71 项 Rust 单测全绿；完整 release HTTP canary 累计通过 39 项检查，其中 Settings 覆盖匿名 `401`、无 secret 导出、无落盘 dry-run、DPAPI 更新、导入预览/提交、三类成功审计和受控关闭。2026-07-15 的公网切换进一步证明 Settings export 匿名请求由 Rust 拒绝，未迁 Tool Registry 仍由 Node 透明处理；当前仍缺远端 CI、可分发包和受控公网认证成功路径，因此该 route family 继续保持 `opt-in`。
 
+### Tool Events 非流式原生 HTTP 路由
+
+`--rust-tool-events-http` 仅在 Rust HTTP 前门开启时生效，并只接管精确的非流式 `GET /api/tool-events`。Rust 保持 `cursor > after` 升序回放、`Last-Event-ID` 后备游标、`toolRunId`/`workspaceId`/`taskId` 过滤、默认 500/最大 5000 条、嵌套 `fields` 和 `{ items }` 响应合同。事件存储 sidecar 与 HTTP route 共同依赖 `tool_events_store.rs` 的参数化 SQL 和 event JSON/cursor 映射；HTTP 数据查询使用只读 SQLite 连接，不复制第二份查询实现。
+
+Host 与设备鉴权继续复用 Rust 控制面前置检查，`host.blocked`/`auth.failed` 拒绝审计在返回 `403`/`401` 前写入。设置、鉴权存储、审计、schema 或查询失败均发生在响应所有权之前，前门会逐字节回放原请求。`stream=1` 在匹配前排除，因此 SSE 订阅、live append 通知和断开清理仍由 Node 负责；关闭独立开关后所有 Tool Events 请求恢复 Node 所有权。
+
+2026-07-16 的隔离 release 单路由 canary 为 12/12；累计开启 Status、Doctor、Devices、Pairing、Audit、Settings 与 Tool Events 的 canary 为 44/44。验证覆盖 Rust 匿名拒绝、真实 SQLite fixture 的认证过滤/投影、严格 after 空页、Node `text/event-stream` 所有权、拒绝审计、与其他路由的组合顺序和受控关闭。默认 release 二进制正被公网服务占用，因此验证使用独立 `CARGO_TARGET_DIR`，没有停止或替换公网进程。该 slice 当前为 `opt-in`：正常 JSON replay 少经过 Node HTTP、Worker 选择和 JSONL 跳数，但 Node 仍因 SSE 与其他路由常驻，单独启用不会显著降低整机常驻内存。
+
 ## Workspace Tree
 
 实现：`src/workspaces.js`、`src/workspaceTreeSidecarClient.js`、`apps/windows/src/workspace_tree.rs`、`vibelink workspace-tree-sidecar`，一次性回退命令为 `vibelink workspace-tree`。
@@ -257,7 +265,7 @@ npm run compression:benchmark -- --require-real
 2. Workspace：扩大自然交互观察窗口。
 3. MCP：完成自然生产会话观察；受控真实/soak 证据已通过。
 4. Event Store：扩大自然运行窗口并持续采集前后 runtime stats。
-5. 控制面路由：设备、配对、审计与设置均已进入 `opt-in`，公网拒绝/只读不存在路径已覆盖；Settings 仍需远端 CI、便携包和受控公网认证成功路径，下一功能切片再迁移 workspace/registry/MCP/tool-events。
+5. 控制面路由：设备、配对、审计、设置与 Tool Events 非流式读取均已进入 `opt-in`；Tool Events SSE 仍由 Node 持有，Settings 与 Tool Events 仍需远端 CI、便携包和受控公网认证成功路径，下一功能切片再评估 workspace/registry/MCP 或 SSE。
 6. Audio/Compression：性能实验保持 `contract`；产品必需的实时通话与音频所有权仍按全量 Node 退役计划迁移。
 
 ## 全量控制面迁移与桌面发布
@@ -267,7 +275,7 @@ npm run compression:benchmark -- --require-real
 1. **桌面运行边界**：Rust launcher 已负责进程监督、包内 Node 解析、sidecar 命令注入、配对 QR、doctor 和命名 Cloudflare Tunnel 安全预检/监督。
 2. **可分发包**：`npm run package:windows` 生成 Windows x64 portable ZIP，固定 Node LTS 与 cloudflared 版本，仅安装服务端生产依赖，并输出 SHA256。
 3. **公网入口**：`vibelink tunnel --check-only` 必须验证固定 hostname、loopback upstream、Host allowlist、端口一致、legacy login 禁用和 404 fallback；通过后才允许运行 connector。
-4. **HTTP 路由迁移**：status/doctor、pairing/device、audit/settings 已进入 opt-in；后续按 workspace/registry/MCP/tool events -> task/provider/browser/terminal/desktop/live-call 的顺序迁入 Rust。每批保留同一 OpenAPI、Android/Web 契约和 staged rollback。
+4. **HTTP 路由迁移**：status/doctor、pairing/device、audit/settings 和非流式 tool events 已进入 opt-in；后续按 workspace/registry/MCP/tool-events SSE -> task/provider/browser/terminal/desktop/live-call 的顺序迁入 Rust。每批保留同一 OpenAPI、Android/Web 契约和 staged rollback。
 5. **删除 Node**：只有路由使用统计为 0、契约/故障/回滚测试齐全、桌面包和公网 canary 连续通过后，才删除对应 Node 实现。最后一批路由移除后，portable 包才取消 Node runtime。
 
 当前桌面包仍是经过验证的 Rust + Node 混合包，不宣称已经完成控制面全量重写。

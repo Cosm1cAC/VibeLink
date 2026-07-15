@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 
 const rootDir = path.resolve(import.meta.dirname, "..", "..");
 
@@ -58,7 +59,7 @@ function writeSettings(dataDir, port, pairingToken) {
   }, null, 2)}\n`, "utf8");
 }
 
-function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp, settingsHttp) {
+function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp, settingsHttp, toolEventsHttp) {
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
@@ -71,6 +72,7 @@ function startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMuta
   if (pairingHttp) args.push("--rust-pairing-http");
   if (auditHttp) args.push("--rust-audit-http");
   if (settingsHttp) args.push("--rust-settings-http");
+  if (toolEventsHttp) args.push("--rust-tool-events-http");
   args.push("bridge");
   const child = spawn(command, args, {
     cwd: rootDir,
@@ -127,6 +129,56 @@ async function request(baseUrl, pathname, { method = "GET", token = "", body } =
     },
     payload: text ? JSON.parse(text) : null
   };
+}
+
+async function requestHeadersOnly(baseUrl, pathname, { token = "" } = {}) {
+  const headers = { Connection: "close" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    headers,
+    signal: AbortSignal.timeout(5000)
+  });
+  const result = {
+    status: response.status,
+    implementation: response.headers.get("x-vibelink-control-plane") || "",
+    contentType: response.headers.get("content-type") || ""
+  };
+  await response.body?.cancel();
+  return result;
+}
+
+function seedToolEvent(dataDir) {
+  const database = new DatabaseSync(path.join(dataDir, "mobile-agent.sqlite"));
+  const nonce = crypto.randomUUID();
+  const toolRunId = `tool-events-http-${nonce}`;
+  const taskId = `task-${nonce}`;
+  const workspaceId = `workspace-${nonce}`;
+  const eventId = `event-${nonce}`;
+  const at = new Date().toISOString();
+  database.prepare(`
+    INSERT INTO tool_runs (
+      id, task_id, workspace_id, tool_name, status, title, input_json,
+      result_json, error, created_at, updated_at, started_at, completed_at
+    ) VALUES (?, ?, ?, 'canary', 'completed', '', '{}', '{}', '', ?, ?, ?, ?)
+  `).run(toolRunId, taskId, workspaceId, at, at, at, at);
+  database.prepare(`
+    INSERT INTO tool_events (
+      tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
+      text, payload_json, event_json, created_at
+    ) VALUES (?, ?, ?, ?, 'tool.completed', ?, 'done', ?, ?, ?)
+  `).run(
+    toolRunId,
+    taskId,
+    workspaceId,
+    eventId,
+    at,
+    JSON.stringify({ value: 7 }),
+    JSON.stringify({ id: eventId, type: "tool.completed", at, toolRunId, taskId, workspaceId, payload: { value: 7 } }),
+    at
+  );
+  const cursor = Number(database.prepare("SELECT cursor FROM tool_events WHERE event_id = ?").get(eventId)?.cursor || 0);
+  database.close();
+  return { toolRunId, taskId, workspaceId, eventId, cursor };
 }
 
 async function waitForRustStatus(baseUrl, token, afterAttempts = -1) {
@@ -195,8 +247,9 @@ async function main() {
   const pairingHttp = process.argv.includes("--pairing-http");
   const auditHttp = process.argv.includes("--audit-http");
   const settingsHttp = process.argv.includes("--settings-http");
+  const toolEventsHttp = process.argv.includes("--tool-events-http");
   writeSettings(dataDir, port, pairingToken);
-  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp, settingsHttp);
+  const server = startServer(dataDir, port, command, doctorHttp, devicesHttp, deviceMutationsHttp, pairingHttp, auditHttp, settingsHttp, toolEventsHttp);
   const baseUrl = `http://127.0.0.1:${port}`;
   let shutdown = null;
 
@@ -388,6 +441,30 @@ async function main() {
         settingsAudit
       };
     }
+    let toolEventsEvidence = null;
+    if (toolEventsHttp) {
+      const fixture = seedToolEvent(dataDir);
+      const anonymousToolEvents = await request(baseUrl, "/api/tool-events?limit=1");
+      const filtered = await request(
+        baseUrl,
+        `/api/tool-events?after=0&limit=0.5&toolRunId=${encodeURIComponent(fixture.toolRunId)}&workspaceId=${encodeURIComponent(fixture.workspaceId)}&taskId=${encodeURIComponent(fixture.taskId)}&fields=cursor,id,payload.value`,
+        { token: activeToken }
+      );
+      const after = await request(
+        baseUrl,
+        `/api/tool-events?after=${encodeURIComponent(fixture.cursor)}&limit=1&toolRunId=${encodeURIComponent(fixture.toolRunId)}`,
+        { token: activeToken }
+      );
+      const stream = await requestHeadersOnly(baseUrl, "/api/tool-events?stream=1", {
+        token: activeToken
+      });
+      const rejectionAudit = await request(
+        baseUrl,
+        "/api/audit-log?limit=20&fields=type,path,reason,success",
+        { token: activeToken }
+      );
+      toolEventsEvidence = { fixture, anonymousToolEvents, filtered, after, stream, rejectionAudit };
+    }
     const doctorAnonymous = doctorHttp ? await request(baseUrl, "/api/doctor") : null;
     const doctor = await request(baseUrl, "/api/doctor", { token: activeToken });
     const doctorRuntime = doctor.payload?.controlPlaneRuntime?.doctorHttp || {};
@@ -487,11 +564,24 @@ async function main() {
         { name: "Settings audit continuity", pass: settingsEvidence?.settingsAudit?.status === 200 && Boolean(exportAudit?.deviceId) && Boolean(updateAudit?.deviceId) && Boolean(importAudit?.deviceId), detail: `export=${Boolean(exportAudit)}, update=${Boolean(updateAudit)}, import=${Boolean(importAudit)}` }
       );
     }
+    if (toolEventsHttp) {
+      const item = toolEventsEvidence?.filtered?.payload?.items?.[0] || {};
+      const authAudit = toolEventsEvidence?.rejectionAudit?.payload?.items?.find(
+        (entry) => entry.type === "auth.failed" && entry.path === "/api/tool-events"
+      );
+      checks.push(
+        { name: "Rust Tool Events denial", pass: toolEventsEvidence?.anonymousToolEvents?.status === 401 && toolEventsEvidence.anonymousToolEvents.implementation === "rust", detail: `status=${toolEventsEvidence?.anonymousToolEvents?.status || 0}, implementation=${toolEventsEvidence?.anonymousToolEvents?.implementation || "node"}` },
+        { name: "Rust Tool Events ownership", pass: toolEventsEvidence?.filtered?.status === 200 && toolEventsEvidence.filtered.implementation === "rust" && item.cursor === toolEventsEvidence.fixture.cursor && item.id === toolEventsEvidence.fixture.eventId && item.payload?.value === 7, detail: `status=${toolEventsEvidence?.filtered?.status || 0}, implementation=${toolEventsEvidence?.filtered?.implementation || "node"}, cursor=${item.cursor || 0}` },
+        { name: "Rust Tool Events cursor and fields", pass: toolEventsEvidence?.after?.status === 200 && toolEventsEvidence.after.implementation === "rust" && toolEventsEvidence.after.payload?.items?.length === 0 && Object.keys(item).every((key) => ["cursor", "id", "payload"].includes(key)), detail: `after=${toolEventsEvidence?.fixture?.cursor || 0}, items=${toolEventsEvidence?.after?.payload?.items?.length ?? -1}, fields=${Object.keys(item).join(",") || "missing"}` },
+        { name: "Node Tool Events SSE ownership", pass: toolEventsEvidence?.stream?.status === 200 && toolEventsEvidence.stream.implementation === "" && toolEventsEvidence.stream.contentType.startsWith("text/event-stream"), detail: `status=${toolEventsEvidence?.stream?.status || 0}, implementation=${toolEventsEvidence?.stream?.implementation || "node"}, contentType=${toolEventsEvidence?.stream?.contentType || "missing"}` },
+        { name: "Tool Events rejection audit", pass: toolEventsEvidence?.rejectionAudit?.status === 200 && authAudit?.reason === "missing_token" && authAudit?.success === false, detail: `status=${toolEventsEvidence?.rejectionAudit?.status || 0}, reason=${authAudit?.reason || "missing"}, success=${authAudit?.success}` }
+      );
+    }
     checks.push({ name: "controlled shutdown", pass: shutdown.code === 0 || shutdown.signal === "SIGTERM", detail: `code=${shutdown.code}, signal=${shutdown.signal || "none"}` });
     const result = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : "", pairingHttp ? "/api/pairing-sessions*" : "", auditHttp ? "/api/audit-log" : "", settingsHttp ? "/api/settings*" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
+      source: { route: ["/api/status", doctorHttp ? "/api/doctor" : "", devicesHttp ? "/api/devices" : "", deviceMutationsHttp ? "/api/devices/*/(rotate|revoke)" : "", pairingHttp ? "/api/pairing-sessions*" : "", auditHttp ? "/api/audit-log" : "", settingsHttp ? "/api/settings*" : "", toolEventsHttp ? "/api/tool-events (non-stream)" : ""].filter(Boolean).join(","), implementation: "rust-http", command },
       runtime,
       doctorRuntime: doctorHttp ? doctorRuntime : undefined,
       deviceMutations: deviceMutationsHttp ? {
@@ -514,6 +604,15 @@ async function main() {
         updated: settingsEvidence?.updated?.status === 200,
         imported: settingsEvidence?.imported?.status === 200,
         dpapi: settingsEvidence?.secretStored === true
+      } : undefined,
+      toolEvents: toolEventsHttp ? {
+        denied: toolEventsEvidence?.anonymousToolEvents?.status === 401,
+        cursor: toolEventsEvidence?.fixture?.cursor || 0,
+        strictAfter: toolEventsEvidence?.after?.payload?.items?.length === 0,
+        sseOwnedByNode: toolEventsEvidence?.stream?.implementation === "",
+        rejectionAudited: toolEventsEvidence?.rejectionAudit?.payload?.items?.some(
+          (entry) => entry.type === "auth.failed" && entry.path === "/api/tool-events"
+        ) === true
       } : undefined,
       shutdown,
       checks,

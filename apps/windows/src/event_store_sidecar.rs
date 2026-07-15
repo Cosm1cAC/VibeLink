@@ -2,6 +2,7 @@ use crate::sidecar_protocol::{
     now_iso, sidecar_arg, sidecar_arg_or_default, write_sidecar_error, write_sidecar_result,
     SidecarRequest,
 };
+use crate::tool_events_store::{list_tool_events, ToolEventListOptions};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
@@ -27,18 +28,6 @@ struct EventStoreSidecar {
 
 #[derive(Default, Deserialize)]
 struct EventStoreListTaskOptions {
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreListToolOptions {
-    #[serde(rename = "toolRunId")]
-    tool_run_id: Option<String>,
-    #[serde(rename = "workspaceId")]
-    workspace_id: Option<String>,
-    #[serde(rename = "taskId")]
-    task_id: Option<String>,
     after: Option<i64>,
     limit: Option<i64>,
 }
@@ -241,8 +230,8 @@ impl EventStoreSidecar {
                 Ok(json!(self.insert_tool_events(&tool_run_id, &events)?))
             }
             "listToolEvents" => {
-                let options: EventStoreListToolOptions = sidecar_arg_or_default(args, 0)?;
-                Ok(Value::Array(self.list_tool_events(&options)?))
+                let options: ToolEventListOptions = sidecar_arg_or_default(args, 0)?;
+                Ok(Value::Array(list_tool_events(&self.db, &options)?))
             }
             "insertLiveCallEvent" => {
                 let session_id: String = sidecar_arg(args, 0)?;
@@ -473,34 +462,6 @@ impl EventStoreSidecar {
         }
         self.db.execute_batch("COMMIT")?;
         Ok(cursors)
-    }
-
-    fn list_tool_events(&self, options: &EventStoreListToolOptions) -> Result<Vec<Value>> {
-        let tool_run_id = clean_option(&options.tool_run_id);
-        let workspace_id = clean_option(&options.workspace_id);
-        let task_id = clean_option(&options.task_id);
-        let mut statement = self.db.prepare(
-            "SELECT cursor, event_json FROM tool_events
-             WHERE cursor > ?
-               AND (? = '' OR tool_run_id = ?)
-               AND (? = '' OR workspace_id = ?)
-               AND (? = '' OR task_id = ?)
-             ORDER BY cursor ASC LIMIT ?",
-        )?;
-        let rows = statement.query_map(
-            params![
-                options.after.unwrap_or(0),
-                tool_run_id,
-                tool_run_id,
-                workspace_id,
-                workspace_id,
-                task_id,
-                task_id,
-                event_limit(options.limit, 500, 5000)
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        rows.map(|row| event_json_with_cursor(row?)).collect()
     }
 
     fn live_call_exists(&self, session_id: &str) -> Result<bool> {

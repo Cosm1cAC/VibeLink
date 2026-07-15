@@ -28,6 +28,8 @@ mod settings_http;
 mod sidecar_protocol;
 mod status_http;
 mod status_sidecar;
+mod tool_events_http;
+mod tool_events_store;
 mod workspace_tree;
 
 #[cfg(windows)]
@@ -77,6 +79,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_settings_http: bool,
+
+    #[arg(long, global = true)]
+    rust_tool_events_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -155,7 +160,6 @@ struct PairingSession {
     #[serde(rename = "expiresAt")]
     expires_at: String,
 }
-
 
 fn main() {
     if let Err(error) = run() {
@@ -304,6 +308,10 @@ fn rust_settings_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_settings_http
 }
 
+fn rust_tool_events_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_tool_events_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -363,6 +371,8 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| device_http::DeviceMutationRouteConfig::new(route_data_dir.clone()));
     let audit_route = rust_audit_http_enabled(cli)
         .then(|| audit_http::AuditRouteConfig::new(route_data_dir.clone()));
+    let tool_events_route = rust_tool_events_http_enabled(cli)
+        .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
         Some(
             settings_http::SettingsRouteConfig::new(route_data_dir.clone(), root.to_path_buf())
@@ -400,6 +410,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_device(device_route)
         .with_device_mutation(device_mutation_route)
         .with_audit(audit_route)
+        .with_tool_events(tool_events_route)
         .with_settings(settings_route)
         .with_pairing(pairing_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
@@ -589,6 +600,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_settings_http {
         command.arg("--rust-settings-http");
+    }
+    if cli.rust_tool_events_http {
+        command.arg("--rust-tool-events-http");
     }
     command
         .arg("bridge")
@@ -962,6 +976,24 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-settings-http", "bridge"]).unwrap();
         assert!(settings_only.rust_settings_http);
         assert!(!rust_settings_http_enabled(&settings_only));
+    }
+
+    #[test]
+    fn rust_tool_events_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-tool-events-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_tool_events_http);
+        assert!(rust_tool_events_http_enabled(&enabled));
+
+        let route_only =
+            Cli::try_parse_from(["vibelink", "--rust-tool-events-http", "bridge"]).unwrap();
+        assert!(route_only.rust_tool_events_http);
+        assert!(!rust_tool_events_http_enabled(&route_only));
     }
 
     #[test]

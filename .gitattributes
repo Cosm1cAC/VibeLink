@@ -1,0 +1,2 @@
+# Vite output filenames include content hashes; preserve their exact build bytes.
+public/assets/* binary

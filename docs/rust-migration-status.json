@@ -70,7 +70,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "远端 CI 已通过；公网认证 canary 保持零失败/零回退后晋级 canary。"
+      "nextAction": "远端 CI 与公网拒绝路径已通过；受控公网认证 canary 保持零失败/零回退后晋级 canary。"
     },
     {
       "id": "doctor-http-route",
@@ -92,7 +92,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "本地 release 已通过；远端 CI 与公网认证 canary 保持 24 项检查、tool run、审计和零失败/零回退后晋级 canary。"
+      "nextAction": "本地 release、远端 CI 与公网拒绝路径已通过；受控公网认证 canary 保持 24 项检查、tool run、审计和零失败/零回退后晋级 canary。"
     },
     {
       "id": "devices-http-route",
@@ -149,7 +149,7 @@
         "VIBELINK_WORKSPACE_TREE_SIDECAR_MAX_PENDING_REQUESTS"
       ],
       "nodeEntry": "src/workspaces.js",
-      "rustEntry": "apps/windows/src/main.rs",
+      "rustEntry": "apps/windows/src/workspace_tree.rs",
       "sidecarCommand": "vibelink workspace-tree-sidecar",
       "fallback": "持久 sidecar -> 一次性 Rust CLI -> Node listDirectory()",
       "tests": [
@@ -227,7 +227,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0008-rust-settings-http-routes.md"
       ],
-      "nextAction": "本地 unit/release canary 已覆盖导出、dry-run、并发写、DPAPI、回滚、导入和审计；等待远端 CI、包内 canary 与公网拒绝路径证据。"
+      "nextAction": "本地 unit/release canary 与公网拒绝路径已覆盖导出、dry-run、并发写、DPAPI、回滚、导入和审计；等待远端 CI、包内 canary 与受控公网认证成功路径证据。"
     },
     {
       "id": "mcp-session-sidecar",
@@ -242,7 +242,7 @@
         "VIBELINK_MCP_PERSISTENT_SESSIONS"
       ],
       "nodeEntry": "src/mcpRuntime.js",
-      "rustEntry": "apps/windows/src/main.rs",
+      "rustEntry": "apps/windows/src/mcp_session_sidecar.rs",
       "sidecarCommand": "vibelink mcp-session-sidecar",
       "fallback": "Rust readiness/probe/call 失败后回退现有 Node stdio 路径",
       "tests": [
@@ -271,7 +271,7 @@
         "VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS"
       ],
       "nodeEntry": "src/db.js",
-      "rustEntry": "apps/windows/src/main.rs",
+      "rustEntry": "apps/windows/src/event_store_sidecar.rs",
       "sidecarCommand": "vibelink event-store-sidecar <db-path>",
       "fallback": "Rust sidecar -> Node Worker（启用时）-> 同步 SQLite",
       "tests": [

@@ -345,10 +345,9 @@ class CallViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { apiClient.pauseSession(sessionId) }
                 .onSuccess { session ->
-                    appContext?.applicationContext?.startService(
-                        android.content.Intent(appContext, LiveCallAudioService::class.java)
-                            .setAction(LiveCallAudioService.ACTION_PAUSE)
-                    )
+                    appContext?.let { context ->
+                        context.startService(LiveCallAudioService.pauseIntent(context))
+                    }
                     _uiState.update {
                         it.copy(
                             sessionActive = session?.status != "stopped",
@@ -368,10 +367,9 @@ class CallViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { apiClient.resumeSession(sessionId) }
                 .onSuccess { session ->
-                    appContext?.applicationContext?.startService(
-                        android.content.Intent(appContext, LiveCallAudioService::class.java)
-                            .setAction(LiveCallAudioService.ACTION_RESUME)
-                    )
+                    appContext?.let { context ->
+                        context.startService(LiveCallAudioService.resumeIntent(context))
+                    }
                     _uiState.update {
                         it.copy(
                             sessionActive = session?.status != "stopped",

@@ -190,6 +190,11 @@ class ApiClient(
         return gson.fromJson(json, SearchResponse::class.java)
     }
 
+    suspend fun listCommands(filter: String = ""): List<CommandDefinition> {
+        val suffix = if (filter.isBlank()) "" else "?filter=${encode(filter)}"
+        return gson.fromJson(get("/api/command-registry$suffix"), CommandRegistryResponse::class.java).items
+    }
+
     private suspend fun delete(path: String): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url("$baseUrl$path")

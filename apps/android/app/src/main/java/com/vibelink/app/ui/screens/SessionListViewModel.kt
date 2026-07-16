@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ConversationItem
+import com.vibelink.app.network.CommandDefinition
 import com.vibelink.app.network.DesktopConversation
 import com.vibelink.app.network.DesktopRemoteState
 import com.vibelink.app.network.HistoryItem
@@ -40,6 +41,9 @@ class SessionListViewModel : ViewModel() {
     private val _searchNextCursor = MutableStateFlow("")
     val searchNextCursor: StateFlow<String> = _searchNextCursor.asStateFlow()
 
+    private val _commands = MutableStateFlow<List<CommandDefinition>>(emptyList())
+    val commands: StateFlow<List<CommandDefinition>> = _commands.asStateFlow()
+
     private val _allConversations = MutableStateFlow<List<ConversationItem>>(emptyList())
 
     private val _conversations = MutableStateFlow<List<ConversationItem>>(emptyList())
@@ -72,6 +76,7 @@ class SessionListViewModel : ViewModel() {
             if (isRefresh) _refreshing.value = true else _loading.value = true
             _error.value = ""
             try {
+                _commands.value = runCatching { apiClient.listCommands() }.getOrDefault(_commands.value)
                 val snapshot = loadSessionListSnapshot(
                     loadHistories = apiClient::listHistories,
                     loadTasks = apiClient::listTasks,

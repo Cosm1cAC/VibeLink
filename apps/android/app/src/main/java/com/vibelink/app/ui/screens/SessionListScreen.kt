@@ -64,6 +64,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ConversationItem
+import com.vibelink.app.network.CommandDefinition
 import com.vibelink.app.network.ThreadPatch
 import com.vibelink.app.ui.i18n.AppStrings
 import com.vibelink.app.ui.i18n.LocalAppStrings
@@ -90,6 +91,7 @@ fun SessionListScreen(
     val searchResults by viewModel.searchResults.collectAsState()
     val searchLoading by viewModel.searchLoading.collectAsState()
     val searchError by viewModel.searchError.collectAsState()
+    val commands by viewModel.commands.collectAsState()
     val strings = LocalAppStrings.current
 
     var topMenuOpen by remember { mutableStateOf(false) }
@@ -100,6 +102,8 @@ fun SessionListScreen(
     val showFavorites by viewModel.showFavorites.collectAsState()
     var tagsTarget by remember { mutableStateOf<ConversationItem?>(null) }
     var tagsText by remember { mutableStateOf("") }
+    var commandPaletteOpen by remember { mutableStateOf(false) }
+    var commandFilter by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         viewModel.load(apiClient)
@@ -137,10 +141,15 @@ fun SessionListScreen(
                         }
                     }
                     Box {
-                        IconButton(onClick = { topMenuOpen = true }) {
+                    IconButton(onClick = { topMenuOpen = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = strings.more)
                         }
                         DropdownMenu(expanded = topMenuOpen, onDismissRequest = { topMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Command palette") },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                onClick = { topMenuOpen = false; commandPaletteOpen = true },
+                            )
                             DropdownMenuItem(
                                 text = { Text(strings.liveCall) },
                                 leadingIcon = { Icon(Icons.Default.Chat, contentDescription = null) },
@@ -374,6 +383,36 @@ fun SessionListScreen(
                 viewModel.patchConversation(apiClient, target, ThreadPatch(tags = tagsText.split(",").map { it.trim() }.filter { it.isNotBlank() }))
                 tagsTarget = null
             },
+        )
+    }
+
+    if (commandPaletteOpen) {
+        AlertDialog(
+            onDismissRequest = { commandPaletteOpen = false },
+            title = { Text("Command palette") },
+            text = {
+                Column {
+                    OutlinedTextField(value = commandFilter, onValueChange = { commandFilter = it }, label = { Text("Filter commands") }, singleLine = true)
+                    LazyColumn {
+                        items(commands.filter { commandFilter.isBlank() || it.name.contains(commandFilter, true) || it.description.contains(commandFilter, true) }, key = { it.id }) { command ->
+                            ListItem(
+                                headlineContent = { Text(command.name) },
+                                supportingContent = { Text(command.description) },
+                                modifier = Modifier.clickable {
+                                    commandPaletteOpen = false
+                                    when (command.id) {
+                                        "session.new" -> onNewConversation()
+                                        "sessions.refresh" -> viewModel.load(apiClient, isRefresh = true)
+                                        "workspace.open" -> onOpenWorkspace()
+                                        "approvals.review" -> onOpenSettings()
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { commandPaletteOpen = false }) { Text("Close") } },
         )
     }
 }

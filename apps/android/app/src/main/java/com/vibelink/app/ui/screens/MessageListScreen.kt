@@ -122,6 +122,8 @@ fun MessageListScreen(
     promptHistory: List<String> = emptyList(),
     onRememberPrompt: (String) -> Unit = {},
     onClearPromptHistory: () -> Unit = {},
+    initialAttachmentUris: List<String> = emptyList(),
+    onInitialAttachmentsConsumed: () -> Unit = {},
 ) {
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -152,25 +154,26 @@ fun MessageListScreen(
     val isDesktopRemote = conversation?.kind == "desktop"
     val selectableProviders = remember(providerRegistry) { providersForComposer(providerRegistry) }
     val canSend = prompt.trim().isNotBlank() && !sending && conversation != null
-    fun uploadAttachment(uri: Uri) {
-        scope.launch {
-            attachmentUploading = true
-            attachmentStatus = strings.uploadingAttachment
-            try {
-                val upload = uploadAttachmentUri(context, apiClient, uri)
-                val attachmentText = MessageContentUtils.attachmentPromptText(
-                    name = upload.name,
-                    markdown = upload.markdown,
-                    preview = upload.preview,
-                )
-                prompt = listOf(prompt.trim(), attachmentText).filter { it.isNotBlank() }.joinToString("\n\n")
-                attachmentStatus = strings.attached(upload.name.ifBlank { strings.file })
-            } catch (error: Exception) {
-                attachmentStatus = error.message ?: strings.attachmentUploadFailed
-            } finally {
-                attachmentUploading = false
-            }
+    suspend fun uploadAttachmentNow(uri: Uri) {
+        attachmentUploading = true
+        attachmentStatus = strings.uploadingAttachment
+        try {
+            val upload = uploadAttachmentUri(context, apiClient, uri)
+            val attachmentText = MessageContentUtils.attachmentPromptText(
+                name = upload.name,
+                markdown = upload.markdown,
+                preview = upload.preview,
+            )
+            prompt = listOf(prompt.trim(), attachmentText).filter { it.isNotBlank() }.joinToString("\n\n")
+            attachmentStatus = strings.attached(upload.name.ifBlank { strings.file })
+        } catch (error: Exception) {
+            attachmentStatus = error.message ?: strings.attachmentUploadFailed
+        } finally {
+            attachmentUploading = false
         }
+    }
+    fun uploadAttachment(uri: Uri) {
+        scope.launch { uploadAttachmentNow(uri) }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) uploadAttachment(uri)
@@ -181,6 +184,12 @@ fun MessageListScreen(
 
     LaunchedEffect(conversation?.key) {
         if (conversation != null) viewModel.ensureConversationLoaded(apiClient, conversation)
+    }
+
+    LaunchedEffect(conversation?.key, initialAttachmentUris) {
+        if (conversation == null || initialAttachmentUris.isEmpty()) return@LaunchedEffect
+        initialAttachmentUris.forEach { rawUri -> uploadAttachmentNow(Uri.parse(rawUri)) }
+        onInitialAttachmentsConsumed()
     }
 
     LaunchedEffect(messages.size) {

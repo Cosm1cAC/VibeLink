@@ -1,5 +1,6 @@
 use crate::status_http::{
-    authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication, RouteMetrics,
+    authenticate_route_request, read_internal_json, HttpRouteResponse, ParsedRequest,
+    RouteAuthentication, RouteMetrics,
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -106,11 +107,10 @@ fn fetch_doctor_report(
             internal = internal.set(target, value);
         }
     }
-    internal
+    let response = internal
         .call()
-        .context("Internal Doctor report request failed")?
-        .into_json::<Value>()
-        .context("Internal Doctor report is not valid JSON")
+        .context("Internal Doctor report request failed")?;
+    read_internal_json(response, "Doctor report")
 }
 
 #[cfg(test)]

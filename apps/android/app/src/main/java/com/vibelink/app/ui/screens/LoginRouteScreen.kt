@@ -26,13 +26,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.data.SettingsStore
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.ui.i18n.LocalAppStrings
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,7 +62,7 @@ fun LoginScreen(
         settingsStore.setToken(token)
         apiClient.baseUrl = url
         apiClient.token = token
-        onLoginSuccess()
+        withContext(Dispatchers.Main.immediate) { onLoginSuccess() }
     }
 
     suspend fun applyPairingUri(raw: String): Boolean {
@@ -80,7 +85,7 @@ fun LoginScreen(
         return true
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(initialPairingUri) {
         initialPairingUri?.let { raw ->
             if (applyPairingUri(raw)) return@LaunchedEffect
         }
@@ -168,6 +173,8 @@ fun LoginScreen(
                 label = { Text(strings.pairingToken) },
                 placeholder = { Text(strings.legacyTokenPlaceholder) },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
             )
 

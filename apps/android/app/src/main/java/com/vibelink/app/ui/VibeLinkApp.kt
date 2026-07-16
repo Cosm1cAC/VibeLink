@@ -5,6 +5,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -17,18 +18,25 @@ import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ApiClientConnectionBootstrapper
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.SavedApiConnection
+import com.vibelink.app.mobile.IncomingSharedContent
 import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.ui.screens.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Root composable for VibeLink Android.
  * Navigation: login 鈫?sessionList 鈫?messageList / call
  */
 @Composable
-fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "") {
+fun VibeLinkApp(
+    initialPairingUri: String? = null,
+    initialSharedContent: IncomingSharedContent = IncomingSharedContent(),
+    onSharedContentConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val apiClient = remember { ApiClient() }
 
@@ -43,6 +51,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
         }
     }
     var connectionInitialized by remember { mutableStateOf(false) }
+    var authenticated by remember { mutableStateOf(false) }
     LaunchedEffect(apiClient, connectionBootstrapper) {
         try {
             connectionBootstrapper.initialize(
@@ -55,15 +64,16 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
     }
     if (!connectionInitialized) return
 
-    // Shared ViewModels (scoped to app-level, retained via remember)
-    val sessionListViewModel = remember { SessionListViewModel() }
-    val messageListViewModel = remember { MessageListViewModel() }
-    val workspaceViewModel = remember { WorkspaceViewModel() }
-    val callViewModel = remember { CallViewModel() }
-    val settingsViewModel = remember { SettingsViewModel() }
+    // Activity-scoped ViewModels survive configuration changes and clear with their owner.
+    val sessionListViewModel: SessionListViewModel = viewModel()
+    val messageListViewModel: MessageListViewModel = viewModel()
+    val workspaceViewModel: WorkspaceViewModel = viewModel()
+    val callViewModel: CallViewModel = viewModel()
+    val settingsViewModel: SettingsViewModel = viewModel()
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
+    var pendingSharedAttachments by remember { mutableStateOf<List<String>>(emptyList()) }
     val conversations by sessionListViewModel.conversations.collectAsState()
     val promptHistory by settingsStore.promptHistory.collectAsState(initial = emptyList())
     val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
@@ -79,6 +89,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 settingsStore = settingsStore,
                 initialPairingUri = initialPairingUri,
                 onLoginSuccess = {
+                    authenticated = true
                     navController.navigate("sessionList") {
                         popUpTo("login") { inclusive = true }
                     }
@@ -107,8 +118,16 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                     navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
                 },
                 onLogout = {
-                    navController.navigate("login") {
-                        popUpTo("sessionList") { inclusive = true }
+                    appScope.launch {
+                        settingsStore.clearSession()
+                        withContext(Dispatchers.Main.immediate) {
+                            apiClient.token = ""
+                            authenticated = false
+                            pendingConversation = null
+                            navController.navigate("login") {
+                                popUpTo("sessionList") { inclusive = true }
+                            }
+                        }
                     }
                 },
                 onOpenLiveCall = {
@@ -158,6 +177,8 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 promptHistory = promptHistory,
                 onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
                 onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
+                initialAttachmentUris = if (conversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
+                onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
             )
         }
 
@@ -208,9 +229,9 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
         }
     }
 
-    LaunchedEffect(initialSharedText) {
-        val text = initialSharedText.trim()
-        if (text.isBlank()) return@LaunchedEffect
+    LaunchedEffect(initialSharedContent, authenticated) {
+        if (initialSharedContent.isEmpty || !authenticated) return@LaunchedEffect
+        val text = initialSharedContent.composerText
         val conversation = ConversationItem(
             key = "share:${System.currentTimeMillis()}",
             kind = "new",
@@ -220,7 +241,9 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             preview = text.take(160),
         )
         pendingConversation = conversation
+        pendingSharedAttachments = initialSharedContent.streamUris
         navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
+        onSharedContentConsumed()
     }
     }
 }

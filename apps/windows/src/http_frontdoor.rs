@@ -186,10 +186,11 @@ mod tests {
     use super::{handle_connection, proxy_connection};
     use crate::doctor_http::DoctorRouteConfig;
     use crate::status_http::StatusRouteConfig;
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
-    use std::path::PathBuf;
     use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn proxy_preserves_bidirectional_bytes() {
@@ -290,9 +291,21 @@ mod tests {
 
         let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let frontend_addr = frontend.local_addr().unwrap();
-        let missing_data_dir = PathBuf::from("Z:/vibelink-status-http-missing");
-        let status_route =
-            StatusRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let invalid_data_dir = std::env::temp_dir().join(format!(
+            "vibelink-status-http-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&invalid_data_dir).unwrap();
+        fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
+        let status_route = StatusRouteConfig::new(
+            invalid_data_dir.clone(),
+            upstream_addr,
+            "secret".to_string(),
+        );
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
             handle_connection(client, upstream_addr, Some(&status_route), None).unwrap();
@@ -312,6 +325,7 @@ mod tests {
         );
         proxy_thread.join().unwrap();
         upstream_thread.join().unwrap();
+        fs::remove_dir_all(invalid_data_dir).unwrap();
     }
 
     #[test]
@@ -333,7 +347,7 @@ mod tests {
 
         let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let frontend_addr = frontend.local_addr().unwrap();
-        let missing_data_dir = PathBuf::from("Z:/vibelink-doctor-http-missing");
+        let missing_data_dir = std::path::PathBuf::from("Z:/vibelink-doctor-http-missing");
         let doctor_route =
             DoctorRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
         let proxy_thread = thread::spawn(move || {

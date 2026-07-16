@@ -14,11 +14,14 @@ import com.vibelink.app.network.ApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.io.File
 
 class LiveCallAudioService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var streamer: LiveCallAudioStreamer? = null
+    private var controlCoordinator: LiveCallControlCoordinator? = null
     private var sessionId: String = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -31,15 +34,9 @@ class LiveCallAudioService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startStreaming(intent)
-            ACTION_PAUSE -> {
-                streamer?.pause()
-                updateNotification("已暂停")
-            }
-            ACTION_RESUME -> {
-                streamer?.resume()
-                updateNotification("录音中")
-            }
-            ACTION_STOP -> stopSelf()
+            ACTION_PAUSE -> handleControl(ACTION_PAUSE, intent.getBooleanExtra(EXTRA_SYNC_SERVER, false))
+            ACTION_RESUME -> handleControl(ACTION_RESUME, intent.getBooleanExtra(EXTRA_SYNC_SERVER, false))
+            ACTION_STOP -> handleControl(ACTION_STOP, intent.getBooleanExtra(EXTRA_SYNC_SERVER, false))
         }
         return START_STICKY
     }
@@ -47,6 +44,8 @@ class LiveCallAudioService : Service() {
     override fun onDestroy() {
         streamer?.stop()
         streamer = null
+        controlCoordinator = null
+        scope.cancel()
         removeNotification()
         super.onDestroy()
     }
@@ -66,6 +65,14 @@ class LiveCallAudioService : Service() {
         val nextStreamer = LiveCallAudioStreamer(apiClient, scope)
         streamer?.stop()
         streamer = nextStreamer
+        controlCoordinator = LiveCallControlCoordinator(
+            remote = ApiLiveCallRemoteControl(apiClient),
+            local = object : LiveCallLocalControl {
+                override fun pause() = nextStreamer.pause()
+                override fun resume() = nextStreamer.resume()
+                override fun stop() = nextStreamer.stop()
+            },
+        )
         nextStreamer.start(
             context = applicationContext,
             sessionId = sessionId,
@@ -73,6 +80,57 @@ class LiveCallAudioService : Service() {
             onError = { updateNotification("错误：$it") },
             recordingFile = file,
         )
+    }
+
+    private fun handleControl(action: String, syncServer: Boolean) {
+        if (!syncServer) {
+            when (action) {
+                ACTION_PAUSE -> {
+                    streamer?.pause()
+                    updateNotification("已暂停")
+                }
+                ACTION_RESUME -> {
+                    streamer?.resume()
+                    updateNotification("录音中")
+                }
+                ACTION_STOP -> stopSelf()
+            }
+            return
+        }
+
+        val coordinator = controlCoordinator
+        if (sessionId.isBlank() || coordinator == null) {
+            updateNotification("控制失败：实时通话尚未连接")
+            return
+        }
+        scope.launch {
+            val pendingText = when (action) {
+                ACTION_PAUSE -> "正在暂停"
+                ACTION_RESUME -> "正在继续"
+                else -> "正在停止"
+            }
+            updateNotification(pendingText)
+            runCatching {
+                when (action) {
+                    ACTION_PAUSE -> coordinator.pause(sessionId)
+                    ACTION_RESUME -> coordinator.resume(sessionId)
+                    ACTION_STOP -> coordinator.stop(sessionId)
+                }
+            }.onSuccess {
+                when (action) {
+                    ACTION_PAUSE -> updateNotification("已暂停")
+                    ACTION_RESUME -> updateNotification("录音中")
+                    ACTION_STOP -> stopSelf()
+                }
+            }.onFailure { error ->
+                val label = when (action) {
+                    ACTION_PAUSE -> "暂停"
+                    ACTION_RESUME -> "继续"
+                    else -> "停止"
+                }
+                updateNotification("${label}失败：${error.message ?: "网络请求失败"}")
+            }
+        }
     }
 
     private fun updateNotification(text: String) {
@@ -113,7 +171,9 @@ class LiveCallAudioService : Service() {
         return PendingIntent.getService(
             this,
             requestCode,
-            Intent(this, LiveCallAudioService::class.java).setAction(action),
+            Intent(this, LiveCallAudioService::class.java)
+                .setAction(action)
+                .putExtra(EXTRA_SYNC_SERVER, true),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
     }
@@ -140,6 +200,7 @@ class LiveCallAudioService : Service() {
         const val EXTRA_BASE_URL = "baseUrl"
         const val EXTRA_TOKEN = "token"
         const val EXTRA_SESSION_ID = "sessionId"
+        const val EXTRA_SYNC_SERVER = "syncServer"
 
         fun startIntent(context: Context, baseUrl: String, token: String, sessionId: String): Intent {
             return Intent(context, LiveCallAudioService::class.java)
@@ -151,6 +212,14 @@ class LiveCallAudioService : Service() {
 
         fun stopIntent(context: Context): Intent {
             return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_STOP)
+        }
+
+        fun pauseIntent(context: Context): Intent {
+            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_PAUSE)
+        }
+
+        fun resumeIntent(context: Context): Intent {
+            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_RESUME)
         }
     }
 }

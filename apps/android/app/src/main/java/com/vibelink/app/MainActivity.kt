@@ -10,27 +10,50 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.vibelink.app.mobile.NotificationPermissionPolicy
+import com.vibelink.app.mobile.IncomingSharedContent
 import com.vibelink.app.ui.VibeLinkApp
 import com.vibelink.app.ui.theme.VibeLinkTheme
 
 class MainActivity : ComponentActivity() {
+    private var pairingUri by mutableStateOf<String?>(null)
+    private var sharedContent by mutableStateOf(IncomingSharedContent())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermissionIfNeeded(activityRecreated = savedInstanceState != null)
-        val sharedText = sharedContentText(intent)
+        applyIncomingIntent(intent)
         setContent {
             VibeLinkTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     VibeLinkApp(
-                        initialPairingUri = intent?.data?.takeIf { it.scheme == "vibelink" }?.toString(),
-                        initialSharedText = sharedText,
+                        initialPairingUri = pairingUri,
+                        initialSharedContent = sharedContent,
+                        onSharedContentConsumed = ::consumeSharedContent,
                     )
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyIncomingIntent(intent)
+    }
+
+    internal fun applyIncomingIntent(intent: Intent?) {
+        intent?.data
+            ?.takeIf { it.scheme == "vibelink" }
+            ?.let { pairingUri = it.toString() }
+        incomingSharedContent(intent)
+            .takeUnless { it.isEmpty }
+            ?.let { sharedContent = it }
     }
 
     private fun requestNotificationPermissionIfNeeded(activityRecreated: Boolean) {
@@ -50,15 +73,33 @@ class MainActivity : ComponentActivity() {
         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
     }
 
-    private fun sharedContentText(intent: Intent?): String {
-        if (intent?.action != Intent.ACTION_SEND) return ""
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().trim()
-        val stream = intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
-        val type = intent.type.orEmpty()
-        return listOfNotNull(
-            text.takeIf { it.isNotBlank() },
-            stream?.let { uri -> "Shared ${type.ifBlank { "file" }}: $uri" },
-        ).joinToString("\n")
+    @Suppress("DEPRECATION")
+    private fun incomingSharedContent(intent: Intent?): IncomingSharedContent {
+        if (intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE) {
+            return IncomingSharedContent()
+        }
+        val extraUris = when (intent.action) {
+            Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<android.net.Uri>(Intent.EXTRA_STREAM).orEmpty()
+            else -> listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM))
+        }
+        val clipUris = intent.clipData?.let { clip ->
+            (0 until clip.itemCount).mapNotNull { index -> clip.getItemAt(index).uri }
+        }.orEmpty()
+        return IncomingSharedContent(
+            text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty(),
+            streamUris = (extraUris + clipUris).map { it.toString() }.distinct(),
+            mimeType = intent.type.orEmpty(),
+        )
+    }
+
+    private fun consumeSharedContent() {
+        sharedContent = IncomingSharedContent()
+        setIntent(Intent(intent).apply {
+            action = null
+            removeExtra(Intent.EXTRA_TEXT)
+            removeExtra(Intent.EXTRA_STREAM)
+            clipData = null
+        })
     }
 
     companion object {

@@ -75,6 +75,7 @@ import {
 import { getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
 import { searchAll } from "./search.js";
+import { addReviewComment, createReview, getReview, listReviews, updateReview } from "./reviews.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
   authenticateRequest,
@@ -3260,6 +3261,36 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     const state = updateThreadState(body.key, body.patch || {});
     sendJson(response, 200, state);
+    return;
+  }
+
+  if (url.pathname === "/api/reviews" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listReviews(), url) });
+    return;
+  }
+  if (url.pathname === "/api/reviews" && request.method === "POST") {
+    const body = await readBody(request);
+    sendJson(response, 201, createReview(body));
+    return;
+  }
+  const reviewMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)$/);
+  if (reviewMatch && request.method === "GET") {
+    const review = getReview(decodeURIComponent(reviewMatch[1]));
+    if (!review) { sendError(response, 404, "Review not found"); return; }
+    sendJson(response, 200, review);
+    return;
+  }
+  if (reviewMatch && request.method === "PATCH") {
+    const review = updateReview(decodeURIComponent(reviewMatch[1]), await readBody(request));
+    if (!review) { sendError(response, 404, "Review not found"); return; }
+    sendJson(response, 200, review);
+    return;
+  }
+  const commentMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/comments$/);
+  if (commentMatch && request.method === "POST") {
+    const review = addReviewComment(decodeURIComponent(commentMatch[1]), await readBody(request));
+    if (!review) { sendError(response, 404, "Review not found"); return; }
+    sendJson(response, 201, review);
     return;
   }
 

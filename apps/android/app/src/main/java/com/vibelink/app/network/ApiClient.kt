@@ -195,6 +195,14 @@ class ApiClient(
         return gson.fromJson(get("/api/command-registry$suffix"), CommandRegistryResponse::class.java).items
     }
 
+    suspend fun listReviews(): List<ReviewSession> = gson.fromJson(get("/api/reviews"), ReviewListResponse::class.java).items
+
+    suspend fun createReview(request: ReviewCreateRequest): ReviewSession = gson.fromJson(post("/api/reviews", request), ReviewSession::class.java)
+
+    suspend fun getReview(id: String): ReviewSession = gson.fromJson(get("/api/reviews/${encode(id)}"), ReviewSession::class.java)
+
+    suspend fun addReviewComment(id: String, request: ReviewCommentRequest): ReviewSession = gson.fromJson(post("/api/reviews/${encode(id)}/comments", request), ReviewSession::class.java)
+
     private suspend fun delete(path: String): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url("$baseUrl$path")

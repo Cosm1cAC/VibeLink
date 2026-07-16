@@ -1,6 +1,7 @@
 package com.vibelink.app.ui.screens
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
@@ -9,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -42,7 +44,6 @@ import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-@OptIn(ExperimentalGetImage::class)
 @Composable
 fun PairingQrScanner(
     onCodeScanned: (String) -> Unit,
@@ -121,12 +122,11 @@ fun PairingQrScanner(
                         .build()
                         .also { imageAnalysis ->
                             imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                                val mediaImage = imageProxy.image
-                                if (mediaImage == null || consumed.get()) {
+                                val image = imageFromProxy(imageProxy)
+                                if (image == null || consumed.get()) {
                                     imageProxy.close()
                                     return@setAnalyzer
                                 }
-                                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
                                 scanner.process(image)
                                     .addOnSuccessListener { barcodes ->
                                         val rawValue = barcodes.firstOrNull()?.rawValue.orEmpty()
@@ -152,4 +152,10 @@ fun PairingQrScanner(
             previewView
         },
     )
+}
+
+@SuppressLint("UnsafeOptInUsageError")
+private fun imageFromProxy(imageProxy: ImageProxy): InputImage? {
+    val mediaImage = imageProxy.image ?: return null
+    return InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
 }

@@ -65,7 +65,7 @@ function fileMatch(file, workspace, query) {
   };
 }
 
-export function searchContent({ query, scope = "all", limit = 50, cursor = "0", histories = [], tasks = [], workspaces = [], historyDetails = new Map() }) {
+export function searchContent({ query, scope = "all", limit = 50, cursor = "0", tag = "", favorite = false, histories = [], tasks = [], workspaces = [], historyDetails = new Map(), threadState = { items: {} } }) {
   const normalizedQuery = normalize(query);
   const scopeAliases = { session: "sessions", history: "sessions", message: "messages", workspace: "files", file: "files", task: "tasks" };
   const normalizedScope = scopeAliases[normalize(scope)] || normalize(scope) || "all";
@@ -105,7 +105,16 @@ export function searchContent({ query, scope = "all", limit = 50, cursor = "0", 
     }
   }
 
-  const items = matches.slice(offset, offset + pageSize);
+  const requestedTag = normalize(tag);
+  const filteredMatches = matches.filter((item) => {
+    if (!requestedTag && !favorite) return true;
+    const key = item.kind === "history" || item.kind === "message"
+      ? `history:${item.provider}:${item.id}`
+      : item.kind === "task" ? `task:${item.id}` : "";
+    const meta = threadState.items?.[key] || {};
+    return (!favorite || meta.favorite === true) && (!requestedTag || (meta.tags || []).some((value) => normalize(value) === requestedTag));
+  });
+  const items = filteredMatches.slice(offset, offset + pageSize);
   const nextOffset = offset + items.length;
   return {
     items,
@@ -113,11 +122,11 @@ export function searchContent({ query, scope = "all", limit = 50, cursor = "0", 
     scope: normalizedScope,
     limit: pageSize,
     cursor: String(offset),
-    nextCursor: nextOffset < matches.length ? String(nextOffset) : ""
+    nextCursor: nextOffset < filteredMatches.length ? String(nextOffset) : ""
   };
 }
 
-export async function searchAll({ query, scope, limit, cursor, histories, tasks, workspaces }) {
+export async function searchAll({ query, scope, limit, cursor, tag, favorite, histories, tasks, workspaces, threadState }) {
   const historyDetails = new Map();
   if (normalize(scope) === "messages" || !scope || normalize(scope) === "all") {
     const { getHistory } = await import("./history.js");
@@ -126,5 +135,5 @@ export async function searchAll({ query, scope, limit, cursor, histories, tasks,
       if (detail) historyDetails.set(`${item.provider}:${item.id}`, detail);
     }
   }
-  return searchContent({ query, scope, limit, cursor, histories, tasks, workspaces, historyDetails });
+  return searchContent({ query, scope, limit, cursor, tag, favorite, histories, tasks, workspaces, historyDetails, threadState });
 }

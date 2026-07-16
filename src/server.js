@@ -101,7 +101,7 @@ import { startSupervisorMonitor } from "./supervisorMonitor.js";
 import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
-import { createThreadFork, getThreadState, updateThreadState } from "./threadState.js";
+import { createThreadFork, getThreadState, updateThreadState, updateThreadStateBatch } from "./threadState.js";
 import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
@@ -3240,9 +3240,12 @@ async function routeApi(request, response, url) {
       scope: url.searchParams.get("scope") || "all",
       limit: url.searchParams.get("limit") || 50,
       cursor: url.searchParams.get("cursor") || "0",
+      tag: url.searchParams.get("tag") || "",
+      favorite: url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true",
       histories: listHistories({ fresh: false }),
       tasks: conversationTasks(),
-      workspaces: getWorkspaces(settings)
+      workspaces: getWorkspaces(settings),
+      threadState: getThreadState()
     });
     sendJson(response, 200, { ...result, items: applyFields(result.items, url) });
     return;
@@ -3257,6 +3260,12 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     const state = updateThreadState(body.key, body.patch || {});
     sendJson(response, 200, state);
+    return;
+  }
+
+  if (url.pathname === "/api/thread-state/batch" && request.method === "POST") {
+    const body = await readBody(request);
+    sendJson(response, 200, updateThreadStateBatch(body.updates));
     return;
   }
 

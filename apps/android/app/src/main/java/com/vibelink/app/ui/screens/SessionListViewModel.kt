@@ -51,6 +51,9 @@ class SessionListViewModel : ViewModel() {
     private val _showArchived = MutableStateFlow(false)
     val showArchived: StateFlow<Boolean> = _showArchived.asStateFlow()
 
+    private val _showFavorites = MutableStateFlow(false)
+    val showFavorites: StateFlow<Boolean> = _showFavorites.asStateFlow()
+
     private val _desktopStatus = MutableStateFlow("")
     val desktopStatus: StateFlow<String> = _desktopStatus.asStateFlow()
 
@@ -123,6 +126,11 @@ class SessionListViewModel : ViewModel() {
         applyFilters()
     }
 
+    fun setShowFavorites(value: Boolean) {
+        _showFavorites.value = value
+        applyFilters()
+    }
+
     fun patchConversation(apiClient: ApiClient, item: ConversationItem, patch: ThreadPatch) {
         if (item.kind == "desktop" || item.kind == "new") return
         viewModelScope.launch {
@@ -135,6 +143,8 @@ class SessionListViewModel : ViewModel() {
                         group = patch.group ?: current.group,
                         pinned = patch.pinned ?: current.pinned,
                         archived = patch.archived ?: current.archived,
+                        tags = patch.tags ?: current.tags,
+                        favorite = patch.favorite ?: current.favorite,
                     )
                 }
                 applyFilters()
@@ -256,6 +266,8 @@ class SessionListViewModel : ViewModel() {
             group = meta.group.ifBlank { item.group },
             pinned = meta.pinned,
             archived = meta.archived,
+            tags = meta.tags,
+            favorite = meta.favorite,
             updatedAt = latestOf(item.updatedAt, meta.updatedAt),
         )
     }
@@ -327,10 +339,12 @@ class SessionListViewModel : ViewModel() {
     private fun applyFilters() {
         val query = _query.value.trim().lowercase()
         val showArchived = _showArchived.value
+        val showFavorites = _showFavorites.value
         _conversations.value = _allConversations.value
             .filter { item ->
                 item.kind == "desktop" || if (showArchived) item.archived else !item.archived
             }
+            .filter { item -> !showFavorites || item.favorite }
             .filter { item ->
                 if (query.isBlank()) true
                 else listOf(item.title, item.provider, item.cwd, item.sessionId, item.preview, item.group)
@@ -354,7 +368,8 @@ class SessionListViewModel : ViewModel() {
 
         private fun sortManaged(items: List<ConversationItem>): List<ConversationItem> {
             return items.sortedWith(
-                compareByDescending<ConversationItem> { it.pinned }
+            compareByDescending<ConversationItem> { it.favorite }
+                .thenByDescending { it.pinned }
                     .thenBy { it.group.lowercase() }
                     .thenByDescending { parseTime(it.updatedAt) }
             )

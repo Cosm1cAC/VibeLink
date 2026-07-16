@@ -17,3 +17,13 @@ test("file scope matches relative path and content without exposing absolute pat
   assert.deepEqual(result.items, []);
 });
 
+test("favorite and tag filters use persisted thread metadata", () => {
+  const result = searchContent({
+    query: "alpha",
+    favorite: true,
+    tag: "work",
+    histories: [{ id: "h1", provider: "codex", title: "alpha" }, { id: "h2", provider: "codex", title: "alpha" }],
+    threadState: { items: { "history:codex:h1": { favorite: true, tags: ["work"] }, "history:codex:h2": { favorite: false, tags: ["work"] } } }
+  });
+  assert.deepEqual(result.items.map((item) => item.id), ["h1"]);
+});

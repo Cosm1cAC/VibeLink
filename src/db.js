@@ -1747,13 +1747,16 @@ export function getThreadStateFromDb() {
   const items = {};
 
   for (const row of itemRows) {
+    const rowMeta = fromJson(row.meta_json, {}) || {};
     items[row.key] = {
-      ...(fromJson(row.meta_json, {}) || {}),
+      ...rowMeta,
       key: row.key,
       title: row.title || "",
       group: row.group_name || "",
       pinned: rowBool(row.pinned),
       archived: rowBool(row.archived),
+      tags: Array.isArray(rowMeta.tags) ? rowMeta.tags : [],
+      favorite: Boolean(rowMeta.favorite),
       updatedAt: row.updated_at
     };
   }
@@ -1795,6 +1798,8 @@ export function upsertThreadMeta(key, patch = {}) {
       ...(patch.meta && typeof patch.meta === "object" ? patch.meta : {})
     }
   };
+  if (Object.hasOwn(patch, "tags")) next.meta.tags = Array.isArray(patch.tags) ? patch.tags.map((tag) => cleanString(tag, 40)).filter(Boolean).slice(0, 20) : [];
+  if (Object.hasOwn(patch, "favorite")) next.meta.favorite = Boolean(patch.favorite);
 
   database()
     .prepare(`

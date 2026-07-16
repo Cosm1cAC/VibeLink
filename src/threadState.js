@@ -78,6 +78,13 @@ export function updateThreadState(key, patch = {}) {
   return upsertThreadMeta(cleanKey, patch);
 }
 
+export function updateThreadStateBatch(updates = []) {
+  if (!Array.isArray(updates) || updates.length === 0) throw new Error("At least one thread update is required.");
+  let state;
+  for (const update of updates.slice(0, 200)) state = updateThreadState(update?.key, update?.patch || {});
+  return state || getThreadState();
+}
+
 export function createThreadFork(payload = {}) {
   const sourceKey = cleanString(payload.sourceKey, 320);
   const provider = payload.provider === "claude" ? "claude" : "codex";

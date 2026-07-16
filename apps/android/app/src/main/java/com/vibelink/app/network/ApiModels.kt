@@ -885,13 +885,23 @@ data class ThreadMeta(
     val messageOverrides: List<Map<String, Any?>> = emptyList(),
 )
 
-data class SearchResponse(val items: List<SearchResult> = emptyList(), val query: String = "", val limit: Int = 0)
+data class SearchResponse(
+    val items: List<SearchResult> = emptyList(),
+    val query: String = "",
+    val scope: String = "all",
+    val limit: Int = 0,
+    val cursor: String = "",
+    val nextCursor: String = "",
+)
 data class SearchResult(
     val kind: String = "",
     val id: String = "",
     val provider: String = "",
     val title: String = "",
     val snippet: String = "",
+    val path: String = "",
+    val workspaceId: String = "",
+    val turnId: String = "",
 )
 
 data class DeviceTokenRotationResponse(

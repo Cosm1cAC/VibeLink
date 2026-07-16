@@ -184,8 +184,9 @@ class ApiClient(
         )
     }
 
-    suspend fun search(query: String, limit: Int = 50): SearchResponse {
-        val json = get("/api/search?q=${encode(query)}&limit=$limit")
+    suspend fun search(query: String, scope: String = "all", limit: Int = 50, cursor: String = ""): SearchResponse {
+        val cursorParam = if (cursor.isBlank()) "" else "&cursor=${encode(cursor)}"
+        val json = get("/api/search?q=${encode(query)}&scope=${encode(scope)}&limit=$limit$cursorParam")
         return gson.fromJson(json, SearchResponse::class.java)
     }
 

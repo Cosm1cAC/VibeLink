@@ -86,6 +86,8 @@ fun SessionListScreen(
     val refreshing by viewModel.refreshing.collectAsState()
     val error by viewModel.error.collectAsState()
     val searchResults by viewModel.searchResults.collectAsState()
+    val searchLoading by viewModel.searchLoading.collectAsState()
+    val searchError by viewModel.searchError.collectAsState()
     val strings = LocalAppStrings.current
 
     var topMenuOpen by remember { mutableStateOf(false) }
@@ -247,6 +249,21 @@ fun SessionListScreen(
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
+                            if (query.trim().length >= 2 && searchLoading) {
+                                item(key = "remote-search-loading") {
+                                    ListItem(headlineContent = { Text("Searching…") }, supportingContent = { Text("Loading unified results") })
+                                }
+                            }
+                            if (query.trim().length >= 2 && searchError.isNotBlank()) {
+                                item(key = "remote-search-error") {
+                                    ListItem(headlineContent = { Text("Search failed") }, supportingContent = { Text(searchError) })
+                                }
+                            }
+                            if (query.trim().length >= 2 && !searchLoading && searchError.isBlank() && searchResults.isEmpty()) {
+                                item(key = "remote-search-empty") {
+                                    ListItem(headlineContent = { Text("No matching results") })
+                                }
+                            }
                             if (query.trim().length >= 2 && searchResults.isNotEmpty()) {
                                 item(key = "remote-search-header") { Text("Search results", style = MaterialTheme.typography.titleSmall) }
                                 items(searchResults, key = { "search:${it.kind}:${it.id}" }) { result ->

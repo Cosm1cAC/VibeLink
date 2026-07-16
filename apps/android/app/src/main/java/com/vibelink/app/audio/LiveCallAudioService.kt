@@ -184,6 +184,9 @@ class LiveCallAudioService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "实时通话助手", NotificationManager.IMPORTANCE_LOW),
         )
+        manager.createNotificationChannel(
+            NotificationChannel(PUSH_CHANNEL_ID, "VibeLink 通知", NotificationManager.IMPORTANCE_DEFAULT),
+        )
     }
 
     private fun recordingFile(sessionId: String): File {
@@ -192,6 +195,7 @@ class LiveCallAudioService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "vibelink_live_call"
+        private const val PUSH_CHANNEL_ID = "bridge-push"
         private const val NOTIFICATION_ID = 7101
         const val ACTION_START = "com.vibelink.app.livecall.START"
         const val ACTION_PAUSE = "com.vibelink.app.livecall.PAUSE"

@@ -16,15 +16,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.vibelink.app.mobile.NotificationPermissionPolicy
 import com.vibelink.app.mobile.IncomingSharedContent
+import com.vibelink.app.mobile.MobileResilienceRuntime
 import com.vibelink.app.ui.VibeLinkApp
 import com.vibelink.app.ui.theme.VibeLinkTheme
 
 class MainActivity : ComponentActivity() {
+    private lateinit var resilienceRuntime: MobileResilienceRuntime
     private var pairingUri by mutableStateOf<String?>(null)
     private var sharedContent by mutableStateOf(IncomingSharedContent())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        resilienceRuntime = MobileResilienceRuntime(applicationContext)
+        lifecycle.addObserver(resilienceRuntime)
         enableEdgeToEdge()
         requestNotificationPermissionIfNeeded(activityRecreated = savedInstanceState != null)
         applyIncomingIntent(intent)
@@ -39,6 +43,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        resilienceRuntime.dispose()
+        lifecycle.removeObserver(resilienceRuntime)
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -188,7 +188,6 @@ fun LoginScreen(
                         try {
                             val login = apiClient.login(pairingToken.trim())
                             if (login.token.isNotBlank()) {
-                                settingsStore.setPairingToken(pairingToken.trim())
                                 persistLogin(url, login.token)
                             } else {
                                 status = "登录失败：设备 Token 为空。"

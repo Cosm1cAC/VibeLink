@@ -337,6 +337,7 @@ fun MessageListScreen(
                             MessageBubble(
                                 message = message,
                                 apiBaseUrl = apiClient.baseUrl,
+                                authToken = apiClient.token,
                                 compact = isDesktopRemote,
                                 onEdit = viewModel::editMessage,
                                 onDelete = viewModel::deleteMessage,
@@ -576,6 +577,7 @@ private fun ComposerBar(
 private fun MessageBubble(
     message: ChatMessage,
     apiBaseUrl: String,
+    authToken: String,
     compact: Boolean,
     onEdit: (ChatMessage, String) -> Unit,
     onDelete: (ChatMessage) -> Unit,
@@ -759,15 +761,16 @@ private fun MessageBubble(
                     Spacer(Modifier.height(8.dp))
                     ImagePreviewGallery(
                         apiBaseUrl = apiBaseUrl,
+                        authToken = authToken,
                         links = imageLinks,
-                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url)) },
+                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url, authToken)) },
                     )
                 }
                 if (artifactLinks.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     ArtifactChips(
                         links = artifactLinks,
-                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url)) },
+                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url, authToken)) },
                     )
                 }
             }
@@ -778,6 +781,7 @@ private fun MessageBubble(
 @Composable
 private fun ImagePreviewGallery(
     apiBaseUrl: String,
+    authToken: String,
     links: List<MessageContentUtils.ContentLink>,
     onOpen: (MessageContentUtils.ContentLink) -> Unit,
 ) {
@@ -790,7 +794,10 @@ private fun ImagePreviewGallery(
             ) {
                 Box {
                     AsyncImage(
-                        model = resolveContentUrl(apiBaseUrl, link.url),
+                        model = coil.request.ImageRequest.Builder(LocalContext.current)
+                            .data(resolveContentUrl(apiBaseUrl, link.url))
+                            .addHeader("Authorization", "Bearer $authToken")
+                            .build(),
                         contentDescription = link.label.ifBlank { "Image" },
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -937,11 +944,13 @@ private fun copyMessage(context: Context, text: String, toast: String = "Copied"
     Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
 }
 
-private fun resolveContentUrl(baseUrl: String, rawUrl: String): String {
+private fun resolveContentUrl(baseUrl: String, rawUrl: String, token: String = ""): String {
     val trimmed = rawUrl.trim()
     if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) return trimmed
     val base = baseUrl.trimEnd('/')
-    return if (trimmed.startsWith('/')) "$base$trimmed" else "$base/$trimmed"
+    val url = if (trimmed.startsWith('/')) "$base$trimmed" else "$base/$trimmed"
+    return if (token.isBlank() || !url.contains("/api/attachments/")) url
+    else url + if (url.contains('?')) "&token=${Uri.encode(token)}" else "?token=${Uri.encode(token)}"
 }
 
 private suspend fun uploadAttachmentUri(
@@ -952,10 +961,18 @@ private suspend fun uploadAttachmentUri(
     val resolver = context.contentResolver
     val name = displayNameForUri(context, uri)
     val mimeType = resolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }
-    val bytes = withContext(Dispatchers.IO) {
-        resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
-    }
-    return apiClient.uploadAttachment(bytes = bytes, fileName = name, mimeType = mimeType)
+    val size = resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getLong(cursor.getColumnIndexOrThrow(OpenableColumns.SIZE)) else -1L
+    } ?: -1L
+    val maxBytes = 30L * 1024L * 1024L
+    if (size > maxBytes) error("Attachment exceeds 30 MB limit")
+    val input = resolver.openInputStream(uri) ?: error("Unable to open attachment")
+    return apiClient.uploadAttachment(
+        input = input,
+        contentLength = size.coerceAtLeast(0L),
+        fileName = name,
+        mimeType = mimeType,
+    )
 }
 
 private fun displayNameForUri(context: Context, uri: Uri): String {

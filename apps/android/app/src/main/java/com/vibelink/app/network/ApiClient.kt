@@ -7,11 +7,15 @@ import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.net.URLEncoder
+import java.io.InputStream
+import okio.BufferedSink
+import okio.source
 import java.util.concurrent.TimeUnit
 
 /**
@@ -171,13 +175,36 @@ class ApiClient(
         mimeType: String = "application/octet-stream",
         relativePath: String = "",
     ): AttachmentUploadResponse = withContext(Dispatchers.IO) {
+        uploadAttachment(
+            input = bytes.inputStream(),
+            contentLength = bytes.size.toLong(),
+            fileName = fileName,
+            mimeType = mimeType,
+            relativePath = relativePath,
+        )
+    }
+
+    suspend fun uploadAttachment(
+        input: InputStream,
+        contentLength: Long,
+        fileName: String,
+        mimeType: String = "application/octet-stream",
+        relativePath: String = "",
+    ): AttachmentUploadResponse = withContext(Dispatchers.IO) {
         val contentType = mimeType.ifBlank { "application/octet-stream" }.toMediaType()
+        val body = object : RequestBody() {
+            override fun contentType() = contentType
+            override fun contentLength() = contentLength
+            override fun writeTo(sink: BufferedSink) {
+                input.use { source -> sink.writeAll(source.source()) }
+            }
+        }
         val req = Request.Builder()
             .url("$baseUrl/api/attachments")
             .apply { authHeaders().forEach { (k, v) -> addHeader(k, v) } }
             .addHeader("X-File-Name", encode(fileName.ifBlank { "attachment" }))
             .apply { if (relativePath.isNotBlank()) addHeader("X-Relative-Path", encode(relativePath)) }
-            .post(bytes.toRequestBody(contentType))
+            .post(body)
             .build()
         httpClient.newCall(req).execute().use { response ->
             val body = response.body?.string() ?: ""

@@ -3233,6 +3233,30 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/search" && request.method === "GET") {
+    const query = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 200);
+    if (!query) {
+      sendJson(response, 200, { items: [], query: "", limit });
+      return;
+    }
+    const matches = [];
+    for (const item of listHistories({ fresh: false })) {
+      const haystack = JSON.stringify(item).toLowerCase();
+      if (haystack.includes(query)) matches.push({ kind: "history", id: item.id || "", provider: item.provider || "", title: item.title || item.id || "History", snippet: item.preview || item.lastMessage || "" });
+      if (matches.length >= limit) break;
+    }
+    if (matches.length < limit) {
+      for (const item of conversationTasks()) {
+        const haystack = JSON.stringify(item).toLowerCase();
+        if (haystack.includes(query)) matches.push({ kind: "task", id: item.id || "", provider: item.agent || "", title: item.title || item.id || "Task", snippet: item.preview || item.status || "" });
+        if (matches.length >= limit) break;
+      }
+    }
+    sendJson(response, 200, { items: applyFields(matches, url), query, limit });
+    return;
+  }
+
   if (url.pathname === "/api/thread-state" && request.method === "GET") {
     sendJson(response, 200, getThreadState());
     return;

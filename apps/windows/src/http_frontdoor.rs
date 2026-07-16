@@ -1,3 +1,4 @@
+use crate::device_http::{route_device_request, DeviceRouteConfig};
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
 use crate::status_http::{
     parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
@@ -20,6 +21,7 @@ pub fn serve(
     node: &mut Child,
     status_route: Option<StatusRouteConfig>,
     doctor_route: Option<DoctorRouteConfig>,
+    device_route: Option<DeviceRouteConfig>,
 ) -> Result<()> {
     listener
         .set_nonblocking(true)
@@ -48,12 +50,14 @@ pub fn serve(
                 let active = Arc::clone(&active);
                 let status_route = status_route.clone();
                 let doctor_route = doctor_route.clone();
+                let device_route = device_route.clone();
                 thread::spawn(move || {
                     if let Err(error) = handle_connection(
                         client,
                         upstream,
                         status_route.as_ref(),
                         doctor_route.as_ref(),
+                        device_route.as_ref(),
                     ) {
                         eprintln!("Rust HTTP front door connection failed: {error}");
                     }
@@ -73,8 +77,9 @@ fn handle_connection(
     upstream: SocketAddr,
     status_route: Option<&StatusRouteConfig>,
     doctor_route: Option<&DoctorRouteConfig>,
+    device_route: Option<&DeviceRouteConfig>,
 ) -> io::Result<()> {
-    if status_route.is_none() && doctor_route.is_none() {
+    if status_route.is_none() && doctor_route.is_none() && device_route.is_none() {
         return proxy_connection(client, upstream);
     }
 
@@ -97,6 +102,16 @@ fn handle_connection(
                 Err(error) => {
                     doctor_route.record_fallback();
                     eprintln!("Rust Doctor route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(device_route) = device_route {
+            match route_device_request(&request, device_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    device_route.record_fallback();
+                    eprintln!("Rust Device route falling back to Node: {error:#}");
                 }
             }
         }
@@ -184,6 +199,7 @@ fn write_service_unavailable(client: &mut TcpStream) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{handle_connection, proxy_connection};
+    use crate::device_http::DeviceRouteConfig;
     use crate::doctor_http::DoctorRouteConfig;
     use crate::status_http::StatusRouteConfig;
     use std::fs;
@@ -308,7 +324,7 @@ mod tests {
         );
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
-            handle_connection(client, upstream_addr, Some(&status_route), None).unwrap();
+            handle_connection(client, upstream_addr, Some(&status_route), None, None).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
@@ -352,7 +368,7 @@ mod tests {
             DoctorRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
-            handle_connection(client, upstream_addr, None, Some(&doctor_route)).unwrap();
+            handle_connection(client, upstream_addr, None, Some(&doctor_route), None).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
@@ -369,5 +385,57 @@ mod tests {
         );
         proxy_thread.join().unwrap();
         upstream_thread.join().unwrap();
+    }
+
+    #[test]
+    fn device_route_failure_replays_the_original_request_to_node() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            assert_eq!(
+                request,
+                b"GET /api/devices HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
+                .unwrap();
+        });
+
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let invalid_data_dir = std::env::temp_dir().join(format!(
+            "vibelink-devices-http-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&invalid_data_dir).unwrap();
+        fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
+        let device_route = DeviceRouteConfig::new(invalid_data_dir.clone());
+        let proxy_thread = thread::spawn(move || {
+            let (client, _) = frontend.accept().unwrap();
+            handle_connection(client, upstream_addr, None, None, Some(&device_route)).unwrap();
+        });
+
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client
+            .write_all(b"GET /api/devices HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        );
+        proxy_thread.join().unwrap();
+        upstream_thread.join().unwrap();
+        fs::remove_dir_all(invalid_data_dir).unwrap();
     }
 }

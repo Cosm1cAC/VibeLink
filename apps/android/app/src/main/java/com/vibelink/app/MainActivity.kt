@@ -8,6 +8,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
@@ -19,6 +20,12 @@ import com.vibelink.app.mobile.IncomingSharedContent
 import com.vibelink.app.mobile.MobileResilienceRuntime
 import com.vibelink.app.ui.VibeLinkApp
 import com.vibelink.app.ui.theme.VibeLinkTheme
+import com.google.firebase.messaging.FirebaseMessaging
+import com.vibelink.app.data.SettingsStore
+import com.vibelink.app.network.ApiClient
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.tasks.await
 
 class MainActivity : ComponentActivity() {
     private lateinit var resilienceRuntime: MobileResilienceRuntime
@@ -32,6 +39,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         requestNotificationPermissionIfNeeded(activityRecreated = savedInstanceState != null)
         applyIncomingIntent(intent)
+        registerFirebaseToken()
         setContent {
             VibeLinkTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -41,6 +49,20 @@ class MainActivity : ComponentActivity() {
                         onSharedContentConsumed = ::consumeSharedContent,
                     )
                 }
+            }
+        }
+    }
+
+    private fun registerFirebaseToken() {
+        lifecycleScope.launch {
+            runCatching {
+                val settings = SettingsStore(applicationContext)
+                val token = settings.getTokenSync()
+                val bridgeUrl = settings.bridgeUrl.first().trimEnd('/')
+                if (token.isBlank() || bridgeUrl.isBlank()) return@runCatching
+                val fcmToken = FirebaseMessaging.getInstance().token.await()
+                if (fcmToken.isBlank()) return@runCatching
+                ApiClient(bridgeUrl, token).registerNativePushToken(provider = "fcm", token = fcmToken)
             }
         }
     }

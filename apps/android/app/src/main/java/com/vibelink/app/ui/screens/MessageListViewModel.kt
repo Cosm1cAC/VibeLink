@@ -21,6 +21,7 @@ import com.vibelink.app.network.TaskEvent
 import com.vibelink.app.network.ToolCallSummary
 import com.vibelink.app.network.ToolEvent
 import com.vibelink.app.network.ToolOutputEvent
+import com.vibelink.app.network.ThreadPatch
 import com.vibelink.app.mobile.EventStreamRecoveryPolicy
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -35,6 +36,12 @@ data class PendingApprovalState(
     val approvalId: String,
     val message: String,
 )
+
+private fun messageOperationKey(message: ChatMessage): String = when {
+    message.turnId.isNotBlank() -> "turn:${message.turnId}"
+    message.id.isNotBlank() -> "id:${message.id}"
+    else -> "text:${message.role}:${message.text.trim()}"
+}
 
 class MessageListViewModel : ViewModel() {
 
@@ -85,12 +92,14 @@ class MessageListViewModel : ViewModel() {
     private var toolReconnectAttempt = 0
     private var loadSequence = 0L
     private var activeConversation: ConversationItem? = null
+    private var persistenceApiClient: ApiClient? = null
     private val seenTaskEvents = mutableSetOf<String>()
     private val seenToolEvents = mutableSetOf<String>()
     private val toolEventsByRun = linkedMapOf<String, MutableList<ToolEvent>>()
 
     fun loadConversation(apiClient: ApiClient, conversation: ConversationItem) {
         stopStreaming()
+        persistenceApiClient = apiClient
         activeConversation = conversation
         loadSequence += 1
         val seq = loadSequence
@@ -122,6 +131,7 @@ class MessageListViewModel : ViewModel() {
                     "fork" -> loadFork(apiClient, conversation, seq)
                     else -> loadHistory(apiClient, conversation, seq)
                 }
+                applyPersistedMessageOverrides(apiClient, conversation.key)
             } catch (error: Exception) {
                 _error.value = error.message ?: "Failed to load conversation"
             } finally {
@@ -251,11 +261,14 @@ class MessageListViewModel : ViewModel() {
     }
 
     fun editMessage(target: ChatMessage, nextText: String) {
-        _messages.value = editFirstMatchingMessage(_messages.value, target, nextText)
+        val trimmed = nextText.trim()
+        _messages.value = editFirstMatchingMessage(_messages.value, target, trimmed)
+        persistMessageOverride(target, deleted = false, text = trimmed)
     }
 
     fun deleteMessage(target: ChatMessage) {
         _messages.value = deleteFirstMatchingMessage(_messages.value, target)
+        persistMessageOverride(target, deleted = true)
     }
 
     fun regenerateMessage(
@@ -272,7 +285,37 @@ class MessageListViewModel : ViewModel() {
             return
         }
         _messages.value = deleteFirstMatchingMessage(_messages.value, target)
+        persistMessageOverride(target, deleted = true)
         sendPrompt(apiClient, prompt, agent, model, reasoningEffort, cwd)
+    }
+
+    private fun persistMessageOverride(target: ChatMessage, deleted: Boolean, text: String = "") {
+        val key = activeConversation?.key ?: return
+        val messageKey = messageOperationKey(target)
+        viewModelScope.launch {
+            runCatching {
+                val client = persistenceApiClient ?: return@runCatching
+                val current = client.getThreadState().items[key]?.messageOverrides.orEmpty()
+                val next = current.filterNot { item -> (item as? Map<*, *>)?.get("key")?.toString() == messageKey } +
+                    mapOf("key" to messageKey, "deleted" to deleted, "text" to text)
+                client.patchThread(key, ThreadPatch(meta = mapOf("messageOverrides" to next)))
+            }
+        }
+    }
+
+    private suspend fun applyPersistedMessageOverrides(apiClient: ApiClient, key: String) {
+        val overrides = apiClient.getThreadState().items[key]?.messageOverrides.orEmpty()
+        val byKey = overrides.mapNotNull { item ->
+            (item as? Map<*, *>)?.let { map ->
+                val messageKey = map["key"]?.toString().orEmpty()
+                if (messageKey.isBlank()) null else messageKey to map
+            }
+        }.toMap()
+        _messages.value = _messages.value.flatMap { message ->
+            val override = byKey[messageOperationKey(message)] ?: return@flatMap listOf(message)
+            if (override["deleted"] == true || override["deleted"]?.toString() == "true") emptyList()
+            else listOf(message.copy(text = override["text"]?.toString().orEmpty(), streaming = false))
+        }
     }
 
     fun stopCurrentTask(apiClient: ApiClient) {

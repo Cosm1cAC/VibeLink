@@ -184,6 +184,49 @@ class ApiClient(
         )
     }
 
+    private suspend fun delete(path: String): String = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("$baseUrl$path")
+            .apply { authHeaders().forEach { (k, v) -> addHeader(k, v) } }
+            .delete()
+            .build()
+        httpClient.newCall(req).execute().use { response ->
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) throw ApiException(response.code, body)
+            body
+        }
+    }
+
+    suspend fun rotateCurrentDevice(): DeviceTokenRotationResponse {
+        val json = post("/api/devices/current/rotate", emptyMap<String, String>())
+        return gson.fromJson(json, DeviceTokenRotationResponse::class.java)
+    }
+
+    suspend fun rotateDevice(deviceId: String): DeviceTokenRotationResponse {
+        val json = post("/api/devices/${encode(deviceId)}/rotate", emptyMap<String, String>())
+        return gson.fromJson(json, DeviceTokenRotationResponse::class.java)
+    }
+
+    suspend fun revokePushSubscription(subscriptionId: String): SimpleOk {
+        val json = delete("/api/push/subscriptions/${encode(subscriptionId)}")
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun getTaskChanges(taskId: String): TaskChangesResponse {
+        val json = get("/api/tasks/${encode(taskId)}/changes")
+        return gson.fromJson(json, TaskChangesResponse::class.java)
+    }
+
+    suspend fun getWorkspaceContext(workspaceId: String, request: Map<String, Any?> = emptyMap()): WorkspaceContextResponse {
+        val json = post("/api/workspaces/${encode(workspaceId)}/context", request)
+        return gson.fromJson(json, WorkspaceContextResponse::class.java)
+    }
+
+    suspend fun createWorkspace(name: String, path: String, allowedRoot: String = ""): WorkspaceItem {
+        val json = post("/api/workspaces", mapOf("name" to name, "path" to path, "allowedRoot" to allowedRoot))
+        return gson.fromJson(json, WorkspaceCreateResponse::class.java).workspace
+    }
+
     suspend fun uploadAttachment(
         input: InputStream,
         contentLength: Long,

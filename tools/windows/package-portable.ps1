@@ -55,9 +55,24 @@ $publicDir = Join-Path $stageRoot "public"
 $viteEntry = Join-Path $root "node_modules\vite\bin\vite.js"
 if (-not (Test-Path -LiteralPath $viteEntry)) { throw "Vite is not installed. Run npm install before packaging." }
 Invoke-Checked "node.exe" @($viteEntry, "build", "--outDir", $publicDir, "--emptyOutDir")
-Invoke-Checked "cargo.exe" @("build", "--release", "--manifest-path", (Join-Path $root "apps\windows\Cargo.toml"))
 
-Copy-Item -LiteralPath (Join-Path $root "apps\windows\target\release\vibelink.exe") -Destination (Join-Path $stageRoot "vibelink.exe")
+$cargoTargetRoot = if ($env:CARGO_TARGET_DIR) {
+  if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+    [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+  } else {
+    [IO.Path]::GetFullPath((Join-Path $root $env:CARGO_TARGET_DIR))
+  }
+} else {
+  Join-Path $root "apps\windows\target"
+}
+$originalCargoTargetDir = $env:CARGO_TARGET_DIR
+$env:CARGO_TARGET_DIR = $cargoTargetRoot
+try {
+  Invoke-Checked "cargo.exe" @("build", "--release", "--manifest-path", (Join-Path $root "apps\windows\Cargo.toml"))
+} finally {
+  $env:CARGO_TARGET_DIR = $originalCargoTargetDir
+}
+Copy-Item -LiteralPath (Join-Path $cargoTargetRoot "release\vibelink.exe") -Destination (Join-Path $stageRoot "vibelink.exe")
 Copy-Item -LiteralPath (Join-Path $root "src") -Destination (Join-Path $stageRoot "src") -Recurse
 New-Item -ItemType Directory -Path (Join-Path $stageRoot "packages") -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "packages\doubao-cli") -Destination (Join-Path $stageRoot "packages\doubao-cli") -Recurse
@@ -187,6 +202,11 @@ $manifest = [ordered]@{
 [IO.File]::WriteAllText(
   (Join-Path $stageRoot "start-vibelink-settings-http-canary.cmd"),
   "@echo off`r`ncd /d %~dp0`r`nvibelink.exe --rust-canary --rust-http-canary --rust-status-http --rust-doctor-http --rust-devices-http --rust-device-mutations-http --rust-pairing-http --rust-audit-http --rust-settings-http %*`r`n",
+  [Text.Encoding]::ASCII
+)
+[IO.File]::WriteAllText(
+  (Join-Path $stageRoot "start-vibelink-tool-events-http-canary.cmd"),
+  "@echo off`r`ncd /d %~dp0`r`nvibelink.exe --rust-canary --rust-http-canary --rust-status-http --rust-doctor-http --rust-devices-http --rust-device-mutations-http --rust-pairing-http --rust-audit-http --rust-settings-http --rust-tool-events-http %*`r`n",
   [Text.Encoding]::ASCII
 )
 

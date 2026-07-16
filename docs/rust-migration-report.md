@@ -206,6 +206,8 @@ Host 与设备鉴权继续复用 Rust 控制面前置检查，`host.blocked`/`au
 
 提交 `981fc5ebcfd1ee90bdfead13b0e76cacb005c8a5` 为 Windows launcher 增加全局 `--rust-canary`，portable 包同时生成 `start-vibelink-canary.cmd`。该配置只为未显式设置的变量启用当前 Status、Workspace、MCP、Event Store 与三个事件 batch canary，现有环境覆盖仍优先，普通 `vibelink.exe` 默认行为不变。
 
+portable 包的累计 HTTP 入口按迁移顺序保留，并由 `start-vibelink-tool-events-http-canary.cmd` 启用当前全部 Rust HTTP opt-in 路由；打包器支持显式 `CARGO_TARGET_DIR`，因此可以在现网默认 release 二进制被占用时从隔离 target 构建，不需要先停止服务。
+
 对应 Windows x64 ZIP SHA256 为 `61841ac3f92ea70dd65f07bbcc0698c969595037df67a4f93bfcbe62d1e45c3a`。该包此前以 `vibelink.exe --rust-canary bridge --host 0.0.0.0 --port 8787` 监督公网 bridge；暖态认证探针确认 Status、Workspace 和 Event Store ready，MCP persistent session/sidecar 可用，全部 pending、failure 和 fallback 为 0，三个事件 batch 开关均已启用。该阶段 5 次认证公网 Status canary 的 p95 为 2020.43ms，Rust attempt/response 各增加 5，错误计数仍为 0。公网根路径为 200，未认证本地/公网 status 均为 401，配对 token 日志保持隐藏。
 
 ## Audio Pipeline

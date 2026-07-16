@@ -22,6 +22,8 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
@@ -95,6 +97,9 @@ fun SessionListScreen(
     var renameText by remember { mutableStateOf("") }
     var forkTarget by remember { mutableStateOf<ConversationItem?>(null) }
     var forkText by remember { mutableStateOf("") }
+    val showFavorites by viewModel.showFavorites.collectAsState()
+    var tagsTarget by remember { mutableStateOf<ConversationItem?>(null) }
+    var tagsText by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         viewModel.load(apiClient)
@@ -215,6 +220,13 @@ fun SessionListScreen(
                     },
                 )
                 AssistChip(
+                    onClick = { viewModel.setShowFavorites(!showFavorites) },
+                    label = { Text(if (showFavorites) "Favorites" else "All") },
+                    leadingIcon = {
+                        Icon(if (showFavorites) Icons.Default.Favorite else Icons.Default.FavoriteBorder, contentDescription = null, modifier = Modifier.size(16.dp))
+                    },
+                )
+                AssistChip(
                     onClick = { viewModel.load(apiClient, isRefresh = true) },
                     label = { Text(strings.syncNow) },
                 )
@@ -296,6 +308,13 @@ fun SessionListScreen(
                                     onPin = {
                                         viewModel.patchConversation(apiClient, item, ThreadPatch(pinned = !item.pinned))
                                     },
+                                    onFavorite = {
+                                        viewModel.patchConversation(apiClient, item, ThreadPatch(favorite = !item.favorite))
+                                    },
+                                    onTags = {
+                                        tagsTarget = item
+                                        tagsText = item.tags.joinToString(", ")
+                                    },
                                     onArchive = {
                                         viewModel.patchConversation(apiClient, item, ThreadPatch(archived = !item.archived))
                                     },
@@ -343,12 +362,27 @@ fun SessionListScreen(
             },
         )
     }
+
+    tagsTarget?.let { target ->
+        TextInputDialog(
+            title = "Edit tags",
+            value = tagsText,
+            onValueChange = { tagsText = it },
+            confirmText = strings.save,
+            onDismiss = { tagsTarget = null },
+            onConfirm = {
+                viewModel.patchConversation(apiClient, target, ThreadPatch(tags = tagsText.split(",").map { it.trim() }.filter { it.isNotBlank() }))
+                tagsTarget = null
+            },
+        )
+    }
 }
 
 object SessionListErrorPolicy {
     fun showCachedContentError(error: String, conversationCount: Int): Boolean {
         return error.isNotBlank() && conversationCount > 0
     }
+
 }
 
 @Composable
@@ -376,6 +410,8 @@ private fun ConversationCard(
     onClick: () -> Unit,
     onRename: () -> Unit,
     onPin: () -> Unit,
+    onFavorite: () -> Unit,
+    onTags: () -> Unit,
     onArchive: () -> Unit,
     onFork: () -> Unit,
     modifier: Modifier = Modifier,
@@ -463,6 +499,16 @@ private fun ConversationCard(
                                     menuOpen = false
                                     onPin()
                                 },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (item.favorite) "Remove favorite" else "Favorite") },
+                                leadingIcon = { Icon(if (item.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, contentDescription = null) },
+                                onClick = { menuOpen = false; onFavorite() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Edit tags") },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                onClick = { menuOpen = false; onTags() },
                             )
                             DropdownMenuItem(
                                 text = { Text(strings.fork) },

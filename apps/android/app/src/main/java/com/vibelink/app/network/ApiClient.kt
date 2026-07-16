@@ -465,6 +465,11 @@ class ApiClient(
         return gson.fromJson(json, ThreadStateResponse::class.java)
     }
 
+    suspend fun patchThreads(updates: List<ThreadPatchRequest>): ThreadStateResponse {
+        val json = post("/api/thread-state/batch", mapOf("updates" to updates))
+        return gson.fromJson(json, ThreadStateResponse::class.java)
+    }
+
     suspend fun createThreadFork(
         sourceKey: String,
         sourceId: String,

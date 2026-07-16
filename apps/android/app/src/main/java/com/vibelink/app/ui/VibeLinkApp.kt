@@ -85,7 +85,7 @@ fun VibeLinkApp(
 
     LaunchedEffect(resilienceRuntime) {
         resilienceRuntime?.policy?.collect { policy ->
-            val paused = policy.eventPollIntervalMs == 0L
+            val paused = policy.suspendRealtimeStreams
             messageListViewModel.setResiliencePaused(paused)
             workspaceViewModel.setResiliencePaused(paused)
             callViewModel.setResiliencePaused(paused)

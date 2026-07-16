@@ -30,6 +30,7 @@ data class MobileRuntimePolicy(
     val eventPollIntervalMs: Long,
     val notificationChannel: String,
     val multiDeviceSyncEnabled: Boolean,
+    val suspendRealtimeStreams: Boolean,
 )
 
 fun resolveMobileRuntimePolicy(input: MobileRuntimeInputs): MobileRuntimePolicy {
@@ -55,5 +56,6 @@ fun resolveMobileRuntimePolicy(input: MobileRuntimeInputs): MobileRuntimePolicy 
         eventPollIntervalMs = pollInterval,
         notificationChannel = channel,
         multiDeviceSyncEnabled = input.pairedDeviceCount > 1,
+        suspendRealtimeStreams = background || input.networkQuality == NetworkQuality.Offline,
     )
 }

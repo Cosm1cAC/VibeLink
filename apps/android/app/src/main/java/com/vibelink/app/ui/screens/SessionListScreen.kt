@@ -39,6 +39,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -84,6 +85,7 @@ fun SessionListScreen(
     val loading by viewModel.loading.collectAsState()
     val refreshing by viewModel.refreshing.collectAsState()
     val error by viewModel.error.collectAsState()
+    val searchResults by viewModel.searchResults.collectAsState()
     val strings = LocalAppStrings.current
 
     var topMenuOpen by remember { mutableStateOf(false) }
@@ -245,6 +247,18 @@ fun SessionListScreen(
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
+                            if (query.trim().length >= 2 && searchResults.isNotEmpty()) {
+                                item(key = "remote-search-header") { Text("Search results", style = MaterialTheme.typography.titleSmall) }
+                                items(searchResults, key = { "search:${it.kind}:${it.id}" }) { result ->
+                                    ListItem(
+                                        headlineContent = { Text(result.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        supportingContent = { Text(result.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                                        modifier = Modifier.clickable {
+                                            onSelectConversation(ConversationItem(key = "${result.kind}:${result.id}", kind = result.kind, id = result.id, provider = result.provider, title = result.title, preview = result.snippet))
+                                        },
+                                    )
+                                }
+                            }
                             if (SessionListErrorPolicy.showCachedContentError(error, conversations.size)) {
                                 item(key = "cached-refresh-error") {
                                     CachedRefreshError(

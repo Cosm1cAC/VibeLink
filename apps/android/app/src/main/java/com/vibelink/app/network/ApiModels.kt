@@ -885,6 +885,15 @@ data class ThreadMeta(
     val messageOverrides: List<Map<String, Any?>> = emptyList(),
 )
 
+data class SearchResponse(val items: List<SearchResult> = emptyList(), val query: String = "", val limit: Int = 0)
+data class SearchResult(
+    val kind: String = "",
+    val id: String = "",
+    val provider: String = "",
+    val title: String = "",
+    val snippet: String = "",
+)
+
 data class DeviceTokenRotationResponse(
     val ok: Boolean = false,
     val token: String = "",

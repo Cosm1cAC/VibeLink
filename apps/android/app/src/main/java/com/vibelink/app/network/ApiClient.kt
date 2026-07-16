@@ -184,6 +184,11 @@ class ApiClient(
         )
     }
 
+    suspend fun search(query: String, limit: Int = 50): SearchResponse {
+        val json = get("/api/search?q=${encode(query)}&limit=$limit")
+        return gson.fromJson(json, SearchResponse::class.java)
+    }
+
     private suspend fun delete(path: String): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url("$baseUrl$path")

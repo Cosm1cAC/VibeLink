@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import com.vibelink.app.network.SearchResult
 
 /**
  * ViewModel for the conversation list.
@@ -23,6 +26,10 @@ import kotlinx.coroutines.launch
  * histories + running tasks + manual thread-state + Codex Desktop visibility.
  */
 class SessionListViewModel : ViewModel() {
+    private var lastApiClient: ApiClient? = null
+    private var searchJob: Job? = null
+    private val _searchResults = MutableStateFlow<List<SearchResult>>(emptyList())
+    val searchResults: StateFlow<List<SearchResult>> = _searchResults.asStateFlow()
 
     private val _allConversations = MutableStateFlow<List<ConversationItem>>(emptyList())
 
@@ -48,6 +55,7 @@ class SessionListViewModel : ViewModel() {
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
 
     fun load(apiClient: ApiClient, isRefresh: Boolean = false) {
+        lastApiClient = apiClient
         viewModelScope.launch {
             if (isRefresh) _refreshing.value = true else _loading.value = true
             _error.value = ""
@@ -79,6 +87,12 @@ class SessionListViewModel : ViewModel() {
     fun setQuery(value: String) {
         _query.value = value
         applyFilters()
+        searchJob?.cancel()
+        if (value.trim().length < 2) { _searchResults.value = emptyList(); return }
+        searchJob = viewModelScope.launch {
+            delay(250)
+            runCatching { lastApiClient?.search(value.trim()) }.getOrNull()?.let { _searchResults.value = it.items }
+        }
     }
 
     fun setShowArchived(value: Boolean) {

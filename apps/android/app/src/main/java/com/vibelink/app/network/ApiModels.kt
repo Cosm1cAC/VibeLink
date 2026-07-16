@@ -882,6 +882,28 @@ data class ThreadMeta(
     val pinned: Boolean = false,
     val archived: Boolean = false,
     @SerializedName("updatedAt") val updatedAt: String = "",
+    val messageOverrides: List<Map<String, Any?>> = emptyList(),
+)
+
+data class DeviceTokenRotationResponse(
+    val ok: Boolean = false,
+    val token: String = "",
+    val device: DeviceAdminItem? = null,
+)
+
+data class TaskChangesResponse(
+    val items: List<Map<String, Any?>> = emptyList(),
+    val changes: List<Map<String, Any?>> = emptyList(),
+)
+
+data class WorkspaceContextResponse(
+    val ok: Boolean = false,
+    val context: String = "",
+    val files: List<Map<String, Any?>> = emptyList(),
+)
+
+data class WorkspaceCreateResponse(
+    val workspace: WorkspaceItem,
 )
 
 data class ThreadPatch(

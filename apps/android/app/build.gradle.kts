@@ -59,9 +59,11 @@ dependencies {
     // JSON
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
 
     // Unit tests
     testImplementation(kotlin("test"))

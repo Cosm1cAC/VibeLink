@@ -17,6 +17,62 @@ const ROOT = path.resolve(__dirname, "..");
 // VibeLink built-in commands.
 const BUILTIN_COMMANDS = [
   {
+    id: "navigate.sessions",
+    name: "Sessions",
+    description: "Open the session list",
+    args: [], usage: "Sessions", permission: "none", toolKind: "navigation", icon: "MessageSquare",
+    action: { type: "navigate", route: "sessionList" }
+  },
+  {
+    id: "search.global",
+    name: "Search everywhere",
+    description: "Search sessions, tasks, messages, and workspace files",
+    args: [{ name: "query", type: "string", required: true }], usage: "Search everywhere <query>", permission: "none", toolKind: "search", icon: "Search",
+    action: { type: "search" }
+  },
+  {
+    id: "session.new",
+    name: "New session",
+    description: "Create a new agent session",
+    args: [], usage: "New session", permission: "none", toolKind: "session", icon: "Plus",
+    action: { type: "new-session" }
+  },
+  {
+    id: "sessions.refresh",
+    name: "Refresh sessions",
+    description: "Reload sessions and thread metadata",
+    args: [], usage: "Refresh sessions", permission: "none", toolKind: "session", icon: "RefreshCw",
+    action: { type: "refresh" }
+  },
+  {
+    id: "thread.favorite",
+    name: "Toggle favorite",
+    description: "Favorite or unfavorite the current session",
+    args: [{ name: "key", type: "string", required: true }], usage: "Toggle favorite <thread-key>", permission: "none", toolKind: "thread", icon: "Star",
+    action: { type: "thread-patch", patch: "favorite" }
+  },
+  {
+    id: "workspace.open",
+    name: "Open Workspace",
+    description: "Browse files and Git state in a Workspace",
+    args: [], usage: "Open Workspace", permission: "none", toolKind: "workspace", icon: "FolderOpen",
+    action: { type: "navigate", route: "workspace" }
+  },
+  {
+    id: "approvals.review",
+    name: "Review approvals",
+    description: "Review pending high-risk actions",
+    args: [], usage: "Review approvals", permission: "none", toolKind: "approval", icon: "ShieldCheck",
+    action: { type: "navigate", route: "settings?section=approvals" }
+  },
+  {
+    id: "workspace.command",
+    name: "Run Workspace command",
+    description: "Execute a command in a Workspace after risk checks",
+    args: [{ name: "command", type: "string", required: true }], usage: "Run Workspace command <command>", permission: "ask", requiresApproval: true, toolKind: "workspace", icon: "Terminal",
+    action: { type: "workspace-command" }
+  },
+  {
     id: "image",
     name: "/image",
     description: "Attach an image from your device",

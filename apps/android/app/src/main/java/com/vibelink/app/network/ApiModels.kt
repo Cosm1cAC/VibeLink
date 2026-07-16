@@ -908,6 +908,17 @@ data class SearchResult(
     val turnId: String = "",
 )
 
+data class CommandRegistryResponse(val items: List<CommandDefinition> = emptyList())
+data class CommandDefinition(
+    val id: String = "",
+    val name: String = "",
+    val description: String = "",
+    val usage: String = "",
+    val permission: String = "none",
+    val requiresApproval: Boolean = false,
+    val toolKind: String = "",
+)
+
 data class DeviceTokenRotationResponse(
     val ok: Boolean = false,
     val token: String = "",

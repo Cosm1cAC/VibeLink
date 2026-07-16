@@ -178,6 +178,12 @@ fun LoginScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
 
+            Text(
+                text = strings.legacyTokenNotice,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             Button(
                 onClick = {
                     scope.launch {

@@ -82,6 +82,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_tool_events_http: bool,
+
+    #[arg(long, global = true)]
+    rust_tool_events_sse: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -312,6 +315,10 @@ fn rust_tool_events_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_tool_events_http
 }
 
+fn rust_tool_events_sse_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_tool_events_sse
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -373,6 +380,8 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| audit_http::AuditRouteConfig::new(route_data_dir.clone()));
     let tool_events_route = rust_tool_events_http_enabled(cli)
         .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
+    let tool_events_sse_route = rust_tool_events_sse_enabled(cli)
+        .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
         Some(
             settings_http::SettingsRouteConfig::new(route_data_dir.clone(), root.to_path_buf())
@@ -411,6 +420,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_device_mutation(device_mutation_route)
         .with_audit(audit_route)
         .with_tool_events(tool_events_route)
+        .with_tool_events_sse(tool_events_sse_route)
         .with_settings(settings_route)
         .with_pairing(pairing_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
@@ -603,6 +613,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_tool_events_http {
         command.arg("--rust-tool-events-http");
+    }
+    if cli.rust_tool_events_sse {
+        command.arg("--rust-tool-events-sse");
     }
     command
         .arg("bridge")

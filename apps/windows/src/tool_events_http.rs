@@ -8,9 +8,12 @@ use crate::tool_events_store::{list_tool_events, ToolEventListOptions};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
+use std::io::Write;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct ToolEventsRouteConfig {
@@ -94,6 +97,105 @@ pub fn route_tool_events_request(
         200,
         json!({ "items": items }),
     )))
+}
+
+/// Serve the long-lived tool-event stream. A bounded lifetime keeps reconnects
+/// explicit and preserves the Node path as an immediate rollback option.
+pub fn stream_tool_events_request(
+    request: &ParsedRequest,
+    peer_ip: &str,
+    config: &ToolEventsRouteConfig,
+    client: &mut TcpStream,
+) -> Result<Option<()>> {
+    if request.method != "GET"
+        || request.path() != "/api/tool-events"
+        || request.query_parameter("stream").as_deref() != Some("1")
+    {
+        return Ok(None);
+    }
+    let authentication = authenticate_route_request(request, &config.data_dir)?;
+    if authentication == RouteAuthentication::Pending {
+        return Ok(None);
+    }
+    config.metrics.record_attempt();
+    match authentication {
+        RouteAuthentication::HostDenied => {
+            audit_route_rejection(
+                &config.data_dir,
+                request,
+                peer_ip,
+                "host.blocked",
+                "Host is not allowed.",
+                &clean_host(request.host()),
+            )?;
+            config.metrics.record_host_denied();
+            HttpRouteResponse::error(403, "Host is not allowed.").write_to(client)?;
+            config.metrics.record_response();
+            return Ok(Some(()));
+        }
+        RouteAuthentication::Unauthorized => {
+            audit_route_rejection(
+                &config.data_dir,
+                request,
+                peer_ip,
+                "auth.failed",
+                if request.token().is_empty() {
+                    "missing_token"
+                } else {
+                    "invalid_or_expired_token"
+                },
+                "",
+            )?;
+            config.metrics.record_unauthorized();
+            HttpRouteResponse::error(401, "Unauthorized").write_to(client)?;
+            config.metrics.record_response();
+            return Ok(Some(()));
+        }
+        RouteAuthentication::Device(_) => {}
+        RouteAuthentication::Pending => unreachable!(),
+    }
+
+    let mut after = request
+        .query_parameter("after")
+        .or_else(|| request.header("last-event-id").map(str::to_string))
+        .map(|value| javascript_number(&value))
+        .unwrap_or(0.0);
+    let started = Instant::now();
+    client.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\nX-VibeLink-Control-Plane: rust\r\n\r\n")?;
+    client.flush()?;
+    let mut heartbeat = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        let options = ToolEventListOptions {
+            tool_run_id: request.query_parameter("toolRunId"),
+            workspace_id: request.query_parameter("workspaceId"),
+            task_id: request.query_parameter("taskId"),
+            after: Some(after),
+            limit: Some(500),
+        };
+        let events = query_tool_events(&config.data_dir, &options)?;
+        for event in events {
+            let cursor = event.get("cursor").and_then(Value::as_i64).unwrap_or(0);
+            let event_type = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("tool.event");
+            let data = serde_json::to_string(&event).context("Cannot encode tool event")?;
+            write!(
+                client,
+                "id: {cursor}\nevent: {event_type}\ndata: {data}\n\n"
+            )?;
+            after = cursor as f64;
+            heartbeat = Instant::now();
+        }
+        if heartbeat.elapsed() >= Duration::from_secs(25) {
+            client.write_all(b": ping\n\n")?;
+            heartbeat = Instant::now();
+        }
+        client.flush()?;
+        thread::sleep(Duration::from_millis(250));
+    }
+    config.metrics.record_response();
+    Ok(Some(()))
 }
 
 fn list_options(request: &ParsedRequest) -> ToolEventListOptions {

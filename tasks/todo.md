@@ -31,16 +31,16 @@
 - [x] Migrate direct `/api/status` HTTP ownership behind a rollback flag.
 - [x] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
 - [x] Migrate read-only `GET /api/devices` ownership behind an independent Rust flag.
-- [ ] Migrate pairing and audited device mutation routes.
-- [ ] Migrate settings and audit routes.
+- [x] Migrate pairing and audited device mutation routes.
+- [x] Migrate settings and audit routes.
 - [ ] Migrate workspace and tool routes.
 - [ ] Migrate task and live-call routes.
 
 ## Independent Rust Server Execution
 
 - [x] Record the end-state architecture and migration order.
-- [ ] Add Rust pairing/device mutation ownership with Node fallback.
-- [ ] Add Rust settings and audit ownership with Node fallback.
+- [x] Add Rust pairing/device mutation ownership with Node fallback.
+- [x] Add Rust settings and audit ownership with Node fallback.
 - [ ] Add Rust workspace/tool ownership with command and approval parity.
 - [ ] Add Rust task/live-call ownership with provider boundary parity.
 - [ ] Make Rust the default bridge server and keep Node as explicit rollback.
@@ -48,7 +48,7 @@
 - [x] Migrate audited device mutation routes with transaction-bound fallback semantics.
 - [x] Migrate pairing status/list/approve/deny routes.
 - [x] Migrate pairing create/claim routes with bounded JSON bodies and one-time token safety.
-- [ ] Migrate settings read, validation, dry-run, and mutation routes.
+- [x] Migrate settings read, validation, dry-run, and mutation routes.
 - [x] Migrate audit-log read, bounded pagination, and field-projection routes.
 - [ ] Migrate workspace read/tree and registry routes.
 - [ ] Migrate approvals, commands, Git actions, and tool-run routes.

@@ -125,6 +125,10 @@ class AppStrings(private val appLanguage: AppLanguage) {
     val bridgeUrl: String = select("Bridge 地址", "Bridge URL")
     val pairingToken: String = select("配对 Token", "Pairing token")
     val legacyTokenPlaceholder: String = select("Bridge 设置里的旧配对 Token", "Legacy token from bridge settings")
+    val legacyTokenNotice: String = select(
+        "旧版 Token 登录已禁用，请扫描二维码并在已有会话中批准设备。",
+        "Legacy token login is disabled. Scan the QR code and approve this device from an existing session.",
+    )
     val connectWithToken: String = select("使用 Token 连接", "Connect with token")
     val createPairingRequest: String = select("创建配对请求", "Create pairing request")
     val invalidPairingQr: String = select("无效的 VibeLink 配对二维码。", "Invalid VibeLink pairing QR.")

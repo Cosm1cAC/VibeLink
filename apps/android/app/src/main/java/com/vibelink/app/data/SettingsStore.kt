@@ -7,6 +7,9 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val Context.dataStore by preferencesDataStore(name = "vibelink_settings")
 
@@ -14,11 +17,11 @@ private val Context.dataStore by preferencesDataStore(name = "vibelink_settings"
  * Persistent key-value storage (localStorage equivalent for Android).
  */
 class SettingsStore(private val context: Context) {
+    private val secretCipher: SecretCipher by lazy { AndroidKeystoreSecretCipher() }
 
     companion object {
         private val KEY_BRIDGE_URL = stringPreferencesKey("bridge_url")
         private val KEY_TOKEN = stringPreferencesKey("token")
-        private val KEY_PAIRING_TOKEN = stringPreferencesKey("pairing_token")
         private val KEY_ACTIVE_SESSION_ID = stringPreferencesKey("active_session_id")
         private val KEY_PROMPT_HISTORY = stringPreferencesKey("prompt_history")
         private val KEY_APP_LANGUAGE = stringPreferencesKey("app_language")
@@ -29,12 +32,8 @@ class SettingsStore(private val context: Context) {
     }
 
     val token: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[KEY_TOKEN] ?: ""
-    }
-
-    val pairingToken: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[KEY_PAIRING_TOKEN] ?: ""
-    }
+        decodeSecretOrEmpty(prefs[KEY_TOKEN].orEmpty())
+    }.flowOn(Dispatchers.IO)
 
     val activeSessionId: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[KEY_ACTIVE_SESSION_ID] ?: ""
@@ -53,11 +52,12 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun setToken(token: String) {
-        context.dataStore.edit { it[KEY_TOKEN] = token }
-    }
-
-    suspend fun setPairingToken(pt: String) {
-        context.dataStore.edit { it[KEY_PAIRING_TOKEN] = pt }
+        withContext(Dispatchers.IO) {
+            val encoded = StoredSecretCodec.encode(token, secretCipher)
+            context.dataStore.edit { prefs ->
+                if (encoded.isBlank()) prefs.remove(KEY_TOKEN) else prefs[KEY_TOKEN] = encoded
+            }
+        }
     }
 
     suspend fun setActiveSessionId(id: String) {
@@ -89,7 +89,19 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun getTokenSync(): String {
-        return context.dataStore.data.first()[KEY_TOKEN] ?: ""
+        return withContext(Dispatchers.IO) {
+            val stored = context.dataStore.data.first()[KEY_TOKEN].orEmpty()
+            val decoded = runCatching { StoredSecretCodec.decode(stored, secretCipher) }
+                .getOrElse { return@withContext "" }
+            if (decoded.needsMigration) {
+                context.dataStore.edit { it[KEY_TOKEN] = StoredSecretCodec.encode(decoded.value, secretCipher) }
+            }
+            decoded.value
+        }
+    }
+
+    private fun decodeSecretOrEmpty(stored: String): String {
+        return runCatching { StoredSecretCodec.decode(stored, secretCipher).value }.getOrDefault("")
     }
 
 }

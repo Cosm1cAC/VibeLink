@@ -48,6 +48,12 @@ class LiveCallAudioStreamer(
     private var recordingOutput: FileOutputStream? = null
     private var recordingFile: File? = null
     private val paused = AtomicBoolean(false)
+    private var sessionId: String = ""
+    private var reconnectJob: Job? = null
+    private var reconnectAttempt = 0
+    private var onStatusCallback: (String) -> Unit = {}
+    private var onErrorCallback: (String) -> Unit = {}
+    private var onLevelCallback: (AudioLevel) -> Unit = {}
 
     val isRunning: Boolean
         get() = running.get()
@@ -68,39 +74,75 @@ class LiveCallAudioStreamer(
 
         running.set(true)
         paused.set(false)
+        this.sessionId = sessionId
         this.recordingFile = recordingFile
+        onStatusCallback = onStatus
+        onErrorCallback = onError
+        onLevelCallback = onLevel
         recordingOutput = recordingFile?.let {
             runCatching {
                 it.parentFile?.mkdirs()
                 FileOutputStream(it, true)
             }.getOrNull()
         }
-        onStatus("Connecting microphone stream")
+        reconnectAttempt = 0
+        onStatusCallback("Connecting microphone stream")
+        connect()
+    }
+
+    private fun connect() {
+        if (!running.get() || sessionId.isBlank()) return
         val request = apiClient.liveCallAudioRequest(sessionId)
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+        val nextSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (!running.get()) {
+                    webSocket.close(1000, "client_stop")
+                    return
+                }
+                reconnectAttempt = 0
                 webSocket.send("""{"sampleRate":16000,"channels":1,"encoding":"pcm16le","device":"remote"}""")
-                onStatus("Microphone connected")
+                onStatusCallback("Microphone connected")
+                recordJob?.cancel()
                 recordJob = scope.launch(Dispatchers.IO) {
-                    pumpAudio(webSocket, onStatus, onError, onLevel)
+                    pumpAudio(webSocket)
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (text.contains("\"error\"")) onError(text) else onStatus(text.take(120))
+                if (this@LiveCallAudioStreamer.webSocket !== webSocket) return
+                if (text.contains("\"error\"")) onErrorCallback(text) else onStatusCallback(text.take(120))
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                running.set(false)
-                onStatus("Microphone stream closed")
+                handleDisconnect(webSocket, "Microphone stream closed: $reason")
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                running.set(false)
-                onError(t.message ?: "Microphone stream failed")
-                stopRecorder()
+                handleDisconnect(webSocket, t.message ?: "Microphone stream failed", t)
             }
         })
+        webSocket = nextSocket
+    }
+
+    private fun handleDisconnect(disconnectedSocket: WebSocket, status: String, error: Throwable? = null) {
+        if (!running.get() || webSocket !== disconnectedSocket) return
+        webSocket = null
+        recordJob?.cancel()
+        recordJob = null
+        stopRecorder()
+        if (error != null) onErrorCallback(error.message ?: status)
+        onStatusCallback("$status; retrying")
+        scheduleReconnect()
+    }
+
+    private fun scheduleReconnect() {
+        if (!running.get() || reconnectJob?.isActive == true) return
+        val delayMs = AudioStreamRecoveryPolicy.retryDelayMs(reconnectAttempt++)
+        reconnectJob = scope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(delayMs)
+            reconnectJob = null
+            connect()
+        }
     }
 
     fun pause() {
@@ -112,7 +154,10 @@ class LiveCallAudioStreamer(
     }
 
     fun stop() {
-        if (!running.getAndSet(false)) return
+        running.set(false)
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempt = 0
         recordJob?.cancel()
         recordJob = null
         try { webSocket?.send("""{"type":"stop"}""") } catch (_: Exception) {}
@@ -120,13 +165,11 @@ class LiveCallAudioStreamer(
         webSocket = null
         stopRecorder()
         closeRecording()
+        sessionId = ""
     }
 
     private fun pumpAudio(
         ws: WebSocket,
-        onStatus: (String) -> Unit,
-        onError: (String) -> Unit,
-        onLevel: (AudioLevel) -> Unit,
     ) {
         val sampleRate = SAMPLE_RATE
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -136,7 +179,8 @@ class LiveCallAudioStreamer(
         )
         if (minBuffer == AudioRecord.ERROR || minBuffer == AudioRecord.ERROR_BAD_VALUE) {
             running.set(false)
-            onError("AudioRecord does not support 16 kHz mono PCM.")
+            closeRecording()
+            onErrorCallback("AudioRecord does not support 16 kHz mono PCM.")
             return
         }
 
@@ -155,18 +199,21 @@ class LiveCallAudioStreamer(
                 .build()
         } catch (error: SecurityException) {
             running.set(false)
-            onError(error.message ?: "Microphone permission denied")
+            closeRecording()
+            onErrorCallback(error.message ?: "Microphone permission denied")
             return
         } catch (error: Exception) {
             running.set(false)
-            onError(error.message ?: "Unable to open microphone")
+            closeRecording()
+            onErrorCallback(error.message ?: "Unable to open microphone")
             return
         }
 
         if (recorder.state != AudioRecord.STATE_INITIALIZED) {
             running.set(false)
             recorder.release()
-            onError("Microphone could not be initialized.")
+            closeRecording()
+            onErrorCallback("Microphone could not be initialized.")
             return
         }
 
@@ -176,7 +223,7 @@ class LiveCallAudioStreamer(
         var lastLevelAt = 0L
         try {
             recorder.startRecording()
-            onStatus("Recording microphone")
+            onStatusCallback("Recording microphone")
             while (running.get() && recordJob?.isActive != false) {
                 val bytesRead = recorder.read(buffer, 0, buffer.size)
                 if (bytesRead <= 0) continue
@@ -184,21 +231,22 @@ class LiveCallAudioStreamer(
                 totalBytes += bytesRead.toLong()
                 val frame = buffer.copyOf(bytesRead)
                 runCatching { recordingOutput?.write(frame) }
-                ws.send(frame.toByteString())
+                if (!ws.send(frame.toByteString())) throw IllegalStateException("Audio socket is closed")
 
                 val now = System.currentTimeMillis()
                 if (now - lastLevelAt >= LEVEL_INTERVAL_MS) {
                     val level = computeLevel(frame, bytesRead, totalBytes)
-                    onLevel(level)
-                    ws.send("""{"type":"level","rms":${level.rms},"peak":${level.peak}}""")
+                    onLevelCallback(level)
+                    if (!ws.send("""{"type":"level","rms":${level.rms},"peak":${level.peak}}""")) {
+                        throw IllegalStateException("Audio socket is closed")
+                    }
                     lastLevelAt = now
                 }
             }
         } catch (error: Exception) {
-            if (running.get()) onError(error.message ?: "Microphone capture failed")
+            if (running.get()) onErrorCallback(error.message ?: "Microphone capture failed")
         } finally {
             stopRecorder()
-            closeRecording()
             try { ws.send("""{"type":"flush"}""") } catch (_: Exception) {}
         }
     }

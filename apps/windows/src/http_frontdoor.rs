@@ -15,7 +15,9 @@ use crate::settings_http::{
 use crate::status_http::{
     parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
 };
-use crate::tool_events_http::{route_tool_events_request, ToolEventsRouteConfig};
+use crate::tool_events_http::{
+    route_tool_events_request, stream_tool_events_request, ToolEventsRouteConfig,
+};
 use anyhow::{bail, Context, Result};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -37,6 +39,7 @@ pub struct FrontdoorRoutes {
     device_mutation: Option<DeviceMutationRouteConfig>,
     audit: Option<AuditRouteConfig>,
     tool_events: Option<ToolEventsRouteConfig>,
+    tool_events_sse: Option<ToolEventsRouteConfig>,
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
 }
@@ -72,6 +75,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_tool_events_sse(mut self, route: Option<ToolEventsRouteConfig>) -> Self {
+        self.tool_events_sse = route;
+        self
+    }
+
     pub fn with_settings(mut self, route: Option<SettingsRouteConfig>) -> Self {
         self.settings = route;
         self
@@ -89,6 +97,7 @@ impl FrontdoorRoutes {
             && self.device_mutation.is_none()
             && self.audit.is_none()
             && self.tool_events.is_none()
+            && self.tool_events_sse.is_none()
             && self.settings.is_none()
             && self.pairing.is_none()
     }
@@ -156,6 +165,16 @@ fn handle_connection(
         .unwrap_or_default();
     let mut prefix = read_request_head(&mut client)?;
     if let Ok(request) = parse_request(&prefix) {
+        if let Some(tool_events_sse) = routes.tool_events_sse.as_ref() {
+            match stream_tool_events_request(&request, &peer_ip, tool_events_sse, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    tool_events_sse.record_fallback();
+                    eprintln!("Rust Tool Events SSE route falling back to Node: {error:#}");
+                }
+            }
+        }
         if let Some(status_route) = routes.status.as_ref() {
             match route_status_request(&request, status_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),

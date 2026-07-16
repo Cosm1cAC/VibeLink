@@ -7,6 +7,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ApiException
+import com.vibelink.app.network.ApprovalDecisionResponse
 import com.vibelink.app.network.ChatMessage
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.DesktopRemoteState
@@ -20,6 +21,7 @@ import com.vibelink.app.network.TaskEvent
 import com.vibelink.app.network.ToolCallSummary
 import com.vibelink.app.network.ToolEvent
 import com.vibelink.app.network.ToolOutputEvent
+import com.vibelink.app.mobile.EventStreamRecoveryPolicy
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,18 +31,9 @@ import kotlinx.coroutines.launch
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 
-data class PendingPromptRetry(
-    val prompt: String,
-    val agent: String,
-    val model: String = "",
-    val reasoningEffort: String = "",
-    val cwd: String = "",
-)
-
 data class PendingApprovalState(
     val approvalId: String,
     val message: String,
-    val retry: PendingPromptRetry? = null,
 )
 
 class MessageListViewModel : ViewModel() {
@@ -83,6 +76,13 @@ class MessageListViewModel : ViewModel() {
     private var taskEventSource: EventSource? = null
     private var toolEventSource: EventSource? = null
     private var pollJob: Job? = null
+    private var taskReconnectJob: Job? = null
+    private var toolReconnectJob: Job? = null
+    private var streamGeneration = 0L
+    private var taskCursor = 0
+    private var toolCursor = 0
+    private var taskReconnectAttempt = 0
+    private var toolReconnectAttempt = 0
     private var loadSequence = 0L
     private var activeConversation: ConversationItem? = null
     private val seenTaskEvents = mutableSetOf<String>()
@@ -97,6 +97,8 @@ class MessageListViewModel : ViewModel() {
         seenTaskEvents.clear()
         seenToolEvents.clear()
         toolEventsByRun.clear()
+        taskCursor = 0
+        toolCursor = 0
 
         viewModelScope.launch {
             _loading.value = true
@@ -126,6 +128,11 @@ class MessageListViewModel : ViewModel() {
                 if (seq == loadSequence) _loading.value = false
             }
         }
+    }
+
+    fun ensureConversationLoaded(apiClient: ApiClient, conversation: ConversationItem) {
+        if (activeConversation?.key == conversation.key) return
+        loadConversation(apiClient, conversation)
     }
 
     fun refresh(apiClient: ApiClient) {
@@ -166,8 +173,6 @@ class MessageListViewModel : ViewModel() {
         val conversation = activeConversation ?: return
         val trimmed = prompt.trim()
         if (trimmed.isBlank() || _sending.value) return
-        val retry = PendingPromptRetry(trimmed, agent, model, reasoningEffort, cwd)
-
         viewModelScope.launch {
             _sending.value = true
             _error.value = ""
@@ -183,7 +188,7 @@ class MessageListViewModel : ViewModel() {
                 }
             } catch (error: ApiException) {
                 val notice = TaskApprovalHandoff.noticeFromException(error)
-                if (notice != null) appendApprovalNotice(notice, retry)
+                if (notice != null) appendApprovalNotice(notice)
                 else appendError(TaskApprovalHandoff.messageFor(error))
             } catch (error: Exception) {
                 appendError(error.message ?: "Failed to send prompt")
@@ -193,33 +198,56 @@ class MessageListViewModel : ViewModel() {
         }
     }
 
-    fun retryPendingApproval(apiClient: ApiClient) {
-        val retry = _pendingApproval.value?.retry ?: return
-        val conversation = activeConversation ?: return
-        if (_sending.value) return
-        viewModelScope.launch {
-            _sending.value = true
-            _error.value = ""
-            try {
-                createOrResumeTask(
-                    apiClient = apiClient,
-                    conversation = conversation,
-                    prompt = retry.prompt,
-                    agent = retry.agent,
-                    model = retry.model,
-                    reasoningEffort = retry.reasoningEffort,
-                    cwdOverride = retry.cwd,
-                )
-            } catch (error: ApiException) {
-                val notice = TaskApprovalHandoff.noticeFromException(error)
-                if (notice != null) appendApprovalNotice(notice, retry)
-                else appendError(TaskApprovalHandoff.messageFor(error))
-            } catch (error: Exception) {
-                appendError(error.message ?: "Failed to retry prompt")
-            } finally {
-                _sending.value = false
-            }
+    fun applyApprovalDecision(apiClient: ApiClient, response: ApprovalDecisionResponse): Boolean {
+        val approval = response.approval ?: return false
+        val pending = _pendingApproval.value ?: return false
+        if (pending.approvalId != approval.id) return false
+
+        if (approval.status == "denied") {
+            _pendingApproval.value = null
+            appendSystem("Approval ${approval.id.take(8)} was denied.")
+            return true
         }
+
+        val handoff = TaskApprovalHandoff.approvedTaskFrom(response)
+        if (handoff == null) {
+            if (response.error.isNotBlank()) appendError(response.error)
+            return true
+        }
+
+        val conversation = activeConversation ?: return true
+        _pendingApproval.value = null
+        _error.value = ""
+        _messages.value = _messages.value.filterNot { message ->
+            message.role == "error" && message.text.contains(approval.id)
+        }
+        _currentTaskId.value = handoff.id
+        _running.value = handoff.status == "running"
+        activeConversation = conversation.copy(
+            kind = "task",
+            id = handoff.id,
+            provider = handoff.agent.ifBlank { conversation.provider.ifBlank { "codex" } },
+            title = handoff.title.ifBlank { conversation.title },
+            cwd = handoff.cwd.ifBlank { conversation.cwd },
+            status = handoff.status,
+            sessionId = handoff.sessionId,
+        )
+        appendSystem("Task ${handoff.id.take(8)} started after approval.")
+
+        viewModelScope.launch {
+            runCatching { apiClient.getTask(handoff.id) }
+                .onSuccess { task ->
+                    _currentTaskId.value = task.id
+                    _running.value = task.status == "running"
+                    appendTaskEvents(task.events)
+                    if (task.status == "running") {
+                        followRunningTask(apiClient, task)
+                        followToolEvents(apiClient, task.id)
+                    }
+                }
+                .onFailure { error -> appendError(error.message ?: "Failed to load approved task") }
+        }
+        return true
     }
 
     fun editMessage(target: ChatMessage, nextText: String) {
@@ -264,28 +292,69 @@ class MessageListViewModel : ViewModel() {
 
     fun followToolEvents(apiClient: ApiClient, taskId: String) {
         if (taskId.isBlank()) return
-        toolEventSource?.cancel()
+        subscribeToolEvents(apiClient, taskId, streamGeneration)
+    }
+
+    private fun subscribeToolEvents(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration) return
+        val previous = toolEventSource
+        toolEventSource = null
+        previous?.cancel()
         toolEventSource = apiClient.subscribeToolEvents(
             taskId = taskId,
-            after = 0,
+            after = toolCursor,
             listener = object : EventSourceListener() {
                 override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                    if (eventSource !== this@MessageListViewModel.toolEventSource) return
                     runCatching {
                         val event = gson.fromJson(data, ToolEvent::class.java)
+                        toolReconnectAttempt = 0
                         appendToolEvent(event)
                     }
+                }
+
+                override fun onClosed(eventSource: EventSource) {
+                    if (eventSource !== this@MessageListViewModel.toolEventSource) return
+                    scheduleToolReconnect(apiClient, taskId, generation)
+                }
+
+                override fun onFailure(eventSource: EventSource, t: Throwable?, response: okhttp3.Response?) {
+                    if (eventSource !== this@MessageListViewModel.toolEventSource) return
+                    scheduleToolReconnect(apiClient, taskId, generation)
                 }
             },
         )
     }
 
+    private fun scheduleToolReconnect(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration || !_running.value || toolReconnectJob?.isActive == true) return
+        val delayMs = EventStreamRecoveryPolicy.retryDelayMs(toolReconnectAttempt++)
+        toolReconnectJob = viewModelScope.launch {
+            delay(delayMs)
+            if (generation != streamGeneration || !_running.value) return@launch
+            runCatching { apiClient.fetchToolEvents(taskId = taskId, after = toolCursor) }
+                .onSuccess { events -> events.forEach(::appendToolEvent) }
+            toolReconnectJob = null
+            subscribeToolEvents(apiClient, taskId, generation)
+        }
+    }
+
     fun stopStreaming() {
-        taskEventSource?.cancel()
+        streamGeneration += 1
+        val previousTaskSource = taskEventSource
         taskEventSource = null
-        toolEventSource?.cancel()
+        previousTaskSource?.cancel()
+        val previousToolSource = toolEventSource
         toolEventSource = null
+        previousToolSource?.cancel()
         pollJob?.cancel()
         pollJob = null
+        taskReconnectJob?.cancel()
+        taskReconnectJob = null
+        toolReconnectJob?.cancel()
+        toolReconnectJob = null
+        taskReconnectAttempt = 0
+        toolReconnectAttempt = 0
     }
 
     private suspend fun loadProviderRegistry(apiClient: ApiClient) {
@@ -393,10 +462,7 @@ class MessageListViewModel : ViewModel() {
             reasoningEffort = reasoningEffort.trim(),
         )
         TaskApprovalHandoff.noticeFromResponse(response)?.let { notice ->
-            appendApprovalNotice(
-                notice,
-                PendingPromptRetry(prompt, resolvedAgent, model, reasoningEffort, resolvedCwd),
-            )
+            appendApprovalNotice(notice)
             return
         }
         if (response.id.isBlank()) {
@@ -458,6 +524,7 @@ class MessageListViewModel : ViewModel() {
     }
 
     private fun followRunningTask(apiClient: ApiClient, task: TaskDetail) {
+        val generation = streamGeneration
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (true) {
@@ -476,12 +543,21 @@ class MessageListViewModel : ViewModel() {
             }
         }
 
-        val cursor = task.events.maxOfOrNull { it.cursor } ?: 0
-        taskEventSource?.cancel()
-        taskEventSource = apiClient.subscribeTaskEvents(task.id, after = cursor, object : EventSourceListener() {
+        taskCursor = EventStreamRecoveryPolicy.nextCursor(taskCursor, task.events.maxOfOrNull { it.cursor } ?: 0)
+        subscribeTaskEvents(apiClient, task.id, generation)
+    }
+
+    private fun subscribeTaskEvents(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration || !_running.value) return
+        val previous = taskEventSource
+        taskEventSource = null
+        previous?.cancel()
+        taskEventSource = apiClient.subscribeTaskEvents(taskId, after = taskCursor, object : EventSourceListener() {
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                if (eventSource !== this@MessageListViewModel.taskEventSource) return
                 runCatching {
                     val event = gson.fromJson(data, TaskEvent::class.java)
+                    taskReconnectAttempt = 0
                     appendTaskEvents(listOf(event))
                     if (event.type == "system" && event.text.contains("Exited")) {
                         _running.value = false
@@ -489,7 +565,28 @@ class MessageListViewModel : ViewModel() {
                     }
                 }
             }
+
+            override fun onClosed(eventSource: EventSource) {
+                if (eventSource !== this@MessageListViewModel.taskEventSource) return
+                scheduleTaskReconnect(apiClient, taskId, generation)
+            }
+
+            override fun onFailure(eventSource: EventSource, t: Throwable?, response: okhttp3.Response?) {
+                if (eventSource !== this@MessageListViewModel.taskEventSource) return
+                scheduleTaskReconnect(apiClient, taskId, generation)
+            }
         })
+    }
+
+    private fun scheduleTaskReconnect(apiClient: ApiClient, taskId: String, generation: Long) {
+        if (generation != streamGeneration || !_running.value || taskReconnectJob?.isActive == true) return
+        val delayMs = EventStreamRecoveryPolicy.retryDelayMs(taskReconnectAttempt++)
+        taskReconnectJob = viewModelScope.launch {
+            delay(delayMs)
+            if (generation != streamGeneration || !_running.value) return@launch
+            taskReconnectJob = null
+            subscribeTaskEvents(apiClient, taskId, generation)
+        }
     }
 
     private suspend fun loadHistoryMessages(apiClient: ApiClient, provider: String, sessionId: String): List<ChatMessage> {
@@ -503,12 +600,14 @@ class MessageListViewModel : ViewModel() {
     }
 
     private fun appendTaskEvents(events: List<TaskEvent>) {
+        events.forEach { event -> taskCursor = EventStreamRecoveryPolicy.nextCursor(taskCursor, event.cursor) }
         val fresh = events.filter { seenTaskEvents.add(taskEventKey(it)) }
         val newMessages = messagesFromEvents(fresh)
         if (newMessages.isNotEmpty()) _messages.value = mergeMessages(_messages.value, newMessages)
     }
 
     private fun appendToolEvent(event: ToolEvent) {
+        toolCursor = EventStreamRecoveryPolicy.nextCursor(toolCursor, event.cursor)
         if (!seenToolEvents.add(toolEventKey(event))) return
         val runId = event.toolRunId.ifBlank { (event.payload.orEmpty()["toolRunId"] as? String).orEmpty() }.ifBlank { event.id }
         if (runId.isBlank()) return
@@ -537,8 +636,8 @@ class MessageListViewModel : ViewModel() {
         _error.value = text
     }
 
-    private fun appendApprovalNotice(notice: ApprovalNotice, retry: PendingPromptRetry?) {
-        _pendingApproval.value = PendingApprovalState(notice.approvalId, notice.message, retry)
+    private fun appendApprovalNotice(notice: ApprovalNotice) {
+        _pendingApproval.value = PendingApprovalState(notice.approvalId, notice.message)
         appendError(notice.message)
     }
 
@@ -823,6 +922,15 @@ data class ApprovalNotice(
     val message: String,
 )
 
+data class ApprovedTaskHandoff(
+    val id: String,
+    val status: String,
+    val agent: String,
+    val title: String,
+    val cwd: String,
+    val sessionId: String,
+)
+
 object TaskApprovalHandoff {
     fun noticeFromResponse(response: TaskCreateResponse): ApprovalNotice? {
         val approvalId = response.approvalId.ifBlank { response.approval?.id.orEmpty() }
@@ -844,10 +952,26 @@ object TaskApprovalHandoff {
         return noticeFromException(error)?.message ?: error.body.ifBlank { "HTTP ${error.statusCode}" }
     }
 
+    fun approvedTaskFrom(response: ApprovalDecisionResponse): ApprovedTaskHandoff? {
+        val result = response.result ?: return null
+        if (!response.ok || !result.ok) return null
+        val task = result.task
+        val id = task?.id.orEmpty().ifBlank { result.id }
+        if (id.isBlank()) return null
+        return ApprovedTaskHandoff(
+            id = id,
+            status = task?.status.orEmpty().ifBlank { result.status.ifBlank { "running" } },
+            agent = task?.agent.orEmpty(),
+            title = task?.title.orEmpty(),
+            cwd = task?.cwd.orEmpty(),
+            sessionId = task?.sessionId.orEmpty(),
+        )
+    }
+
     private fun approvalMessage(approvalId: String, reason: String): String {
         val idSuffix = if (approvalId.isBlank()) "" else " ($approvalId)"
         val reasonPrefix = reason.ifBlank { "This action needs approval." }
-        return "$reasonPrefix Approval required$idSuffix. Open Settings > Approvals, approve it, then retry this prompt."
+        return "$reasonPrefix Approval required$idSuffix. Open Settings > Approvals; approving starts this task automatically."
     }
 
     private fun parseObject(raw: String): JsonObject? {

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { withAgentReachPath } from "./agentReachRuntime.js";
 import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
+import { createWorkspaceTreeSidecarClient } from "./workspaceTreeSidecarClient.js";
 
 const execFileAsync = promisify(execFile);
 const ignoredDirs = new Set([".git", "node_modules", ".next", "dist", "build", "target", "coverage", ".agent-mobile-terminal"]);
@@ -16,16 +17,30 @@ const gitStatusCacheStats = { hits: 0, misses: 0, evictions: 0 };
 const workspaceTreeCache = new Map();
 const workspaceTreeStats = { budgetHits: 0, cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeCache = new Map();
+let rustWorkspaceTreeSidecar = null;
+let rustWorkspaceTreeSidecarKey = "";
+let rustWorkspaceTreeSidecarReady = null;
+let rustWorkspaceTreeLastClientStats = { terminated: true, pending: 0 };
 const workspaceContextFileCache = new Map();
 const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeStats = {
   hits: 0,
   misses: 0,
+  fallbacks: 0,
+  failures: 0,
   budgetHits: 0,
   cacheHits: 0,
   cacheMisses: 0,
   cacheEvictions: 0,
-  lastSignature: ""
+  lastSignature: "",
+  lastError: ""
+};
+const rustWorkspaceTreeSessionStats = {
+  starts: 0,
+  failures: 0,
+  fallbacks: 0,
+  ready: false,
+  lastError: ""
 };
 const textExtensions = new Set([
   ".txt",
@@ -188,6 +203,11 @@ function capGitCache(cache, stats) {
 }
 
 export function getWorkspaceRuntimeStats() {
+  const rustTreeMode = rustWorkspaceTreeMode();
+  const rustTreeCommand = rustWorkspaceTreeCommand();
+  const rustTreeEnabled = rustTreeMode !== "off";
+  const sessionMode = rustWorkspaceTreeSessionMode();
+  const sessionClientStats = rustWorkspaceTreeSidecar?.stats() || rustWorkspaceTreeLastClientStats;
   return {
     gitSummaryCache: {
       entries: gitSummaryCache.size,
@@ -221,16 +241,34 @@ export function getWorkspaceRuntimeStats() {
       maxEntries: workspaceContextFileCacheMaxEntries()
     },
     rustWorkspaceTree: {
-      enabled: rustWorkspaceTreeEnabled(),
+      enabled: rustTreeEnabled,
+      mode: rustTreeMode,
+      auto: rustTreeMode === "auto",
+      command: rustTreeEnabled ? rustTreeCommand : "",
+      available: rustTreeEnabled && rustWorkspaceTreeCommandAvailable(rustTreeCommand),
       hits: rustWorkspaceTreeStats.hits,
       misses: rustWorkspaceTreeStats.misses,
+      fallbacks: rustWorkspaceTreeStats.fallbacks,
+      failures: rustWorkspaceTreeStats.failures,
       budgetHits: rustWorkspaceTreeStats.budgetHits,
       cacheHits: rustWorkspaceTreeStats.cacheHits,
       cacheMisses: rustWorkspaceTreeStats.cacheMisses,
       cacheEvictions: rustWorkspaceTreeStats.cacheEvictions,
       entries: rustWorkspaceTreeCache.size,
       maxEntries: workspaceTreeCacheMaxEntries(),
-      lastSignature: rustWorkspaceTreeStats.lastSignature
+      lastSignature: rustWorkspaceTreeStats.lastSignature,
+      lastError: rustWorkspaceTreeStats.lastError,
+      session: {
+        enabled: rustTreeEnabled && sessionMode !== "off",
+        mode: sessionMode,
+        active: Boolean(rustWorkspaceTreeSidecar),
+        ready: rustWorkspaceTreeSessionStats.ready,
+        starts: rustWorkspaceTreeSessionStats.starts,
+        failures: rustWorkspaceTreeSessionStats.failures,
+        fallbacks: rustWorkspaceTreeSessionStats.fallbacks,
+        lastError: rustWorkspaceTreeSessionStats.lastError,
+        client: { ...sessionClientStats }
+      }
     }
   };
 }
@@ -434,13 +472,14 @@ function workspaceContextFileCacheKey(filePath) {
   return path.resolve(filePath).toLowerCase();
 }
 
-function workspaceContextFileSignature(stat) {
-  return `${Math.trunc(stat.mtimeMs)}:${Math.trunc(stat.ctimeMs)}:${stat.size}`;
+function workspaceContextFileSignature(filePath, stat) {
+  const metadata = `${Math.trunc(stat.mtimeMs)}:${Math.trunc(stat.ctimeMs)}:${stat.size}`;
+  return isTextFile(filePath, stat) ? `${metadata}:${fileContentSignature(filePath, stat)}` : metadata;
 }
 
 function cacheWorkspaceContextFile(filePath, stat, item) {
   workspaceContextFileCache.set(workspaceContextFileCacheKey(filePath), {
-    signature: workspaceContextFileSignature(stat),
+    signature: workspaceContextFileSignature(filePath, stat),
     item: { ...item }
   });
   while (workspaceContextFileCache.size > workspaceContextFileCacheMaxEntries()) {
@@ -453,7 +492,7 @@ function cacheWorkspaceContextFile(filePath, stat, item) {
 
 function workspaceContextForFile(target, rel, stat) {
   const key = workspaceContextFileCacheKey(target);
-  const signature = workspaceContextFileSignature(stat);
+  const signature = workspaceContextFileSignature(target, stat);
   const cached = workspaceContextFileCache.get(key);
   if (cached?.signature === signature) {
     workspaceContextFileStats.cacheHits += 1;
@@ -477,21 +516,89 @@ function workspaceContextForFile(target, rel, stat) {
   });
 }
 
-function rootGitignoreDirs(root) {
+function workspaceGitignoreBasenameMatches(pattern, name) {
+  if (!pattern.includes("*")) return pattern === name;
+  if (pattern === "*") return true;
+
+  let remaining = name;
+  const parts = pattern.split("*");
+  let firstPart = true;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!part) {
+      firstPart = false;
+      continue;
+    }
+    if (firstPart && !pattern.startsWith("*")) {
+      if (!remaining.startsWith(part)) return false;
+      remaining = remaining.slice(part.length);
+    } else if (index === parts.length - 1 && !pattern.endsWith("*")) {
+      return remaining.endsWith(part);
+    } else {
+      const matchIndex = remaining.indexOf(part);
+      if (matchIndex < 0) return false;
+      remaining = remaining.slice(matchIndex + part.length);
+    }
+    firstPart = false;
+  }
+  return pattern.endsWith("*") || remaining.length === 0;
+}
+
+function workspaceGitignorePathMatches(pattern, itemPath) {
+  const patternParts = pattern.split("/");
+  const pathParts = itemPath.split("/");
+  return patternParts.length === pathParts.length
+    && patternParts.every((part, index) => workspaceGitignoreBasenameMatches(part, pathParts[index]));
+}
+
+function workspaceGitignoreRulesForDir(root, dir) {
   try {
-    const dirs = new Set();
-    const content = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
+    const rules = [];
+    const content = fs.readFileSync(path.join(dir, ".gitignore"), "utf8");
+    const base = path.relative(root, dir).replaceAll("\\", "/");
     for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!") || trimmed.includes("*")) continue;
-      const pattern = trimmed.replace(/^\/+/, "").replace(/\/+$/, "");
-      if (!pattern || pattern.includes("/")) continue;
-      dirs.add(pattern);
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const negated = trimmed.startsWith("!");
+      const body = (negated ? trimmed.slice(1) : trimmed).trim();
+      if (!body) continue;
+      const directoryOnly = body.endsWith("/");
+      const anchored = body.startsWith("/");
+      const rawPattern = body.replace(/^\/+/, "").replace(/\/+$/, "");
+      if (!rawPattern) continue;
+      const matchPath = anchored || rawPattern.includes("/");
+      const pattern = matchPath && base ? `${base}/${rawPattern}` : rawPattern;
+      rules.push({ pattern, matchPath, directoryOnly, negated });
     }
-    return dirs;
+    return rules;
   } catch {
-    return new Set();
+    return [];
   }
+}
+
+function workspaceGitignoreRulesForAncestors(root, dir) {
+  const relative = path.relative(root, dir);
+  if (!relative) return [];
+  const parts = relative.split(path.sep).filter(Boolean);
+  const rules = [...workspaceGitignoreRulesForDir(root, root)];
+  let current = root;
+  for (const part of parts.slice(0, -1)) {
+    current = path.join(current, part);
+    rules.push(...workspaceGitignoreRulesForDir(root, current));
+  }
+  return rules;
+}
+
+function isWorkspacePathIgnored(rules, name, itemPath, isDirectory) {
+  let ignored = false;
+  for (const rule of rules) {
+    if (rule.directoryOnly && !isDirectory) continue;
+    const matches = rule.matchPath
+      ? workspaceGitignorePathMatches(rule.pattern, itemPath)
+      : workspaceGitignoreBasenameMatches(rule.pattern, name);
+    if (matches) ignored = !rule.negated;
+  }
+  return ignored;
 }
 
 function workspaceTreeCacheKey(dir, root, depth, maxEntries) {
@@ -512,32 +619,37 @@ function workspaceTreeCacheKey(dir, root, depth, maxEntries) {
 }
 
 function workspaceTreeDirectoryVersion(dir, root, depth, maxEntries) {
-  const gitignoreDirs = rootGitignoreDirs(root);
   const parts = [];
-  const queue = [{ dir, rel: "", depth: 0 }];
+  const queue = [{ dir, depth: 0, ignoreRules: workspaceGitignoreRulesForAncestors(root, dir) }];
   let entriesSeen = 0;
 
   while (queue.length && entriesSeen < maxEntries) {
     const current = queue.shift();
     const stat = fs.statSync(current.dir);
-    parts.push(`${current.rel}:d:${stat.mtimeMs}:${stat.size}`);
+    const currentPath = path.relative(root, current.dir).replaceAll("\\", "/");
+    const ignoreRules = [...current.ignoreRules, ...workspaceGitignoreRulesForDir(root, current.dir)];
+    parts.push(`${currentPath}:d:${stat.mtimeMs}:${stat.size}`);
+    parts.push(`${currentPath}/.gitignore:${statSignature(path.join(current.dir, ".gitignore"), { contentHash: true })}`);
 
     const children = fs
       .readdirSync(current.dir, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith(".") || entry.name === ".env")
       .filter((entry) => !(entry.isDirectory() && ignoredDirs.has(entry.name)))
-      .filter((entry) => !(entry.isDirectory() && gitignoreDirs.has(entry.name)))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .filter((entry) => {
+        const itemPath = path.relative(root, path.join(current.dir, entry.name)).replaceAll("\\", "/");
+        return !isWorkspacePathIgnored(ignoreRules, entry.name, itemPath, entry.isDirectory());
+      })
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
 
     for (const entry of children) {
       if (entriesSeen >= maxEntries) break;
-      const rel = current.rel ? `${current.rel}/${entry.name}` : entry.name;
       const fullPath = path.join(current.dir, entry.name);
+      const rel = path.relative(root, fullPath).replaceAll("\\", "/");
       const entryStat = fs.statSync(fullPath);
       parts.push(`${rel}:${entry.isDirectory() ? "d" : "f"}:${entryStat.mtimeMs}:${entryStat.size}`);
       entriesSeen += 1;
       if (entry.isDirectory() && current.depth + 1 < depth) {
-        queue.push({ dir: fullPath, rel, depth: current.depth + 1 });
+        queue.push({ dir: fullPath, depth: current.depth + 1, ignoreRules });
       }
     }
   }
@@ -545,8 +657,11 @@ function workspaceTreeDirectoryVersion(dir, root, depth, maxEntries) {
   return parts.join("|");
 }
 
-function rustWorkspaceTreeEnabled() {
-  return /^(1|true|yes|on)$/i.test(process.env.VIBELINK_RUST_WORKSPACE_TREE || "");
+function rustWorkspaceTreeMode() {
+  const value = String(process.env.VIBELINK_RUST_WORKSPACE_TREE || "").trim();
+  if (/^auto$/i.test(value)) return "auto";
+  if (/^(1|true|yes|on)$/i.test(value)) return "manual";
+  return "off";
 }
 
 function rustWorkspaceTreeCommand() {
@@ -564,16 +679,161 @@ function rustWorkspaceTreeBaseArgs() {
   }
 }
 
+function rustWorkspaceTreeCommandAvailable(command) {
+  return Boolean(command && fs.existsSync(command));
+}
+
+function rustWorkspaceTreeErrorMessage(error) {
+  const detail = String(error?.stderr || error?.stdout || error?.message || error || "unknown error").trim();
+  return detail.length > 500 ? `${detail.slice(0, 500)}...` : detail;
+}
+
+function recordRustWorkspaceTreeFallback(message) {
+  rustWorkspaceTreeStats.misses += 1;
+  rustWorkspaceTreeStats.fallbacks += 1;
+  rustWorkspaceTreeStats.failures += 1;
+  rustWorkspaceTreeStats.lastError = message;
+}
+
+function rustWorkspaceTreeSessionMode() {
+  const value = String(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION || "").trim();
+  if (/^auto$/i.test(value)) return "auto";
+  if (/^(1|true|yes|on)$/i.test(value)) return "manual";
+  return "off";
+}
+
+function rustWorkspaceTreeSessionTimeoutMs() {
+  const value = Number(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS || 10000);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10000;
+}
+
+function recordRustWorkspaceTreeBudgetFallback(message) {
+  rustWorkspaceTreeStats.misses += 1;
+  rustWorkspaceTreeStats.fallbacks += 1;
+  rustWorkspaceTreeStats.lastError = message;
+}
+
 function rustWorkspaceTreeCacheKey(dir, root, depth, maxEntries, command, baseArgs) {
   return JSON.stringify({
     command,
     baseArgs,
+    session: rustWorkspaceTreeSessionMode(),
     tree: workspaceTreeCacheKey(dir, root, depth, maxEntries)
   });
 }
 
+export async function closeRustWorkspaceTreeSidecar() {
+  const client = rustWorkspaceTreeSidecar;
+  rustWorkspaceTreeSidecar = null;
+  rustWorkspaceTreeSidecarKey = "";
+  rustWorkspaceTreeSidecarReady = null;
+  rustWorkspaceTreeSessionStats.ready = false;
+  if (!client) return { closed: false };
+  await client.close();
+  rustWorkspaceTreeLastClientStats = client.stats();
+  return { closed: true };
+}
+
+async function ensureRustWorkspaceTreeSidecar(command, baseArgs) {
+  const key = JSON.stringify({ command, baseArgs });
+  if (rustWorkspaceTreeSidecar && rustWorkspaceTreeSidecarKey === key && rustWorkspaceTreeSessionStats.ready) {
+    return rustWorkspaceTreeSidecar;
+  }
+  if (rustWorkspaceTreeSidecarReady && rustWorkspaceTreeSidecarKey === key) {
+    return rustWorkspaceTreeSidecarReady;
+  }
+  if (rustWorkspaceTreeSidecar) await closeRustWorkspaceTreeSidecar();
+
+  const client = createWorkspaceTreeSidecarClient({
+    command,
+    args: [...baseArgs, "workspace-tree-sidecar"],
+    timeoutMs: rustWorkspaceTreeSessionTimeoutMs()
+  });
+  rustWorkspaceTreeSidecar = client;
+  rustWorkspaceTreeSidecarKey = key;
+  rustWorkspaceTreeSessionStats.starts += 1;
+  rustWorkspaceTreeSessionStats.ready = false;
+  const ready = (async () => {
+    const health = await client.health();
+    if (!health?.ok || health.implementation !== "rust" || health.protocolVersion !== 1) {
+      throw new Error("Workspace tree Rust sidecar health check failed.");
+    }
+    if (rustWorkspaceTreeSidecar !== client || rustWorkspaceTreeSidecarKey !== key) {
+      throw new Error("Workspace tree Rust sidecar was superseded during startup.");
+    }
+    rustWorkspaceTreeSessionStats.ready = true;
+    rustWorkspaceTreeSessionStats.lastError = "";
+    return client;
+  })();
+  rustWorkspaceTreeSidecarReady = ready;
+  try {
+    return await ready;
+  } finally {
+    if (rustWorkspaceTreeSidecarReady === ready) rustWorkspaceTreeSidecarReady = null;
+  }
+}
+
+async function scanWithRustWorkspaceTreeSidecar(command, baseArgs, options) {
+  try {
+    const client = await ensureRustWorkspaceTreeSidecar(command, baseArgs);
+    return await client.scan(options);
+  } catch (error) {
+    const message = rustWorkspaceTreeErrorMessage(error);
+    rustWorkspaceTreeSessionStats.failures += 1;
+    rustWorkspaceTreeSessionStats.fallbacks += 1;
+    rustWorkspaceTreeSessionStats.lastError = message;
+    await closeRustWorkspaceTreeSidecar().catch(() => {});
+    return null;
+  }
+}
+
 function cloneWorkspaceTreeItems(items = []) {
   return items.map((item) => ({ ...item }));
+}
+
+function orderWorkspaceTreeItemsLikeNode(items, dir, root) {
+  const startPath = path.relative(root, dir).replaceAll("\\", "/");
+  const byParent = new Map();
+  const itemPaths = new Set();
+  for (const rawItem of items) {
+    const normalizedPath = typeof rawItem?.path === "string" ? rawItem.path.replace(/^(\.\/)+/, "") : "";
+    const item = rawItem && { ...rawItem, path: normalizedPath };
+    if (
+      !item
+      || !item.path
+      || item.path.startsWith("/")
+      || item.path.split("/").includes("..")
+      || typeof item.name !== "string"
+      || !["directory", "file"].includes(item.type)
+      || item.path.split("/").at(-1) !== item.name
+      || itemPaths.has(item.path)
+    ) return null;
+    itemPaths.add(item.path);
+    const separator = item.path.lastIndexOf("/");
+    const parentPath = separator >= 0 ? item.path.slice(0, separator) : "";
+    const siblings = byParent.get(parentPath) || [];
+    siblings.push({ ...item });
+    byParent.set(parentPath, siblings);
+  }
+
+  const ordered = [];
+  const queue = [startPath];
+  const visitedParents = new Set();
+  while (queue.length) {
+    const parentPath = queue.shift();
+    if (visitedParents.has(parentPath)) return null;
+    visitedParents.add(parentPath);
+    const children = byParent.get(parentPath) || [];
+    children.sort((left, right) => (
+      Number(right.type === "directory") - Number(left.type === "directory")
+      || left.name.localeCompare(right.name)
+    ));
+    for (const item of children) {
+      ordered.push(item);
+      if (item.type === "directory") queue.push(item.path);
+    }
+  }
+  return ordered.length === items.length ? ordered : null;
 }
 
 function cacheRustWorkspaceTree(cacheKey, signature, items) {
@@ -590,10 +850,16 @@ function cacheRustWorkspaceTree(cacheKey, signature, items) {
 }
 
 async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
-  if (!rustWorkspaceTreeEnabled()) return null;
+  const mode = rustWorkspaceTreeMode();
+  if (mode === "off") return null;
   const command = rustWorkspaceTreeCommand();
-  if (!fs.existsSync(command)) {
-    rustWorkspaceTreeStats.misses += 1;
+  if (!rustWorkspaceTreeCommandAvailable(command)) {
+    if (mode === "manual") {
+      recordRustWorkspaceTreeFallback(`Rust workspace-tree command not found: ${command}`);
+    } else {
+      rustWorkspaceTreeStats.misses += 1;
+      rustWorkspaceTreeStats.lastError = "";
+    }
     return null;
   }
   const baseArgs = rustWorkspaceTreeBaseArgs();
@@ -602,33 +868,56 @@ async function listDirectoryRust(dir, root, depth = 1, maxEntries = 240) {
   if (cached) {
     rustWorkspaceTreeStats.cacheHits += 1;
     rustWorkspaceTreeStats.lastSignature = cached.signature;
+    rustWorkspaceTreeStats.lastError = "";
     return cloneWorkspaceTreeItems(cached.items);
   }
   rustWorkspaceTreeStats.cacheMisses += 1;
   try {
-    const { stdout } = await execFileAsync(command, [
-      ...baseArgs,
-      "workspace-tree",
-      "--root", root,
-      "--dir", path.relative(root, dir),
-      "--depth", String(depth),
-      "--max-entries", String(maxEntries)
-    ], {
-      windowsHide: true,
-      maxBuffer: 10 * 1024 * 1024
-    });
-    const parsed = JSON.parse(stdout);
-    if (Array.isArray(parsed.items)) {
-      rustWorkspaceTreeStats.hits += 1;
-      if (parsed.truncated) rustWorkspaceTreeStats.budgetHits += 1;
-      if (typeof parsed.signature === "string") rustWorkspaceTreeStats.lastSignature = parsed.signature;
-      cacheRustWorkspaceTree(cacheKey, parsed.signature, parsed.items);
-      return cloneWorkspaceTreeItems(parsed.items);
+    const relativeDir = path.relative(root, dir) || ".";
+    let parsed = null;
+    if (rustWorkspaceTreeSessionMode() !== "off") {
+      parsed = await scanWithRustWorkspaceTreeSidecar(command, baseArgs, {
+        root,
+        dir: relativeDir,
+        depth,
+        maxEntries
+      });
     }
-    rustWorkspaceTreeStats.misses += 1;
+    if (!parsed) {
+      const { stdout } = await execFileAsync(command, [
+        ...baseArgs,
+        "workspace-tree",
+        "--root", root,
+        "--dir", relativeDir,
+        "--depth", String(depth),
+        "--max-entries", String(maxEntries)
+      ], {
+        windowsHide: true,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      parsed = JSON.parse(stdout);
+    }
+    if (Array.isArray(parsed.items)) {
+      if (parsed.truncated) {
+        rustWorkspaceTreeStats.budgetHits += 1;
+        recordRustWorkspaceTreeBudgetFallback("Rust workspace-tree reached its entry budget; using Node ordering and selection.");
+        return null;
+      }
+      const orderedItems = orderWorkspaceTreeItemsLikeNode(parsed.items, dir, root);
+      if (!orderedItems) {
+        recordRustWorkspaceTreeFallback("Rust workspace-tree returned items outside the requested traversal.");
+        return null;
+      }
+      rustWorkspaceTreeStats.hits += 1;
+      if (typeof parsed.signature === "string") rustWorkspaceTreeStats.lastSignature = parsed.signature;
+      rustWorkspaceTreeStats.lastError = "";
+      cacheRustWorkspaceTree(cacheKey, parsed.signature, orderedItems);
+      return cloneWorkspaceTreeItems(orderedItems);
+    }
+    recordRustWorkspaceTreeFallback("Rust workspace-tree returned invalid payload.");
     return null;
-  } catch {
-    rustWorkspaceTreeStats.misses += 1;
+  } catch (error) {
+    recordRustWorkspaceTreeFallback(`Rust workspace-tree failed: ${rustWorkspaceTreeErrorMessage(error)}`);
     return null;
   }
 }
@@ -642,17 +931,20 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
   workspaceTreeStats.cacheMisses += 1;
 
   const entries = [];
-  const queue = [{ dir, depth: 0 }];
-  const gitignoreDirs = rootGitignoreDirs(root);
+  const queue = [{ dir, depth: 0, ignoreRules: workspaceGitignoreRulesForAncestors(root, dir) }];
   let budgetHit = false;
 
   while (queue.length && entries.length < maxEntries) {
     const current = queue.shift();
+    const ignoreRules = [...current.ignoreRules, ...workspaceGitignoreRulesForDir(root, current.dir)];
     const children = fs
       .readdirSync(current.dir, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith(".") || entry.name === ".env")
       .filter((entry) => !(entry.isDirectory() && ignoredDirs.has(entry.name)))
-      .filter((entry) => !(entry.isDirectory() && gitignoreDirs.has(entry.name)))
+      .filter((entry) => {
+        const itemPath = path.relative(root, path.join(current.dir, entry.name)).replaceAll("\\", "/");
+        return !isWorkspacePathIgnored(ignoreRules, entry.name, itemPath, entry.isDirectory());
+      })
       .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
 
     for (const entry of children) {
@@ -671,7 +963,9 @@ function listDirectory(dir, root, depth = 1, maxEntries = 160) {
         updatedAt: stat.mtime.toISOString()
       };
       entries.push(item);
-      if (entry.isDirectory() && current.depth + 1 < depth) queue.push({ dir: fullPath, depth: current.depth + 1 });
+      if (entry.isDirectory() && current.depth + 1 < depth) {
+        queue.push({ dir: fullPath, depth: current.depth + 1, ignoreRules });
+      }
     }
   }
 

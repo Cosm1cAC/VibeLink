@@ -19,7 +19,25 @@ function cargoPath() {
   return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
 }
 
+function rustBinaryPath() {
+  const binary = process.platform === "win32" ? "vibelink.exe" : "vibelink";
+  const target = path.join(process.cwd(), "apps", "windows", "target");
+  const release = path.join(target, "release", binary);
+  if (fs.existsSync(release)) return release;
+  const debug = path.join(target, "debug", binary);
+  return fs.existsSync(debug) ? debug : "";
+}
+
 function rustSidecarClient(t, options = {}) {
+  const binary = rustBinaryPath();
+  if (binary) {
+    return createMcpSessionSidecarClient({
+      command: binary,
+      args: ["mcp-session-sidecar"],
+      timeoutMs: 10000,
+      ...options
+    });
+  }
   const cargo = cargoPath();
   if (!cargo) t.skip("cargo is not available");
   return createMcpSessionSidecarClient({
@@ -263,14 +281,17 @@ test("Rust MCP session sidecar serves stats while a tool call is in flight", asy
   };
 
   try {
-    const slowCall = client.callTool(server, "echo", { q: "slow" }, { timeoutMs: 10000 });
+    let slowCallCompleted = false;
+    const slowCall = client.callTool(server, "echo", { q: "slow" }, { timeoutMs: 10000 })
+      .then((result) => {
+        slowCallCompleted = true;
+        return result;
+      });
     await sleep(75);
 
-    const startedAt = Date.now();
     const stats = await client.getSessionStats();
-    const elapsedMs = Date.now() - startedAt;
 
-    assert.ok(elapsedMs < 500, `expected stats before slow call completed, got ${elapsedMs}ms`);
+    assert.equal(slowCallCompleted, false, "expected stats before slow call completed");
     assert.ok(stats.activeRequests >= 1, `expected activeRequests >= 1, got ${stats.activeRequests}`);
     assert.ok(stats.maxActiveObserved >= 1, `expected maxActiveObserved >= 1, got ${stats.maxActiveObserved}`);
 

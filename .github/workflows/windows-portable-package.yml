@@ -1,0 +1,67 @@
+name: Windows Portable Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-portable-package.yml"
+      - "apps/windows/**"
+      - "apps/web/**"
+      - "packages/doubao-cli/**"
+      - "public/**"
+      - "src/**"
+      - "tools/windows/**"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.js"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-portable-package.yml"
+      - "apps/windows/**"
+      - "apps/web/**"
+      - "packages/doubao-cli/**"
+      - "public/**"
+      - "src/**"
+      - "tools/windows/**"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.js"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-portable-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/windows
+      - run: npm ci
+      - run: npm run package:windows
+      - name: Verify package outputs
+        shell: pwsh
+        run: |
+          $zip = Get-Item artifacts/windows/VibeLink-*-windows-x64.zip
+          $checksum = Get-Item "$($zip.FullName).sha256"
+          if ($zip.Length -le 0 -or $checksum.Length -le 0) { throw "Package output is empty." }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vibelink-windows-x64
+          path: |
+            artifacts/windows/VibeLink-*-windows-x64.zip
+            artifacts/windows/VibeLink-*-windows-x64.zip.sha256
+          retention-days: 30
+          if-no-files-found: error

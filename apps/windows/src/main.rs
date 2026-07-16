@@ -2,22 +2,33 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::{
     env,
+    ffi::OsString,
     hash::{Hash, Hasher},
-    net::UdpSocket,
+    net::{SocketAddr, TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     thread,
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
+
+mod audio_pipeline_sidecar;
+mod compression_sidecar;
+mod doctor_http;
+mod http_frontdoor;
+mod public_tunnel;
+mod status_http;
+mod status_sidecar;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -39,6 +50,18 @@ struct Cli {
 
     #[arg(long, global = true, default_value = "VibeLink Windows")]
     device_label: String,
+
+    #[arg(long, global = true)]
+    rust_canary: bool,
+
+    #[arg(long, global = true)]
+    rust_http_canary: bool,
+
+    #[arg(long, global = true)]
+    rust_status_http: bool,
+
+    #[arg(long, global = true)]
+    rust_doctor_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -51,6 +74,15 @@ enum Mode {
     Pair,
     /// Check bridge health.
     Doctor,
+    /// Validate or run a fixed, allowlisted Cloudflare Tunnel.
+    Tunnel {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        settings: Option<PathBuf>,
+        #[arg(long)]
+        check_only: bool,
+    },
     /// List a workspace directory using the Rust filesystem scanner.
     WorkspaceTree {
         #[arg(long)]
@@ -62,12 +94,27 @@ enum Mode {
         #[arg(long = "max-entries", default_value_t = 240)]
         max_entries: usize,
     },
+    /// Run the persistent workspace tree JSONL sidecar.
+    WorkspaceTreeSidecar,
     /// Run the MCP stdio session JSONL sidecar.
     McpSessionSidecar,
     /// Run the event-store SQLite JSONL sidecar.
     EventStoreSidecar {
         #[arg(value_name = "DB_PATH")]
         db_path: PathBuf,
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Run the deterministic compression helper JSONL sidecar.
+    CompressionSidecar,
+    /// Validate and assemble status snapshots as a persistent JSONL sidecar.
+    StatusSidecar,
+    /// Run deterministic PCM preprocessing as a bounded JSONL sidecar.
+    AudioPipelineSidecar {
+        #[arg(long = "max-buffered-samples", default_value_t = 48_000)]
+        max_buffered_samples: usize,
+        #[arg(long = "max-samples-per-chunk", default_value_t = 8_192)]
+        max_samples_per_chunk: usize,
     },
 }
 
@@ -112,6 +159,39 @@ struct WorkspaceTreeItem {
     size: u64,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceTreeScanOptions {
+    root: PathBuf,
+    #[serde(default)]
+    dir: PathBuf,
+    #[serde(default = "default_workspace_tree_depth")]
+    depth: usize,
+    #[serde(rename = "maxEntries", default = "default_workspace_tree_max_entries")]
+    max_entries: usize,
+}
+
+struct WorkspaceTreeSidecar {
+    started_at: String,
+    requests: u64,
+    responses: u64,
+    failures: u64,
+    scans: u64,
+    items: u64,
+    truncated_scans: u64,
+    last_request_at: String,
+    last_response_at: String,
+    last_failure_at: String,
+    last_error: String,
+}
+
+fn default_workspace_tree_depth() -> usize {
+    1
+}
+
+fn default_workspace_tree_max_entries() -> usize {
+    240
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,8 +260,16 @@ struct McpSidecarManager {
     sessions: HashMap<String, McpStdioSession>,
 }
 
+struct McpSidecarRuntimeStats {
+    active_requests: AtomicUsize,
+    max_active_observed: AtomicUsize,
+    backpressure_rejects: AtomicUsize,
+    max_active_requests: usize,
+}
+
 struct EventStoreSidecar {
     db: Connection,
+    read_only: bool,
     started_at: String,
     requests: u64,
     responses: u64,
@@ -247,12 +335,10 @@ fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize)
     Ok(())
 }
 
-fn run_mcp_session_sidecar() -> Result<()> {
+fn run_workspace_tree_sidecar() -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut manager = McpSidecarManager {
-        sessions: HashMap::new(),
-    };
+    let mut sidecar = WorkspaceTreeSidecar::new();
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -263,31 +349,207 @@ fn run_mcp_session_sidecar() -> Result<()> {
         let request: SidecarRequest = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(error) => {
+                sidecar.record_request();
+                sidecar.record_failure(&error.to_string());
+                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
+                continue;
+            }
+        };
+
+        sidecar.record_request();
+        if request.method == "__close" {
+            sidecar.record_response();
+            write_sidecar_result(&mut stdout, &request.id, Value::Bool(true))?;
+            break;
+        }
+
+        match sidecar.handle(&request.method, &request.args) {
+            Ok(result) => {
+                sidecar.record_response();
+                write_sidecar_result(&mut stdout, &request.id, result)?;
+            }
+            Err(error) => {
+                sidecar.record_failure(&format!("{error:#}"));
+                write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+impl WorkspaceTreeSidecar {
+    fn new() -> Self {
+        Self {
+            started_at: now_iso(),
+            requests: 0,
+            responses: 0,
+            failures: 0,
+            scans: 0,
+            items: 0,
+            truncated_scans: 0,
+            last_request_at: String::new(),
+            last_response_at: String::new(),
+            last_failure_at: String::new(),
+            last_error: String::new(),
+        }
+    }
+
+    fn record_request(&mut self) {
+        self.requests += 1;
+        self.last_request_at = now_iso();
+    }
+
+    fn record_response(&mut self) {
+        self.responses += 1;
+        self.last_response_at = now_iso();
+    }
+
+    fn record_failure(&mut self, message: &str) {
+        self.failures += 1;
+        self.last_failure_at = now_iso();
+        self.last_error = message.to_string();
+    }
+
+    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+        match method {
+            "__health" => Ok(json!({
+                "ok": true,
+                "implementation": "rust",
+                "protocolVersion": 1,
+                "supportedMethods": ["scan"],
+                "controlMethods": ["__health", "stats", "__close"],
+                "startedAt": self.started_at
+            })),
+            "stats" => Ok(self.stats()),
+            "scan" => {
+                let options: WorkspaceTreeScanOptions = sidecar_arg(args, 0)?;
+                let tree = list_workspace_tree(
+                    &options.root,
+                    &options.dir,
+                    options.depth,
+                    options.max_entries,
+                )?;
+                self.scans += 1;
+                self.items += tree.items.len() as u64;
+                if tree.truncated {
+                    self.truncated_scans += 1;
+                }
+                Ok(serde_json::to_value(tree)?)
+            }
+            _ => bail!("Unsupported workspace tree sidecar method: {method}"),
+        }
+    }
+
+    fn stats(&self) -> Value {
+        json!({
+            "implementation": "rust",
+            "protocolVersion": 1,
+            "startedAt": self.started_at,
+            "pending": 0,
+            "requests": self.requests,
+            "responses": self.responses,
+            "failures": self.failures,
+            "scans": self.scans,
+            "items": self.items,
+            "truncatedScans": self.truncated_scans,
+            "lastRequestAt": self.last_request_at,
+            "lastResponseAt": self.last_response_at,
+            "lastFailureAt": self.last_failure_at,
+            "lastError": self.last_error
+        })
+    }
+}
+
+fn run_mcp_session_sidecar() -> Result<()> {
+    let stdin = io::stdin();
+    let stdout = Arc::new(Mutex::new(io::stdout()));
+    let manager = Arc::new(Mutex::new(McpSidecarManager {
+        sessions: HashMap::new(),
+    }));
+    let runtime = Arc::new(McpSidecarRuntimeStats::from_env());
+    let mut workers = Vec::new();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: SidecarRequest = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
                 write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
                 continue;
             }
         };
 
         if request.method == "__close" {
+            let mut manager = manager.lock().expect("MCP sidecar manager lock poisoned");
             manager.close_all();
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
             write_sidecar_result(&mut stdout, &request.id, json!({ "ok": true }))?;
             break;
         }
 
-        match manager.handle(&request.method, &request.args) {
-            Ok(result) => write_sidecar_result(&mut stdout, &request.id, result)?,
-            Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?,
+        if request.method == "stats" {
+            let result = match manager.try_lock() {
+                Ok(manager) => manager.stats_with_runtime(&runtime),
+                Err(TryLockError::WouldBlock) => McpSidecarManager::busy_stats(&runtime),
+                Err(TryLockError::Poisoned(_)) => McpSidecarManager::busy_stats(&runtime),
+            };
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
+            write_sidecar_result(&mut stdout, &request.id, result)?;
+            continue;
         }
+
+        if !runtime.try_acquire() {
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
+            write_sidecar_error(
+                &mut stdout,
+                &request.id,
+                &format!(
+                    "MCP session sidecar backpressure: {} rejected because {} request(s) are already active.",
+                    request.method, runtime.max_active_requests
+                ),
+            )?;
+            continue;
+        }
+
+        let manager = Arc::clone(&manager);
+        let stdout = Arc::clone(&stdout);
+        let runtime = Arc::clone(&runtime);
+        workers.push(thread::spawn(move || {
+            let result = {
+                let mut manager = manager.lock().expect("MCP sidecar manager lock poisoned");
+                manager.handle(&request.method, &request.args)
+            };
+            runtime.release();
+            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
+            match result {
+                Ok(result) => write_sidecar_result(&mut stdout, &request.id, result),
+                Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}")),
+            }
+        }));
     }
 
-    manager.close_all();
+    for worker in workers {
+        let result = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("MCP sidecar worker thread panicked"))?;
+        result?;
+    }
+    manager
+        .lock()
+        .expect("MCP sidecar manager lock poisoned")
+        .close_all();
     Ok(())
 }
 
-fn run_event_store_sidecar(db_path: &Path) -> Result<()> {
+fn run_event_store_sidecar(db_path: &Path, read_only: bool) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut sidecar = EventStoreSidecar::open(db_path)?;
+    let mut sidecar = EventStoreSidecar::open(db_path, read_only)?;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -353,7 +615,7 @@ fn sidecar_arg<T: DeserializeOwned>(args: &[Value], index: usize) -> Result<T> {
     let value = args
         .get(index)
         .cloned()
-        .with_context(|| format!("Missing MCP session sidecar arg {index}"))?;
+        .with_context(|| format!("Missing sidecar arg {index}"))?;
     Ok(serde_json::from_value(value)?)
 }
 
@@ -388,17 +650,41 @@ fn now_iso() -> String {
     datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+fn is_event_store_write_method(method: &str) -> bool {
+    matches!(
+        method,
+        "insertTaskEvent"
+            | "insertTaskEvents"
+            | "insertToolEvent"
+            | "insertToolEvents"
+            | "pruneToolEvents"
+            | "insertLiveCallEvent"
+            | "insertLiveCallEvents"
+            | "pruneLiveCallEvents"
+    )
+}
+
 impl EventStoreSidecar {
-    fn open(db_path: &Path) -> Result<Self> {
-        let db = Connection::open(db_path).with_context(|| {
-            format!("Failed to open event store database: {}", db_path.display())
-        })?;
+    fn open(db_path: &Path, read_only: bool) -> Result<Self> {
+        let db = if read_only {
+            Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            Connection::open(db_path)
+        }
+        .with_context(|| format!("Failed to open event store database: {}", db_path.display()))?;
         db.busy_timeout(Duration::from_millis(5000))?;
-        db.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
-        )?;
+        if read_only {
+            db.execute_batch(
+                "PRAGMA query_only = ON; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+            )?;
+        } else {
+            db.execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+            )?;
+        }
         Ok(Self {
             db,
+            read_only,
             started_at: now_iso(),
             requests: 0,
             responses: 0,
@@ -427,6 +713,9 @@ impl EventStoreSidecar {
     }
 
     fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+        if self.read_only && is_event_store_write_method(method) {
+            bail!("Event store sidecar is read-only; method {method} is not allowed.");
+        }
         match method {
             "__health" => Ok(json!({
                 "ok": true,
@@ -451,6 +740,7 @@ impl EventStoreSidecar {
                 ],
                 "controlMethods": ["__health", "stats", "__close"],
                 "schemaReady": self.schema_ready()?,
+                "readOnly": self.read_only,
                 "startedAt": self.started_at
             })),
             "stats" => Ok(json!({
@@ -458,6 +748,7 @@ impl EventStoreSidecar {
                 "protocolVersion": 1,
                 "startedAt": self.started_at,
                 "pending": 0,
+                "readOnly": self.read_only,
                 "requests": self.requests,
                 "responses": self.responses,
                 "failures": self.failures,
@@ -1115,6 +1406,21 @@ fn unified_live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
 }
 
 impl McpSidecarManager {
+    fn busy_stats(runtime: &McpSidecarRuntimeStats) -> Value {
+        runtime.apply(json!({
+            "sessions": 0,
+            "activeSessions": 0,
+            "totalPending": 0,
+            "totalRequests": 0,
+            "totalResponses": 0,
+            "totalFailures": 0,
+            "totalTimeouts": 0,
+            "totalBackpressureRejects": 0,
+            "maxPendingObserved": 0,
+            "items": []
+        }))
+    }
+
     fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
         match method {
             "probeStdioServer" => {
@@ -1250,6 +1556,85 @@ impl McpSidecarManager {
             "maxPendingObserved": max_pending_observed,
             "items": items
         })
+    }
+
+    fn stats_with_runtime(&self, runtime: &McpSidecarRuntimeStats) -> Value {
+        runtime.apply(self.stats())
+    }
+}
+
+impl McpSidecarRuntimeStats {
+    fn from_env() -> Self {
+        let max_active_requests = env::var("VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(64);
+        Self {
+            active_requests: AtomicUsize::new(0),
+            max_active_observed: AtomicUsize::new(0),
+            backpressure_rejects: AtomicUsize::new(0),
+            max_active_requests,
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        loop {
+            let current = self.active_requests.load(Ordering::SeqCst);
+            if current >= self.max_active_requests {
+                self.backpressure_rejects.fetch_add(1, Ordering::SeqCst);
+                return false;
+            }
+            if self
+                .active_requests
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.record_max_active(current + 1);
+                return true;
+            }
+        }
+    }
+
+    fn release(&self) {
+        self.active_requests.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn record_max_active(&self, observed: usize) {
+        let mut current = self.max_active_observed.load(Ordering::SeqCst);
+        while observed > current {
+            match self.max_active_observed.compare_exchange(
+                current,
+                observed,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    fn apply(&self, mut value: Value) -> Value {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "activeRequests".to_string(),
+                json!(self.active_requests.load(Ordering::SeqCst)),
+            );
+            object.insert(
+                "maxActiveObserved".to_string(),
+                json!(self.max_active_observed.load(Ordering::SeqCst)),
+            );
+            object.insert(
+                "sidecarBackpressureRejects".to_string(),
+                json!(self.backpressure_rejects.load(Ordering::SeqCst)),
+            );
+            object.insert(
+                "maxActiveRequests".to_string(),
+                json!(self.max_active_requests),
+            );
+        }
+        value
     }
 }
 
@@ -1548,7 +1933,7 @@ fn list_workspace_tree(
     let mut queue = VecDeque::from([(
         target.clone(),
         0usize,
-        gitignore_rules_for_dir(&root, &root),
+        gitignore_rules_for_ancestors(&root, &target),
     )]);
     let max_entries = max_entries.max(1);
     let depth = depth.max(1);
@@ -1566,9 +1951,7 @@ fn list_workspace_tree(
             &root,
             &current.join(".gitignore"),
         ));
-        if current != root {
-            ignore_rules.extend(gitignore_rules_for_dir(&root, &current));
-        }
+        ignore_rules.extend(gitignore_rules_for_dir(&root, &current));
 
         let mut children = Vec::new();
         for entry in std::fs::read_dir(&current)
@@ -1608,7 +1991,7 @@ fn list_workspace_tree(
                 name,
                 path: rel,
                 kind: if is_dir { "directory" } else { "file" }.to_string(),
-                size: metadata.len(),
+                size: workspace_metadata_size(&metadata),
                 updated_at: system_time_iso(metadata.modified().ok()),
             });
             if is_dir && current_depth + 1 < depth {
@@ -1633,13 +2016,12 @@ fn metadata_signature_part(kind: &str, root: &Path, path: &Path) -> String {
             let modified_ms = metadata
                 .modified()
                 .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
+                .map(system_time_rounded_millis)
                 .unwrap_or(0);
             format!(
                 "{kind}:{rel}:{}:{}:{modified_ms}",
                 if metadata.is_dir() { "d" } else { "f" },
-                metadata.len()
+                workspace_metadata_size(&metadata)
             )
         }
         Err(_) => format!("{kind}:{rel}:missing"),
@@ -1754,6 +2136,26 @@ fn gitignore_rules_for_dir(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
     rules
 }
 
+fn gitignore_rules_for_ancestors(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
+    let Ok(relative) = dir.strip_prefix(root) else {
+        return WorkspaceIgnoreRules::default();
+    };
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() {
+        return WorkspaceIgnoreRules::default();
+    }
+
+    let mut rules = gitignore_rules_for_dir(root, root);
+    let mut current = root.to_path_buf();
+    for component in components.iter().take(components.len() - 1) {
+        if let std::path::Component::Normal(part) = component {
+            current.push(part);
+            rules.extend(gitignore_rules_for_dir(root, &current));
+        }
+    }
+    rules
+}
+
 fn gitignore_path_matches(pattern: &str, path: &str) -> bool {
     let pattern_parts: Vec<_> = pattern.split('/').collect();
     let path_parts: Vec<_> = path.split('/').collect();
@@ -1824,11 +2226,30 @@ fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn workspace_metadata_size(metadata: &std::fs::Metadata) -> u64 {
+    if cfg!(windows) && metadata.is_dir() {
+        0
+    } else {
+        metadata.len()
+    }
+}
+
+fn rounded_system_time(value: std::time::SystemTime) -> DateTime<Utc> {
+    let datetime: DateTime<Utc> = value.into();
+    datetime
+        .checked_add_signed(chrono::Duration::microseconds(500))
+        .unwrap_or(datetime)
+}
+
+fn system_time_rounded_millis(value: std::time::SystemTime) -> i64 {
+    rounded_system_time(value).timestamp_millis()
+}
+
 fn system_time_iso(value: Option<std::time::SystemTime>) -> String {
     let Some(value) = value else {
         return String::new();
     };
-    let datetime: DateTime<Utc> = value.into();
+    let datetime = rounded_system_time(value);
     datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 fn main() {
@@ -1845,14 +2266,28 @@ fn run() -> Result<()> {
         Mode::Bridge => run_bridge_role(&cli),
         Mode::Pair => run_pairing_flow(&cli),
         Mode::Doctor => run_doctor(&cli),
+        Mode::Tunnel {
+            config,
+            settings,
+            check_only,
+        } => public_tunnel::run(config.as_deref(), settings.as_deref(), check_only),
         Mode::WorkspaceTree {
             root,
             dir,
             depth,
             max_entries,
         } => run_workspace_tree(&root, &dir, depth, max_entries),
+        Mode::WorkspaceTreeSidecar => run_workspace_tree_sidecar(),
         Mode::McpSessionSidecar => run_mcp_session_sidecar(),
-        Mode::EventStoreSidecar { db_path } => run_event_store_sidecar(&db_path),
+        Mode::EventStoreSidecar { db_path, read_only } => {
+            run_event_store_sidecar(&db_path, read_only)
+        }
+        Mode::CompressionSidecar => compression_sidecar::run(),
+        Mode::StatusSidecar => status_sidecar::run(),
+        Mode::AudioPipelineSidecar {
+            max_buffered_samples,
+            max_samples_per_chunk,
+        } => audio_pipeline_sidecar::run(max_buffered_samples, max_samples_per_chunk),
     }
 }
 
@@ -1890,19 +2325,12 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
         bail!("Cannot find bridge server at {}", server.display());
     }
 
-    let mut command = Command::new("node");
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-        .arg(&server)
-        .current_dir(&root)
-        .env("MOBILE_AGENT_HOST", &cli.host)
-        .env("MOBILE_AGENT_PORT", cli.port.to_string())
-        .stdin(Stdio::null());
+    if cli.rust_http_canary {
+        return run_rust_http_frontdoor(cli, &root, &server);
+    }
 
-    let status = command
-        .spawn()
-        .context("Failed to launch Node bridge. Is node.exe on PATH?")?
+    let plan = node_bridge_plan(cli, cli.port);
+    let status = spawn_node_bridge(cli, &root, &server, &plan, None)?
         .wait()
         .context("Failed while waiting for Node bridge")?;
 
@@ -1910,6 +2338,240 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
         bail!("Node bridge exited with status {status}");
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NodeBridgeBinding {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NodeBridgePlan {
+    persisted: NodeBridgeBinding,
+    runtime: NodeBridgeBinding,
+}
+
+fn node_bridge_plan(cli: &Cli, internal_port: u16) -> NodeBridgePlan {
+    let persisted = NodeBridgeBinding {
+        host: cli.host.clone(),
+        port: cli.port,
+    };
+    let runtime = if cli.rust_http_canary {
+        NodeBridgeBinding {
+            host: "127.0.0.1".to_string(),
+            port: internal_port,
+        }
+    } else {
+        NodeBridgeBinding {
+            host: persisted.host.clone(),
+            port: persisted.port,
+        }
+    };
+    NodeBridgePlan { persisted, runtime }
+}
+
+fn rust_status_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_status_http
+}
+
+fn rust_doctor_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_doctor_http
+}
+
+fn reserve_loopback_port() -> Result<u16> {
+    let reservation = TcpListener::bind(("127.0.0.1", 0))
+        .context("Failed to reserve loopback port for Node bridge")?;
+    Ok(reservation
+        .local_addr()
+        .context("Failed to inspect reserved loopback port")?
+        .port())
+}
+
+fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> {
+    let listener = TcpListener::bind((cli.host.as_str(), cli.port)).with_context(|| {
+        format!(
+            "Failed to bind Rust HTTP front door on {}:{}",
+            cli.host, cli.port
+        )
+    })?;
+    let internal_port = reserve_loopback_port()?;
+    let plan = node_bridge_plan(cli, internal_port);
+    let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
+    let internal_token = (rust_status_http_enabled(cli) || rust_doctor_http_enabled(cli))
+        .then(generate_internal_control_token)
+        .transpose()?;
+    let route_data_dir = resolve_data_dir(
+        root,
+        env::var_os("VIBELINK_DATA_DIR"),
+        env::var_os("LOCALAPPDATA"),
+        Path::exists,
+    );
+    let status_route = if rust_status_http_enabled(cli) {
+        Some(status_http::StatusRouteConfig::new(
+            route_data_dir.clone(),
+            upstream,
+            internal_token
+                .clone()
+                .context("Status route internal token is missing")?,
+        ))
+    } else {
+        None
+    };
+    let doctor_route = if rust_doctor_http_enabled(cli) {
+        Some(doctor_http::DoctorRouteConfig::new(
+            route_data_dir,
+            upstream,
+            internal_token
+                .clone()
+                .context("Doctor route internal token is missing")?,
+        ))
+    } else {
+        None
+    };
+    let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
+
+    println!(
+        "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
+        cli.host, cli.port, upstream
+    );
+    let result = http_frontdoor::serve(listener, upstream, &mut node, status_route, doctor_route);
+    if node
+        .try_wait()
+        .context("Failed to inspect Node bridge after front-door shutdown")?
+        .is_none()
+    {
+        let _ = node.kill();
+        let _ = node.wait();
+    }
+    result
+}
+
+fn spawn_node_bridge(
+    cli: &Cli,
+    root: &Path,
+    server: &Path,
+    plan: &NodeBridgePlan,
+    internal_control_token: Option<&str>,
+) -> Result<Child> {
+    let executable = env::current_exe().context("Cannot resolve current executable path")?;
+    let data_dir = resolve_data_dir(
+        root,
+        env::var_os("VIBELINK_DATA_DIR"),
+        env::var_os("LOCALAPPDATA"),
+        Path::exists,
+    );
+    let mut command = Command::new(resolve_node_command(
+        root,
+        env::var_os("VIBELINK_NODE_COMMAND"),
+        Path::exists,
+    ));
+    for (key, value) in missing_sidecar_command_envs(&executable, |key| env::var_os(key)) {
+        command.env(key, value);
+    }
+    for (key, value) in missing_rust_canary_envs(cli.rust_canary, |key| env::var_os(key)) {
+        command.env(key, value);
+    }
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+        .arg(server)
+        .current_dir(root)
+        .env("VIBELINK_DATA_DIR", data_dir)
+        .env("VIBELINK_SUPERVISOR_PID", std::process::id().to_string())
+        .env("MOBILE_AGENT_HOST", &plan.persisted.host)
+        .env("MOBILE_AGENT_PORT", plan.persisted.port.to_string())
+        .stdin(Stdio::null());
+
+    if cli.rust_http_canary {
+        command
+            .env("VIBELINK_RUNTIME_HOST", &plan.runtime.host)
+            .env("VIBELINK_RUNTIME_PORT", plan.runtime.port.to_string());
+    }
+    if let Some(token) = internal_control_token {
+        command.env("VIBELINK_INTERNAL_CONTROL_TOKEN", token);
+    }
+
+    command
+        .spawn()
+        .context("Failed to launch Node bridge. Is node.exe on PATH?")
+}
+
+fn missing_sidecar_command_envs<F>(
+    executable: &Path,
+    mut existing: F,
+) -> Vec<(&'static str, OsString)>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    [
+        "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_RUST_BIN",
+    ]
+    .into_iter()
+    .filter(|key| existing(key).is_none())
+    .map(|key| (key, executable.as_os_str().to_os_string()))
+    .collect()
+}
+
+fn missing_rust_canary_envs<F>(enabled: bool, mut existing: F) -> Vec<(&'static str, OsString)>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    if !enabled {
+        return Vec::new();
+    }
+    [
+        ("VIBELINK_RUST_STATUS", "1"),
+        ("VIBELINK_RUST_WORKSPACE_TREE", "auto"),
+        ("VIBELINK_RUST_WORKSPACE_TREE_SESSION", "auto"),
+        ("VIBELINK_MCP_RUST_SIDECAR", "auto"),
+        ("VIBELINK_MCP_PERSISTENT_SESSIONS", "1"),
+        ("VIBELINK_EVENT_STORE_RUST_SIDECAR", "auto"),
+        ("VIBELINK_EVENT_STORE_BATCH_APPEND", "1"),
+        ("VIBELINK_EVENT_STORE_BATCH_TASK_APPEND", "1"),
+        ("VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", "1"),
+    ]
+    .into_iter()
+    .filter(|(key, _)| existing(key).is_none())
+    .map(|(key, value)| (key, OsString::from(value)))
+    .collect()
+}
+
+fn resolve_node_command<F>(root: &Path, configured: Option<OsString>, mut exists: F) -> OsString
+where
+    F: FnMut(&Path) -> bool,
+{
+    if let Some(command) = configured.filter(|value| !value.is_empty()) {
+        return command;
+    }
+    let bundled = root.join("runtime").join("node.exe");
+    if exists(&bundled) {
+        return bundled.into_os_string();
+    }
+    OsString::from("node")
+}
+
+fn resolve_data_dir<F>(
+    root: &Path,
+    configured: Option<OsString>,
+    local_app_data: Option<OsString>,
+    mut exists: F,
+) -> PathBuf
+where
+    F: FnMut(&Path) -> bool,
+{
+    if let Some(path) = configured.filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    if exists(&root.join("runtime").join("node.exe")) {
+        if let Some(local) = local_app_data.filter(|value| !value.is_empty()) {
+            return PathBuf::from(local).join("VibeLink");
+        }
+    }
+    root.join(".agent-mobile-terminal")
 }
 
 fn run_pairing_flow(cli: &Cli) -> Result<()> {
@@ -1933,7 +2595,20 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
         .arg("--host")
         .arg(&cli.host)
         .arg("--port")
-        .arg(cli.port.to_string())
+        .arg(cli.port.to_string());
+    if cli.rust_canary {
+        command.arg("--rust-canary");
+    }
+    if cli.rust_http_canary {
+        command.arg("--rust-http-canary");
+    }
+    if cli.rust_status_http {
+        command.arg("--rust-status-http");
+    }
+    if cli.rust_doctor_http {
+        command.arg("--rust-doctor-http");
+    }
+    command
         .arg("bridge")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1943,6 +2618,13 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     command.creation_flags(CREATE_NO_WINDOW);
 
     command.spawn().context("Failed to start bridge role")
+}
+
+fn generate_internal_control_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("Cannot generate internal Status route token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn print_pairing_qr(api_base_url: &str, pairing_base_url: &str, label: &str) -> Result<()> {
@@ -2041,16 +2723,16 @@ fn project_root() -> Result<PathBuf> {
         return Ok(PathBuf::from(root));
     }
 
-    let cwd = env::current_dir().context("Cannot read current directory")?;
-    if let Some(root) = find_project_root_from(&cwd) {
-        return Ok(root);
-    }
-
     let exe = env::current_exe().context("Cannot resolve current executable path")?;
     if let Some(parent) = exe.parent() {
         if let Some(root) = find_project_root_from(parent) {
             return Ok(root);
         }
+    }
+
+    let cwd = env::current_dir().context("Cannot read current directory")?;
+    if let Some(root) = find_project_root_from(&cwd) {
+        return Ok(root);
     }
 
     bail!("Cannot find VibeLink project root. Set VIBELINK_ROOT to the directory containing src/server.js.")
@@ -2066,7 +2748,197 @@ fn find_project_root_from(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
+
+    #[test]
+    fn packaged_sidecar_envs_use_current_executable_and_preserve_overrides() {
+        let executable = Path::new("C:/Program Files/VibeLink/vibelink.exe");
+
+        let all_values = missing_sidecar_command_envs(executable, |_| None);
+        assert_eq!(
+            all_values.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![
+                "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
+                "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+                "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
+                "VIBELINK_RUST_BIN"
+            ]
+        );
+        assert!(all_values
+            .iter()
+            .all(|(_, value)| value == executable.as_os_str()));
+
+        let values = missing_sidecar_command_envs(executable, |key| {
+            (key == "VIBELINK_MCP_RUST_SIDECAR_COMMAND")
+                .then(|| OsString::from("C:/custom/mcp-sidecar.exe"))
+        });
+
+        assert_eq!(
+            values,
+            vec![
+                (
+                    "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+                    executable.as_os_str().to_os_string()
+                ),
+                (
+                    "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
+                    executable.as_os_str().to_os_string()
+                ),
+                ("VIBELINK_RUST_BIN", executable.as_os_str().to_os_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_canary_envs_enable_current_slices_and_preserve_overrides() {
+        let values = missing_rust_canary_envs(true, |_| None);
+        assert_eq!(
+            values,
+            vec![
+                ("VIBELINK_RUST_STATUS", OsString::from("1")),
+                ("VIBELINK_RUST_WORKSPACE_TREE", OsString::from("auto")),
+                (
+                    "VIBELINK_RUST_WORKSPACE_TREE_SESSION",
+                    OsString::from("auto")
+                ),
+                ("VIBELINK_MCP_RUST_SIDECAR", OsString::from("auto")),
+                ("VIBELINK_MCP_PERSISTENT_SESSIONS", OsString::from("1")),
+                ("VIBELINK_EVENT_STORE_RUST_SIDECAR", OsString::from("auto")),
+                ("VIBELINK_EVENT_STORE_BATCH_APPEND", OsString::from("1")),
+                (
+                    "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND",
+                    OsString::from("1")
+                ),
+                (
+                    "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND",
+                    OsString::from("1")
+                )
+            ]
+        );
+
+        let overridden = missing_rust_canary_envs(true, |key| {
+            (key == "VIBELINK_RUST_STATUS").then(|| OsString::from("0"))
+        });
+        assert!(overridden
+            .iter()
+            .all(|(key, _)| *key != "VIBELINK_RUST_STATUS"));
+        assert!(missing_rust_canary_envs(false, |_| None).is_empty());
+    }
+
+    #[test]
+    fn rust_canary_is_an_additive_global_cli_flag() {
+        let enabled = Cli::try_parse_from(["vibelink", "--rust-canary", "bridge"]).unwrap();
+        assert!(enabled.rust_canary);
+        assert!(matches!(enabled.command, Some(Mode::Bridge)));
+
+        let defaulted = Cli::try_parse_from(["vibelink", "bridge"]).unwrap();
+        assert!(!defaulted.rust_canary);
+    }
+
+    #[test]
+    fn rust_http_canary_is_additive_and_keeps_node_on_loopback() {
+        let enabled = Cli::try_parse_from(["vibelink", "--rust-http-canary", "bridge"]).unwrap();
+        assert!(enabled.rust_http_canary);
+
+        let plan = node_bridge_plan(&enabled, 49_152);
+        assert_eq!(plan.persisted.host, "0.0.0.0");
+        assert_eq!(plan.persisted.port, 8787);
+        assert_eq!(plan.runtime.host, "127.0.0.1");
+        assert_eq!(plan.runtime.port, 49_152);
+
+        let defaulted =
+            Cli::try_parse_from(["vibelink", "--host", "0.0.0.0", "--port", "8787", "bridge"])
+                .unwrap();
+        assert!(!defaulted.rust_http_canary);
+
+        let plan = node_bridge_plan(&defaulted, 49_152);
+        assert_eq!(plan.persisted.host, "0.0.0.0");
+        assert_eq!(plan.persisted.port, 8787);
+        assert_eq!(plan.runtime, plan.persisted);
+    }
+
+    #[test]
+    fn rust_status_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-status-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_status_http);
+        assert!(rust_status_http_enabled(&enabled));
+
+        let status_only =
+            Cli::try_parse_from(["vibelink", "--rust-status-http", "bridge"]).unwrap();
+        assert!(status_only.rust_status_http);
+        assert!(!rust_status_http_enabled(&status_only));
+    }
+
+    #[test]
+    fn rust_doctor_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-doctor-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_doctor_http);
+        assert!(rust_doctor_http_enabled(&enabled));
+
+        let doctor_only =
+            Cli::try_parse_from(["vibelink", "--rust-doctor-http", "bridge"]).unwrap();
+        assert!(doctor_only.rust_doctor_http);
+        assert!(!rust_doctor_http_enabled(&doctor_only));
+    }
+
+    #[test]
+    fn packaged_node_runtime_precedes_path_and_preserves_override() {
+        let root = Path::new("C:/Program Files/VibeLink");
+        let bundled = root.join("runtime").join("node.exe");
+
+        assert_eq!(
+            resolve_node_command(root, Some(OsString::from("C:/custom/node.exe")), |_| true),
+            OsString::from("C:/custom/node.exe")
+        );
+        assert_eq!(
+            resolve_node_command(root, None, |path| path == bundled),
+            bundled.as_os_str()
+        );
+        assert_eq!(
+            resolve_node_command(root, None, |_| false),
+            OsString::from("node")
+        );
+    }
+
+    #[test]
+    fn packaged_data_dir_uses_local_app_data_and_preserves_override() {
+        let root = Path::new("C:/Program Files/VibeLink");
+        let local = Path::new("C:/Users/test/AppData/Local");
+        assert_eq!(
+            resolve_data_dir(
+                root,
+                Some(OsString::from("D:/VibeLinkData")),
+                Some(local.as_os_str().to_os_string()),
+                |_| true
+            ),
+            PathBuf::from("D:/VibeLinkData")
+        );
+        assert_eq!(
+            resolve_data_dir(root, None, Some(local.as_os_str().to_os_string()), |path| {
+                path == root.join("runtime").join("node.exe")
+            }),
+            local.join("VibeLink")
+        );
+        assert_eq!(
+            resolve_data_dir(root, None, Some(local.as_os_str().to_os_string()), |_| {
+                false
+            }),
+            root.join(".agent-mobile-terminal")
+        );
+    }
 
     #[test]
     fn android_pairing_uri_uses_deep_link_and_escapes_server() {
@@ -2267,5 +3139,12 @@ mod tests {
         assert_ne!(first.signature, second.signature);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_tree_rounds_submillisecond_timestamps_like_node() {
+        let value = std::time::UNIX_EPOCH + Duration::from_millis(123) + Duration::from_micros(600);
+        assert_eq!(system_time_iso(Some(value)), "1970-01-01T00:00:00.124Z");
+        assert_eq!(system_time_rounded_millis(value), 124);
     }
 }

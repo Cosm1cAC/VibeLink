@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -54,6 +55,7 @@ import com.vibelink.app.data.AppLanguage
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.AuditLogItem
 import com.vibelink.app.network.ApprovalRequestItem
+import com.vibelink.app.network.ApprovalDecisionResponse
 import com.vibelink.app.network.CloudflareGuideResponse
 import com.vibelink.app.network.DeviceAdminItem
 import com.vibelink.app.network.DoctorResponse
@@ -156,11 +158,16 @@ class SettingsViewModel : ViewModel() {
         }
     }
 
-    fun decideApproval(apiClient: ApiClient, approvalId: String, approve: Boolean) {
+    fun decideApproval(
+        apiClient: ApiClient,
+        approvalId: String,
+        approve: Boolean,
+        onResolved: (ApprovalDecisionResponse) -> Unit = {},
+    ) {
         viewModelScope.launch {
             _uiState.update { it.copy(error = "", notice = "") }
             try {
-                apiClient.decideApproval(
+                val result = apiClient.decideApproval(
                     approvalId = approvalId,
                     approve = approve,
                     reason = if (approve) "已在 Android 端批准。" else "已在 Android 端拒绝。",
@@ -172,6 +179,7 @@ class SettingsViewModel : ViewModel() {
                         notice = if (approve) "审批已批准。" else "审批已拒绝。",
                     )
                 }
+                onResolved(result)
             } catch (error: Exception) {
                 _uiState.update { it.copy(error = error.message ?: "审批操作失败") }
             }
@@ -335,18 +343,30 @@ class SettingsViewModel : ViewModel() {
 
 private val settingsJson = GsonBuilder().setPrettyPrinting().create()
 
+object SettingsSectionTarget {
+    private const val sectionsBeforeApprovals = 6
+
+    fun pendingApprovalsIndex(hasError: Boolean, hasNotice: Boolean): Int {
+        return sectionsBeforeApprovals + (if (hasError) 1 else 0) + (if (hasNotice) 1 else 0)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     apiClient: ApiClient,
     viewModel: SettingsViewModel,
     language: AppLanguage,
+    initialSection: String = "",
+    onApprovalDecision: (ApprovalDecisionResponse) -> Unit = {},
     onLanguageChange: (AppLanguage) -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.uiState.collectAsState()
     val settings = state.settings
     val strings = LocalAppStrings.current
+    val listState = rememberLazyListState()
+    var sectionPositioned by remember(initialSection) { mutableStateOf(false) }
 
     var defaultCwd by remember { mutableStateOf("") }
     var codexCommand by remember { mutableStateOf("auto") }
@@ -407,6 +427,18 @@ fun SettingsScreen(
         toolAutoPrune = settings.toolEvents.autoPrune
         toolPruneInterval = settings.toolEvents.autoPruneIntervalMinutes.toString()
         mcpProbeTimeout = settings.mcp.probeTimeoutMs.toString()
+    }
+
+    LaunchedEffect(initialSection, state.loading, settings, state.error, state.notice) {
+        if (initialSection == "approvals" && !sectionPositioned && !state.loading && settings != null) {
+            listState.scrollToItem(
+                SettingsSectionTarget.pendingApprovalsIndex(
+                    hasError = state.error.isNotBlank(),
+                    hasNotice = state.notice.isNotBlank(),
+                ),
+            )
+            sectionPositioned = true
+        }
     }
 
     Scaffold(
@@ -479,6 +511,7 @@ fun SettingsScreen(
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -714,8 +747,12 @@ fun SettingsScreen(
                                     state.approvals.forEach { approval ->
                                         ApprovalCard(
                                             approval = approval,
-                                            onApprove = { viewModel.decideApproval(apiClient, approval.id, approve = true) },
-                                            onDeny = { viewModel.decideApproval(apiClient, approval.id, approve = false) },
+                                            onApprove = {
+                                                viewModel.decideApproval(apiClient, approval.id, approve = true, onResolved = onApprovalDecision)
+                                            },
+                                            onDeny = {
+                                                viewModel.decideApproval(apiClient, approval.id, approve = false, onResolved = onApprovalDecision)
+                                            },
                                         )
                                     }
                                 }

@@ -6,6 +6,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -23,13 +26,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.data.SettingsStore
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.ui.i18n.LocalAppStrings
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,7 +62,7 @@ fun LoginScreen(
         settingsStore.setToken(token)
         apiClient.baseUrl = url
         apiClient.token = token
-        onLoginSuccess()
+        withContext(Dispatchers.Main.immediate) { onLoginSuccess() }
     }
 
     suspend fun applyPairingUri(raw: String): Boolean {
@@ -68,6 +76,7 @@ fun LoginScreen(
         }
 
         bridgeUrl = server
+        apiClient.token = ""
         apiClient.baseUrl = server
         settingsStore.setBridgeUrl(server)
         pairingSessionId = session
@@ -76,7 +85,7 @@ fun LoginScreen(
         return true
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(initialPairingUri) {
         initialPairingUri?.let { raw ->
             if (applyPairingUri(raw)) return@LaunchedEffect
         }
@@ -126,6 +135,8 @@ fun LoginScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -162,6 +173,8 @@ fun LoginScreen(
                 label = { Text(strings.pairingToken) },
                 placeholder = { Text(strings.legacyTokenPlaceholder) },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -175,7 +188,6 @@ fun LoginScreen(
                         try {
                             val login = apiClient.login(pairingToken.trim())
                             if (login.token.isNotBlank()) {
-                                settingsStore.setPairingToken(pairingToken.trim())
                                 persistLogin(url, login.token)
                             } else {
                                 status = "登录失败：设备 Token 为空。"

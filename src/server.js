@@ -84,6 +84,7 @@ import {
   isHostAllowed,
   isPublicHost,
   pairDevice,
+  pairingTokenLogValue,
   publicAccessWarnings,
   rateLimitKey,
   requestIp,
@@ -92,6 +93,10 @@ import {
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
 import { buildProviderRegistry } from "./providerRegistry.js";
+import { internalControlAuthorized, originalHostRequest } from "./internalControl.js";
+import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
+import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
+import { startSupervisorMonitor } from "./supervisorMonitor.js";
 import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
@@ -119,6 +124,7 @@ import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, Bro
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
+settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
 restoreTasks();
 const restoredLiveCallSessions = restoreLiveCallSessions();
@@ -1192,6 +1198,22 @@ async function buildDoctorReport(request) {
   };
 }
 
+async function runDoctorToolRequest(request, url, auth) {
+  const result = await runSystemTool({
+    toolName: "system.doctor",
+    title: "Doctor",
+    input: { host: request.headers.host || "", path: url.pathname },
+    request,
+    url,
+    auth,
+    execute: async () => {
+      const report = await buildDoctorReport(request);
+      return { ok: report.ok, result: report, error: report.ok ? "" : `${report.failures.length} check(s) failed.` };
+    }
+  });
+  return { ...result.result, toolRunId: result.toolRunId };
+}
+
 async function providerRegistryPayload(options = {}) {
   const settingsValue = await settingsWithSecrets(settings);
   const probes = {};
@@ -1212,6 +1234,33 @@ async function providerRegistryPayload(options = {}) {
     probes.doubao = doubao;
   }
   return buildProviderRegistry({ settings: settingsValue, probes });
+}
+
+async function buildStatusSnapshot(request) {
+  const publicSettingsValue = await publicSettings(settings);
+  const providerRegistry = await providerRegistryPayload();
+  return {
+    ok: true,
+    settings: publicSettingsValue,
+    providerRegistry,
+    storage: {
+      sqlite: getDbPath()
+    },
+    security: {
+      warnings: publicAccessWarnings(request, settings),
+      devices: listDevices(),
+      cloudflare: cloudflareGuide(request, settings)
+    },
+    notifications: {
+      webPush: publicSettingsValue.webPush,
+      emailFallback: { configured: Boolean(settings.notificationEmail) }
+    },
+    workspaces: getWorkspaces(settings),
+    workspaceRuntime: getWorkspaceRuntimeStats(),
+    controlPlaneRuntime: getStatusRuntimeStats(),
+    network: getNetworkAddresses(settings.port),
+    tasks: conversationTasks()
+  };
 }
 
 function serveStatic(request, response, url) {
@@ -1548,29 +1597,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/status" && request.method === "GET") {
-    const publicSettingsValue = await publicSettings(settings);
-    const providerRegistry = await providerRegistryPayload();
-    sendJson(response, 200, {
-      ok: true,
-      settings: publicSettingsValue,
-      providerRegistry,
-      storage: {
-        sqlite: getDbPath()
-      },
-      security: {
-        warnings: publicAccessWarnings(request, settings),
-        devices: listDevices(),
-        cloudflare: cloudflareGuide(request, settings)
-      },
-      notifications: {
-        webPush: publicSettingsValue.webPush,
-        emailFallback: { configured: Boolean(settings.notificationEmail) }
-      },
-      workspaces: getWorkspaces(settings),
-      workspaceRuntime: getWorkspaceRuntimeStats(),
-      network: getNetworkAddresses(settings.port),
-      tasks: conversationTasks()
-    });
+    sendJson(response, 200, await renderStatusPayload(await buildStatusSnapshot(request)));
     return;
   }
 
@@ -1746,19 +1773,7 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/doctor" && request.method === "GET") {
-    const result = await runSystemTool({
-      toolName: "system.doctor",
-      title: "Doctor",
-      input: { host: request.headers.host || "", path: url.pathname },
-      request,
-      url,
-      auth,
-      execute: async () => {
-        const report = await buildDoctorReport(request);
-        return { ok: report.ok, result: report, error: report.ok ? "" : `${report.failures.length} check(s) failed.` };
-      }
-    });
-    sendJson(response, 200, { ...result.result, toolRunId: result.toolRunId });
+    sendJson(response, 200, await runDoctorToolRequest(request, url, auth));
     return;
   }
 
@@ -3432,6 +3447,35 @@ const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
 
   try {
+    if (url.pathname === "/internal/doctor-report" && request.method === "GET") {
+      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
+        sendError(response, 404, "Unknown API route");
+        return;
+      }
+      const deviceIdHeader = request.headers["x-vibelink-device-id"];
+      const deviceId = typeof deviceIdHeader === "string" ? deviceIdHeader.trim() : "";
+      if (!deviceId || deviceId.length > 160) {
+        sendError(response, 400, "Authenticated device context is required.");
+        return;
+      }
+      const originalRequest = originalHostRequest(request);
+      const doctorUrl = new URL("http://localhost/api/doctor");
+      sendJson(response, 200, await runDoctorToolRequest(originalRequest, doctorUrl, {
+        ok: true,
+        device: { id: deviceId }
+      }));
+      return;
+    }
+
+    if (url.pathname === "/internal/status-snapshot" && request.method === "GET") {
+      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
+        sendError(response, 404, "Unknown API route");
+        return;
+      }
+      sendJson(response, 200, await buildStatusSnapshot(originalHostRequest(request)));
+      return;
+    }
+
     if (!isHostAllowed(request, settings)) {
       sendError(response, 403, "Host is not allowed.");
       return;
@@ -3478,6 +3522,7 @@ async function shutdown(signal) {
   try {
     await drainEventStoreRuntime();
     await closePersistentMcpSessions();
+    await closeStatusRuntime();
   } catch (error) {
     console.error(`[shutdown] runtime drain failed: ${error.stack || error.message}`);
   }
@@ -3500,6 +3545,8 @@ process.once("SIGTERM", () => {
     process.exit(1);
   });
 });
+
+startSupervisorMonitor({ onExit: shutdown });
 
 // WebSocket upgrade handler — only used for /api/live-calls/:id/audio today.
 const wss = new WebSocketServer({ noServer: true });
@@ -3540,6 +3587,6 @@ scheduleToolEventsPrune();
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;
   console.log(`VibeLink listening on ${local}`);
-  console.log(`Pairing token: ${settings.pairingToken}`);
+  console.log(`Pairing token: ${pairingTokenLogValue({ settings, devices: listDevices() })}`);
   for (const item of getNetworkAddresses(settings.port)) console.log(`LAN: ${item.url}`);
 });

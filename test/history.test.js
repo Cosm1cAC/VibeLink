@@ -77,3 +77,51 @@ test("listHistories excludes Codex sessions archived by Codex Desktop", () => {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("history previews exclude internal reasoning and developer content", () => {
+  const originalHome = process.env.USERPROFILE;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-history-preview-"));
+  const sessionId = "visible-preview-session";
+
+  process.env.USERPROFILE = home;
+  try {
+    writeJsonl(path.join(home, ".codex", "sessions", "preview.jsonl"), [
+      {
+        timestamp: "2026-07-12T00:00:00.000Z",
+        type: "session_meta",
+        payload: { id: sessionId, cwd: "C:\\work\\preview" }
+      },
+      {
+        timestamp: "2026-07-12T00:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "agent_reasoning", text: "private chain of thought" }
+      },
+      {
+        timestamp: "2026-07-12T00:00:02.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "developer", content: [{ type: "input_text", text: "internal developer instruction" }] }
+      },
+      {
+        timestamp: "2026-07-12T00:00:03.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "user", content: [{ type: "input_text", text: "visible user prompt" }] }
+      },
+      {
+        timestamp: "2026-07-12T00:00:04.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "visible assistant reply" }] }
+      }
+    ]);
+
+    const item = listHistories({ fresh: true }).find((entry) => entry.id === sessionId);
+
+    assert.ok(item);
+    assert.match(item.preview, /user: visible user prompt/);
+    assert.match(item.preview, /assistant: visible assistant reply/);
+    assert.doesNotMatch(item.preview, /agent_reasoning|private chain of thought|developer instruction|\[object Object\]/i);
+  } finally {
+    if (originalHome === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

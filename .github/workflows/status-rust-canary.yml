@@ -1,0 +1,89 @@
+name: Status Rust Canary
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 4 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/status-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
+      - "package.json"
+      - "src/server.js"
+      - "src/statusRuntime.js"
+      - "src/statusSidecarClient.js"
+      - "test/status*.test.js"
+      - "test/serverStatusRuntime.test.js"
+      - "test/fixtures/fake-status-sidecar.js"
+      - "tools/status/**"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/status-rust-canary.yml"
+      - "apps/windows/**"
+      - "docs/rust-migration-report.md"
+      - "docs/rust-migration-status.json"
+      - "package.json"
+      - "src/server.js"
+      - "src/statusRuntime.js"
+      - "src/statusSidecarClient.js"
+      - "test/status*.test.js"
+      - "test/serverStatusRuntime.test.js"
+      - "test/fixtures/fake-status-sidecar.js"
+      - "tools/status/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: status-rust-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  status-rust-canary:
+    name: Contract, fallback, and authenticated route
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Rust status sidecar
+        run: cargo build --release --manifest-path apps/windows/Cargo.toml
+      - name: Check Rust migration manifest
+        run: npm run rust:migration:check
+      - name: Run status contract and fallback tests
+        run: npm run status:contract
+      - name: Run Rust status unit tests
+        run: cargo test --manifest-path apps/windows/Cargo.toml status
+      - name: Run Rust Doctor unit tests
+        run: cargo test --manifest-path apps/windows/Cargo.toml doctor_http
+      - name: Run authenticated status canary
+        run: npm run status:server-canary -- --output .tmp/status-server-canary-ci.json --delete-temp
+      - name: Run Rust-owned HTTP status canary
+        run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --output .tmp/status-http-canary-ci.json --delete-temp
+      - name: Run Rust-owned HTTP Doctor canary
+        run: npm run status:http-canary -- --command apps/windows/target/release/vibelink.exe --doctor-http --output .tmp/doctor-http-canary-ci.json --delete-temp
+      - name: Upload canary output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: status-rust-canary-result
+          path: |
+            .tmp/status-server-canary-ci.json
+            .tmp/status-http-canary-ci.json
+            .tmp/doctor-http-canary-ci.json
+          if-no-files-found: error
+          retention-days: 30

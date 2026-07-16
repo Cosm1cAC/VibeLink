@@ -192,7 +192,7 @@ export function createMcpSessionSidecarClient({
     callTool: (server, toolName, toolArguments, options) => request("callTool", [server, toolName, toolArguments, options]),
     closeIdleSessions: (options) => request("closeIdleSessions", [options]),
     closeAll: () => request("closeAll"),
-    getSessionStats: () => request("stats"),
+    getSessionStats: (options) => request("stats", [], options),
     close
   };
 }

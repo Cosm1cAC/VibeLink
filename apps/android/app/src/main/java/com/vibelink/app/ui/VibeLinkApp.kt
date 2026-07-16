@@ -5,6 +5,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -14,32 +15,65 @@ import androidx.navigation.navDeepLink
 import com.vibelink.app.data.AppLanguage
 import com.vibelink.app.data.SettingsStore
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.network.ApiClientConnectionBootstrapper
 import com.vibelink.app.network.ConversationItem
+import com.vibelink.app.network.SavedApiConnection
+import com.vibelink.app.mobile.IncomingSharedContent
 import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.ui.screens.*
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Root composable for VibeLink Android.
  * Navigation: login 鈫?sessionList 鈫?messageList / call
  */
 @Composable
-fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "") {
+fun VibeLinkApp(
+    initialPairingUri: String? = null,
+    initialSharedContent: IncomingSharedContent = IncomingSharedContent(),
+    onSharedContentConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val apiClient = remember { ApiClient() }
 
     val context = LocalContext.current
     val settingsStore = remember { SettingsStore(context.applicationContext) }
-    // Shared ViewModels (scoped to app-level, retained via remember)
-    val sessionListViewModel = remember { SessionListViewModel() }
-    val messageListViewModel = remember { MessageListViewModel() }
-    val workspaceViewModel = remember { WorkspaceViewModel() }
-    val callViewModel = remember { CallViewModel() }
-    val settingsViewModel = remember { SettingsViewModel() }
+    val connectionBootstrapper = remember(settingsStore) {
+        ApiClientConnectionBootstrapper {
+            SavedApiConnection(
+                bridgeUrl = settingsStore.bridgeUrl.first(),
+                token = settingsStore.getTokenSync(),
+            )
+        }
+    }
+    var connectionInitialized by remember { mutableStateOf(false) }
+    var authenticated by remember { mutableStateOf(false) }
+    LaunchedEffect(apiClient, connectionBootstrapper) {
+        try {
+            connectionBootstrapper.initialize(
+                apiClient = apiClient,
+                restoreToken = initialPairingUri == null,
+            )
+        } finally {
+            connectionInitialized = true
+        }
+    }
+    if (!connectionInitialized) return
+
+    // Activity-scoped ViewModels survive configuration changes and clear with their owner.
+    val sessionListViewModel: SessionListViewModel = viewModel()
+    val messageListViewModel: MessageListViewModel = viewModel()
+    val workspaceViewModel: WorkspaceViewModel = viewModel()
+    val callViewModel: CallViewModel = viewModel()
+    val settingsViewModel: SettingsViewModel = viewModel()
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
+    var pendingSharedAttachments by remember { mutableStateOf<List<String>>(emptyList()) }
     val conversations by sessionListViewModel.conversations.collectAsState()
     val promptHistory by settingsStore.promptHistory.collectAsState(initial = emptyList())
     val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
@@ -55,6 +89,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 settingsStore = settingsStore,
                 initialPairingUri = initialPairingUri,
                 onLoginSuccess = {
+                    authenticated = true
                     navController.navigate("sessionList") {
                         popUpTo("login") { inclusive = true }
                     }
@@ -83,8 +118,16 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                     navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
                 },
                 onLogout = {
-                    navController.navigate("login") {
-                        popUpTo("sessionList") { inclusive = true }
+                    appScope.launch {
+                        settingsStore.clearSession()
+                        withContext(Dispatchers.Main.immediate) {
+                            apiClient.token = ""
+                            authenticated = false
+                            pendingConversation = null
+                            navController.navigate("login") {
+                                popUpTo("sessionList") { inclusive = true }
+                            }
+                        }
                     }
                 },
                 onOpenLiveCall = {
@@ -125,7 +168,7 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                     pendingConversation = null
                     navController.popBackStack()
                 },
-                onOpenApprovals = { navController.navigate("settings") },
+                onOpenApprovals = { navController.navigate("settings?section=approvals") },
                 onOpenLiveCall = { navController.navigate("call") },
                 onOpenFileReference = { reference ->
                     workspaceViewModel.openFileReference(apiClient, reference)
@@ -134,6 +177,8 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
                 promptHistory = promptHistory,
                 onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
                 onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
+                initialAttachmentUris = if (conversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
+                onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
             )
         }
 
@@ -151,15 +196,31 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             WorkspaceScreen(
                 apiClient = apiClient,
                 viewModel = workspaceViewModel,
+                onOpenApprovals = { navController.navigate("settings?section=approvals") },
                 onBack = { navController.popBackStack() },
             )
         }
 
-        composable("settings") {
+        composable(
+            route = "settings?section={section}",
+            arguments = listOf(navArgument("section") {
+                type = NavType.StringType
+                defaultValue = ""
+            }),
+        ) { backStackEntry ->
             SettingsScreen(
                 apiClient = apiClient,
                 viewModel = settingsViewModel,
                 language = appLanguage,
+                initialSection = backStackEntry.arguments?.getString("section").orEmpty(),
+                onApprovalDecision = { response ->
+                    val messageHandled = messageListViewModel.applyApprovalDecision(apiClient, response)
+                    val workspaceHandled = workspaceViewModel.applyApprovalDecision(apiClient, response)
+                    val handled = messageHandled || workspaceHandled
+                    if (handled && (response.approval?.status == "approved" || response.approval?.status == "denied")) {
+                        navController.popBackStack()
+                    }
+                },
                 onLanguageChange = { language ->
                     appScope.launch { settingsStore.setAppLanguage(language) }
                 },
@@ -168,9 +229,9 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
         }
     }
 
-    LaunchedEffect(initialSharedText) {
-        val text = initialSharedText.trim()
-        if (text.isBlank()) return@LaunchedEffect
+    LaunchedEffect(initialSharedContent, authenticated) {
+        if (initialSharedContent.isEmpty || !authenticated) return@LaunchedEffect
+        val text = initialSharedContent.composerText
         val conversation = ConversationItem(
             key = "share:${System.currentTimeMillis()}",
             kind = "new",
@@ -180,7 +241,9 @@ fun VibeLinkApp(initialPairingUri: String? = null, initialSharedText: String = "
             preview = text.take(160),
         )
         pendingConversation = conversation
+        pendingSharedAttachments = initialSharedContent.streamUris
         navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
+        onSharedContentConsumed()
     }
     }
 }

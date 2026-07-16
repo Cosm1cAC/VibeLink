@@ -16,10 +16,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -80,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -101,6 +105,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+object ComposerLayoutPolicy {
+    fun showSupplementalContent(imeVisible: Boolean): Boolean = !imeVisible
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageListScreen(
@@ -114,6 +122,8 @@ fun MessageListScreen(
     promptHistory: List<String> = emptyList(),
     onRememberPrompt: (String) -> Unit = {},
     onClearPromptHistory: () -> Unit = {},
+    initialAttachmentUris: List<String> = emptyList(),
+    onInitialAttachmentsConsumed: () -> Unit = {},
 ) {
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -144,25 +154,26 @@ fun MessageListScreen(
     val isDesktopRemote = conversation?.kind == "desktop"
     val selectableProviders = remember(providerRegistry) { providersForComposer(providerRegistry) }
     val canSend = prompt.trim().isNotBlank() && !sending && conversation != null
-    fun uploadAttachment(uri: Uri) {
-        scope.launch {
-            attachmentUploading = true
-            attachmentStatus = strings.uploadingAttachment
-            try {
-                val upload = uploadAttachmentUri(context, apiClient, uri)
-                val attachmentText = MessageContentUtils.attachmentPromptText(
-                    name = upload.name,
-                    markdown = upload.markdown,
-                    preview = upload.preview,
-                )
-                prompt = listOf(prompt.trim(), attachmentText).filter { it.isNotBlank() }.joinToString("\n\n")
-                attachmentStatus = strings.attached(upload.name.ifBlank { strings.file })
-            } catch (error: Exception) {
-                attachmentStatus = error.message ?: strings.attachmentUploadFailed
-            } finally {
-                attachmentUploading = false
-            }
+    suspend fun uploadAttachmentNow(uri: Uri) {
+        attachmentUploading = true
+        attachmentStatus = strings.uploadingAttachment
+        try {
+            val upload = uploadAttachmentUri(context, apiClient, uri)
+            val attachmentText = MessageContentUtils.attachmentPromptText(
+                name = upload.name,
+                markdown = upload.markdown,
+                preview = upload.preview,
+            )
+            prompt = listOf(prompt.trim(), attachmentText).filter { it.isNotBlank() }.joinToString("\n\n")
+            attachmentStatus = strings.attached(upload.name.ifBlank { strings.file })
+        } catch (error: Exception) {
+            attachmentStatus = error.message ?: strings.attachmentUploadFailed
+        } finally {
+            attachmentUploading = false
         }
+    }
+    fun uploadAttachment(uri: Uri) {
+        scope.launch { uploadAttachmentNow(uri) }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) uploadAttachment(uri)
@@ -172,7 +183,13 @@ fun MessageListScreen(
     }
 
     LaunchedEffect(conversation?.key) {
-        if (conversation != null) viewModel.loadConversation(apiClient, conversation)
+        if (conversation != null) viewModel.ensureConversationLoaded(apiClient, conversation)
+    }
+
+    LaunchedEffect(conversation?.key, initialAttachmentUris) {
+        if (conversation == null || initialAttachmentUris.isEmpty()) return@LaunchedEffect
+        initialAttachmentUris.forEach { rawUri -> uploadAttachmentNow(Uri.parse(rawUri)) }
+        onInitialAttachmentsConsumed()
     }
 
     LaunchedEffect(messages.size) {
@@ -308,7 +325,6 @@ fun MessageListScreen(
                                 ApprovalRequiredCard(
                                     approval = approval,
                                     onOpenApprovals = onOpenApprovals,
-                                    onRetry = { viewModel.retryPendingApproval(apiClient) },
                                 )
                             }
                         }
@@ -321,6 +337,7 @@ fun MessageListScreen(
                             MessageBubble(
                                 message = message,
                                 apiBaseUrl = apiClient.baseUrl,
+                                authToken = apiClient.token,
                                 compact = isDesktopRemote,
                                 onEdit = viewModel::editMessage,
                                 onDelete = viewModel::deleteMessage,
@@ -385,12 +402,15 @@ private fun ComposerBar(
     onStop: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    Surface(tonalElevation = 3.dp) {
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val showSupplementalContent = ComposerLayoutPolicy.showSupplementalContent(imeVisible)
+    Surface(modifier = Modifier.imePadding(), tonalElevation = 3.dp) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (!isDesktopRemote) {
+            if (showSupplementalContent && !isDesktopRemote) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(providers, key = { it.id }) { option ->
                         FilterChip(
@@ -401,11 +421,11 @@ private fun ComposerBar(
                         )
                     }
                 }
-            } else {
+            } else if (showSupplementalContent) {
                 AssistChip(onClick = {}, label = { Text(strings.codexRemoteCurrentSettings) })
             }
 
-            if (!isDesktopRemote) {
+            if (showSupplementalContent && !isDesktopRemote) {
                 Text(strings.quickCommands, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(PromptCommandCatalog.commands, key = { it.id }) { command ->
@@ -417,7 +437,7 @@ private fun ComposerBar(
                 }
             }
 
-            if (!isDesktopRemote && promptHistory.isNotEmpty()) {
+            if (showSupplementalContent && !isDesktopRemote && promptHistory.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -436,7 +456,7 @@ private fun ComposerBar(
                 }
             }
 
-            if (showOptions && !isDesktopRemote) {
+            if (showSupplementalContent && showOptions && !isDesktopRemote) {
                 val provider = providerRegistry.providers.firstOrNull { it.id == activeAgent }
                 val models = provider?.models.orEmpty()
                 val efforts = provider?.reasoningEfforts.orEmpty().ifEmpty { listOf("", "low", "medium", "high", "xhigh") }
@@ -484,13 +504,32 @@ private fun ComposerBar(
                 }
             }
 
-            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconButton(onClick = onPickImage, enabled = !isDesktopRemote && !attachmentUploading) {
-                    Icon(Icons.Default.Image, contentDescription = strings.attachImage)
+            if (showSupplementalContent && !isDesktopRemote) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onPickImage, enabled = !attachmentUploading) {
+                        Icon(Icons.Default.Image, contentDescription = strings.attachImage)
+                    }
+                    IconButton(onClick = onPickFile, enabled = !attachmentUploading) {
+                        Icon(Icons.Default.AttachFile, contentDescription = strings.attachFile)
+                    }
+                    IconButton(onClick = onToggleOptions) {
+                        Icon(Icons.Default.Tune, contentDescription = strings.composerOptions)
+                    }
+                    IconButton(onClick = onOpenLiveCall) {
+                        Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)
+                    }
                 }
-                IconButton(onClick = onPickFile, enabled = !isDesktopRemote && !attachmentUploading) {
-                    Icon(Icons.Default.AttachFile, contentDescription = strings.attachFile)
-                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 OutlinedTextField(
                     value = prompt,
                     onValueChange = onPromptChange,
@@ -499,17 +538,16 @@ private fun ComposerBar(
                     minLines = 1,
                     maxLines = 5,
                 )
-                IconButton(onClick = onToggleOptions, enabled = !isDesktopRemote) {
-                    Icon(Icons.Default.Tune, contentDescription = strings.composerOptions)
-                }
-                IconButton(onClick = onOpenLiveCall, enabled = !isDesktopRemote) {
-                    Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)
-                }
-                Button(onClick = onSend, enabled = canSend) {
+                Button(
+                    onClick = onSend,
+                    enabled = canSend,
+                    modifier = Modifier.size(56.dp),
+                    contentPadding = PaddingValues(0.dp),
+                ) {
                     if (sending) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = strings.send)
                     }
                 }
             }
@@ -539,6 +577,7 @@ private fun ComposerBar(
 private fun MessageBubble(
     message: ChatMessage,
     apiBaseUrl: String,
+    authToken: String,
     compact: Boolean,
     onEdit: (ChatMessage, String) -> Unit,
     onDelete: (ChatMessage) -> Unit,
@@ -722,15 +761,16 @@ private fun MessageBubble(
                     Spacer(Modifier.height(8.dp))
                     ImagePreviewGallery(
                         apiBaseUrl = apiBaseUrl,
+                        authToken = authToken,
                         links = imageLinks,
-                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url)) },
+                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url, authToken)) },
                     )
                 }
                 if (artifactLinks.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     ArtifactChips(
                         links = artifactLinks,
-                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url)) },
+                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url, authToken)) },
                     )
                 }
             }
@@ -741,6 +781,7 @@ private fun MessageBubble(
 @Composable
 private fun ImagePreviewGallery(
     apiBaseUrl: String,
+    authToken: String,
     links: List<MessageContentUtils.ContentLink>,
     onOpen: (MessageContentUtils.ContentLink) -> Unit,
 ) {
@@ -753,7 +794,10 @@ private fun ImagePreviewGallery(
             ) {
                 Box {
                     AsyncImage(
-                        model = resolveContentUrl(apiBaseUrl, link.url),
+                        model = coil.request.ImageRequest.Builder(LocalContext.current)
+                            .data(resolveContentUrl(apiBaseUrl, link.url))
+                            .addHeader("Authorization", "Bearer $authToken")
+                            .build(),
                         contentDescription = link.label.ifBlank { "Image" },
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -900,11 +944,13 @@ private fun copyMessage(context: Context, text: String, toast: String = "Copied"
     Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
 }
 
-private fun resolveContentUrl(baseUrl: String, rawUrl: String): String {
+private fun resolveContentUrl(baseUrl: String, rawUrl: String, token: String = ""): String {
     val trimmed = rawUrl.trim()
     if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) return trimmed
     val base = baseUrl.trimEnd('/')
-    return if (trimmed.startsWith('/')) "$base$trimmed" else "$base/$trimmed"
+    val url = if (trimmed.startsWith('/')) "$base$trimmed" else "$base/$trimmed"
+    return if (token.isBlank() || !url.contains("/api/attachments/")) url
+    else url + if (url.contains('?')) "&token=${Uri.encode(token)}" else "?token=${Uri.encode(token)}"
 }
 
 private suspend fun uploadAttachmentUri(
@@ -915,10 +961,18 @@ private suspend fun uploadAttachmentUri(
     val resolver = context.contentResolver
     val name = displayNameForUri(context, uri)
     val mimeType = resolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }
-    val bytes = withContext(Dispatchers.IO) {
-        resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
-    }
-    return apiClient.uploadAttachment(bytes = bytes, fileName = name, mimeType = mimeType)
+    val size = resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getLong(cursor.getColumnIndexOrThrow(OpenableColumns.SIZE)) else -1L
+    } ?: -1L
+    val maxBytes = 30L * 1024L * 1024L
+    if (size > maxBytes) error("Attachment exceeds 30 MB limit")
+    val input = resolver.openInputStream(uri) ?: error("Unable to open attachment")
+    return apiClient.uploadAttachment(
+        input = input,
+        contentLength = size.coerceAtLeast(0L),
+        fileName = name,
+        mimeType = mimeType,
+    )
 }
 
 private fun displayNameForUri(context: Context, uri: Uri): String {
@@ -936,7 +990,6 @@ private fun displayNameForUri(context: Context, uri: Uri): String {
 private fun ApprovalRequiredCard(
     approval: PendingApprovalState,
     onOpenApprovals: () -> Unit,
-    onRetry: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
@@ -946,13 +999,8 @@ private fun ApprovalRequiredCard(
                 color = MaterialTheme.colorScheme.onErrorContainer,
                 style = MaterialTheme.typography.bodySmall,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onOpenApprovals, modifier = Modifier.weight(1f)) {
-                    Text(strings.openApprovals)
-                }
-                OutlinedButton(onClick = onRetry, modifier = Modifier.weight(1f), enabled = approval.retry != null) {
-                    Text(strings.retry)
-                }
+            Button(onClick = onOpenApprovals, modifier = Modifier.fillMaxWidth()) {
+                Text(strings.openApprovals)
             }
         }
     }

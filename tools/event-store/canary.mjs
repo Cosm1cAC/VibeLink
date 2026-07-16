@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createSqliteEventStore } from "../../src/eventStore.js";
 import { EVENT_STORE_CONTRACT_METHODS, EVENT_STORE_SIDECAR_PROTOCOL_VERSION } from "../../src/eventStoreContract.js";
 import { createEventStoreSidecarClient } from "../../src/eventStoreSidecarClient.js";
+import { evaluateLatency, summarizeLatencySamples } from "./canaryStats.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..", "..");
@@ -19,6 +20,13 @@ function numberArg(name, fallback) {
   if (index < 0) return fallback;
   const parsed = Number(process.argv[index + 1]);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function nonNegativeNumberArg(name, fallback) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return fallback;
+  const parsed = Number(process.argv[index + 1]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function stringArg(name, fallback = "") {
@@ -231,16 +239,7 @@ async function measure(samples, method, callback) {
 function summarizeSamples(samples, stallThresholdMs) {
   const methods = {};
   for (const [method, values] of Object.entries(samples)) {
-    const sorted = [...values].sort((a, b) => a - b);
-    const total = values.reduce((sum, value) => sum + value, 0);
-    const p95Index = sorted.length ? Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1) : 0;
-    methods[method] = {
-      count: values.length,
-      avgMs: roundMs(values.length ? total / values.length : 0),
-      maxMs: roundMs(sorted[sorted.length - 1] || 0),
-      p95Ms: roundMs(sorted[p95Index] || 0),
-      stalls: values.filter((value) => value >= stallThresholdMs).length
-    };
+    methods[method] = summarizeLatencySamples(values, stallThresholdMs);
   }
   return methods;
 }
@@ -341,7 +340,7 @@ async function runRust({ dbPath, command, args, rounds, warmups, batchSize, stal
   }
 }
 
-function evaluate({ sync, rust, stallThresholdMs }) {
+function evaluate({ sync, rust, stallThresholdMs, latencyMarginMs }) {
   const checks = [];
   const rustReady = rust.health?.ok === true && rust.health?.schemaReady === true;
   checks.push({ name: "rust readiness", pass: rustReady, detail: `health ${rustReady ? "ok" : "failed"}` });
@@ -349,14 +348,15 @@ function evaluate({ sync, rust, stallThresholdMs }) {
   checks.push({ name: "sidecar failures", pass: Number(rust.sidecar?.failures || 0) === 0, detail: `${rust.sidecar?.failures || 0} sidecar failures` });
 
   for (const method of appendMethods) {
-    const baseline = sync.methods[method]?.avgMs || 0;
-    const candidate = rust.methods[method]?.avgMs || 0;
-    const limit = baseline * 1.1;
-    const pass = baseline === 0 ? candidate === 0 : candidate <= limit;
+    const latency = evaluateLatency({
+      baseline: sync.methods[method],
+      candidate: rust.methods[method],
+      latencyMarginMs
+    });
     checks.push({
-      name: `${method} average latency`,
-      pass,
-      detail: `rust ${candidate}ms vs sync ${baseline}ms; limit ${roundMs(limit)}ms`
+      name: `${method} trimmed average latency`,
+      pass: latency.pass,
+      detail: `rust ${latency.candidateMs}ms vs sync ${latency.baselineMs}ms; limit ${latency.limitMs}ms`
     });
   }
 
@@ -383,10 +383,10 @@ function printSummary(result) {
   console.log(`- workload: ${result.workload.rounds} rounds x ${result.workload.batchSize} events x 3 append paths (${result.workload.totalMeasuredEvents} measured events)`);
   console.log(`- rust command: ${result.rust.command} ${result.rust.args.join(" ")}`);
   console.log(`- temp root: ${result.tempRoot}`);
-  console.log("\nAppend averages:");
+  console.log("\nAppend 10% trimmed averages:");
   for (const method of appendMethods) {
-    const syncAvg = result.sync.methods[method].avgMs;
-    const rustAvg = result.rust.methods[method].avgMs;
+    const syncAvg = result.sync.methods[method].trimmedAvgMs;
+    const rustAvg = result.rust.methods[method].trimmedAvgMs;
     const ratio = syncAvg ? roundMs(rustAvg / syncAvg) : 0;
     console.log(`- ${method}: sync ${syncAvg}ms, rust ${rustAvg}ms, ratio ${ratio}x`);
   }
@@ -402,6 +402,7 @@ async function main() {
   const warmups = numberArg("--warmups", 2);
   const batchSize = numberArg("--batch-size", 120);
   const stallThresholdMs = numberArg("--stall-threshold-ms", 50);
+  const latencyMarginMs = nonNegativeNumberArg("--latency-margin-ms", 0);
   const command = stringArg("--command", defaultRustCommand());
   const args = defaultRustArgs();
   assertRustCommand(command);
@@ -409,7 +410,7 @@ async function main() {
   const tempRoot = createTempRoot();
   const sync = await runSync({ dbPath: path.join(tempRoot, "sync.sqlite"), rounds, warmups, batchSize, stallThresholdMs });
   const rust = await runRust({ dbPath: path.join(tempRoot, "rust.sqlite"), command, args, rounds, warmups, batchSize, stallThresholdMs });
-  const evaluation = evaluate({ sync, rust, stallThresholdMs });
+  const evaluation = evaluate({ sync, rust, stallThresholdMs, latencyMarginMs });
   const result = {
     generatedAt: nowIso(),
     tempRoot,
@@ -419,7 +420,8 @@ async function main() {
       batchSize,
       appendPaths: appendMethods.length,
       totalMeasuredEvents: rounds * batchSize * appendMethods.length,
-      stallThresholdMs
+      stallThresholdMs,
+      latencyMarginMs
     },
     sync,
     rust: { command, args, ...rust },

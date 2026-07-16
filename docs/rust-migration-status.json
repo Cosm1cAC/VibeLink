@@ -1,85 +1,171 @@
 {
-  "schemaVersion": 1,
-  "updatedAt": "2026-07-10",
+  "schemaVersion": 2,
+  "report": "docs/rust-migration-report.md",
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
-      "id": "workspace-tree",
-      "title": "Workspace tree scanner",
-      "priority": "P1",
-      "status": "opt-in",
-      "rollout": "manual flag only",
+      "id": "rust-http-frontdoor",
+      "title": "Rust HTTP 前门",
+      "priority": "P0",
+      "status": "canary",
       "featureFlags": [
-        { "name": "VIBELINK_RUST_WORKSPACE_TREE", "requiredInCode": true },
-        { "name": "VIBELINK_RUST_BIN", "requiredInCode": true },
-        { "name": "VIBELINK_RUST_BIN_ARGS_JSON", "requiredInCode": true }
+        "--rust-http-canary",
+        "VIBELINK_RUNTIME_HOST",
+        "VIBELINK_RUNTIME_PORT",
+        "VIBELINK_SUPERVISOR_PID"
+      ],
+      "nodeEntry": "src/server.js",
+      "rustEntry": "apps/windows/src/http_frontdoor.rs",
+      "sidecarCommand": "vibelink --rust-http-canary bridge",
+      "fallback": "关闭 --rust-http-canary 后 Node 恢复直接监听原 host:port；旧 portable 包保留为进程级回滚",
+      "tests": [
+        "apps/windows/src/http_frontdoor.rs",
+        "test/runtimeBinding.test.js",
+        "test/supervisorMonitor.test.js",
+        "test/statusPublicCanary.test.js"
+      ],
+      "nextAction": "保持公网透明转发 canary 稳定，并验证独立 Status/Doctor 原生路由 opt-in 不影响其他 HTTP/SSE/WebSocket 流量。"
+    },
+    {
+      "id": "status-response-sidecar",
+      "title": "状态响应契约组装",
+      "priority": "P0",
+      "status": "canary",
+      "featureFlags": [
+        "VIBELINK_RUST_STATUS",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_ARGS_JSON",
+        "VIBELINK_CONTROL_PLANE_RUST_SIDECAR_TIMEOUT_MS"
+      ],
+      "nodeEntry": "src/statusRuntime.js",
+      "rustEntry": "apps/windows/src/status_sidecar.rs",
+      "sidecarCommand": "vibelink status-sidecar",
+      "fallback": "Rust readiness 或 renderStatus 失败后熔断，并返回 Node 已组装的原始 status 快照",
+      "tests": [
+        "test/statusSidecarContract.test.js",
+        "test/statusRuntime.test.js",
+        "test/statusPublicCanary.test.js",
+        "test/statusServerCanary.test.js",
+        "test/serverStatusRuntime.test.js"
+      ],
+      "nextAction": "继续作为 Status 动态快照的强类型契约层，并保持 Node 快照回退。"
+    },
+    {
+      "id": "status-http-route",
+      "title": "Status 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-status-http",
+        "VIBELINK_INTERNAL_CONTROL_TOKEN"
+      ],
+      "nodeEntry": "src/server.js#/internal/status-snapshot",
+      "rustEntry": "apps/windows/src/status_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-status-http bridge",
+      "fallback": "Rust 解析/快照/校验失败后逐字节重放原请求到 Node；关闭 --rust-status-http 后所有 Status 请求透明转发",
+      "tests": [
+        "apps/windows/src/status_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/internalControl.test.js",
+        "tools/status/http-canary.mjs"
+      ],
+      "nextAction": "远端 CI 已通过；公网认证 canary 保持零失败/零回退后晋级 canary。"
+    },
+    {
+      "id": "doctor-http-route",
+      "title": "Doctor 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-doctor-http",
+        "VIBELINK_INTERNAL_CONTROL_TOKEN"
+      ],
+      "nodeEntry": "src/server.js#/internal/doctor-report",
+      "rustEntry": "apps/windows/src/doctor_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-doctor-http bridge",
+      "fallback": "Rust 解析/内部诊断/契约校验失败后逐字节重放原请求到 Node；关闭 --rust-doctor-http 后所有 Doctor 请求透明转发",
+      "tests": [
+        "apps/windows/src/doctor_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/internalControl.test.js",
+        "tools/status/http-canary.mjs"
+      ],
+      "nextAction": "本地 release 已通过；远端 CI 与公网认证 canary 保持 24 项检查、tool run、审计和零失败/零回退后晋级 canary。"
+    },
+    {
+      "id": "workspace-tree",
+      "title": "Workspace 目录扫描器",
+      "priority": "P1",
+      "status": "canary",
+      "featureFlags": [
+        "VIBELINK_RUST_WORKSPACE_TREE",
+        "VIBELINK_RUST_BIN",
+        "VIBELINK_RUST_BIN_ARGS_JSON",
+        "VIBELINK_RUST_WORKSPACE_TREE_SESSION",
+        "VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS",
+        "VIBELINK_WORKSPACE_TREE_SIDECAR_MAX_PENDING_REQUESTS"
       ],
       "nodeEntry": "src/workspaces.js",
       "rustEntry": "apps/windows/src/main.rs",
-      "sidecarCommand": "vibelink workspace-tree",
-      "nodeFallback": "src/workspaces.js listDirectory() is used when the flag is off, the binary is missing, output is invalid, or the command fails.",
-      "runtimeStats": "rustWorkspaceTreeStats in src/workspaces.js tracks hits, misses, cache, budget hits, and last signature.",
+      "sidecarCommand": "vibelink workspace-tree-sidecar",
+      "fallback": "持久 sidecar -> 一次性 Rust CLI -> Node listDirectory()",
       "tests": [
-        "test/workspacesRustTree.test.js"
+        "test/workspacesRustTree.test.js",
+        "test/workspaceTreeCanary.test.js",
+        "test/workspaceTreeRealCanary.test.js",
+        "test/workspaceTreeServerCanary.test.js",
+        "test/workspaceTreeSidecarContract.test.js",
+        "test/workspaceTreeSidecarClient.test.js"
       ],
-      "docs": [
-        "README.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Rust CLI and Node opt-in integration exist. Rust scanner covers fixed ignored directories, root and nested gitignore basename/wildcard/directory rules, path-pattern rules, negation rules, truncation, signature output, and Node-side cache reuse.",
-      "nextAction": "Add auto mode, parity gates, fallback counters, lastError stats, and an explicit long-lived scanner/cache plan before canary.",
-      "promotionGate": "Can move to canary only after Node/Rust parity tests cover sorting, hidden files, fixed ignores, nested gitignore, path-pattern gitignore, truncation, signature/cache behavior, and missing-binary fallback."
+      "nextAction": "代表性本地/公网交互证据已通过；继续扩大自然交互观察窗口后再评估 default-on。"
     },
     {
       "id": "mcp-session-sidecar",
-      "title": "Persistent MCP stdio sessions",
+      "title": "MCP 持久 stdio 会话",
       "priority": "P1",
-      "status": "opt-in",
-      "rollout": "manual flag only",
+      "status": "canary",
       "featureFlags": [
-        { "name": "VIBELINK_MCP_RUST_SIDECAR", "requiredInCode": true },
-        { "name": "VIBELINK_MCP_RUST_SIDECAR_COMMAND", "requiredInCode": true },
-        { "name": "VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
-        { "name": "VIBELINK_MCP_PERSISTENT_SESSIONS", "requiredInCode": true }
+        "VIBELINK_MCP_RUST_SIDECAR",
+        "VIBELINK_MCP_RUST_SIDECAR_COMMAND",
+        "VIBELINK_MCP_RUST_SIDECAR_ARGS_JSON",
+        "VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS",
+        "VIBELINK_MCP_PERSISTENT_SESSIONS"
       ],
       "nodeEntry": "src/mcpRuntime.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink mcp-session-sidecar",
-      "nodeFallback": "src/mcpRuntime.js falls back to the existing Node stdio probe/call path and closes the failed Rust sidecar client on probe or call failure.",
-      "runtimeStats": "getMcpRustSidecarStats() exposes enabled, command, args, starts, failures, fallbacks, last failure, last error, and client stats.",
+      "fallback": "Rust readiness/probe/call 失败后回退现有 Node stdio 路径",
       "tests": [
         "test/mcpRuntime.test.js",
-        "test/mcpSessionSidecarContract.test.js"
+        "test/mcpSessionSidecarContract.test.js",
+        "test/mcpSessionCanary.test.js",
+        "test/mcpSessionRealCanary.test.js",
+        "test/mcpSessionServerCanary.test.js",
+        "test/mcpSessionSoak.test.js"
       ],
-      "docs": [
-        "docs/mcp-persistent-sessions.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Node manager, JSONL sidecar client, real Rust mcp-session-sidecar command, opt-in runtime routing, contract tests, burst tests, timeout tests, and crash-replacement tests exist.",
-      "nextAction": "Add auto mode, health readiness checks, promotion thresholds, and docs for spawn-reduction and fallback-rate gates before canary/default-on.",
-      "promotionGate": "Can move to canary only after auto mode validates command/health readiness and tests cover spawn failure, tool-call failure, timeout, invalid JSON, and fallback without task-visible failure."
+      "nextAction": "受控真实 server、installed MCP 和 soak 已通过；继续观察自然生产会话后再评估 default-on。"
     },
     {
       "id": "event-store-sidecar",
-      "title": "Event store append/replay sidecar",
+      "title": "事件存储 append/replay sidecar",
       "priority": "P0",
       "status": "canary",
-      "rollout": "auto readiness canary with manual rollback flag",
       "featureFlags": [
-        { "name": "VIBELINK_EVENT_STORE_WORKER", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_BATCH_APPEND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON", "requiredInCode": true },
-        { "name": "VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS", "requiredInCode": true }
+        "VIBELINK_EVENT_STORE_WORKER",
+        "VIBELINK_EVENT_STORE_BATCH_APPEND",
+        "VIBELINK_EVENT_STORE_BATCH_LIVE_CALL_APPEND",
+        "VIBELINK_EVENT_STORE_BATCH_TASK_APPEND",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON",
+        "VIBELINK_EVENT_STORE_RUST_SIDECAR_TIMEOUT_MS"
       ],
       "nodeEntry": "src/db.js",
       "rustEntry": "apps/windows/src/main.rs",
       "sidecarCommand": "vibelink event-store-sidecar <db-path>",
-      "nodeFallback": "src/db.js prefers the Rust sidecar when VIBELINK_EVENT_STORE_RUST_SIDECAR=1, or when VIBELINK_EVENT_STORE_RUST_SIDECAR=auto and the command exists. Missing binary in manual mode, bad health, timeout, invalid JSON, request failure, or sidecar exit falls back to the Node Worker when enabled, otherwise sync SQLite. Missing binary in auto mode skips Rust without marking failure.",
-      "runtimeStats": "getEventStoreRuntimeStats() in src/db.js exposes mode, rustSidecar enabled/auto/available/active/ready/failed, starts/failures/fallbacks/lastError/client stats, worker status, batch append stats, and eventStore metrics.",
+      "fallback": "Rust sidecar -> Node Worker（启用时）-> 同步 SQLite",
       "tests": [
         "test/eventStoreContract.test.js",
         "test/eventStoreWorker.test.js",
@@ -88,66 +174,48 @@
         "test/eventStoreRustRuntime.test.js",
         "test/eventStoreBatchAppend.test.js",
         "test/eventStoreBatcher.test.js",
-        "test/eventStoreMetrics.test.js"
+        "test/eventStoreMetrics.test.js",
+        "test/eventStoreRealDataCanary.test.js"
       ],
-      "docs": [
-        "docs/event-store-worker.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Node Worker boundary, event-store metrics, batchers, JSONL sidecar client, shared method allowlist, JS fixture contract smoke, real Rust event-store-sidecar command, real Rust contract test, explicit opt-in runtime routing, auto readiness mode, health gate, Worker/sync fallback tests, rollback docs, canary thresholds, local and runtime canary harnesses, and passing 2026-07-10 representative release canaries exist. Rust batch append now avoids repeated owner lookups and uses last_insert_rowid on the normal insert hot path.",
-      "nextAction": "Run limited real-session canaries with runtime stats capture, keep fallback-rate/latency/stall checks green, and wire the local plus runtime canaries into release or CI status before broader default exposure.",
-      "promotionGate": "Can move to default-on only after canary metrics remain within documented thresholds across representative runtime sessions, CI/status checks cover contract/runtime/canary verification, and rollback remains tested and documented."
+      "nextAction": "真实大库与公网审批命令证据已通过；继续扩大自然运行窗口并采集前后 runtime stats。"
     },
     {
       "id": "audio-pipeline",
-      "title": "Live audio low-latency pipeline",
+      "title": "实时音频低延迟管线",
       "priority": "P1",
-      "status": "planned",
-      "rollout": "not implemented",
+      "status": "contract",
       "featureFlags": [
         { "name": "VIBELINK_AUDIO_RUST_PIPELINE", "requiredInCode": false }
       ],
       "nodeEntry": "src/liveCallAudioPipeline.js",
-      "rustEntry": "planned: apps/windows/src/main.rs audio-pipeline-sidecar subcommand",
-      "sidecarCommand": "planned: vibelink audio-pipeline-sidecar",
-      "nodeFallback": "Existing live-call audio and ASR paths remain Node/provider-owned. The first Rust slice must fall back to the current Node level/stream path when missing or failed.",
-      "runtimeStats": "planned: sidecar stats should expose processed chunks, processed bytes, dropped chunks, backpressure rejections, and last error.",
+      "rustEntry": "apps/windows/src/audio_pipeline_sidecar.rs",
+      "sidecarCommand": "vibelink audio-pipeline-sidecar",
+      "fallback": "没有生产路由，现有 live-call 音频与 ASR 路径保持不变",
       "tests": [
         "test/liveCallAudioPipeline.test.js",
-        "test/liveCallAudio.test.js"
+        "test/liveCallAudio.test.js",
+        "test/rustAudioPipelineContract.test.js",
+        "test/audioPipelineBenchmark.test.js"
       ],
-      "docs": [
-        "README.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "Rust audio pipeline is not implemented. Current live-call stack uses existing Node/Kotlin/.NET paths and mock/real ASR integration points.",
-      "nextAction": "Define a bounded JSONL contract for deterministic PCM chunk preprocessing: level, peak, RMS, sequence accounting, ring-buffer/backpressure stats, __health, stats, and __close. Do not move ASR into Rust in the first slice.",
-      "promotionGate": "Can move to contract only after synthetic PCM tests define deterministic level/RMS behavior. Can move to opt-in only after a real sidecar exists and falls back to the existing Node path."
+      "nextAction": "保持 contract；仅在生产遥测出现实质 Node 瓶颈时重新评估。"
     },
     {
       "id": "compression-adapter",
-      "title": "Compression and context budget helper",
+      "title": "压缩与上下文预算辅助器",
       "priority": "P2",
-      "status": "planned",
-      "rollout": "not implemented; conditional need",
+      "status": "contract",
       "featureFlags": [
         { "name": "VIBELINK_RUST_COMPRESSION", "requiredInCode": false }
       ],
-      "nodeEntry": "planned: src/rustCompressionClient.js",
-      "rustEntry": "planned: apps/windows/src/main.rs compression-sidecar subcommand",
-      "sidecarCommand": "planned: vibelink compression-sidecar",
-      "nodeFallback": "Existing Node/provider prompt construction remains authoritative. First Rust helper should be optional and no-op/fallback when missing.",
-      "runtimeStats": "planned: sidecar stats should expose requests, failures, bytes in/out, and last error.",
+      "nodeEntry": "src/compressionContract.js",
+      "rustEntry": "apps/windows/src/compression_sidecar.rs",
+      "sidecarCommand": "vibelink compression-sidecar",
+      "fallback": "没有生产路由，src/compactService.js 与 src/contextBudget.js 保持权威",
       "tests": [
-        "planned: test/rustCompressionContract.test.js"
+        "test/rustCompressionContract.test.js",
+        "test/compressionBenchmark.test.js"
       ],
-      "docs": [
-        "README.md",
-        "docs/rust-migration-status.md"
-      ],
-      "currentState": "No VibeLink Rust compression helper exists. README says to prefer external Headroom sidecar/proxy and only implement VibeLink-native compression if clearly needed.",
-      "nextAction": "If needed, define a deterministic data-plane helper contract for byte/log sampling and budget trimming only; do not claim semantic summarization or provider-token precision.",
-      "promotionGate": "Can move to contract only after deterministic input/output fixtures exist. Can move to opt-in only after a real sidecar exists, fallback preserves current behavior, and docs state this is not semantic summarization."
+      "nextAction": "保持 contract；仅在生产负载显著变化并超过 10ms 阈值时重新评估。"
     }
   ]
 }

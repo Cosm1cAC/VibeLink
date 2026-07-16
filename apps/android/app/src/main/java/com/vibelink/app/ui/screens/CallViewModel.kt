@@ -8,6 +8,7 @@ import com.google.gson.Gson
 import com.vibelink.app.audio.AudioLevel
 import com.vibelink.app.audio.LiveCallAudioService
 import com.vibelink.app.audio.LiveCallAudioStreamer
+import com.vibelink.app.mobile.EventStreamRecoveryPolicy
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.AsrCheckpointInfo
 import com.vibelink.app.network.AsrProviderInfo
@@ -18,6 +19,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.Response
 import okhttp3.sse.EventSource
@@ -159,6 +162,10 @@ class CallViewModel : ViewModel() {
     val uiState: StateFlow<CallUiState> = _uiState.asStateFlow()
 
     private var eventSource: EventSource? = null
+    private var eventReconnectJob: Job? = null
+    private var eventStreamGeneration = 0L
+    private var lastEventCursor = 0
+    private var reconnectAttempt = 0
     private var audioStreamer: LiveCallAudioStreamer? = null
     private var appContext: Context? = null
     private val seenEvents = mutableSetOf<String>()
@@ -217,9 +224,9 @@ class CallViewModel : ViewModel() {
         if (sessionId.isBlank()) return
         viewModelScope.launch {
             stopAudio()
-            eventSource?.cancel()
-            eventSource = null
+            cancelEventStream()
             seenEvents.clear()
+            lastEventCursor = 0
             _uiState.update { state ->
                 val selected = state.sessions.firstOrNull { it.id == sessionId }
                 state.copy(
@@ -257,9 +264,9 @@ class CallViewModel : ViewModel() {
         val asrProvider = _uiState.value.asrProvider
         viewModelScope.launch {
             stopAudio()
-            eventSource?.cancel()
-            eventSource = null
+            cancelEventStream()
             seenEvents.clear()
+            lastEventCursor = 0
             _uiState.update {
                 it.copy(
                     loading = true,
@@ -315,8 +322,7 @@ class CallViewModel : ViewModel() {
             stopAudio()
             try {
                 apiClient.stopSession(sessionId)
-                eventSource?.cancel()
-                eventSource = null
+                cancelEventStream()
                 val sessions = apiClient.listSessions()
                 _uiState.update {
                     it.copy(
@@ -339,10 +345,9 @@ class CallViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { apiClient.pauseSession(sessionId) }
                 .onSuccess { session ->
-                    appContext?.applicationContext?.startService(
-                        android.content.Intent(appContext, LiveCallAudioService::class.java)
-                            .setAction(LiveCallAudioService.ACTION_PAUSE)
-                    )
+                    appContext?.let { context ->
+                        context.startService(LiveCallAudioService.pauseIntent(context))
+                    }
                     _uiState.update {
                         it.copy(
                             sessionActive = session?.status != "stopped",
@@ -362,10 +367,9 @@ class CallViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { apiClient.resumeSession(sessionId) }
                 .onSuccess { session ->
-                    appContext?.applicationContext?.startService(
-                        android.content.Intent(appContext, LiveCallAudioService::class.java)
-                            .setAction(LiveCallAudioService.ACTION_RESUME)
-                    )
+                    appContext?.let { context ->
+                        context.startService(LiveCallAudioService.resumeIntent(context))
+                    }
                     _uiState.update {
                         it.copy(
                             sessionActive = session?.status != "stopped",
@@ -476,15 +480,26 @@ class CallViewModel : ViewModel() {
         _uiState.update { it.copy(audioRunning = false, audioStatus = "") }
     }
 
-    private fun subscribeEvents(apiClient: ApiClient, sessionId: String, after: Int = 0) {
-        eventSource?.cancel()
+    private fun subscribeEvents(
+        apiClient: ApiClient,
+        sessionId: String,
+        after: Int = 0,
+        generation: Long = eventStreamGeneration,
+    ) {
+        if (generation != eventStreamGeneration || !_uiState.value.sessionActive) return
+        lastEventCursor = EventStreamRecoveryPolicy.nextCursor(lastEventCursor, after)
+        val previous = eventSource
+        eventSource = null
+        previous?.cancel()
         eventSource = apiClient.subscribeLiveCallEvents(
             sessionId = sessionId,
-            after = after,
+            after = lastEventCursor,
             listener = object : EventSourceListener() {
                 override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                    if (eventSource !== this@CallViewModel.eventSource) return
                     try {
                         val event = gson.fromJson(data, LiveCallEvent::class.java)
+                        reconnectAttempt = 0
                         applyEvent(event)
                     } catch (error: Exception) {
                         _uiState.update { it.copy(errorText = error.message ?: "解析实时通话事件失败") }
@@ -492,12 +507,52 @@ class CallViewModel : ViewModel() {
                 }
 
                 override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                    if (eventSource !== this@CallViewModel.eventSource) return
                     _uiState.update {
-                        it.copy(errorText = t?.message ?: "实时通话事件流已断开")
+                        it.copy(errorText = t?.message ?: "实时通话事件流已断开，正在重连")
                     }
+                    scheduleEventReconnect(apiClient, sessionId, generation)
+                }
+
+                override fun onClosed(eventSource: EventSource) {
+                    if (eventSource !== this@CallViewModel.eventSource) return
+                    scheduleEventReconnect(apiClient, sessionId, generation)
                 }
             },
         )
+    }
+
+    private fun scheduleEventReconnect(apiClient: ApiClient, sessionId: String, generation: Long) {
+        if (generation != eventStreamGeneration || !_uiState.value.sessionActive || eventReconnectJob?.isActive == true) return
+        val delayMs = EventStreamRecoveryPolicy.retryDelayMs(reconnectAttempt++)
+        eventReconnectJob = viewModelScope.launch {
+            delay(delayMs)
+            if (generation != eventStreamGeneration || !_uiState.value.sessionActive) return@launch
+            val catchUp = runCatching {
+                apiClient.fetchLiveCallEvents(sessionId, after = lastEventCursor, limit = MAX_EVENTS)
+            }
+            if (catchUp.isFailure) {
+                _uiState.update { it.copy(errorText = catchUp.exceptionOrNull()?.message ?: "实时通话重连失败") }
+                eventReconnectJob = null
+                scheduleEventReconnect(apiClient, sessionId, generation)
+                return@launch
+            }
+            applyEvents(catchUp.getOrDefault(emptyList()))
+            reconnectAttempt = 0
+            _uiState.update { it.copy(errorText = "", statusText = "实时通话事件已恢复") }
+            eventReconnectJob = null
+            subscribeEvents(apiClient, sessionId, lastEventCursor, generation)
+        }
+    }
+
+    private fun cancelEventStream() {
+        eventStreamGeneration += 1
+        eventReconnectJob?.cancel()
+        eventReconnectJob = null
+        val previous = eventSource
+        eventSource = null
+        previous?.cancel()
+        reconnectAttempt = 0
     }
 
     private fun applyEvents(events: List<LiveCallEvent>) {
@@ -505,6 +560,7 @@ class CallViewModel : ViewModel() {
     }
 
     private fun applyEvent(event: LiveCallEvent) {
+        lastEventCursor = EventStreamRecoveryPolicy.nextCursor(lastEventCursor, event.cursor)
         if (!seenEvents.add(eventKey(event))) return
         _uiState.update { state ->
             val events = (state.events + event).takeLast(MAX_EVENTS)
@@ -550,7 +606,7 @@ class CallViewModel : ViewModel() {
     }
 
     override fun onCleared() {
-        eventSource?.cancel()
+        cancelEventStream()
         stopAudio()
         super.onCleared()
     }

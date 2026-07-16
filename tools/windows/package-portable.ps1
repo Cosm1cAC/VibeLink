@@ -160,6 +160,11 @@ $manifest = [ordered]@{
   [Text.Encoding]::ASCII
 )
 [IO.File]::WriteAllText(
+  (Join-Path $stageRoot "start-vibelink-rust-http.cmd"),
+  "@echo off`r`ncd /d %~dp0`r`nvibelink.exe --rust-status-http --rust-doctor-http --rust-devices-http --rust-device-mutations-http --rust-pairing-http --rust-audit-http --rust-settings-http --rust-tool-events-http %*`r`n",
+  [Text.Encoding]::ASCII
+)
+[IO.File]::WriteAllText(
   (Join-Path $stageRoot "start-vibelink-canary.cmd"),
   "@echo off`r`ncd /d %~dp0`r`nvibelink.exe --rust-canary %*`r`n",
   [Text.Encoding]::ASCII

@@ -33,6 +33,7 @@ data class WorkspaceTerminalUiState(
 )
 
 class WorkspaceViewModel : ViewModel() {
+    private var resiliencePaused = false
     private val _workspaces = MutableStateFlow<List<WorkspaceItem>>(emptyList())
     val workspaces: StateFlow<List<WorkspaceItem>> = _workspaces.asStateFlow()
 
@@ -76,6 +77,15 @@ class WorkspaceViewModel : ViewModel() {
     val pendingApproval: StateFlow<WorkspaceApprovalNotice?> = _pendingApproval.asStateFlow()
 
     private var terminalPollJob: Job? = null
+
+    fun setResiliencePaused(paused: Boolean) {
+        if (resiliencePaused == paused) return
+        resiliencePaused = paused
+        if (paused) {
+            terminalPollJob?.cancel()
+            terminalPollJob = null
+        }
+    }
 
     private val _error = MutableStateFlow("")
     val error: StateFlow<String> = _error.asStateFlow()

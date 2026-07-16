@@ -339,6 +339,15 @@ class SettingsViewModel : ViewModel() {
             }
         }
     }
+
+    fun rotateCurrentDevice(apiClient: ApiClient) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(error = "", notice = "") }
+            runCatching { apiClient.rotateCurrentDevice() }
+                .onSuccess { _uiState.update { it.copy(notice = "当前设备 token 已轮换，请重新连接。") } }
+                .onFailure { error -> _uiState.update { it.copy(error = error.message ?: "轮换设备 token 失败") } }
+        }
+    }
 }
 
 private val settingsJson = GsonBuilder().setPrettyPrinting().create()
@@ -349,6 +358,7 @@ object SettingsSectionTarget {
     fun pendingApprovalsIndex(hasError: Boolean, hasNotice: Boolean): Int {
         return sectionsBeforeApprovals + (if (hasError) 1 else 0) + (if (hasNotice) 1 else 0)
     }
+
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -774,6 +784,9 @@ fun SettingsScreen(
                                         )
                                     }
                                 }
+                            }
+                            OutlinedButton(onClick = { viewModel.rotateCurrentDevice(apiClient) }, modifier = Modifier.fillMaxWidth()) {
+                                Text(strings.text("轮换当前设备 token", "Rotate current device token"))
                             }
                             Spacer(Modifier.height(10.dp))
                             Text(strings.text("配对请求", "Pairing requests"), style = MaterialTheme.typography.labelMedium)

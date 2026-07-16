@@ -31,6 +31,7 @@ mod status_sidecar;
 mod tool_events_http;
 mod tool_events_store;
 mod workspace_tree;
+mod workspace_http;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -38,7 +39,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(name = "vibelink", version, about = "VibeLink Windows single entry")]
 struct Cli {
     #[command(subcommand)]
@@ -85,6 +86,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_tool_events_sse: bool,
+
+    #[arg(long, global = true)]
+    rust_workspace_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -205,7 +209,8 @@ fn run() -> Result<()> {
 
 fn run_user_entry(cli: &Cli) -> Result<()> {
     println!("Starting VibeLink bridge on {}:{}", cli.host, cli.port);
-    let mut bridge = spawn_bridge_role(cli)?;
+    let effective_cli = default_rust_profile(cli);
+    let mut bridge = spawn_bridge_role(&effective_cli)?;
     let base_url = local_base_url(cli.port);
 
     if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
@@ -319,6 +324,27 @@ fn rust_tool_events_sse_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_tool_events_sse
 }
 
+fn default_rust_profile(cli: &Cli) -> Cli {
+    let mut effective = cli.clone();
+    effective.rust_canary = true;
+    effective.rust_http_canary = true;
+    effective.rust_status_http = true;
+    effective.rust_doctor_http = true;
+    effective.rust_devices_http = true;
+    effective.rust_device_mutations_http = true;
+    effective.rust_pairing_http = true;
+    effective.rust_audit_http = true;
+    effective.rust_settings_http = true;
+    effective.rust_tool_events_http = true;
+    effective.rust_tool_events_sse = true;
+    effective.rust_workspace_http = true;
+    effective
+}
+
+fn rust_workspace_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_workspace_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -382,6 +408,8 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
     let tool_events_sse_route = rust_tool_events_sse_enabled(cli)
         .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
+    let workspace_route = rust_workspace_http_enabled(cli)
+        .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
         Some(
             settings_http::SettingsRouteConfig::new(route_data_dir.clone(), root.to_path_buf())
@@ -423,6 +451,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_tool_events_sse(tool_events_sse_route)
         .with_settings(settings_route)
         .with_pairing(pairing_route);
+    let routes = routes.with_workspace(workspace_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
     if node
         .try_wait()
@@ -616,6 +645,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_tool_events_sse {
         command.arg("--rust-tool-events-sse");
+    }
+    if cli.rust_workspace_http {
+        command.arg("--rust-workspace-http");
     }
     command
         .arg("bridge")
@@ -845,6 +877,16 @@ mod tests {
     }
 
     #[test]
+    fn user_entry_defaults_to_rust_frontdoor_with_current_route_ownership() {
+        let cli = Cli::try_parse_from(["vibelink"]).unwrap();
+        let effective = default_rust_profile(&cli);
+        assert!(effective.rust_canary);
+        assert!(effective.rust_http_canary);
+        assert!(effective.rust_workspace_http);
+        assert!(effective.rust_tool_events_sse);
+    }
+
+    #[test]
     fn rust_http_canary_is_additive_and_keeps_node_on_loopback() {
         let enabled = Cli::try_parse_from(["vibelink", "--rust-http-canary", "bridge"]).unwrap();
         assert!(enabled.rust_http_canary);
@@ -1007,6 +1049,23 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-tool-events-http", "bridge"]).unwrap();
         assert!(route_only.rust_tool_events_http);
         assert!(!rust_tool_events_http_enabled(&route_only));
+    }
+
+    #[test]
+    fn rust_workspace_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-workspace-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_workspace_http);
+        assert!(rust_workspace_http_enabled(&enabled));
+
+        let route_only = Cli::try_parse_from(["vibelink", "--rust-workspace-http", "bridge"])
+            .unwrap();
+        assert!(!rust_workspace_http_enabled(&route_only));
     }
 
     #[test]

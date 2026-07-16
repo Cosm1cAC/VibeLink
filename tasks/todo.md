@@ -52,6 +52,7 @@
 - [x] Migrate audit-log read, bounded pagination, and field-projection routes.
 - [x] Isolate Rust workspace-tree, event-store, MCP session, and sidecar protocol modules.
 - [ ] Migrate workspace read/tree and registry routes.
+- [x] Migrate authenticated workspace file write/delete/rename with allowed-root enforcement.
 - [ ] Migrate approvals, commands, Git actions, and tool-run routes.
 - [ ] Migrate tool-event and unified-event SSE streams.
 - [x] Migrate tool-event read and SSE ownership behind an opt-in Rust flag.

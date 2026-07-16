@@ -27,6 +27,7 @@
 | Audit Log 原生 HTTP 路由 | `opt-in` | Rust 鉴权、拒绝审计、游标分页、字段投影 | 远端 CI、便携包与公网拒绝路径后保持观察 |
 | Settings 原生 HTTP 路由 | `opt-in` | Rust 校验/dry-run/导入导出/原子写入/DPAPI/审计；Node 仅做受保护内存重载 | 公网拒绝路径已通过；等待远端 CI、便携包与受控公网认证成功路径 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
+| Workspace 文件写操作原生 HTTP 路由 | `opt-in` | Rust allowed-root 文件操作，Node 回退 | 继续迁移 Git/command/approval |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |
 | 事件存储 append/replay sidecar | `canary` | `auto`/显式开启，可回退 Worker/同步 SQLite | 有限真人运行会话并采集统计 |
 | 实时音频低延迟管线 | `contract` | 无 | 仅在新证据表明 Node 成为瓶颈时重评 |
@@ -127,6 +128,12 @@ Host 与设备鉴权继续复用 Rust 控制面前置检查，`host.blocked`/`au
 2026-07-16 的隔离 release 单路由 canary 为 12/12；累计开启 Status、Doctor、Devices、Pairing、Audit、Settings 与 Tool Events 的 canary 为 44/44。验证覆盖 Rust 匿名拒绝、真实 SQLite fixture 的认证过滤/投影、严格 after 空页、Node `text/event-stream` 所有权、拒绝审计、与其他路由的组合顺序和受控关闭。默认 release 二进制正被公网服务占用，因此验证使用独立 `CARGO_TARGET_DIR`，没有停止或替换公网进程。该 slice 当前为 `opt-in`：正常 JSON replay 少经过 Node HTTP、Worker 选择和 JSONL 跳数，但 Node 仍因 SSE 与其他路由常驻，单独启用不会显著降低整机常驻内存。
 
 ## Workspace Tree
+
+### Workspace File Mutations
+
+`--rust-workspace-http` 接管认证 `POST /api/workspaces/:id/file` 的 write、delete 和 rename。Rust 从 SQLite 读取 workspace root，执行 canonical allowed-root 校验、1MiB JSON/text 上限、父目录创建与文件操作，并写入 `workspace.file` audit 记录；路径穿越、绝对路径、非文件目标和冲突目标均拒绝。请求解析、数据库未就绪或 Rust 操作失败时，前门保留原始请求并回退 Node。
+
+当前本地 78 项 Rust 测试覆盖文件写入、重命名、删除、路径穿越拒绝和现有控制面回归。该切片已纳入默认 `vibelink.exe` Rust 前门 profile；Git/command/approval 仍由 Node 负责，直到后续 workspace/tool slices 完成。
 
 实现：`src/workspaces.js`、`src/workspaceTreeSidecarClient.js`、`apps/windows/src/workspace_tree.rs`、`vibelink workspace-tree-sidecar`，一次性回退命令为 `vibelink workspace-tree`。
 

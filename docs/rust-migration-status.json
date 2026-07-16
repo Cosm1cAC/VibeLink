@@ -253,6 +253,19 @@
       "nextAction": "本地 unit、clippy、12 项单路由及 44 项累计 release canary 已覆盖认证、过滤、cursor、fields、拒绝审计、Node SSE 所有权和零回退；等待远端 CI、包内及受控公网认证证据。"
     },
     {
+      "id": "workspace-http",
+      "title": "Workspace 文件写操作原生 HTTP 路由",
+      "priority": "P1",
+      "status": "opt-in",
+      "featureFlags": ["--rust-http-canary", "--rust-workspace-http"],
+      "nodeEntry": "src/server.js#/api/workspaces/:id/file",
+      "rustEntry": "apps/windows/src/workspace_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
+      "fallback": "Rust 鉴权、workspace root、body 或文件操作失败时逐字节回放 Node；关闭 --rust-workspace-http 后恢复 Node 所有权",
+      "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
+      "nextAction": "完成 Git file-action、Git action、worktree 和 command/approval 路由后再扩大默认 Rust 所有权。"
+    },
+    {
       "id": "mcp-session-sidecar",
       "title": "MCP 持久 stdio 会话",
       "priority": "P1",

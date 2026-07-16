@@ -36,6 +36,16 @@
 - [ ] Migrate workspace and tool routes.
 - [ ] Migrate task and live-call routes.
 
+## Independent Rust Server Execution
+
+- [x] Record the end-state architecture and migration order.
+- [ ] Add Rust pairing/device mutation ownership with Node fallback.
+- [ ] Add Rust settings and audit ownership with Node fallback.
+- [ ] Add Rust workspace/tool ownership with command and approval parity.
+- [ ] Add Rust task/live-call ownership with provider boundary parity.
+- [ ] Make Rust the default bridge server and keep Node as explicit rollback.
+- [ ] Remove Node runtime from the portable package after observation and recovery evidence.
+
 ## Retirement And Desktop Release
 
 - [ ] Confirm zero Node route ownership and fallback during the observation window.

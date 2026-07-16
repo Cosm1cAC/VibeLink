@@ -4,6 +4,18 @@
 
 Migrate VibeLink from the current Node control plane plus Rust data-plane sidecars to a Rust-owned HTTP control plane through reversible vertical slices. The immediate milestone is to deploy the current Rust status assembler, collect authenticated public-canary evidence, and promote it only when failure, fallback, timeout, pending, and backpressure counters remain zero. Later route families follow the same contract-first and canary-first process.
 
+## Independent Rust Server Objective
+
+The completion target is a distributable `vibelink.exe` whose HTTP server, authentication, persistence boundaries, route handlers, SSE/WebSocket handling, and supervision are Rust-owned. Node may remain as an explicitly disabled rollback runtime during the observation window, but must not be required for the normal server path.
+
+### Execution Order
+
+1. Complete identity and administrative routes: pairing/device mutations, settings, and audit.
+2. Complete workspace and tool routes, including command safety, approvals, and event streams.
+3. Complete task and live-call routes, retaining provider subprocess boundaries behind typed Rust adapters.
+4. Switch the default bridge to Rust-native serving, retain a separately selectable Node rollback mode, and measure zero Node route ownership.
+5. Remove bundled Node only after the observation window and recovery drill pass.
+
 ## Architecture Decisions
 
 - Preserve the current OpenAPI and Web/Android HTTP/SSE contracts throughout the migration.

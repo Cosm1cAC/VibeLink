@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
             VibeLinkTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     VibeLinkApp(
+                        resilienceRuntime = resilienceRuntime,
                         initialPairingUri = pairingUri,
                         initialSharedContent = sharedContent,
                         onSharedContentConsumed = ::consumeSharedContent,

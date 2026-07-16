@@ -19,6 +19,8 @@ import com.vibelink.app.network.ApiClientConnectionBootstrapper
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.SavedApiConnection
 import com.vibelink.app.mobile.IncomingSharedContent
+import com.vibelink.app.mobile.MobileResilienceRuntime
+import com.vibelink.app.mobile.NetworkQuality
 import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.ui.screens.*
@@ -33,6 +35,7 @@ import kotlinx.coroutines.withContext
  */
 @Composable
 fun VibeLinkApp(
+    resilienceRuntime: MobileResilienceRuntime? = null,
     initialPairingUri: String? = null,
     initialSharedContent: IncomingSharedContent = IncomingSharedContent(),
     onSharedContentConsumed: () -> Unit = {},
@@ -79,6 +82,15 @@ fun VibeLinkApp(
     val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
     val appStrings = remember(appLanguage) { appStringsFor(appLanguage) }
     val appScope = rememberCoroutineScope()
+
+    LaunchedEffect(resilienceRuntime) {
+        resilienceRuntime?.policy?.collect { policy ->
+            val paused = policy.eventPollIntervalMs == 0L
+            messageListViewModel.setResiliencePaused(paused)
+            workspaceViewModel.setResiliencePaused(paused)
+            callViewModel.setResiliencePaused(paused)
+        }
+    }
 
     CompositionLocalProvider(LocalAppStrings provides appStrings) {
     NavHost(navController = navController, startDestination = "login") {
@@ -179,6 +191,7 @@ fun VibeLinkApp(
                 onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
                 initialAttachmentUris = if (conversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
                 onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
+                workspaceId = workspaceViewModel.selectedWorkspaceId.collectAsState().value,
             )
         }
 

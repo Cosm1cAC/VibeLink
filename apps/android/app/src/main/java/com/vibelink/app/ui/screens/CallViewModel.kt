@@ -157,6 +157,13 @@ data class CallUiState(
 )
 
 class CallViewModel : ViewModel() {
+    private var resiliencePaused = false
+
+    fun setResiliencePaused(paused: Boolean) {
+        if (resiliencePaused == paused) return
+        resiliencePaused = paused
+        if (paused) cancelEventStream()
+    }
     private val gson = Gson()
     private val _uiState = MutableStateFlow(CallUiState())
     val uiState: StateFlow<CallUiState> = _uiState.asStateFlow()

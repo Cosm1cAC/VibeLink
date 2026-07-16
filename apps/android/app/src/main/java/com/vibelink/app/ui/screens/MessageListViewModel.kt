@@ -22,6 +22,7 @@ import com.vibelink.app.network.ToolCallSummary
 import com.vibelink.app.network.ToolEvent
 import com.vibelink.app.network.ToolOutputEvent
 import com.vibelink.app.network.ThreadPatch
+import com.vibelink.app.network.TaskChangesResponse
 import com.vibelink.app.mobile.EventStreamRecoveryPolicy
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -44,6 +45,7 @@ private fun messageOperationKey(message: ChatMessage): String = when {
 }
 
 class MessageListViewModel : ViewModel() {
+    private var resiliencePaused = false
 
     private val gson = Gson()
 
@@ -79,6 +81,8 @@ class MessageListViewModel : ViewModel() {
 
     private val _pendingApproval = MutableStateFlow<PendingApprovalState?>(null)
     val pendingApproval: StateFlow<PendingApprovalState?> = _pendingApproval.asStateFlow()
+    private val _taskChanges = MutableStateFlow<TaskChangesResponse?>(null)
+    val taskChanges: StateFlow<TaskChangesResponse?> = _taskChanges.asStateFlow()
 
     private var taskEventSource: EventSource? = null
     private var toolEventSource: EventSource? = null
@@ -116,6 +120,7 @@ class MessageListViewModel : ViewModel() {
             _sending.value = false
             _currentTaskId.value = if (conversation.kind == "task") conversation.id else ""
             _pendingApproval.value = null
+            _taskChanges.value = null
             _remoteReady.value = false
             _remoteStatus.value = ""
             _title.value = conversation.title.ifBlank { titleForKind(conversation.kind) }
@@ -131,6 +136,7 @@ class MessageListViewModel : ViewModel() {
                     "fork" -> loadFork(apiClient, conversation, seq)
                     else -> loadHistory(apiClient, conversation, seq)
                 }
+                if (conversation.id.isNotBlank()) _taskChanges.value = apiClient.getTaskChanges(conversation.id)
                 applyPersistedMessageOverrides(apiClient, conversation.key)
             } catch (error: Exception) {
                 _error.value = error.message ?: "Failed to load conversation"
@@ -148,6 +154,12 @@ class MessageListViewModel : ViewModel() {
     fun refresh(apiClient: ApiClient) {
         val conversation = activeConversation ?: return
         loadConversation(apiClient, conversation)
+    }
+
+    fun setResiliencePaused(paused: Boolean) {
+        if (resiliencePaused == paused) return
+        resiliencePaused = paused
+        if (paused) stopStreaming() else persistenceApiClient?.let { refresh(it) }
     }
 
     fun retryDesktop(apiClient: ApiClient) {

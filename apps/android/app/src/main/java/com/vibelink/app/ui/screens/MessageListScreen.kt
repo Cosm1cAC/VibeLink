@@ -124,6 +124,7 @@ fun MessageListScreen(
     onClearPromptHistory: () -> Unit = {},
     initialAttachmentUris: List<String> = emptyList(),
     onInitialAttachmentsConsumed: () -> Unit = {},
+    workspaceId: String = "",
 ) {
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -135,6 +136,7 @@ fun MessageListScreen(
     val remoteStatus by viewModel.remoteStatus.collectAsState()
     val providerRegistry by viewModel.providerRegistry.collectAsState()
     val pendingApproval by viewModel.pendingApproval.collectAsState()
+    val taskChanges by viewModel.taskChanges.collectAsState()
     val strings = LocalAppStrings.current
 
     var prompt by remember(conversation?.key) {
@@ -147,6 +149,7 @@ fun MessageListScreen(
     var showOptions by remember { mutableStateOf(false) }
     var attachmentStatus by remember(conversation?.key) { mutableStateOf("") }
     var attachmentUploading by remember(conversation?.key) { mutableStateOf(false) }
+    var workspaceContext by remember(conversation?.key, workspaceId) { mutableStateOf("") }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -184,6 +187,15 @@ fun MessageListScreen(
 
     LaunchedEffect(conversation?.key) {
         if (conversation != null) viewModel.ensureConversationLoaded(apiClient, conversation)
+    }
+
+    LaunchedEffect(workspaceId) {
+        if (workspaceId.isBlank()) return@LaunchedEffect
+        workspaceContext = runCatching { apiClient.getWorkspaceContext(workspaceId).context }.getOrDefault("")
+    }
+
+    LaunchedEffect(workspaceContext, conversation?.key) {
+        if (workspaceContext.isNotBlank() && prompt.isBlank()) prompt = workspaceContext
     }
 
     LaunchedEffect(conversation?.key, initialAttachmentUris) {
@@ -331,6 +343,11 @@ fun MessageListScreen(
                         if (error.isNotBlank() && pendingApproval == null) {
                             item {
                                 ErrorBanner(error, onOpenApprovals = onOpenApprovals)
+                            }
+                        }
+                        taskChanges?.let { changes ->
+                            if (changes.items.isNotEmpty() || changes.changes.isNotEmpty()) item {
+                                TaskChangesCard(changes)
                             }
                         }
                         itemsIndexed(messages, key = { index, message -> "$index:${message.role}:${message.text.hashCode()}:${message.toolCalls.size}" }) { _, message ->
@@ -973,6 +990,19 @@ private suspend fun uploadAttachmentUri(
         fileName = name,
         mimeType = mimeType,
     )
+}
+
+@Composable
+private fun TaskChangesCard(changes: com.vibelink.app.network.TaskChangesResponse) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Task changes", style = MaterialTheme.typography.titleSmall)
+            (changes.items.ifEmpty { changes.changes }).take(8).forEach { change ->
+                val label = change["path"]?.toString() ?: change["title"]?.toString() ?: change["type"]?.toString() ?: change.toString()
+                Text(label, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
 }
 
 private fun displayNameForUri(context: Context, uri: Uri): String {

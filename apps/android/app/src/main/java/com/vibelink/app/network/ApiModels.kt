@@ -919,6 +919,27 @@ data class CommandDefinition(
     val toolKind: String = "",
 )
 
+data class ReviewListResponse(val items: List<ReviewSession> = emptyList())
+data class ReviewSession(
+    val id: String = "",
+    val workspaceId: String = "",
+    val branch: String = "",
+    val title: String = "",
+    val status: String = "open",
+    val files: List<Map<String, Any?>> = emptyList(),
+    val comments: List<ReviewComment> = emptyList(),
+)
+data class ReviewComment(
+    val id: String = "",
+    val file: String = "",
+    val line: Int = 0,
+    val body: String = "",
+    val severity: String = "info",
+    val status: String = "open",
+)
+data class ReviewCreateRequest(val workspaceId: String, val branch: String = "", val title: String = "PR Review")
+data class ReviewCommentRequest(val file: String, val line: Int = 0, val body: String, val severity: String = "info")
+
 data class DeviceTokenRotationResponse(
     val ok: Boolean = false,
     val token: String = "",

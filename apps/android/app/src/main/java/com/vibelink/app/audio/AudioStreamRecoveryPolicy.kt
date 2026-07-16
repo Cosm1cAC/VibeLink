@@ -1,8 +1,11 @@
 package com.vibelink.app.audio
 
-object AudioStreamRecoveryPolicy {
+internal object AudioStreamRecoveryPolicy {
+    private const val INITIAL_DELAY_MS = 500L
+    private const val MAX_DELAY_MS = 30_000L
+
     fun retryDelayMs(attempt: Int): Long {
-        val normalized = attempt.coerceIn(0, 6)
-        return (1_000L shl normalized).coerceAtMost(30_000L)
+        val boundedAttempt = attempt.coerceAtLeast(0).coerceAtMost(6)
+        return (INITIAL_DELAY_MS shl boundedAttempt).coerceAtMost(MAX_DELAY_MS)
     }
 }

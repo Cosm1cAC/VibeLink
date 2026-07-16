@@ -31,6 +31,15 @@ class SessionListViewModel : ViewModel() {
     private val _searchResults = MutableStateFlow<List<SearchResult>>(emptyList())
     val searchResults: StateFlow<List<SearchResult>> = _searchResults.asStateFlow()
 
+    private val _searchLoading = MutableStateFlow(false)
+    val searchLoading: StateFlow<Boolean> = _searchLoading.asStateFlow()
+
+    private val _searchError = MutableStateFlow("")
+    val searchError: StateFlow<String> = _searchError.asStateFlow()
+
+    private val _searchNextCursor = MutableStateFlow("")
+    val searchNextCursor: StateFlow<String> = _searchNextCursor.asStateFlow()
+
     private val _allConversations = MutableStateFlow<List<ConversationItem>>(emptyList())
 
     private val _conversations = MutableStateFlow<List<ConversationItem>>(emptyList())
@@ -88,10 +97,24 @@ class SessionListViewModel : ViewModel() {
         _query.value = value
         applyFilters()
         searchJob?.cancel()
-        if (value.trim().length < 2) { _searchResults.value = emptyList(); return }
+        if (value.trim().length < 2) {
+            _searchResults.value = emptyList()
+            _searchError.value = ""
+            _searchNextCursor.value = ""
+            _searchLoading.value = false
+            return
+        }
         searchJob = viewModelScope.launch {
             delay(250)
-            runCatching { lastApiClient?.search(value.trim()) }.getOrNull()?.let { _searchResults.value = it.items }
+            _searchLoading.value = true
+            _searchError.value = ""
+            runCatching { lastApiClient?.search(value.trim()) }
+                .onSuccess { response ->
+                    _searchResults.value = response?.items.orEmpty()
+                    _searchNextCursor.value = response?.nextCursor.orEmpty()
+                }
+                .onFailure { _searchError.value = it.message ?: "搜索失败" }
+            _searchLoading.value = false
         }
     }
 

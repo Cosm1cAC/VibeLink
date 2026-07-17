@@ -1,35 +1,37 @@
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use qrcode::{render::unicode, QrCode};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{self, BufRead, BufReader, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex, TryLockError};
 use std::{
     env,
     ffi::OsString,
-    hash::{Hash, Hasher},
     net::{SocketAddr, TcpListener, UdpSocket},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 mod audio_pipeline_sidecar;
+mod audit_http;
 mod compression_sidecar;
 mod device_http;
 mod doctor_http;
+mod event_store_sidecar;
 mod http_frontdoor;
+mod mcp_session_sidecar;
+mod pairing_http;
 mod public_tunnel;
+mod settings_contract;
+mod settings_credentials;
+mod settings_http;
+mod sidecar_protocol;
 mod status_http;
 mod status_sidecar;
+mod tool_events_http;
+mod tool_events_store;
+mod workspace_tree;
+mod workspace_http;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -37,7 +39,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(name = "vibelink", version, about = "VibeLink Windows single entry")]
 struct Cli {
     #[command(subcommand)]
@@ -66,6 +68,27 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_devices_http: bool,
+
+    #[arg(long, global = true)]
+    rust_device_mutations_http: bool,
+
+    #[arg(long, global = true)]
+    rust_pairing_http: bool,
+
+    #[arg(long, global = true)]
+    rust_audit_http: bool,
+
+    #[arg(long, global = true)]
+    rust_settings_http: bool,
+
+    #[arg(long, global = true)]
+    rust_tool_events_http: bool,
+
+    #[arg(long, global = true)]
+    rust_tool_events_sse: bool,
+
+    #[arg(long, global = true)]
+    rust_workspace_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -145,2117 +168,6 @@ struct PairingSession {
     expires_at: String,
 }
 
-#[derive(Debug, Serialize)]
-struct WorkspaceTree {
-    ok: bool,
-    dir: String,
-    truncated: bool,
-    signature: String,
-    items: Vec<WorkspaceTreeItem>,
-}
-
-#[derive(Debug, Serialize)]
-struct WorkspaceTreeItem {
-    name: String,
-    path: String,
-    #[serde(rename = "type")]
-    kind: String,
-    size: u64,
-    #[serde(rename = "updatedAt")]
-    updated_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceTreeScanOptions {
-    root: PathBuf,
-    #[serde(default)]
-    dir: PathBuf,
-    #[serde(default = "default_workspace_tree_depth")]
-    depth: usize,
-    #[serde(rename = "maxEntries", default = "default_workspace_tree_max_entries")]
-    max_entries: usize,
-}
-
-struct WorkspaceTreeSidecar {
-    started_at: String,
-    requests: u64,
-    responses: u64,
-    failures: u64,
-    scans: u64,
-    items: u64,
-    truncated_scans: u64,
-    last_request_at: String,
-    last_response_at: String,
-    last_failure_at: String,
-    last_error: String,
-}
-
-fn default_workspace_tree_depth() -> usize {
-    1
-}
-
-fn default_workspace_tree_max_entries() -> usize {
-    240
-}
-
-#[derive(Debug, Deserialize)]
-struct SidecarRequest {
-    #[serde(default)]
-    id: Value,
-    method: String,
-    #[serde(default)]
-    args: Vec<Value>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct McpServerConfig {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    cwd: String,
-    #[serde(default)]
-    env: HashMap<String, String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct McpSidecarOptions {
-    #[serde(rename = "timeoutMs")]
-    timeout_ms: Option<u64>,
-    #[serde(rename = "maxIdleMs")]
-    max_idle_ms: Option<u64>,
-    #[serde(rename = "maxPendingRequests")]
-    max_pending_requests: Option<usize>,
-    timeout: Option<u64>,
-}
-
-struct McpStdioSession {
-    server: McpServerConfig,
-    child: Child,
-    stdin: ChildStdin,
-    stdout_rx: Receiver<Value>,
-    closed: bool,
-    next_id: u64,
-    initialized: Option<Value>,
-    tools: Option<Vec<Value>>,
-    started_at: String,
-    last_used_at: String,
-    last_request_at: String,
-    last_response_at: String,
-    last_failure_at: String,
-    last_backpressure_at: String,
-    requests: u64,
-    responses: u64,
-    failures: u64,
-    timeouts: u64,
-    backpressure_rejects: u64,
-    timeout_ms: u64,
-    max_pending_requests: usize,
-    max_pending_observed: usize,
-    last_used: Instant,
-}
-
-struct McpSidecarManager {
-    sessions: HashMap<String, McpStdioSession>,
-}
-
-struct McpSidecarRuntimeStats {
-    active_requests: AtomicUsize,
-    max_active_observed: AtomicUsize,
-    backpressure_rejects: AtomicUsize,
-    max_active_requests: usize,
-}
-
-struct EventStoreSidecar {
-    db: Connection,
-    read_only: bool,
-    started_at: String,
-    requests: u64,
-    responses: u64,
-    failures: u64,
-    last_request_at: String,
-    last_response_at: String,
-    last_failure_at: String,
-    last_error: String,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreListTaskOptions {
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreListToolOptions {
-    #[serde(rename = "toolRunId")]
-    tool_run_id: Option<String>,
-    #[serde(rename = "workspaceId")]
-    workspace_id: Option<String>,
-    #[serde(rename = "taskId")]
-    task_id: Option<String>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreListLiveOptions {
-    #[serde(rename = "sessionId")]
-    session_id: Option<String>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-struct EventStoreUnifiedOptions {
-    #[serde(rename = "taskId")]
-    task_id: Option<String>,
-    #[serde(rename = "liveCallSessionId")]
-    live_call_session_id: Option<String>,
-    #[serde(rename = "toolRunId")]
-    tool_run_id: Option<String>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-const IGNORED_WORKSPACE_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    ".next",
-    "dist",
-    "build",
-    "target",
-    "coverage",
-    ".agent-mobile-terminal",
-];
-
-fn run_workspace_tree(root: &Path, dir: &Path, depth: usize, max_entries: usize) -> Result<()> {
-    let tree = list_workspace_tree(root, dir, depth, max_entries)?;
-    println!("{}", serde_json::to_string_pretty(&tree)?);
-    Ok(())
-}
-
-fn run_workspace_tree_sidecar() -> Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut sidecar = WorkspaceTreeSidecar::new();
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: SidecarRequest = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                sidecar.record_request();
-                sidecar.record_failure(&error.to_string());
-                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
-                continue;
-            }
-        };
-
-        sidecar.record_request();
-        if request.method == "__close" {
-            sidecar.record_response();
-            write_sidecar_result(&mut stdout, &request.id, Value::Bool(true))?;
-            break;
-        }
-
-        match sidecar.handle(&request.method, &request.args) {
-            Ok(result) => {
-                sidecar.record_response();
-                write_sidecar_result(&mut stdout, &request.id, result)?;
-            }
-            Err(error) => {
-                sidecar.record_failure(&format!("{error:#}"));
-                write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-impl WorkspaceTreeSidecar {
-    fn new() -> Self {
-        Self {
-            started_at: now_iso(),
-            requests: 0,
-            responses: 0,
-            failures: 0,
-            scans: 0,
-            items: 0,
-            truncated_scans: 0,
-            last_request_at: String::new(),
-            last_response_at: String::new(),
-            last_failure_at: String::new(),
-            last_error: String::new(),
-        }
-    }
-
-    fn record_request(&mut self) {
-        self.requests += 1;
-        self.last_request_at = now_iso();
-    }
-
-    fn record_response(&mut self) {
-        self.responses += 1;
-        self.last_response_at = now_iso();
-    }
-
-    fn record_failure(&mut self, message: &str) {
-        self.failures += 1;
-        self.last_failure_at = now_iso();
-        self.last_error = message.to_string();
-    }
-
-    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
-        match method {
-            "__health" => Ok(json!({
-                "ok": true,
-                "implementation": "rust",
-                "protocolVersion": 1,
-                "supportedMethods": ["scan"],
-                "controlMethods": ["__health", "stats", "__close"],
-                "startedAt": self.started_at
-            })),
-            "stats" => Ok(self.stats()),
-            "scan" => {
-                let options: WorkspaceTreeScanOptions = sidecar_arg(args, 0)?;
-                let tree = list_workspace_tree(
-                    &options.root,
-                    &options.dir,
-                    options.depth,
-                    options.max_entries,
-                )?;
-                self.scans += 1;
-                self.items += tree.items.len() as u64;
-                if tree.truncated {
-                    self.truncated_scans += 1;
-                }
-                Ok(serde_json::to_value(tree)?)
-            }
-            _ => bail!("Unsupported workspace tree sidecar method: {method}"),
-        }
-    }
-
-    fn stats(&self) -> Value {
-        json!({
-            "implementation": "rust",
-            "protocolVersion": 1,
-            "startedAt": self.started_at,
-            "pending": 0,
-            "requests": self.requests,
-            "responses": self.responses,
-            "failures": self.failures,
-            "scans": self.scans,
-            "items": self.items,
-            "truncatedScans": self.truncated_scans,
-            "lastRequestAt": self.last_request_at,
-            "lastResponseAt": self.last_response_at,
-            "lastFailureAt": self.last_failure_at,
-            "lastError": self.last_error
-        })
-    }
-}
-
-fn run_mcp_session_sidecar() -> Result<()> {
-    let stdin = io::stdin();
-    let stdout = Arc::new(Mutex::new(io::stdout()));
-    let manager = Arc::new(Mutex::new(McpSidecarManager {
-        sessions: HashMap::new(),
-    }));
-    let runtime = Arc::new(McpSidecarRuntimeStats::from_env());
-    let mut workers = Vec::new();
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: SidecarRequest = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
-                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
-                continue;
-            }
-        };
-
-        if request.method == "__close" {
-            let mut manager = manager.lock().expect("MCP sidecar manager lock poisoned");
-            manager.close_all();
-            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
-            write_sidecar_result(&mut stdout, &request.id, json!({ "ok": true }))?;
-            break;
-        }
-
-        if request.method == "stats" {
-            let result = match manager.try_lock() {
-                Ok(manager) => manager.stats_with_runtime(&runtime),
-                Err(TryLockError::WouldBlock) => McpSidecarManager::busy_stats(&runtime),
-                Err(TryLockError::Poisoned(_)) => McpSidecarManager::busy_stats(&runtime),
-            };
-            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
-            write_sidecar_result(&mut stdout, &request.id, result)?;
-            continue;
-        }
-
-        if !runtime.try_acquire() {
-            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
-            write_sidecar_error(
-                &mut stdout,
-                &request.id,
-                &format!(
-                    "MCP session sidecar backpressure: {} rejected because {} request(s) are already active.",
-                    request.method, runtime.max_active_requests
-                ),
-            )?;
-            continue;
-        }
-
-        let manager = Arc::clone(&manager);
-        let stdout = Arc::clone(&stdout);
-        let runtime = Arc::clone(&runtime);
-        workers.push(thread::spawn(move || {
-            let result = {
-                let mut manager = manager.lock().expect("MCP sidecar manager lock poisoned");
-                manager.handle(&request.method, &request.args)
-            };
-            runtime.release();
-            let mut stdout = stdout.lock().expect("MCP sidecar stdout lock poisoned");
-            match result {
-                Ok(result) => write_sidecar_result(&mut stdout, &request.id, result),
-                Err(error) => write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}")),
-            }
-        }));
-    }
-
-    for worker in workers {
-        let result = worker
-            .join()
-            .map_err(|_| anyhow::anyhow!("MCP sidecar worker thread panicked"))?;
-        result?;
-    }
-    manager
-        .lock()
-        .expect("MCP sidecar manager lock poisoned")
-        .close_all();
-    Ok(())
-}
-
-fn run_event_store_sidecar(db_path: &Path, read_only: bool) -> Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut sidecar = EventStoreSidecar::open(db_path, read_only)?;
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: SidecarRequest = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                write_sidecar_error(&mut stdout, &Value::Null, &error.to_string())?;
-                continue;
-            }
-        };
-
-        sidecar.record_request();
-        if request.method == "__close" {
-            sidecar.record_response();
-            write_sidecar_result(&mut stdout, &request.id, Value::Bool(true))?;
-            break;
-        }
-
-        match sidecar.handle(&request.method, &request.args) {
-            Ok(result) => {
-                sidecar.record_response();
-                write_sidecar_result(&mut stdout, &request.id, result)?;
-            }
-            Err(error) => {
-                sidecar.record_failure(&format!("{error:#}"));
-                write_sidecar_error(&mut stdout, &request.id, &format!("{error:#}"))?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn write_sidecar_result(stdout: &mut io::Stdout, id: &Value, result: Value) -> Result<()> {
-    writeln!(stdout, "{}", json!({ "id": id, "result": result }))?;
-    stdout.flush()?;
-    Ok(())
-}
-
-fn write_sidecar_error(stdout: &mut io::Stdout, id: &Value, message: &str) -> Result<()> {
-    writeln!(
-        stdout,
-        "{}",
-        json!({
-            "id": id,
-            "error": {
-                "name": "Error",
-                "message": message,
-                "stack": "",
-                "code": ""
-            }
-        })
-    )?;
-    stdout.flush()?;
-    Ok(())
-}
-
-fn sidecar_arg<T: DeserializeOwned>(args: &[Value], index: usize) -> Result<T> {
-    let value = args
-        .get(index)
-        .cloned()
-        .with_context(|| format!("Missing sidecar arg {index}"))?;
-    Ok(serde_json::from_value(value)?)
-}
-
-fn sidecar_arg_or_default<T: DeserializeOwned + Default>(
-    args: &[Value],
-    index: usize,
-) -> Result<T> {
-    match args.get(index) {
-        Some(value) if !value.is_null() => Ok(serde_json::from_value(value.clone())?),
-        _ => Ok(T::default()),
-    }
-}
-
-fn mcp_server_key(server: &McpServerConfig) -> String {
-    let mut env = BTreeMap::new();
-    for (key, value) in &server.env {
-        env.insert(key, value);
-    }
-    serde_json::to_string(&json!({
-        "id": server.id,
-        "name": server.name,
-        "command": server.command,
-        "args": server.args,
-        "cwd": server.cwd,
-        "env": env
-    }))
-    .unwrap_or_default()
-}
-
-fn now_iso() -> String {
-    let datetime: DateTime<Utc> = std::time::SystemTime::now().into();
-    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-fn is_event_store_write_method(method: &str) -> bool {
-    matches!(
-        method,
-        "insertTaskEvent"
-            | "insertTaskEvents"
-            | "insertToolEvent"
-            | "insertToolEvents"
-            | "pruneToolEvents"
-            | "insertLiveCallEvent"
-            | "insertLiveCallEvents"
-            | "pruneLiveCallEvents"
-    )
-}
-
-impl EventStoreSidecar {
-    fn open(db_path: &Path, read_only: bool) -> Result<Self> {
-        let db = if read_only {
-            Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        } else {
-            Connection::open(db_path)
-        }
-        .with_context(|| format!("Failed to open event store database: {}", db_path.display()))?;
-        db.busy_timeout(Duration::from_millis(5000))?;
-        if read_only {
-            db.execute_batch(
-                "PRAGMA query_only = ON; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
-            )?;
-        } else {
-            db.execute_batch(
-                "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
-            )?;
-        }
-        Ok(Self {
-            db,
-            read_only,
-            started_at: now_iso(),
-            requests: 0,
-            responses: 0,
-            failures: 0,
-            last_request_at: String::new(),
-            last_response_at: String::new(),
-            last_failure_at: String::new(),
-            last_error: String::new(),
-        })
-    }
-
-    fn record_request(&mut self) {
-        self.requests += 1;
-        self.last_request_at = now_iso();
-    }
-
-    fn record_response(&mut self) {
-        self.responses += 1;
-        self.last_response_at = now_iso();
-    }
-
-    fn record_failure(&mut self, message: &str) {
-        self.failures += 1;
-        self.last_failure_at = now_iso();
-        self.last_error = message.to_string();
-    }
-
-    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
-        if self.read_only && is_event_store_write_method(method) {
-            bail!("Event store sidecar is read-only; method {method} is not allowed.");
-        }
-        match method {
-            "__health" => Ok(json!({
-                "ok": true,
-                "implementation": "rust",
-                "protocolVersion": 1,
-                "supportedMethods": [
-                    "insertTaskEvent",
-                    "insertTaskEvents",
-                    "listTaskEvents",
-                    "getTaskEventCount",
-                    "insertToolEvent",
-                    "insertToolEvents",
-                    "listToolEvents",
-                    "getToolEventStats",
-                    "pruneToolEvents",
-                    "insertLiveCallEvent",
-                    "insertLiveCallEvents",
-                    "listLiveCallEvents",
-                    "pruneLiveCallEvents",
-                    "listUnifiedEvents",
-                    "replayWindow"
-                ],
-                "controlMethods": ["__health", "stats", "__close"],
-                "schemaReady": self.schema_ready()?,
-                "readOnly": self.read_only,
-                "startedAt": self.started_at
-            })),
-            "stats" => Ok(json!({
-                "implementation": "rust",
-                "protocolVersion": 1,
-                "startedAt": self.started_at,
-                "pending": 0,
-                "readOnly": self.read_only,
-                "requests": self.requests,
-                "responses": self.responses,
-                "failures": self.failures,
-                "lastRequestAt": self.last_request_at,
-                "lastResponseAt": self.last_response_at,
-                "lastFailureAt": self.last_failure_at,
-                "lastError": self.last_error
-            })),
-            "insertTaskEvent" => {
-                let task_id: String = sidecar_arg(args, 0)?;
-                let event: Value = sidecar_arg(args, 1)?;
-                Ok(json!(self.insert_task_event(&task_id, &event)?))
-            }
-            "insertTaskEvents" => {
-                let task_id: String = sidecar_arg(args, 0)?;
-                let events: Vec<Value> = sidecar_arg_or_default(args, 1)?;
-                Ok(json!(self.insert_task_events(&task_id, &events)?))
-            }
-            "listTaskEvents" => {
-                let task_id: String = sidecar_arg(args, 0)?;
-                let options: EventStoreListTaskOptions = sidecar_arg_or_default(args, 1)?;
-                Ok(Value::Array(self.list_task_events(&task_id, &options)?))
-            }
-            "getTaskEventCount" => {
-                let task_id: String = sidecar_arg(args, 0)?;
-                Ok(json!(self.get_task_event_count(&task_id)?))
-            }
-            "insertToolEvent" => {
-                let tool_run_id: String = sidecar_arg(args, 0)?;
-                let event: Value = sidecar_arg(args, 1)?;
-                Ok(json!(self.insert_tool_event(&tool_run_id, &event)?))
-            }
-            "insertToolEvents" => {
-                let tool_run_id: String = sidecar_arg(args, 0)?;
-                let events: Vec<Value> = sidecar_arg_or_default(args, 1)?;
-                Ok(json!(self.insert_tool_events(&tool_run_id, &events)?))
-            }
-            "listToolEvents" => {
-                let options: EventStoreListToolOptions = sidecar_arg_or_default(args, 0)?;
-                Ok(Value::Array(self.list_tool_events(&options)?))
-            }
-            "insertLiveCallEvent" => {
-                let session_id: String = sidecar_arg(args, 0)?;
-                let event: Value = sidecar_arg(args, 1)?;
-                Ok(json!(self.insert_live_call_event(&session_id, &event)?))
-            }
-            "insertLiveCallEvents" => {
-                let session_id: String = sidecar_arg(args, 0)?;
-                let events: Vec<Value> = sidecar_arg_or_default(args, 1)?;
-                Ok(json!(self.insert_live_call_events(&session_id, &events)?))
-            }
-            "listLiveCallEvents" => {
-                let options: EventStoreListLiveOptions = sidecar_arg_or_default(args, 0)?;
-                Ok(Value::Array(self.list_live_call_events(&options)?))
-            }
-            "listUnifiedEvents" => {
-                let options: EventStoreUnifiedOptions = sidecar_arg_or_default(args, 0)?;
-                Ok(Value::Array(self.list_unified_events(&options)?))
-            }
-            "replayWindow" => {
-                let options: EventStoreUnifiedOptions = sidecar_arg_or_default(args, 0)?;
-                Ok(self.replay_window(&options)?)
-            }
-            "getToolEventStats" => Ok(self.get_tool_event_stats()?),
-            "pruneToolEvents" => Ok(json!({
-                "cutoff": "",
-                "keepLatest": 0,
-                "maxPrunableCursor": 0,
-                "prunable": 0,
-                "deleted": 0,
-                "dryRun": true,
-                "stats": self.get_tool_event_stats()?
-            })),
-            "pruneLiveCallEvents" => Ok(Value::Null),
-            _ => bail!("Unsupported event store sidecar method: {method}"),
-        }
-    }
-
-    fn schema_ready(&self) -> Result<bool> {
-        for table in [
-            "task_events",
-            "tool_runs",
-            "tool_events",
-            "live_calls",
-            "live_call_events",
-        ] {
-            let exists: Option<i64> = self
-                .db
-                .query_row(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                    params![table],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if exists.is_none() {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn insert_task_event(&self, task_id: &str, event: &Value) -> Result<Option<i64>> {
-        let current = now_iso();
-        let event_at = event_string_or(event, "at", &current);
-        let event_id = event_string_or(event, "id", &format!("{task_id}:{event_at}:rust"));
-        let event_kind = event_string_or(event, "kind", &classify_task_event_kind(event));
-        let turn_id = event_string(event, "turnId");
-        let block_id = event_string(event, "blockId");
-        let mut event_json = event_object(event);
-        set_json_string(&mut event_json, "id", event_id.clone());
-        set_json_string(&mut event_json, "at", event_at.clone());
-        set_json_string(&mut event_json, "kind", event_kind.clone());
-        set_json_string(&mut event_json, "turnId", turn_id.clone());
-        set_json_string(&mut event_json, "blockId", block_id.clone());
-
-        let inserted = self.db.execute(
-            "INSERT OR IGNORE INTO task_events (
-                    task_id, event_id, event_type, event_at, text, payload_json, event_json,
-                    created_at, event_kind, turn_id, block_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                task_id,
-                event_id,
-                event_string(event, "type"),
-                event_at,
-                event_string(event, "text"),
-                payload_json(event)?,
-                serde_json::to_string(&event_json)?,
-                current,
-                event_kind,
-                turn_id,
-                block_id
-            ],
-        )?;
-        if inserted > 0 {
-            return Ok(Some(self.db.last_insert_rowid()));
-        }
-        self.cursor_for("task_events", "task_id", task_id, &event_id)
-    }
-
-    fn insert_task_events(&mut self, task_id: &str, events: &[Value]) -> Result<Vec<Option<i64>>> {
-        let mut cursors = Vec::with_capacity(events.len());
-        self.db.execute_batch("BEGIN IMMEDIATE")?;
-        for event in events {
-            match self.insert_task_event(task_id, event) {
-                Ok(cursor) => cursors.push(cursor),
-                Err(error) => {
-                    let _ = self.db.execute_batch("ROLLBACK");
-                    return Err(error);
-                }
-            }
-        }
-        self.db.execute_batch("COMMIT")?;
-        Ok(cursors)
-    }
-
-    fn list_task_events(
-        &self,
-        task_id: &str,
-        options: &EventStoreListTaskOptions,
-    ) -> Result<Vec<Value>> {
-        let mut statement = self.db.prepare(
-            "SELECT cursor, event_json FROM task_events WHERE task_id = ? AND cursor > ? ORDER BY cursor ASC LIMIT ?",
-        )?;
-        let rows = statement.query_map(
-            params![
-                task_id,
-                options.after.unwrap_or(0),
-                event_limit(options.limit, 500, 5000)
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        rows.map(|row| event_json_with_cursor(row?)).collect()
-    }
-
-    fn get_task_event_count(&self, task_id: &str) -> Result<i64> {
-        Ok(self.db.query_row(
-            "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
-            params![task_id],
-            |row| row.get::<_, i64>(0),
-        )?)
-    }
-
-    fn tool_run_owner(&self, tool_run_id: &str) -> Result<Option<(String, String)>> {
-        self.db
-            .query_row(
-                "SELECT task_id, workspace_id FROM tool_runs WHERE id = ?",
-                params![tool_run_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    ))
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    fn insert_tool_event(&self, tool_run_id: &str, event: &Value) -> Result<Option<i64>> {
-        let Some((task_id, workspace_id)) = self.tool_run_owner(tool_run_id)? else {
-            return Ok(None);
-        };
-        self.insert_tool_event_with_owner(tool_run_id, event, &task_id, &workspace_id)
-    }
-
-    fn insert_tool_event_with_owner(
-        &self,
-        tool_run_id: &str,
-        event: &Value,
-        default_task_id: &str,
-        default_workspace_id: &str,
-    ) -> Result<Option<i64>> {
-        let current = now_iso();
-        let event_at = event_string_or(event, "at", &current);
-        let event_id = event_string_or(event, "id", &format!("{tool_run_id}:{event_at}:rust"));
-        let task_id = event_string_or(event, "taskId", default_task_id);
-        let workspace_id = event_string_or(event, "workspaceId", default_workspace_id);
-        let mut event_json = event_object(event);
-        set_json_string(&mut event_json, "id", event_id.clone());
-        set_json_string(&mut event_json, "at", event_at.clone());
-        set_json_string(&mut event_json, "toolRunId", tool_run_id.to_string());
-        set_json_string(&mut event_json, "taskId", task_id.clone());
-        set_json_string(&mut event_json, "workspaceId", workspace_id.clone());
-
-        let inserted = self.db.execute(
-            "INSERT OR IGNORE INTO tool_events (
-                    tool_run_id, task_id, workspace_id, event_id, event_type, event_at,
-                    text, payload_json, event_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                tool_run_id,
-                task_id,
-                workspace_id,
-                event_id,
-                event_string_or(event, "type", "tool.event"),
-                event_at,
-                event_string(event, "text"),
-                payload_json(event)?,
-                serde_json::to_string(&event_json)?,
-                current
-            ],
-        )?;
-        if inserted > 0 {
-            return Ok(Some(self.db.last_insert_rowid()));
-        }
-        self.cursor_for("tool_events", "tool_run_id", tool_run_id, &event_id)
-    }
-
-    fn insert_tool_events(
-        &mut self,
-        tool_run_id: &str,
-        events: &[Value],
-    ) -> Result<Vec<Option<i64>>> {
-        let Some((task_id, workspace_id)) = self.tool_run_owner(tool_run_id)? else {
-            return Ok(vec![None; events.len()]);
-        };
-        let mut cursors = Vec::with_capacity(events.len());
-        self.db.execute_batch("BEGIN IMMEDIATE")?;
-        for event in events {
-            match self.insert_tool_event_with_owner(tool_run_id, event, &task_id, &workspace_id) {
-                Ok(cursor) => cursors.push(cursor),
-                Err(error) => {
-                    let _ = self.db.execute_batch("ROLLBACK");
-                    return Err(error);
-                }
-            }
-        }
-        self.db.execute_batch("COMMIT")?;
-        Ok(cursors)
-    }
-
-    fn list_tool_events(&self, options: &EventStoreListToolOptions) -> Result<Vec<Value>> {
-        let tool_run_id = clean_option(&options.tool_run_id);
-        let workspace_id = clean_option(&options.workspace_id);
-        let task_id = clean_option(&options.task_id);
-        let mut statement = self.db.prepare(
-            "SELECT cursor, event_json FROM tool_events
-             WHERE cursor > ?
-               AND (? = '' OR tool_run_id = ?)
-               AND (? = '' OR workspace_id = ?)
-               AND (? = '' OR task_id = ?)
-             ORDER BY cursor ASC LIMIT ?",
-        )?;
-        let rows = statement.query_map(
-            params![
-                options.after.unwrap_or(0),
-                tool_run_id,
-                tool_run_id,
-                workspace_id,
-                workspace_id,
-                task_id,
-                task_id,
-                event_limit(options.limit, 500, 5000)
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        rows.map(|row| event_json_with_cursor(row?)).collect()
-    }
-
-    fn live_call_exists(&self, session_id: &str) -> Result<bool> {
-        let exists: Option<String> = self
-            .db
-            .query_row(
-                "SELECT id FROM live_calls WHERE id = ?",
-                params![session_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(exists.is_some())
-    }
-
-    fn insert_live_call_event(&self, session_id: &str, event: &Value) -> Result<Option<i64>> {
-        if !self.live_call_exists(session_id)? {
-            return Ok(None);
-        }
-        self.insert_live_call_event_existing(session_id, event)
-    }
-
-    fn insert_live_call_event_existing(
-        &self,
-        session_id: &str,
-        event: &Value,
-    ) -> Result<Option<i64>> {
-        let current = now_iso();
-        let event_at = event_string_or(event, "at", &current);
-        let event_id = event_string_or(event, "id", &format!("{session_id}:{event_at}:rust"));
-        let mut event_json = event_object(event);
-        set_json_string(&mut event_json, "id", event_id.clone());
-        set_json_string(&mut event_json, "at", event_at.clone());
-        set_json_string(&mut event_json, "sessionId", session_id.to_string());
-
-        let inserted = self.db.execute(
-            "INSERT OR IGNORE INTO live_call_events (
-                    session_id, event_id, event_type, event_at, text, payload_json, event_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                session_id,
-                event_id,
-                event_string_or(event, "type", "live_call.event"),
-                event_at,
-                event_string(event, "text"),
-                payload_json(event)?,
-                serde_json::to_string(&event_json)?,
-                current
-            ],
-        )?;
-        if inserted > 0 {
-            return Ok(Some(self.db.last_insert_rowid()));
-        }
-        self.cursor_for("live_call_events", "session_id", session_id, &event_id)
-    }
-
-    fn insert_live_call_events(
-        &mut self,
-        session_id: &str,
-        events: &[Value],
-    ) -> Result<Vec<Option<i64>>> {
-        if !self.live_call_exists(session_id)? {
-            return Ok(vec![None; events.len()]);
-        }
-        let mut cursors = Vec::with_capacity(events.len());
-        self.db.execute_batch("BEGIN IMMEDIATE")?;
-        for event in events {
-            match self.insert_live_call_event_existing(session_id, event) {
-                Ok(cursor) => cursors.push(cursor),
-                Err(error) => {
-                    let _ = self.db.execute_batch("ROLLBACK");
-                    return Err(error);
-                }
-            }
-        }
-        self.db.execute_batch("COMMIT")?;
-        Ok(cursors)
-    }
-
-    fn list_live_call_events(&self, options: &EventStoreListLiveOptions) -> Result<Vec<Value>> {
-        let session_id = clean_option(&options.session_id);
-        if session_id.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut statement = self.db.prepare(
-            "SELECT cursor, event_json FROM live_call_events
-             WHERE session_id = ? AND cursor > ?
-             ORDER BY cursor ASC LIMIT ?",
-        )?;
-        let rows = statement.query_map(
-            params![
-                session_id,
-                options.after.unwrap_or(0),
-                event_limit(options.limit, 500, 2000)
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        rows.map(|row| event_json_with_cursor(row?)).collect()
-    }
-
-    fn list_unified_events(&self, options: &EventStoreUnifiedOptions) -> Result<Vec<Value>> {
-        let limit = event_limit(options.limit, 200, 2000);
-        let after = options.after.unwrap_or(0);
-        let task_id = clean_option(&options.task_id);
-        let session_id = clean_option(&options.live_call_session_id);
-        let tool_run_id = clean_option(&options.tool_run_id);
-        let mut items = Vec::new();
-
-        if options.live_call_session_id.is_none() && options.tool_run_id.is_none() {
-            let mut statement = self.db.prepare(
-                "SELECT cursor, task_id, event_id, event_type, event_kind, turn_id, block_id, event_at, text
-                 FROM task_events WHERE (? = '' OR task_id = ?) AND cursor > ? ORDER BY cursor ASC LIMIT ?",
-            )?;
-            let rows =
-                statement.query_map(params![task_id, task_id, after, limit], unified_task_row)?;
-            for row in rows {
-                items.push(row?);
-            }
-        }
-
-        if options.live_call_session_id.is_none() && items.len() < limit as usize {
-            let remaining = limit - items.len() as i64;
-            let mut statement = self.db.prepare(
-                "SELECT cursor, task_id, tool_run_id, event_id, event_type, event_at, text
-                 FROM tool_events
-                 WHERE (? = '' OR task_id = ?) AND (? = '' OR tool_run_id = ?) AND cursor > ?
-                 ORDER BY cursor ASC LIMIT ?",
-            )?;
-            let rows = statement.query_map(
-                params![task_id, task_id, tool_run_id, tool_run_id, after, remaining],
-                unified_tool_row,
-            )?;
-            for row in rows {
-                items.push(row?);
-            }
-        }
-
-        if options.task_id.is_none()
-            && options.tool_run_id.is_none()
-            && items.len() < limit as usize
-        {
-            let remaining = limit - items.len() as i64;
-            let mut statement = self.db.prepare(
-                "SELECT cursor, session_id, event_id, event_type, event_at, text
-                 FROM live_call_events WHERE (? = '' OR session_id = ?) AND cursor > ? ORDER BY cursor ASC LIMIT ?",
-            )?;
-            let rows = statement.query_map(
-                params![session_id, session_id, after, remaining],
-                unified_live_row,
-            )?;
-            for row in rows {
-                items.push(row?);
-            }
-        }
-
-        items.sort_by_key(|item| item.get("cursor").and_then(Value::as_i64).unwrap_or(0));
-        items.truncate(limit as usize);
-        Ok(items)
-    }
-
-    fn replay_window(&self, options: &EventStoreUnifiedOptions) -> Result<Value> {
-        let limit = event_limit(options.limit, 200, 2000);
-        let options = EventStoreUnifiedOptions {
-            task_id: options.task_id.clone(),
-            live_call_session_id: options.live_call_session_id.clone(),
-            tool_run_id: options.tool_run_id.clone(),
-            after: options.after.map(|value| value / 10),
-            limit: Some(limit + 1),
-        };
-        let mut items = self.list_unified_events(&options)?;
-        let has_more = items.len() > limit as usize;
-        items.truncate(limit as usize);
-        for item in &mut items {
-            if let Some(object) = item.as_object_mut() {
-                let raw_cursor = object.get("cursor").and_then(Value::as_i64).unwrap_or(0);
-                let source_rank = match object.get("kind").and_then(Value::as_str).unwrap_or("") {
-                    "tool" => 2,
-                    "live_call" => 3,
-                    _ => 1,
-                };
-                object.insert("rawCursor".to_string(), json!(raw_cursor));
-                object.insert("cursor".to_string(), json!((raw_cursor * 10) + source_rank));
-            }
-        }
-        let next_cursor = items
-            .last()
-            .and_then(|item| item.get("cursor").and_then(Value::as_i64))
-            .unwrap_or(options.after.unwrap_or(0));
-        Ok(
-            json!({ "items": items, "nextCursor": next_cursor, "hasMore": has_more, "limit": limit }),
-        )
-    }
-
-    fn get_tool_event_stats(&self) -> Result<Value> {
-        let row = self.db.query_row(
-            "SELECT COUNT(*), MIN(cursor), MAX(cursor), MIN(event_at), MAX(event_at) FROM tool_events",
-            [],
-            |row| Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            )),
-        )?;
-        Ok(json!({
-            "count": row.0,
-            "minCursor": row.1.unwrap_or(0),
-            "maxCursor": row.2.unwrap_or(0),
-            "oldestAt": row.3.unwrap_or_default(),
-            "newestAt": row.4.unwrap_or_default()
-        }))
-    }
-
-    fn cursor_for(
-        &self,
-        table: &str,
-        owner_col: &str,
-        owner_id: &str,
-        event_id: &str,
-    ) -> Result<Option<i64>> {
-        let sql = format!("SELECT cursor FROM {table} WHERE {owner_col} = ? AND event_id = ?");
-        Ok(self
-            .db
-            .query_row(&sql, params![owner_id, event_id], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()?)
-    }
-}
-
-fn event_limit(value: Option<i64>, default_limit: i64, max_limit: i64) -> i64 {
-    match value {
-        Some(value) if value > 0 => value.min(max_limit.max(1)),
-        _ => default_limit.max(1).min(max_limit.max(1)),
-    }
-}
-
-fn clean_option(value: &Option<String>) -> String {
-    value
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(160)
-        .collect()
-}
-
-fn event_string(event: &Value, key: &str) -> String {
-    event
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
-
-fn event_string_or(event: &Value, key: &str, fallback: &str) -> String {
-    match event.get(key).and_then(Value::as_str) {
-        Some(value) if !value.is_empty() => value.to_string(),
-        _ => fallback.to_string(),
-    }
-}
-
-fn event_object(event: &Value) -> Value {
-    if event.is_object() {
-        event.clone()
-    } else {
-        json!({})
-    }
-}
-
-fn set_json_string(value: &mut Value, key: &str, text: String) {
-    if let Some(object) = value.as_object_mut() {
-        object.insert(key.to_string(), Value::String(text));
-    }
-}
-
-fn payload_json(event: &Value) -> Result<String> {
-    Ok(serde_json::to_string(
-        event.get("payload").unwrap_or(&Value::Null),
-    )?)
-}
-
-fn classify_task_event_kind(event: &Value) -> String {
-    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
-    match event_type {
-        "user_message" | "user" | "attachment" => "user",
-        "assistant_message" | "assistant" => "assistant",
-        "system" => "system",
-        "error" => "error",
-        "summarization" => "summary",
-        "stderr" | "stdout" => "output",
-        _ if event_type.starts_with("live_call.") => "live_call",
-        _ if event_type.starts_with("approval.") => "approval",
-        _ if event_type.starts_with("tool.") => "tool",
-        _ => "system",
-    }
-    .to_string()
-}
-
-fn event_json_with_cursor((cursor, event_json): (i64, String)) -> Result<Value> {
-    let mut value = serde_json::from_str::<Value>(&event_json).unwrap_or_else(|_| json!({}));
-    if !value.is_object() {
-        value = json!({});
-    }
-    if let Some(object) = value.as_object_mut() {
-        object.insert("cursor".to_string(), json!(cursor));
-    }
-    Ok(value)
-}
-
-fn unified_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({
-        "cursor": row.get::<_, i64>(0)?,
-        "taskId": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-        "eventId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        "type": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-        "kind": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-        "turnId": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-        "blockId": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-        "at": row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-        "text": row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-        "sessionId": "",
-        "toolRunId": ""
-    }))
-}
-
-fn unified_tool_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({
-        "cursor": row.get::<_, i64>(0)?,
-        "taskId": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-        "toolRunId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        "eventId": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-        "type": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-        "kind": "tool",
-        "at": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-        "text": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-        "sessionId": "",
-        "turnId": "",
-        "blockId": ""
-    }))
-}
-
-fn unified_live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({
-        "cursor": row.get::<_, i64>(0)?,
-        "sessionId": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-        "eventId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        "type": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-        "kind": "live_call",
-        "at": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-        "text": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-        "taskId": "",
-        "toolRunId": "",
-        "turnId": "",
-        "blockId": ""
-    }))
-}
-
-impl McpSidecarManager {
-    fn busy_stats(runtime: &McpSidecarRuntimeStats) -> Value {
-        runtime.apply(json!({
-            "sessions": 0,
-            "activeSessions": 0,
-            "totalPending": 0,
-            "totalRequests": 0,
-            "totalResponses": 0,
-            "totalFailures": 0,
-            "totalTimeouts": 0,
-            "totalBackpressureRejects": 0,
-            "maxPendingObserved": 0,
-            "items": []
-        }))
-    }
-
-    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
-        match method {
-            "probeStdioServer" => {
-                let server: McpServerConfig = sidecar_arg(args, 0)?;
-                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
-                let session = self.session_for(server, &options)?;
-                let initialize = session.ensure_initialized()?;
-                let tools = session.list_tools()?;
-                Ok(json!({
-                    "ok": true,
-                    "transport": "stdio",
-                    "protocolVersion": initialize.get("protocolVersion").and_then(Value::as_str).unwrap_or(""),
-                    "serverInfo": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
-                    "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
-                    "tools": tools,
-                    "stderr": ""
-                }))
-            }
-            "listTools" => {
-                let server: McpServerConfig = sidecar_arg(args, 0)?;
-                let options: McpSidecarOptions = sidecar_arg_or_default(args, 1)?;
-                let session = self.session_for(server, &options)?;
-                Ok(Value::Array(session.list_tools()?))
-            }
-            "callTool" => {
-                let server: McpServerConfig = sidecar_arg(args, 0)?;
-                let tool_name: String = sidecar_arg(args, 1)?;
-                let tool_arguments: Value = args.get(2).cloned().unwrap_or_else(|| json!({}));
-                let options: McpSidecarOptions = sidecar_arg_or_default(args, 3)?;
-                let session = self.session_for(server, &options)?;
-                session.call_tool(&tool_name, tool_arguments)
-            }
-            "closeIdleSessions" => {
-                let options: McpSidecarOptions = sidecar_arg_or_default(args, 0)?;
-                let closed = self.close_idle(options.max_idle_ms.unwrap_or(10 * 60 * 1000));
-                Ok(json!({ "closed": closed, "remaining": self.sessions.len() }))
-            }
-            "closeAll" => {
-                self.close_all();
-                Ok(json!({ "ok": true }))
-            }
-            "stats" => Ok(self.stats()),
-            _ => bail!("Unsupported MCP session sidecar method: {method}"),
-        }
-    }
-
-    fn session_for(
-        &mut self,
-        server: McpServerConfig,
-        options: &McpSidecarOptions,
-    ) -> Result<&mut McpStdioSession> {
-        let key = mcp_server_key(&server);
-        let replace = self
-            .sessions
-            .get_mut(&key)
-            .map(|session| session.is_closed())
-            .unwrap_or(true);
-        if replace {
-            self.sessions
-                .insert(key.clone(), McpStdioSession::spawn(server, options)?);
-        }
-        let session = self
-            .sessions
-            .get_mut(&key)
-            .context("MCP session was not available after spawn")?;
-        session.apply_options(options);
-        Ok(session)
-    }
-
-    fn close_idle(&mut self, max_idle_ms: u64) -> usize {
-        let max_idle = Duration::from_millis(max_idle_ms);
-        let idle_keys: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| session.last_used.elapsed() >= max_idle)
-            .map(|(key, _)| key.clone())
-            .collect();
-        let closed = idle_keys.len();
-        for key in idle_keys {
-            if let Some(mut session) = self.sessions.remove(&key) {
-                session.close();
-            }
-        }
-        closed
-    }
-
-    fn close_all(&mut self) {
-        for (_, mut session) in self.sessions.drain() {
-            session.close();
-        }
-    }
-
-    fn stats(&self) -> Value {
-        let items: Vec<Value> = self.sessions.values().map(McpStdioSession::stats).collect();
-        let total_requests: u64 = items
-            .iter()
-            .map(|item| item.get("requests").and_then(Value::as_u64).unwrap_or(0))
-            .sum();
-        let total_responses: u64 = items
-            .iter()
-            .map(|item| item.get("responses").and_then(Value::as_u64).unwrap_or(0))
-            .sum();
-        let total_failures: u64 = items
-            .iter()
-            .map(|item| item.get("failures").and_then(Value::as_u64).unwrap_or(0))
-            .sum();
-        let total_timeouts: u64 = items
-            .iter()
-            .map(|item| item.get("timeouts").and_then(Value::as_u64).unwrap_or(0))
-            .sum();
-        let total_backpressure_rejects: u64 = items
-            .iter()
-            .map(|item| {
-                item.get("backpressureRejects")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-            })
-            .sum();
-        let max_pending_observed = items
-            .iter()
-            .filter_map(|item| item.get("maxPendingObserved").and_then(Value::as_u64))
-            .max()
-            .unwrap_or(0);
-        json!({
-            "sessions": self.sessions.len(),
-            "activeSessions": items.iter().filter(|item| item.get("closed").and_then(Value::as_bool) == Some(false)).count(),
-            "totalPending": 0,
-            "totalRequests": total_requests,
-            "totalResponses": total_responses,
-            "totalFailures": total_failures,
-            "totalTimeouts": total_timeouts,
-            "totalBackpressureRejects": total_backpressure_rejects,
-            "maxPendingObserved": max_pending_observed,
-            "items": items
-        })
-    }
-
-    fn stats_with_runtime(&self, runtime: &McpSidecarRuntimeStats) -> Value {
-        runtime.apply(self.stats())
-    }
-}
-
-impl McpSidecarRuntimeStats {
-    fn from_env() -> Self {
-        let max_active_requests = env::var("VIBELINK_MCP_SESSION_SIDECAR_MAX_ACTIVE_REQUESTS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(64);
-        Self {
-            active_requests: AtomicUsize::new(0),
-            max_active_observed: AtomicUsize::new(0),
-            backpressure_rejects: AtomicUsize::new(0),
-            max_active_requests,
-        }
-    }
-
-    fn try_acquire(&self) -> bool {
-        loop {
-            let current = self.active_requests.load(Ordering::SeqCst);
-            if current >= self.max_active_requests {
-                self.backpressure_rejects.fetch_add(1, Ordering::SeqCst);
-                return false;
-            }
-            if self
-                .active_requests
-                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                self.record_max_active(current + 1);
-                return true;
-            }
-        }
-    }
-
-    fn release(&self) {
-        self.active_requests.fetch_sub(1, Ordering::SeqCst);
-    }
-
-    fn record_max_active(&self, observed: usize) {
-        let mut current = self.max_active_observed.load(Ordering::SeqCst);
-        while observed > current {
-            match self.max_active_observed.compare_exchange(
-                current,
-                observed,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(next) => current = next,
-            }
-        }
-    }
-
-    fn apply(&self, mut value: Value) -> Value {
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "activeRequests".to_string(),
-                json!(self.active_requests.load(Ordering::SeqCst)),
-            );
-            object.insert(
-                "maxActiveObserved".to_string(),
-                json!(self.max_active_observed.load(Ordering::SeqCst)),
-            );
-            object.insert(
-                "sidecarBackpressureRejects".to_string(),
-                json!(self.backpressure_rejects.load(Ordering::SeqCst)),
-            );
-            object.insert(
-                "maxActiveRequests".to_string(),
-                json!(self.max_active_requests),
-            );
-        }
-        value
-    }
-}
-
-impl McpStdioSession {
-    fn spawn(server: McpServerConfig, options: &McpSidecarOptions) -> Result<Self> {
-        if server.command.trim().is_empty() {
-            bail!("MCP stdio server command is empty.");
-        }
-
-        let mut command = Command::new(&server.command);
-        command.args(&server.args);
-        if !server.cwd.trim().is_empty() {
-            command.current_dir(&server.cwd);
-        }
-        for (key, value) in &server.env {
-            command.env(key, value);
-        }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        command.creation_flags(CREATE_NO_WINDOW);
-
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("Failed to spawn MCP stdio server: {}", server.command))?;
-        let stdin = child
-            .stdin
-            .take()
-            .context("MCP stdio server stdin was not piped")?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("MCP stdio server stdout was not piped")?;
-        let (stdout_tx, stdout_rx) = mpsc::channel();
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
-                    continue;
-                };
-                if stdout_tx.send(message).is_err() {
-                    break;
-                }
-            }
-        });
-        let now = now_iso();
-        let timeout_ms = options.timeout_ms.or(options.timeout).unwrap_or(10_000);
-        let max_pending_requests = options.max_pending_requests.unwrap_or(1).max(1);
-
-        Ok(Self {
-            server,
-            child,
-            stdin,
-            stdout_rx,
-            closed: false,
-            next_id: 1,
-            initialized: None,
-            tools: None,
-            started_at: now.clone(),
-            last_used_at: now,
-            last_request_at: String::new(),
-            last_response_at: String::new(),
-            last_failure_at: String::new(),
-            last_backpressure_at: String::new(),
-            requests: 0,
-            responses: 0,
-            failures: 0,
-            timeouts: 0,
-            backpressure_rejects: 0,
-            timeout_ms,
-            max_pending_requests,
-            max_pending_observed: 0,
-            last_used: Instant::now(),
-        })
-    }
-
-    fn ensure_initialized(&mut self) -> Result<Value> {
-        if let Some(value) = &self.initialized {
-            return Ok(value.clone());
-        }
-        let result = self.request(
-            "initialize",
-            Some(json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "vibelink-rust",
-                    "version": "0.1.0"
-                }
-            })),
-        )?;
-        self.notify("notifications/initialized", None)?;
-        self.initialized = Some(result.clone());
-        Ok(result)
-    }
-
-    fn apply_options(&mut self, options: &McpSidecarOptions) {
-        if let Some(timeout_ms) = options.timeout_ms.or(options.timeout) {
-            self.timeout_ms = timeout_ms.max(1);
-        }
-        if let Some(max_pending_requests) = options.max_pending_requests {
-            self.max_pending_requests = max_pending_requests.max(1);
-        }
-    }
-
-    fn list_tools(&mut self) -> Result<Vec<Value>> {
-        self.ensure_initialized()?;
-        if let Some(tools) = &self.tools {
-            let tools = tools.clone();
-            self.touch();
-            return Ok(tools);
-        }
-        let result = self.request("tools/list", None)?;
-        let tools = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        self.tools = Some(tools.clone());
-        Ok(tools)
-    }
-
-    fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
-        self.ensure_initialized()?;
-        self.request(
-            "tools/call",
-            Some(json!({
-                "name": name,
-                "arguments": arguments
-            })),
-        )
-    }
-
-    fn notify(&mut self, method: &str, params: Option<Value>) -> Result<()> {
-        if self.closed {
-            bail!("MCP stdio session is closed.");
-        }
-        let message = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params
-        });
-        if let Err(error) = writeln!(self.stdin, "{}", message).and_then(|_| self.stdin.flush()) {
-            self.mark_failed();
-            return Err(error).context("Failed to write MCP stdio notification");
-        }
-        self.touch();
-        Ok(())
-    }
-
-    fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value> {
-        if self.closed {
-            bail!("MCP stdio session is closed.");
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        let message = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params
-        });
-        if let Err(error) = writeln!(self.stdin, "{}", message).and_then(|_| self.stdin.flush()) {
-            self.mark_failed();
-            return Err(error).context(format!("Failed to write MCP stdio request: {method}"));
-        }
-        self.requests += 1;
-        self.max_pending_observed = self.max_pending_observed.max(1);
-        self.last_request_at = now_iso();
-        self.touch();
-
-        loop {
-            let message = match self
-                .stdout_rx
-                .recv_timeout(Duration::from_millis(self.timeout_ms.max(1)))
-            {
-                Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => {
-                    self.timeouts += 1;
-                    self.mark_failed();
-                    bail!(
-                        "MCP stdio request timed out: {method} after {}ms",
-                        self.timeout_ms
-                    );
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.mark_failed();
-                    bail!("MCP stdio session exited before replying to {method}");
-                }
-            };
-            if message.get("id").and_then(Value::as_u64) != Some(id) {
-                continue;
-            }
-            if let Some(error) = message.get("error") {
-                self.mark_failed();
-                bail!(
-                    "{}",
-                    error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("MCP stdio request failed")
-                );
-            }
-            self.responses += 1;
-            self.last_response_at = now_iso();
-            self.touch();
-            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-        }
-    }
-
-    fn touch(&mut self) {
-        self.last_used = Instant::now();
-        self.last_used_at = now_iso();
-    }
-
-    fn mark_failed(&mut self) {
-        self.failures += 1;
-        self.last_failure_at = now_iso();
-        self.closed = true;
-        let _ = self.child.kill();
-    }
-
-    fn is_closed(&mut self) -> bool {
-        if self.closed {
-            return true;
-        }
-        match self.child.try_wait() {
-            Ok(Some(_)) => {
-                self.closed = true;
-                true
-            }
-            Ok(None) => false,
-            Err(_) => {
-                self.closed = true;
-                true
-            }
-        }
-    }
-
-    fn close(&mut self) {
-        self.closed = true;
-        let _ = self.stdin.flush();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-
-    fn stats(&self) -> Value {
-        json!({
-            "id": if self.server.id.is_empty() { &self.server.name } else { &self.server.id },
-            "name": if self.server.name.is_empty() { &self.server.id } else { &self.server.name },
-            "closed": self.closed,
-            "pending": 0,
-            "maxPendingRequests": self.max_pending_requests,
-            "maxPendingObserved": self.max_pending_observed,
-            "timeoutMs": self.timeout_ms,
-            "requests": self.requests,
-            "responses": self.responses,
-            "failures": self.failures,
-            "timeouts": self.timeouts,
-            "backpressureRejects": self.backpressure_rejects,
-            "toolsCached": self.tools.is_some(),
-            "toolCount": self.tools.as_ref().map(Vec::len).unwrap_or(0),
-            "startedAt": self.started_at,
-            "lastUsedAt": self.last_used_at,
-            "lastRequestAt": self.last_request_at,
-            "lastResponseAt": self.last_response_at,
-            "lastFailureAt": self.last_failure_at,
-            "lastBackpressureAt": self.last_backpressure_at,
-            "stderr": ""
-        })
-    }
-}
-
-fn list_workspace_tree(
-    root: &Path,
-    dir: &Path,
-    depth: usize,
-    max_entries: usize,
-) -> Result<WorkspaceTree> {
-    let root = root
-        .canonicalize()
-        .with_context(|| format!("Cannot resolve workspace root {}", root.display()))?;
-    let target = safe_workspace_child(&root, dir)?;
-    if !target.is_dir() {
-        bail!(
-            "Workspace tree path must be a directory: {}",
-            target.display()
-        );
-    }
-
-    let mut items = Vec::new();
-    let mut signature_parts = Vec::new();
-    let mut truncated = false;
-    let mut queue = VecDeque::from([(
-        target.clone(),
-        0usize,
-        gitignore_rules_for_ancestors(&root, &target),
-    )]);
-    let max_entries = max_entries.max(1);
-    let depth = depth.max(1);
-
-    while let Some((current, current_depth, inherited_rules)) = queue.pop_front() {
-        if items.len() >= max_entries {
-            truncated = true;
-            break;
-        }
-
-        let mut ignore_rules = inherited_rules;
-        signature_parts.push(metadata_signature_part("dir", &root, &current));
-        signature_parts.push(metadata_signature_part(
-            "gitignore",
-            &root,
-            &current.join(".gitignore"),
-        ));
-        ignore_rules.extend(gitignore_rules_for_dir(&root, &current));
-
-        let mut children = Vec::new();
-        for entry in std::fs::read_dir(&current)
-            .with_context(|| format!("Cannot read {}", current.display()))?
-        {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            let file_type = entry.file_type()?;
-            if name.starts_with('.') && name != ".env" {
-                continue;
-            }
-            if file_type.is_dir() && IGNORED_WORKSPACE_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            let full_path = entry.path();
-            let rel = slash_path(full_path.strip_prefix(&root).unwrap_or(&full_path));
-            if ignore_rules.is_ignored(&name, &rel, file_type.is_dir()) {
-                continue;
-            }
-            children.push((name, full_path, file_type.is_dir()));
-        }
-
-        children.sort_by(|a, b| {
-            b.2.cmp(&a.2)
-                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
-        });
-
-        for (name, full_path, is_dir) in children {
-            if items.len() >= max_entries {
-                truncated = true;
-                break;
-            }
-            let metadata = std::fs::metadata(&full_path)?;
-            let rel = slash_path(full_path.strip_prefix(&root).unwrap_or(&full_path));
-            signature_parts.push(metadata_signature_part("entry", &root, &full_path));
-            items.push(WorkspaceTreeItem {
-                name,
-                path: rel,
-                kind: if is_dir { "directory" } else { "file" }.to_string(),
-                size: workspace_metadata_size(&metadata),
-                updated_at: system_time_iso(metadata.modified().ok()),
-            });
-            if is_dir && current_depth + 1 < depth {
-                queue.push_back((full_path, current_depth + 1, ignore_rules.clone()));
-            }
-        }
-    }
-
-    Ok(WorkspaceTree {
-        ok: true,
-        dir: slash_path(target.strip_prefix(&root).unwrap_or(Path::new(""))),
-        truncated,
-        signature: scan_signature(&signature_parts),
-        items,
-    })
-}
-
-fn metadata_signature_part(kind: &str, root: &Path, path: &Path) -> String {
-    let rel = slash_path(path.strip_prefix(root).unwrap_or(path));
-    match std::fs::metadata(path) {
-        Ok(metadata) => {
-            let modified_ms = metadata
-                .modified()
-                .ok()
-                .map(system_time_rounded_millis)
-                .unwrap_or(0);
-            format!(
-                "{kind}:{rel}:{}:{}:{modified_ms}",
-                if metadata.is_dir() { "d" } else { "f" },
-                workspace_metadata_size(&metadata)
-            )
-        }
-        Err(_) => format!("{kind}:{rel}:missing"),
-    }
-}
-
-fn scan_signature(parts: &[String]) -> String {
-    let mut hasher = Fnv64::default();
-    for part in parts {
-        part.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
-
-#[derive(Default)]
-struct Fnv64(u64);
-
-impl Hasher for Fnv64 {
-    fn write(&mut self, bytes: &[u8]) {
-        if self.0 == 0 {
-            self.0 = 0xcbf29ce484222325;
-        }
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct WorkspaceIgnoreRules {
-    rules: Vec<WorkspaceIgnoreRule>,
-}
-
-#[derive(Clone, Debug)]
-struct WorkspaceIgnoreRule {
-    pattern: String,
-    match_path: bool,
-    directory_only: bool,
-    negated: bool,
-}
-
-impl WorkspaceIgnoreRules {
-    fn extend(&mut self, other: WorkspaceIgnoreRules) {
-        self.rules.extend(other.rules);
-    }
-
-    fn is_ignored(&self, name: &str, rel_path: &str, is_dir: bool) -> bool {
-        let mut ignored = false;
-        for rule in &self.rules {
-            if rule.directory_only && !is_dir {
-                continue;
-            }
-            let matches = if rule.match_path {
-                gitignore_path_matches(&rule.pattern, rel_path)
-            } else {
-                gitignore_basename_matches(&rule.pattern, name)
-            };
-            if matches {
-                ignored = !rule.negated;
-            }
-        }
-        ignored
-    }
-}
-
-fn gitignore_rules_for_dir(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
-    let mut rules = WorkspaceIgnoreRules::default();
-    let Ok(content) = std::fs::read_to_string(dir.join(".gitignore")) else {
-        return rules;
-    };
-    let base = slash_path(dir.strip_prefix(root).unwrap_or(Path::new("")));
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let negated = trimmed.starts_with('!');
-        let body = if negated {
-            trimmed[1..].trim()
-        } else {
-            trimmed
-        };
-        if body.is_empty() {
-            continue;
-        }
-        let directory_only = body.ends_with('/');
-        let anchored = body.starts_with('/');
-        let pattern = body.trim_start_matches('/').trim_end_matches('/');
-        if pattern.is_empty() {
-            continue;
-        }
-        let match_path = anchored || pattern.contains('/');
-        let pattern = if match_path && !base.is_empty() {
-            format!("{base}/{pattern}")
-        } else {
-            pattern.to_string()
-        };
-        rules.rules.push(WorkspaceIgnoreRule {
-            pattern,
-            match_path,
-            directory_only,
-            negated,
-        });
-    }
-
-    rules
-}
-
-fn gitignore_rules_for_ancestors(root: &Path, dir: &Path) -> WorkspaceIgnoreRules {
-    let Ok(relative) = dir.strip_prefix(root) else {
-        return WorkspaceIgnoreRules::default();
-    };
-    let components: Vec<_> = relative.components().collect();
-    if components.is_empty() {
-        return WorkspaceIgnoreRules::default();
-    }
-
-    let mut rules = gitignore_rules_for_dir(root, root);
-    let mut current = root.to_path_buf();
-    for component in components.iter().take(components.len() - 1) {
-        if let std::path::Component::Normal(part) = component {
-            current.push(part);
-            rules.extend(gitignore_rules_for_dir(root, &current));
-        }
-    }
-    rules
-}
-
-fn gitignore_path_matches(pattern: &str, path: &str) -> bool {
-    let pattern_parts: Vec<_> = pattern.split('/').collect();
-    let path_parts: Vec<_> = path.split('/').collect();
-    if pattern_parts.len() != path_parts.len() {
-        return false;
-    }
-    pattern_parts
-        .iter()
-        .zip(path_parts.iter())
-        .all(|(pattern_part, path_part)| gitignore_basename_matches(pattern_part, path_part))
-}
-
-fn gitignore_basename_matches(pattern: &str, name: &str) -> bool {
-    if !pattern.contains('*') {
-        return pattern == name;
-    }
-    if pattern == "*" {
-        return true;
-    }
-
-    let mut remaining = name;
-    let mut parts = pattern.split('*').peekable();
-    let mut first_part = true;
-
-    while let Some(part) = parts.next() {
-        if part.is_empty() {
-            first_part = false;
-            continue;
-        }
-        if first_part && !pattern.starts_with('*') {
-            let Some(next_remaining) = remaining.strip_prefix(part) else {
-                return false;
-            };
-            remaining = next_remaining;
-        } else if parts.peek().is_none() && !pattern.ends_with('*') {
-            return remaining.ends_with(part);
-        } else {
-            let Some(index) = remaining.find(part) else {
-                return false;
-            };
-            remaining = &remaining[index + part.len()..];
-        }
-        first_part = false;
-    }
-
-    pattern.ends_with('*') || remaining.is_empty()
-}
-
-fn safe_workspace_child(root: &Path, child: &Path) -> Result<PathBuf> {
-    let mut target = PathBuf::from(root);
-    for component in child.components() {
-        match component {
-            std::path::Component::Normal(part) => target.push(part),
-            std::path::Component::CurDir => {}
-            _ => bail!("Path is outside workspace: {}", child.display()),
-        }
-    }
-    let canonical = target
-        .canonicalize()
-        .with_context(|| format!("Cannot resolve {}", target.display()))?;
-    if !canonical.starts_with(root) {
-        bail!("Path is outside workspace: {}", child.display());
-    }
-    Ok(canonical)
-}
-
-fn slash_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-fn workspace_metadata_size(metadata: &std::fs::Metadata) -> u64 {
-    if cfg!(windows) && metadata.is_dir() {
-        0
-    } else {
-        metadata.len()
-    }
-}
-
-fn rounded_system_time(value: std::time::SystemTime) -> DateTime<Utc> {
-    let datetime: DateTime<Utc> = value.into();
-    datetime
-        .checked_add_signed(chrono::Duration::microseconds(500))
-        .unwrap_or(datetime)
-}
-
-fn system_time_rounded_millis(value: std::time::SystemTime) -> i64 {
-    rounded_system_time(value).timestamp_millis()
-}
-
-fn system_time_iso(value: Option<std::time::SystemTime>) -> String {
-    let Some(value) = value else {
-        return String::new();
-    };
-    let datetime = rounded_system_time(value);
-    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
 fn main() {
     if let Err(error) = run() {
         eprintln!("VibeLink failed: {error:#}");
@@ -2280,11 +192,11 @@ fn run() -> Result<()> {
             dir,
             depth,
             max_entries,
-        } => run_workspace_tree(&root, &dir, depth, max_entries),
-        Mode::WorkspaceTreeSidecar => run_workspace_tree_sidecar(),
-        Mode::McpSessionSidecar => run_mcp_session_sidecar(),
+        } => workspace_tree::run(&root, &dir, depth, max_entries),
+        Mode::WorkspaceTreeSidecar => workspace_tree::run_sidecar(),
+        Mode::McpSessionSidecar => mcp_session_sidecar::run(),
         Mode::EventStoreSidecar { db_path, read_only } => {
-            run_event_store_sidecar(&db_path, read_only)
+            event_store_sidecar::run(&db_path, read_only)
         }
         Mode::CompressionSidecar => compression_sidecar::run(),
         Mode::StatusSidecar => status_sidecar::run(),
@@ -2297,7 +209,8 @@ fn run() -> Result<()> {
 
 fn run_user_entry(cli: &Cli) -> Result<()> {
     println!("Starting VibeLink bridge on {}:{}", cli.host, cli.port);
-    let mut bridge = spawn_bridge_role(cli)?;
+    let effective_cli = default_rust_profile(cli);
+    let mut bridge = spawn_bridge_role(&effective_cli)?;
     let base_url = local_base_url(cli.port);
 
     if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
@@ -2387,6 +300,51 @@ fn rust_devices_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_devices_http
 }
 
+fn rust_device_mutations_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_device_mutations_http
+}
+
+fn rust_pairing_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_pairing_http
+}
+
+fn rust_audit_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_audit_http
+}
+
+fn rust_settings_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_settings_http
+}
+
+fn rust_tool_events_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_tool_events_http
+}
+
+fn rust_tool_events_sse_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_tool_events_sse
+}
+
+fn default_rust_profile(cli: &Cli) -> Cli {
+    let mut effective = cli.clone();
+    effective.rust_canary = true;
+    effective.rust_http_canary = true;
+    effective.rust_status_http = true;
+    effective.rust_doctor_http = true;
+    effective.rust_devices_http = true;
+    effective.rust_device_mutations_http = true;
+    effective.rust_pairing_http = true;
+    effective.rust_audit_http = true;
+    effective.rust_settings_http = true;
+    effective.rust_tool_events_http = true;
+    effective.rust_tool_events_sse = true;
+    effective.rust_workspace_http = true;
+    effective
+}
+
+fn rust_workspace_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_workspace_http
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let reservation = TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve loopback port for Node bridge")?;
@@ -2406,9 +364,12 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let internal_port = reserve_loopback_port()?;
     let plan = node_bridge_plan(cli, internal_port);
     let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
-    let internal_token = (rust_status_http_enabled(cli) || rust_doctor_http_enabled(cli))
-        .then(generate_internal_control_token)
-        .transpose()?;
+    let internal_token = (rust_status_http_enabled(cli)
+        || rust_doctor_http_enabled(cli)
+        || rust_pairing_http_enabled(cli)
+        || rust_settings_http_enabled(cli))
+    .then(generate_internal_control_token)
+    .transpose()?;
     let route_data_dir = resolve_data_dir(
         root,
         env::var_os("VIBELINK_DATA_DIR"),
@@ -2437,22 +398,61 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     } else {
         None
     };
-    let device_route =
-        rust_devices_http_enabled(cli).then(|| device_http::DeviceRouteConfig::new(route_data_dir));
+    let device_route = rust_devices_http_enabled(cli)
+        .then(|| device_http::DeviceRouteConfig::new(route_data_dir.clone()));
+    let device_mutation_route = rust_device_mutations_http_enabled(cli)
+        .then(|| device_http::DeviceMutationRouteConfig::new(route_data_dir.clone()));
+    let audit_route = rust_audit_http_enabled(cli)
+        .then(|| audit_http::AuditRouteConfig::new(route_data_dir.clone()));
+    let tool_events_route = rust_tool_events_http_enabled(cli)
+        .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
+    let tool_events_sse_route = rust_tool_events_sse_enabled(cli)
+        .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
+    let workspace_route = rust_workspace_http_enabled(cli)
+        .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
+    let settings_route = if rust_settings_http_enabled(cli) {
+        Some(
+            settings_http::SettingsRouteConfig::new(route_data_dir.clone(), root.to_path_buf())
+                .with_internal_settings(
+                    upstream,
+                    internal_token
+                        .clone()
+                        .context("Settings route internal token is missing")?,
+                ),
+        )
+    } else {
+        None
+    };
+    let pairing_route = if rust_pairing_http_enabled(cli) {
+        Some(
+            pairing_http::PairingRouteConfig::new(route_data_dir.clone()).with_internal_settings(
+                upstream,
+                internal_token
+                    .clone()
+                    .context("Pairing route internal token is missing")?,
+            ),
+        )
+    } else {
+        None
+    };
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
         "Rust HTTP front door listening on {}:{}; Node backend is loopback-only on {}",
         cli.host, cli.port, upstream
     );
-    let result = http_frontdoor::serve(
-        listener,
-        upstream,
-        &mut node,
-        status_route,
-        doctor_route,
-        device_route,
-    );
+    let routes = http_frontdoor::FrontdoorRoutes::default()
+        .with_status(status_route)
+        .with_doctor(doctor_route)
+        .with_device(device_route)
+        .with_device_mutation(device_mutation_route)
+        .with_audit(audit_route)
+        .with_tool_events(tool_events_route)
+        .with_tool_events_sse(tool_events_sse_route)
+        .with_settings(settings_route)
+        .with_pairing(pairing_route);
+    let routes = routes.with_workspace(workspace_route);
+    let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
     if node
         .try_wait()
         .context("Failed to inspect Node bridge after front-door shutdown")?
@@ -2628,6 +628,27 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     if cli.rust_devices_http {
         command.arg("--rust-devices-http");
     }
+    if cli.rust_device_mutations_http {
+        command.arg("--rust-device-mutations-http");
+    }
+    if cli.rust_pairing_http {
+        command.arg("--rust-pairing-http");
+    }
+    if cli.rust_audit_http {
+        command.arg("--rust-audit-http");
+    }
+    if cli.rust_settings_http {
+        command.arg("--rust-settings-http");
+    }
+    if cli.rust_tool_events_http {
+        command.arg("--rust-tool-events-http");
+    }
+    if cli.rust_tool_events_sse {
+        command.arg("--rust-tool-events-sse");
+    }
+    if cli.rust_workspace_http {
+        command.arg("--rust-workspace-http");
+    }
     command
         .arg("bridge")
         .stdin(Stdio::null())
@@ -2769,7 +790,6 @@ fn find_project_root_from(start: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::fs;
 
     #[test]
     fn packaged_sidecar_envs_use_current_executable_and_preserve_overrides() {
@@ -2857,6 +877,16 @@ mod tests {
     }
 
     #[test]
+    fn user_entry_defaults_to_rust_frontdoor_with_current_route_ownership() {
+        let cli = Cli::try_parse_from(["vibelink"]).unwrap();
+        let effective = default_rust_profile(&cli);
+        assert!(effective.rust_canary);
+        assert!(effective.rust_http_canary);
+        assert!(effective.rust_workspace_http);
+        assert!(effective.rust_tool_events_sse);
+    }
+
+    #[test]
     fn rust_http_canary_is_additive_and_keeps_node_on_loopback() {
         let enabled = Cli::try_parse_from(["vibelink", "--rust-http-canary", "bridge"]).unwrap();
         assert!(enabled.rust_http_canary);
@@ -2933,6 +963,112 @@ mod tests {
     }
 
     #[test]
+    fn rust_device_mutations_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-device-mutations-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_device_mutations_http);
+        assert!(rust_device_mutations_http_enabled(&enabled));
+
+        let mutations_only =
+            Cli::try_parse_from(["vibelink", "--rust-device-mutations-http", "bridge"]).unwrap();
+        assert!(mutations_only.rust_device_mutations_http);
+        assert!(!rust_device_mutations_http_enabled(&mutations_only));
+    }
+
+    #[test]
+    fn rust_pairing_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-pairing-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_pairing_http);
+        assert!(rust_pairing_http_enabled(&enabled));
+
+        let pairing_only =
+            Cli::try_parse_from(["vibelink", "--rust-pairing-http", "bridge"]).unwrap();
+        assert!(pairing_only.rust_pairing_http);
+        assert!(!rust_pairing_http_enabled(&pairing_only));
+    }
+
+    #[test]
+    fn rust_audit_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-audit-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_audit_http);
+        assert!(rust_audit_http_enabled(&enabled));
+
+        let audit_only = Cli::try_parse_from(["vibelink", "--rust-audit-http", "bridge"]).unwrap();
+        assert!(audit_only.rust_audit_http);
+        assert!(!rust_audit_http_enabled(&audit_only));
+    }
+
+    #[test]
+    fn rust_settings_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-settings-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_settings_http);
+        assert!(rust_settings_http_enabled(&enabled));
+
+        let settings_only =
+            Cli::try_parse_from(["vibelink", "--rust-settings-http", "bridge"]).unwrap();
+        assert!(settings_only.rust_settings_http);
+        assert!(!rust_settings_http_enabled(&settings_only));
+    }
+
+    #[test]
+    fn rust_tool_events_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-tool-events-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_tool_events_http);
+        assert!(rust_tool_events_http_enabled(&enabled));
+
+        let route_only =
+            Cli::try_parse_from(["vibelink", "--rust-tool-events-http", "bridge"]).unwrap();
+        assert!(route_only.rust_tool_events_http);
+        assert!(!rust_tool_events_http_enabled(&route_only));
+    }
+
+    #[test]
+    fn rust_workspace_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-workspace-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_workspace_http);
+        assert!(rust_workspace_http_enabled(&enabled));
+
+        let route_only = Cli::try_parse_from(["vibelink", "--rust-workspace-http", "bridge"])
+            .unwrap();
+        assert!(!rust_workspace_http_enabled(&route_only));
+    }
+
+    #[test]
     fn packaged_node_runtime_precedes_path_and_preserves_override() {
         let root = Path::new("C:/Program Files/VibeLink");
         let bundled = root.join("runtime").join("node.exe");
@@ -2993,196 +1129,5 @@ mod tests {
             uri,
             "vibelink://pair?server=http%3A%2F%2F192.168.1.10%3A8787&session=session%201&code=ABC123"
         );
-    }
-    #[test]
-    fn workspace_tree_lists_directories_first_and_skips_heavy_dirs() {
-        let root = env::temp_dir().join(format!("vibelink-workspace-tree-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("node_modules")).unwrap();
-        fs::create_dir_all(root.join("target")).unwrap();
-        fs::create_dir_all(root.join("tmp-cache")).unwrap();
-        fs::write(root.join(".gitignore"), "tmp-cache/\n").unwrap();
-        fs::write(root.join("README.md"), "hello").unwrap();
-        fs::write(root.join("src").join("main.rs"), "fn main() {}").unwrap();
-        fs::write(root.join("node_modules").join("noise.js"), "ignored").unwrap();
-        fs::write(root.join("target").join("noise.txt"), "ignored").unwrap();
-        fs::write(root.join("tmp-cache").join("noise.txt"), "ignored").unwrap();
-
-        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
-
-        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
-        assert_eq!(names, vec!["src", "README.md"]);
-        assert_eq!(tree.items[0].kind, "directory");
-        assert_eq!(tree.items[1].kind, "file");
-        assert!(tree.items[1].updated_at.contains("T"));
-        assert!(tree
-            .items
-            .iter()
-            .all(|item| !item.path.starts_with("node_modules")));
-        assert!(tree
-            .items
-            .iter()
-            .all(|item| !item.path.starts_with("target")));
-        assert!(tree
-            .items
-            .iter()
-            .all(|item| !item.path.starts_with("tmp-cache")));
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_honors_root_gitignore_file_patterns() {
-        let root = env::temp_dir().join(format!(
-            "vibelink-workspace-tree-gitignore-files-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("logs")).unwrap();
-        fs::write(root.join(".gitignore"), "*.log\nsecrets.local\nlogs/\n").unwrap();
-        fs::write(root.join("README.md"), "hello").unwrap();
-        fs::write(root.join("debug.log"), "ignored").unwrap();
-        fs::write(root.join("secrets.local"), "ignored").unwrap();
-        fs::write(root.join("logs").join("debug.txt"), "ignored").unwrap();
-
-        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
-
-        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
-        assert_eq!(names, vec!["README.md"]);
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_honors_gitignore_negation_rules() {
-        let root = env::temp_dir().join(format!(
-            "vibelink-workspace-tree-gitignore-negation-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join(".gitignore"), "*.log\n!keep.log\n").unwrap();
-        fs::write(root.join("README.md"), "hello").unwrap();
-        fs::write(root.join("debug.log"), "ignored").unwrap();
-        fs::write(root.join("keep.log"), "kept").unwrap();
-
-        let tree = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
-
-        let names: Vec<_> = tree.items.iter().map(|item| item.name.as_str()).collect();
-        assert_eq!(names, vec!["keep.log", "README.md"]);
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_honors_nested_gitignore_rules() {
-        let root = env::temp_dir().join(format!(
-            "vibelink-workspace-tree-nested-gitignore-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src").join("private")).unwrap();
-        fs::write(
-            root.join("src").join(".gitignore"),
-            "generated.tmp\nprivate/\n",
-        )
-        .unwrap();
-        fs::write(root.join("src").join("README.md"), "hello").unwrap();
-        fs::write(root.join("src").join("generated.tmp"), "ignored").unwrap();
-        fs::write(root.join("src").join("private").join("note.txt"), "ignored").unwrap();
-
-        let tree = list_workspace_tree(&root, Path::new(""), 2, 20).unwrap();
-
-        let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(paths, vec!["src", "src/README.md"]);
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_honors_gitignore_path_patterns() {
-        let root = env::temp_dir().join(format!(
-            "vibelink-workspace-tree-gitignore-paths-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src").join("generated")).unwrap();
-        fs::write(
-            root.join(".gitignore"),
-            "src/generated/*.tmp\n!src/generated/keep.tmp\n",
-        )
-        .unwrap();
-        fs::write(root.join("src").join("app.rs"), "fn main() {}").unwrap();
-        fs::write(
-            root.join("src").join("generated").join("noise.tmp"),
-            "ignored",
-        )
-        .unwrap();
-        fs::write(root.join("src").join("generated").join("keep.tmp"), "kept").unwrap();
-        fs::write(root.join("src").join("generated").join("note.txt"), "kept").unwrap();
-
-        let tree = list_workspace_tree(&root, Path::new(""), 3, 20).unwrap();
-
-        let paths: Vec<_> = tree.items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(
-            paths,
-            vec![
-                "src",
-                "src/generated",
-                "src/app.rs",
-                "src/generated/keep.tmp",
-                "src/generated/note.txt",
-            ]
-        );
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_marks_truncated_when_max_entries_is_reached() {
-        let root = env::temp_dir().join(format!(
-            "vibelink-workspace-tree-truncated-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("a.txt"), "a").unwrap();
-        fs::write(root.join("b.txt"), "b").unwrap();
-        fs::write(root.join("c.txt"), "c").unwrap();
-
-        let tree = list_workspace_tree(&root, Path::new(""), 1, 2).unwrap();
-
-        assert_eq!(tree.items.len(), 2);
-        assert!(tree.truncated);
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_signature_changes_when_metadata_changes() {
-        let root = env::temp_dir().join(format!(
-            "vibelink-workspace-tree-signature-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("README.md"), "hello").unwrap();
-
-        let first = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
-        fs::write(root.join("README.md"), "hello with more bytes").unwrap();
-        let second = list_workspace_tree(&root, Path::new(""), 1, 20).unwrap();
-
-        assert!(!first.signature.is_empty());
-        assert_ne!(first.signature, second.signature);
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn workspace_tree_rounds_submillisecond_timestamps_like_node() {
-        let value = std::time::UNIX_EPOCH + Duration::from_millis(123) + Duration::from_micros(600);
-        assert_eq!(system_time_iso(Some(value)), "1970-01-01T00:00:00.124Z");
-        assert_eq!(system_time_rounded_millis(value), 124);
     }
 }

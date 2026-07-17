@@ -112,7 +112,28 @@
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "本地认证 release canary 通过；远端 CI 与公网认证 canary 通过后晋级 canary，再单独迁移审计化设备写操作。"
+      "nextAction": "本地认证 release canary、远端 CI 与公网拒绝路径已通过；设备写操作已在独立 slice 迁移，两个 slice 都等待受控公网认证证据后晋级。"
+    },
+    {
+      "id": "device-mutations-http-route",
+      "title": "Devices 审计化写操作原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-device-mutations-http"
+      ],
+      "nodeEntry": "src/server.js#/api/devices/*/(rotate|revoke)",
+      "rustEntry": "apps/windows/src/device_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-device-mutations-http bridge",
+      "fallback": "仅初始化或认证前错误可回放 Node；Rust 认领后设备变更与审计同事务提交，任何失败返回 Rust 500 且绝不回放；关闭独立开关恢复后续请求的 Node 所有权",
+      "tests": [
+        "apps/windows/src/device_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0005-rust-device-mutation-http-routes.md"
+      ],
+      "nextAction": "本地、包内和远端 CI canary 已通过，提交 43e03fc 已部署且公网拒绝路径归 Rust；没有生产明文 token，保持 opt-in，待受控公网认证证据后晋级。"
     },
     {
       "id": "workspace-tree",
@@ -140,6 +161,109 @@
         "test/workspaceTreeSidecarClient.test.js"
       ],
       "nextAction": "代表性本地/公网交互证据已通过；继续扩大自然交互观察窗口后再评估 default-on。"
+    },
+    {
+      "id": "pairing-http-route",
+      "title": "Pairing 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-pairing-http"
+      ],
+      "nodeEntry": "src/server.js#/api/pairing-sessions",
+      "rustEntry": "apps/windows/src/pairing_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-pairing-http bridge",
+      "fallback": "初始化、只读查询、unsupported/chunked/超限 body 或 claim 的提交前 settings 快照失败可完整回放 Node；Rust 认领写事务后 domain 与审计同事务，失败返回 Rust 500 且不回放",
+      "tests": [
+        "apps/windows/src/pairing_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0006-rust-pairing-http-routes.md"
+      ],
+      "nextAction": "完整本地/包内 canary、6 条远端 CI 和公网只读拒绝路径均已通过；保持 opt-in 观察，继续迁移 workspace/registry/MCP/tool-events。"
+    },
+    {
+      "id": "audit-http-route",
+      "title": "Audit Log 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-audit-http"
+      ],
+      "nodeEntry": "src/server.js#/api/audit-log",
+      "rustEntry": "apps/windows/src/audit_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-audit-http bridge",
+      "fallback": "初始化、鉴权存储、拒绝审计或读取失败可完整回放 Node；Rust 成功写入拒绝审计后直接返回 401/403",
+      "tests": [
+        "apps/windows/src/audit_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0007-rust-audit-http-route.md"
+      ],
+      "nextAction": "本地/包内 canary、6 条远端 CI、自动回滚和公网拒绝路径均已通过；保持 opt-in 观察，继续迁移 workspace/registry/MCP/tool-events。"
+    },
+    {
+      "id": "settings-http-route",
+      "title": "Settings 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-settings-http",
+        "VIBELINK_INTERNAL_CONTROL_TOKEN"
+      ],
+      "nodeEntry": "src/server.js#/internal/reload-settings",
+      "rustEntry": "apps/windows/src/settings_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-settings-http bridge",
+      "fallback": "初始化、鉴权前错误或 unsupported/chunked/超限 body 可回放 Node；Rust 认领 mutation body 后设置/DPAPI/Node 内存同步/审计失败全部回滚并返回 Rust 500，绝不重放",
+      "tests": [
+        "apps/windows/src/settings_contract.rs",
+        "apps/windows/src/settings_credentials.rs",
+        "apps/windows/src/settings_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/settingsImportExport.test.js",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0008-rust-settings-http-routes.md"
+      ],
+      "nextAction": "本地 unit/release canary 已覆盖导出、dry-run、并发写、DPAPI、回滚、导入和审计；等待远端 CI、包内 canary 与公网拒绝路径证据。"
+    },
+    {
+      "id": "tool-events-http-route",
+      "title": "Tool Events 非流式原生 HTTP 路由",
+      "priority": "P0",
+      "status": "opt-in",
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-tool-events-http"
+      ],
+      "nodeEntry": "src/server.js#/api/tool-events",
+      "rustEntry": "apps/windows/src/tool_events_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-tool-events-http bridge",
+      "fallback": "stream=1、非 GET 和非精确路径始终透明转发 Node；初始化、鉴权存储、拒绝审计、schema 或只读查询失败时在响应前逐字节回放原请求；关闭独立开关恢复 Node 所有权",
+      "tests": [
+        "apps/windows/src/tool_events_http.rs",
+        "apps/windows/src/tool_events_store.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/eventStoreContract.test.js",
+        "tools/status/http-canary.mjs",
+        "docs/decisions/ADR-0009-rust-tool-events-http-route.md"
+      ],
+      "nextAction": "本地 unit、clippy、12 项单路由及 44 项累计 release canary 已覆盖认证、过滤、cursor、fields、拒绝审计、Node SSE 所有权和零回退；等待远端 CI、包内及受控公网认证证据。"
+    },
+    {
+      "id": "workspace-http",
+      "title": "Workspace 文件写操作原生 HTTP 路由",
+      "priority": "P1",
+      "status": "opt-in",
+      "featureFlags": ["--rust-http-canary", "--rust-workspace-http"],
+      "nodeEntry": "src/server.js#/api/workspaces/:id/file",
+      "rustEntry": "apps/windows/src/workspace_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
+      "fallback": "Rust 鉴权、workspace root、body 或文件操作失败时逐字节回放 Node；关闭 --rust-workspace-http 后恢复 Node 所有权",
+      "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
+      "nextAction": "完成 Git file-action、Git action、worktree 和 command/approval 路由后再扩大默认 Rust 所有权。"
     },
     {
       "id": "mcp-session-sidecar",

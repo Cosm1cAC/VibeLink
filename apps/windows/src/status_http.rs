@@ -22,6 +22,7 @@ pub struct ParsedRequest {
     pub method: String,
     target: String,
     headers: Vec<(String, String)>,
+    header_length: usize,
 }
 
 impl ParsedRequest {
@@ -69,6 +70,10 @@ impl ParsedRequest {
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
+
+    pub(crate) fn header_length(&self) -> usize {
+        self.header_length
+    }
 }
 
 fn decode_query_component(value: &str) -> Option<String> {
@@ -84,10 +89,10 @@ pub fn parse_request(bytes: &[u8]) -> Result<ParsedRequest, String> {
     }
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut request = httparse::Request::new(&mut headers);
-    match request.parse(bytes).map_err(|error| error.to_string())? {
-        httparse::Status::Complete(_) => {}
+    let header_length = match request.parse(bytes).map_err(|error| error.to_string())? {
+        httparse::Status::Complete(length) => length,
         httparse::Status::Partial => return Err("request headers are incomplete".to_string()),
-    }
+    };
     let method = request
         .method
         .ok_or_else(|| "request method is missing".to_string())?
@@ -114,10 +119,11 @@ pub fn parse_request(bytes: &[u8]) -> Result<ParsedRequest, String> {
         method,
         target,
         headers: parsed_headers,
+        header_length,
     })
 }
 
-fn clean_host(value: &str) -> String {
+pub(crate) fn clean_host(value: &str) -> String {
     let mut host = value.trim().to_ascii_lowercase();
     if let Some(value) = host
         .strip_prefix("http://")
@@ -196,6 +202,12 @@ pub(crate) enum RouteAuthentication {
     Device(String),
 }
 
+pub(crate) enum RoutePreparation {
+    Pending,
+    HostDenied,
+    Ready(Connection),
+}
+
 #[derive(Debug, Clone)]
 pub struct StatusRouteConfig {
     data_dir: PathBuf,
@@ -225,6 +237,10 @@ impl RouteMetrics {
 
     pub(crate) fn record_fallback(&self) {
         self.fallbacks.fetch_add(1, Ordering::SeqCst);
+        self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record_failure(&self) {
         self.failures.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -277,6 +293,7 @@ impl StatusRouteConfig {
 pub struct HttpRouteResponse {
     pub status: u16,
     pub body: Value,
+    headers: Vec<(String, String)>,
 }
 
 impl HttpRouteResponse {
@@ -284,7 +301,29 @@ impl HttpRouteResponse {
         Self {
             status,
             body: json!({ "error": message }),
+            headers: Vec::new(),
         }
+    }
+
+    pub(crate) fn json(status: u16, body: Value) -> Self {
+        Self {
+            status,
+            body,
+            headers: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     pub fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
@@ -292,17 +331,30 @@ impl HttpRouteResponse {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let reason = match self.status {
             200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
             401 => "Unauthorized",
             403 => "Forbidden",
+            404 => "Not Found",
+            409 => "Conflict",
+            410 => "Gone",
+            413 => "Content Too Large",
+            428 => "Precondition Required",
+            429 => "Too Many Requests",
+            503 => "Service Unavailable",
             _ => "Internal Server Error",
         };
         write!(
             writer,
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n",
             self.status,
             reason,
             body.len()
         )?;
+        for (name, value) in &self.headers {
+            write!(writer, "{name}: {value}\r\n")?;
+        }
+        write!(writer, "\r\n")?;
         writer.write_all(&body)?;
         writer.flush()
     }
@@ -349,18 +401,38 @@ pub fn route_status_request(
         .context("Rendered Status controlPlaneRuntime must be an object")?;
     config.record_response();
     runtime.insert("statusHttp".to_string(), config.metrics_value());
-    Ok(Some(HttpRouteResponse { status: 200, body }))
+    Ok(Some(HttpRouteResponse::json(200, body)))
 }
 
 pub(crate) fn authenticate_route_request(
     request: &ParsedRequest,
     data_dir: &Path,
 ) -> Result<RouteAuthentication> {
+    let connection = match prepare_route_request(request, data_dir)? {
+        RoutePreparation::Pending => return Ok(RouteAuthentication::Pending),
+        RoutePreparation::HostDenied => return Ok(RouteAuthentication::HostDenied),
+        RoutePreparation::Ready(connection) => connection,
+    };
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let now = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    match authenticate_device(&connection, true, &request.token(), &now)
+        .context("Cannot authenticate control-plane request")?
+    {
+        AuthResult::Device(id) => Ok(RouteAuthentication::Device(id)),
+        AuthResult::Open => Ok(RouteAuthentication::Unauthorized),
+        AuthResult::Unauthorized => Ok(RouteAuthentication::Unauthorized),
+    }
+}
+
+pub(crate) fn prepare_route_request(
+    request: &ParsedRequest,
+    data_dir: &Path,
+) -> Result<RoutePreparation> {
     let settings_path = data_dir.join("settings.json");
     let settings_source = match fs::read_to_string(&settings_path) {
         Ok(source) => source,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(RouteAuthentication::Pending)
+            return Ok(RoutePreparation::Pending)
         }
         Err(error) => {
             return Err(error).with_context(|| format!("Cannot read {}", settings_path.display()))
@@ -369,12 +441,12 @@ pub(crate) fn authenticate_route_request(
     let settings: StatusHttpSettings = serde_json::from_str(&settings_source)
         .with_context(|| format!("Cannot parse {}", settings_path.display()))?;
     if settings.pairing_token.is_empty() {
-        return Ok(RouteAuthentication::Pending);
+        return Ok(RoutePreparation::Pending);
     }
 
     let database_path = data_dir.join("mobile-agent.sqlite");
     if !database_path.exists() {
-        return Ok(RouteAuthentication::Pending);
+        return Ok(RoutePreparation::Pending);
     }
     let connection = Connection::open_with_flags(
         &database_path,
@@ -394,21 +466,12 @@ pub(crate) fn authenticate_route_request(
         .context("Cannot inspect control-plane authentication schema")?
         .is_some();
     if !devices_ready {
-        return Ok(RouteAuthentication::Pending);
+        return Ok(RoutePreparation::Pending);
     }
     if !is_host_allowed(request.host(), &settings.host_allowlist) {
-        return Ok(RouteAuthentication::HostDenied);
+        return Ok(RoutePreparation::HostDenied);
     }
-
-    let now: DateTime<Utc> = SystemTime::now().into();
-    let now = now.to_rfc3339_opts(SecondsFormat::Millis, true);
-    match authenticate_device(&connection, true, &request.token(), &now)
-        .context("Cannot authenticate control-plane request")?
-    {
-        AuthResult::Device(id) => Ok(RouteAuthentication::Device(id)),
-        AuthResult::Open => Ok(RouteAuthentication::Unauthorized),
-        AuthResult::Unauthorized => Ok(RouteAuthentication::Unauthorized),
-    }
+    Ok(RoutePreparation::Ready(connection))
 }
 
 fn fetch_status_snapshot(host: &str, config: &StatusRouteConfig) -> Result<Value> {

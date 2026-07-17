@@ -31,10 +31,34 @@
 - [x] Migrate direct `/api/status` HTTP ownership behind a rollback flag.
 - [x] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
 - [x] Migrate read-only `GET /api/devices` ownership behind an independent Rust flag.
-- [ ] Migrate pairing and audited device mutation routes.
-- [ ] Migrate settings and audit routes.
+- [x] Migrate pairing and audited device mutation routes.
+- [x] Migrate settings and audit routes.
 - [ ] Migrate workspace and tool routes.
 - [ ] Migrate task and live-call routes.
+
+## Independent Rust Server Execution
+
+- [x] Record the end-state architecture and migration order.
+- [x] Add Rust pairing/device mutation ownership with Node fallback.
+- [x] Add Rust settings and audit ownership with Node fallback.
+- [ ] Add Rust workspace/tool ownership with command and approval parity.
+- [ ] Add Rust task/live-call ownership with provider boundary parity.
+- [ ] Make Rust the default bridge server and keep Node as explicit rollback.
+- [ ] Remove Node runtime from the portable package after observation and recovery evidence.
+- [x] Migrate audited device mutation routes with transaction-bound fallback semantics.
+- [x] Migrate pairing status/list/approve/deny routes.
+- [x] Migrate pairing create/claim routes with bounded JSON bodies and one-time token safety.
+- [x] Migrate settings read, validation, dry-run, and mutation routes.
+- [x] Migrate audit-log read, bounded pagination, and field-projection routes.
+- [x] Isolate Rust workspace-tree, event-store, MCP session, and sidecar protocol modules.
+- [ ] Migrate workspace read/tree and registry routes.
+- [x] Migrate authenticated workspace file write/delete/rename with allowed-root enforcement.
+- [ ] Migrate approvals, commands, Git actions, and tool-run routes.
+- [ ] Migrate tool-event and unified-event SSE streams.
+- [x] Migrate tool-event read and SSE ownership behind an opt-in Rust flag.
+- [ ] Migrate task, history, and terminal routes.
+- [ ] Migrate provider-process ownership out of Node.
+- [ ] Migrate live-call HTTP and WebSocket/audio routes.
 
 ## Retirement And Desktop Release
 

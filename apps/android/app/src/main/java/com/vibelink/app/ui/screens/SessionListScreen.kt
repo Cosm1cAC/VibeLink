@@ -79,6 +79,7 @@ fun SessionListScreen(
     onLogout: () -> Unit,
     onOpenLiveCall: () -> Unit,
     onOpenWorkspace: () -> Unit,
+    onOpenReview: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val conversations by viewModel.conversations.collectAsState()
@@ -407,6 +408,11 @@ fun SessionListScreen(
                                         "approvals.review" -> onOpenSettings()
                                     }
                                 },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("PR Review") },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                onClick = { topMenuOpen = false; onOpenReview() },
                             )
                         }
                     }

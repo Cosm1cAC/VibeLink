@@ -148,6 +148,9 @@ fun VibeLinkApp(
                 onOpenWorkspace = {
                     navController.navigate("workspace")
                 },
+                onOpenReview = {
+                    navController.navigate("review")
+                },
                 onOpenSettings = {
                     navController.navigate("settings")
                 },
@@ -210,6 +213,15 @@ fun VibeLinkApp(
                 apiClient = apiClient,
                 viewModel = workspaceViewModel,
                 onOpenApprovals = { navController.navigate("settings?section=approvals") },
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable("review") {
+            val reviewViewModel: ReviewViewModel = viewModel()
+            ReviewScreen(
+                apiClient = apiClient,
+                viewModel = reviewViewModel,
                 onBack = { navController.popBackStack() },
             )
         }

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { dataDir } from "./config.js";
-import { createThreadForkInDb, getThreadStateFromDb, importThreadState, upsertThreadMeta } from "./db.js";
+import { createThreadForkInDb, getThreadStateFromDb, importThreadState, upsertThreadMeta, upsertThreadMetaBatch } from "./db.js";
 
 const statePath = path.join(dataDir, "thread-state.json");
 
@@ -70,19 +70,17 @@ export function getThreadState() {
   return getThreadStateFromDb();
 }
 
-export function updateThreadState(key, patch = {}) {
+export function updateThreadState(key, patch = {}, options = {}) {
   const cleanKey = cleanString(key, 320);
   if (!cleanKey) throw new Error("Thread key is required.");
 
   ensureLegacyImported();
-  return upsertThreadMeta(cleanKey, patch);
+  return upsertThreadMeta(cleanKey, patch, options);
 }
 
 export function updateThreadStateBatch(updates = []) {
-  if (!Array.isArray(updates) || updates.length === 0) throw new Error("At least one thread update is required.");
-  let state;
-  for (const update of updates.slice(0, 200)) state = updateThreadState(update?.key, update?.patch || {});
-  return state || getThreadState();
+  ensureLegacyImported();
+  return upsertThreadMetaBatch(updates);
 }
 
 export function createThreadFork(payload = {}) {

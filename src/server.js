@@ -284,12 +284,28 @@ function sendJson(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
-function sendError(response, status, message) {
+function sendError(response, status, message, extra = {}) {
   if (response.headersSent || response.writableEnded || response.destroyed) {
     console.error(message);
     return;
   }
-  sendJson(response, status, { error: message });
+  sendJson(response, status, { error: message, ...extra });
+}
+
+function sendKnownThreadStateError(response, error) {
+  if (error?.status === 409 && error?.code === "THREAD_STATE_CONFLICT") {
+    sendError(response, 409, error.message || "Thread state conflict.", {
+      code: error.code,
+      conflicts: error.conflicts || [],
+      state: getThreadState()
+    });
+    return true;
+  }
+  if (error?.status === 400) {
+    sendError(response, 400, error.message || "Invalid thread state update.", { code: error.code || "THREAD_STATE_INVALID" });
+    return true;
+  }
+  return false;
 }
 
 function eventCatchUpWindowPayload(events, limit) {
@@ -3259,8 +3275,12 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/thread-state" && request.method === "POST") {
     const body = await readBody(request);
-    const state = updateThreadState(body.key, body.patch || {});
-    sendJson(response, 200, state);
+    try {
+      const state = updateThreadState(body.key, body.patch || {}, { expectedRevision: body.expectedRevision });
+      sendJson(response, 200, state);
+    } catch (error) {
+      if (!sendKnownThreadStateError(response, error)) throw error;
+    }
     return;
   }
 
@@ -3296,7 +3316,11 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/thread-state/batch" && request.method === "POST") {
     const body = await readBody(request);
-    sendJson(response, 200, updateThreadStateBatch(body.updates));
+    try {
+      sendJson(response, 200, updateThreadStateBatch(body.updates));
+    } catch (error) {
+      if (!sendKnownThreadStateError(response, error)) throw error;
+    }
     return;
   }
 

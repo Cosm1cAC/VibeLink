@@ -198,9 +198,18 @@ class ApiClient(
         )
     }
 
-    suspend fun search(query: String, scope: String = "all", limit: Int = 50, cursor: String = ""): SearchResponse {
+    suspend fun search(
+        query: String,
+        scope: String = "all",
+        limit: Int = 50,
+        cursor: String = "",
+        tag: String = "",
+        favorite: Boolean = false,
+    ): SearchResponse {
         val cursorParam = if (cursor.isBlank()) "" else "&cursor=${encode(cursor)}"
-        val json = get("/api/search?q=${encode(query)}&scope=${encode(scope)}&limit=$limit$cursorParam")
+        val tagParam = if (tag.isBlank()) "" else "&tag=${encode(tag)}"
+        val favoriteParam = if (favorite) "&favorite=1" else ""
+        val json = get("/api/search?q=${encode(query)}&scope=${encode(scope)}&limit=$limit$cursorParam$tagParam$favoriteParam")
         return gson.fromJson(json, SearchResponse::class.java)
     }
 
@@ -489,8 +498,8 @@ class ApiClient(
         return gson.fromJson(json, ThreadStateResponse::class.java)
     }
 
-    suspend fun patchThread(key: String, patch: ThreadPatch): ThreadStateResponse {
-        val json = post("/api/thread-state", ThreadPatchRequest(key, patch))
+    suspend fun patchThread(key: String, patch: ThreadPatch, expectedRevision: Int? = null): ThreadStateResponse {
+        val json = post("/api/thread-state", ThreadPatchRequest(key, patch, expectedRevision))
         return gson.fromJson(json, ThreadStateResponse::class.java)
     }
 

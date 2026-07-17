@@ -3,6 +3,7 @@ package com.vibelink.app.ui.screens
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.network.ApiException
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.CommandDefinition
 import com.vibelink.app.network.DesktopConversation
@@ -11,6 +12,7 @@ import com.vibelink.app.network.HistoryItem
 import com.vibelink.app.network.TaskSummary
 import com.vibelink.app.network.ThreadFork
 import com.vibelink.app.network.ThreadPatch
+import com.vibelink.app.network.ThreadPatchRequest
 import com.vibelink.app.network.ThreadStateResponse
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,6 +21,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import com.vibelink.app.network.SearchResult
+import com.vibelink.app.ui.i18n.AppStrings
+import com.vibelink.app.ui.i18n.appStringsFor
+import com.vibelink.app.data.AppLanguage
 
 /**
  * ViewModel for the conversation list.
@@ -27,19 +32,43 @@ import com.vibelink.app.network.SearchResult
  * histories + running tasks + manual thread-state + Codex Desktop visibility.
  */
 class SessionListViewModel : ViewModel() {
+    private var strings: AppStrings = appStringsFor(AppLanguage.Default)
     private var lastApiClient: ApiClient? = null
     private var searchJob: Job? = null
+    private var searchGeneration = 0L
+
+    fun setLanguage(language: AppLanguage) {
+        strings = appStringsFor(language)
+    }
     private val _searchResults = MutableStateFlow<List<SearchResult>>(emptyList())
     val searchResults: StateFlow<List<SearchResult>> = _searchResults.asStateFlow()
 
     private val _searchLoading = MutableStateFlow(false)
     val searchLoading: StateFlow<Boolean> = _searchLoading.asStateFlow()
 
+    private val _searchAppending = MutableStateFlow(false)
+    val searchAppending: StateFlow<Boolean> = _searchAppending.asStateFlow()
+
     private val _searchError = MutableStateFlow("")
     val searchError: StateFlow<String> = _searchError.asStateFlow()
 
     private val _searchNextCursor = MutableStateFlow("")
     val searchNextCursor: StateFlow<String> = _searchNextCursor.asStateFlow()
+
+    private val _searchScope = MutableStateFlow("all")
+    val searchScope: StateFlow<String> = _searchScope.asStateFlow()
+
+    private val _selectedSearchTag = MutableStateFlow("")
+    val selectedSearchTag: StateFlow<String> = _selectedSearchTag.asStateFlow()
+
+    private val _selectedTags = MutableStateFlow<Set<String>>(emptySet())
+    val selectedTags: StateFlow<Set<String>> = _selectedTags.asStateFlow()
+
+    private val _availableTags = MutableStateFlow<List<String>>(emptyList())
+    val availableTags: StateFlow<List<String>> = _availableTags.asStateFlow()
+
+    private val _selectedConversationKeys = MutableStateFlow<Set<String>>(emptySet())
+    val selectedConversationKeys: StateFlow<Set<String>> = _selectedConversationKeys.asStateFlow()
 
     private val _commands = MutableStateFlow<List<CommandDefinition>>(emptyList())
     val commands: StateFlow<List<CommandDefinition>> = _commands.asStateFlow()
@@ -84,16 +113,17 @@ class SessionListViewModel : ViewModel() {
                     loadDesktop = { apiClient.getDesktopRemoteStatus(fresh = isRefresh) },
                 )
 
-                _desktopStatus.value = desktopStatusText(snapshot.desktop)
+                _desktopStatus.value = desktopStatusText(snapshot.desktop, strings)
                 _allConversations.value = buildConversationItems(
                     snapshot.histories,
                     snapshot.tasks,
                     snapshot.threadState,
                     snapshot.desktop,
                 )
+                updateAvailableTags()
                 applyFilters()
             } catch (error: Exception) {
-                _error.value = error.message ?: "加载会话失败"
+                _error.value = error.message ?: strings.loadChatsFailed
             } finally {
                 _loading.value = false
                 _refreshing.value = false
@@ -104,26 +134,51 @@ class SessionListViewModel : ViewModel() {
     fun setQuery(value: String) {
         _query.value = value
         applyFilters()
+        scheduleSearch()
+    }
+
+    fun setSearchScope(value: String) {
+        if (_searchScope.value == value) return
+        _searchScope.value = value
+        scheduleSearch()
+    }
+
+    fun setSearchTag(value: String) {
+        val clean = value.trim()
+        if (_selectedSearchTag.value == clean && _selectedTags.value == setOf(clean).filter { it.isNotBlank() }.toSet()) return
+        _selectedSearchTag.value = clean
+        _selectedTags.value = setOf(clean).filter { it.isNotBlank() }.toSet()
+        applyFilters()
+        scheduleSearch()
+    }
+
+    fun toggleTagFilter(tag: String) {
+        val clean = tag.trim()
+        if (clean.isBlank()) return
+        val next = _selectedTags.value.toMutableSet().apply {
+            val existing = firstOrNull { it.equals(clean, ignoreCase = true) }
+            if (existing == null) add(clean) else remove(existing)
+        }
+        _selectedTags.value = next
+        _selectedSearchTag.value = if (next.size == 1) next.first() else ""
+        applyFilters()
+        scheduleSearch()
+    }
+
+    fun clearTagFilters() {
+        if (_selectedTags.value.isEmpty() && _selectedSearchTag.value.isBlank()) return
+        _selectedTags.value = emptySet()
+        _selectedSearchTag.value = ""
+        applyFilters()
+        scheduleSearch()
+    }
+
+    fun loadMoreSearch(apiClient: ApiClient) {
+        lastApiClient = apiClient
+        val cursor = _searchNextCursor.value
+        if (_query.value.trim().length < 2 || cursor.isBlank() || _searchAppending.value || _searchLoading.value) return
         searchJob?.cancel()
-        if (value.trim().length < 2) {
-            _searchResults.value = emptyList()
-            _searchError.value = ""
-            _searchNextCursor.value = ""
-            _searchLoading.value = false
-            return
-        }
-        searchJob = viewModelScope.launch {
-            delay(250)
-            _searchLoading.value = true
-            _searchError.value = ""
-            runCatching { lastApiClient?.search(value.trim()) }
-                .onSuccess { response ->
-                    _searchResults.value = response?.items.orEmpty()
-                    _searchNextCursor.value = response?.nextCursor.orEmpty()
-                }
-                .onFailure { _searchError.value = it.message ?: "搜索失败" }
-            _searchLoading.value = false
-        }
+        runSearch(cursor = cursor, append = true)
     }
 
     fun setShowArchived(value: Boolean) {
@@ -134,34 +189,89 @@ class SessionListViewModel : ViewModel() {
     fun setShowFavorites(value: Boolean) {
         _showFavorites.value = value
         applyFilters()
+        scheduleSearch()
     }
 
     fun patchConversation(apiClient: ApiClient, item: ConversationItem, patch: ThreadPatch) {
-        if (item.kind == "desktop" || item.kind == "new") return
+        if (!SessionListBatchEditPolicy.isBatchEditable(item)) return
         viewModelScope.launch {
             _error.value = ""
             try {
-                apiClient.patchThread(item.key, patch)
-                _allConversations.value = _allConversations.value.map { current ->
-                    if (current.key != item.key) current else current.copy(
-                        title = patch.title ?: current.title,
-                        group = patch.group ?: current.group,
-                        pinned = patch.pinned ?: current.pinned,
-                        archived = patch.archived ?: current.archived,
-                        tags = patch.tags ?: current.tags,
-                        favorite = patch.favorite ?: current.favorite,
-                    )
+                val state = apiClient.patchThread(item.key, patch, expectedRevision = item.revision)
+                applyThreadStateUpdate(state)
+            } catch (error: ApiException) {
+                if (error.statusCode == 409) {
+                    _error.value = strings.conversationChangedElsewhere
+                    load(apiClient, isRefresh = true)
+                } else {
+                    _error.value = error.message ?: strings.updateConversationFailed
                 }
-                applyFilters()
             } catch (error: Exception) {
-                _error.value = error.message ?: "更新会话失败"
+                _error.value = error.message ?: strings.updateConversationFailed
+            }
+        }
+    }
+
+    fun toggleConversationSelection(item: ConversationItem) {
+        if (!SessionListBatchEditPolicy.isBatchEditable(item)) return
+        _selectedConversationKeys.value = _selectedConversationKeys.value.toMutableSet().apply {
+            if (!add(item.key)) remove(item.key)
+        }
+    }
+
+    fun clearSelection() {
+        _selectedConversationKeys.value = emptySet()
+    }
+
+    fun selectVisibleManagedConversations() {
+        _selectedConversationKeys.value = _conversations.value
+            .filter(SessionListBatchEditPolicy::isBatchEditable)
+            .map { it.key }
+            .toSet()
+    }
+
+    fun batchSetFavorite(apiClient: ApiClient, favorite: Boolean) {
+        batchPatchConversations(apiClient, SessionListBatchEditPolicy.buildSetFavoriteUpdates(selectedConversations(), favorite))
+    }
+
+    fun batchAddTags(apiClient: ApiClient, tags: List<String>) {
+        batchPatchConversations(apiClient, SessionListBatchEditPolicy.buildAddTagsUpdates(selectedConversations(), tags))
+    }
+
+    fun batchRemoveTags(apiClient: ApiClient, tags: List<String>) {
+        batchPatchConversations(apiClient, SessionListBatchEditPolicy.buildRemoveTagsUpdates(selectedConversations(), tags))
+    }
+
+    private fun selectedConversations(): List<ConversationItem> {
+        val keys = _selectedConversationKeys.value
+        return _allConversations.value.filter { it.key in keys }
+    }
+
+    private fun batchPatchConversations(apiClient: ApiClient, updates: List<ThreadPatchRequest>) {
+        if (updates.isEmpty()) return
+        viewModelScope.launch {
+            _error.value = ""
+            try {
+                val state = apiClient.patchThreads(updates)
+                applyThreadStateUpdate(state)
+                clearSelection()
+            } catch (error: ApiException) {
+                if (error.statusCode == 409) {
+                    _error.value = strings.someConversationsChangedElsewhere
+                    clearSelection()
+                    load(apiClient, isRefresh = true)
+                } else {
+                    _error.value = error.message ?: strings.batchUpdateConversationFailed
+                }
+            } catch (error: Exception) {
+                _error.value = error.message ?: strings.batchUpdateConversationFailed
             }
         }
     }
 
     fun forkConversation(apiClient: ApiClient, item: ConversationItem, title: String) {
         if (item.kind == "desktop" || item.kind == "new") return
-        val cleanTitle = title.trim().ifBlank { "${item.title} 分叉" }
+        val cleanTitle = title.trim().ifBlank { strings.forkTitle(item.title) }
         viewModelScope.launch {
             _error.value = ""
             try {
@@ -175,9 +285,10 @@ class SessionListViewModel : ViewModel() {
                 val fork = result.fork
                 val forkItem = fork.toConversationItem()
                 _allConversations.value = sortManaged(_allConversations.value + forkItem)
+                updateAvailableTags()
                 applyFilters()
             } catch (error: Exception) {
-                _error.value = error.message ?: "分叉会话失败"
+                _error.value = error.message ?: strings.forkConversationFailed
             }
         }
     }
@@ -218,7 +329,7 @@ class SessionListViewModel : ViewModel() {
                 kind = if (staleCompletedTask) "history" else "task",
                 id = task.id,
                 provider = task.agent,
-                title = history?.title?.ifBlank { task.title } ?: task.title.ifBlank { "${providerLabel(task.agent)} 任务" },
+                title = history?.title?.ifBlank { task.title } ?: task.title.ifBlank { strings.agentTask(providerLabel(task.agent)) },
                 cwd = task.cwd.ifBlank { history?.projectPath.orEmpty() },
                 status = if (staleCompletedTask) "history" else task.status,
                 updatedAt = latestOf(task.updatedAt, history?.updatedAt),
@@ -273,6 +384,7 @@ class SessionListViewModel : ViewModel() {
             archived = meta.archived,
             tags = meta.tags,
             favorite = meta.favorite,
+            revision = meta.revision,
             updatedAt = latestOf(item.updatedAt, meta.updatedAt),
         )
     }
@@ -302,12 +414,12 @@ class SessionListViewModel : ViewModel() {
         val desktopSnapshot = desktop
         val ready = desktopSnapshot?.ready == true
         val running = active || pendingCount > 0 || desktopSnapshot?.sidebarHasRunning == true
-        val title = desktopSnapshot?.windowTitle?.ifBlank { "Codex Desktop 远程" } ?: "Codex Desktop 远程"
+        val title = desktopSnapshot?.windowTitle?.ifBlank { strings.codexDesktopRemoteTitle } ?: strings.codexDesktopRemoteTitle
         val preview = when {
             ready && pendingCount > 0 -> "$pendingCount queued message(s)"
             ready -> "Connected. Tap to sync the visible Codex transcript."
             desktopSnapshot?.found == true -> desktopSnapshot.reason.ifBlank { "Codex window found but composer is not ready." }
-            else -> desktopReasonLabel(desktopSnapshot?.reason)
+            else -> desktopReasonLabel(desktopSnapshot?.reason, strings)
         }
         return ConversationItem(
             key = "desktop:current",
@@ -322,6 +434,24 @@ class SessionListViewModel : ViewModel() {
             pinned = true,
             desktopLinked = ready,
         )
+    }
+
+    private fun applyThreadStateUpdate(state: ThreadStateResponse) {
+        _allConversations.value = _allConversations.value.map { current ->
+            val meta = state.items[current.key]
+            if (meta == null) current else current.copy(
+                title = meta.title.ifBlank { current.title },
+                group = meta.group.ifBlank { current.group },
+                pinned = meta.pinned,
+                archived = meta.archived,
+                tags = meta.tags,
+                favorite = meta.favorite,
+                revision = meta.revision,
+                updatedAt = latestOf(current.updatedAt, meta.updatedAt),
+            )
+        }
+        updateAvailableTags()
+        applyFilters()
     }
 
     private fun ThreadFork.toConversationItem(): ConversationItem = ConversationItem(
@@ -341,27 +471,114 @@ class SessionListViewModel : ViewModel() {
         archived = archived,
     )
 
+    private fun updateAvailableTags() {
+        _availableTags.value = _allConversations.value
+            .flatMap { it.tags }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+            .sortedWith(String.CASE_INSENSITIVE_ORDER)
+        _selectedTags.value = _selectedTags.value.filter { selected ->
+            _availableTags.value.any { it.equals(selected, ignoreCase = true) }
+        }.toSet()
+        if (_selectedSearchTag.value.isNotBlank() && _availableTags.value.none { it.equals(_selectedSearchTag.value, ignoreCase = true) }) {
+            _selectedSearchTag.value = ""
+        }
+    }
+
+    private fun scheduleSearch() {
+        searchJob?.cancel()
+        searchGeneration += 1
+        val generation = searchGeneration
+        if (_query.value.trim().length < 2) {
+            clearSearchState()
+            return
+        }
+        searchJob = viewModelScope.launch {
+            delay(250)
+            if (generation != searchGeneration) return@launch
+            runSearch(cursor = "", append = false)
+        }
+    }
+
+    private fun clearSearchState() {
+        _searchResults.value = emptyList()
+        _searchError.value = ""
+        _searchNextCursor.value = ""
+        _searchLoading.value = false
+        _searchAppending.value = false
+    }
+
+    private fun runSearch(cursor: String, append: Boolean) {
+        val apiClient = lastApiClient ?: return
+        val query = _query.value.trim()
+        if (query.length < 2) {
+            clearSearchState()
+            return
+        }
+
+        searchGeneration += 1
+        val generation = searchGeneration
+        val scope = _searchScope.value
+        val tag = _selectedSearchTag.value
+        val favorite = _showFavorites.value
+
+        viewModelScope.launch {
+            if (append) _searchAppending.value = true else _searchLoading.value = true
+            _searchError.value = ""
+            try {
+                val response = apiClient.search(
+                    query = query,
+                    scope = scope,
+                    cursor = cursor,
+                    tag = tag,
+                    favorite = favorite,
+                )
+                if (generation != searchGeneration ||
+                    query != _query.value.trim() ||
+                    scope != _searchScope.value ||
+                    tag != _selectedSearchTag.value ||
+                    favorite != _showFavorites.value
+                ) {
+                    return@launch
+                }
+                _searchResults.value = if (append) {
+                    dedupeSearchResults(_searchResults.value + response.items)
+                } else {
+                    response.items
+                }
+                _searchNextCursor.value = response.nextCursor
+            } catch (error: Exception) {
+                if (generation == searchGeneration) _searchError.value = error.message ?: strings.searchFailed
+            } finally {
+                if (generation == searchGeneration) {
+                    if (append) _searchAppending.value = false else _searchLoading.value = false
+                }
+            }
+        }
+    }
+
     private fun applyFilters() {
-        val query = _query.value.trim().lowercase()
-        val showArchived = _showArchived.value
-        val showFavorites = _showFavorites.value
-        _conversations.value = _allConversations.value
-            .filter { item ->
-                item.kind == "desktop" || if (showArchived) item.archived else !item.archived
-            }
-            .filter { item -> !showFavorites || item.favorite }
-            .filter { item ->
-                if (query.isBlank()) true
-                else listOf(item.title, item.provider, item.cwd, item.sessionId, item.preview, item.group)
-                    .joinToString(" ")
-                    .lowercase()
-                    .contains(query)
-            }
+        _conversations.value = filterSessionConversations(
+            items = _allConversations.value,
+            query = _query.value,
+            showArchived = _showArchived.value,
+            showFavorites = _showFavorites.value,
+            tag = _selectedSearchTag.value,
+            selectedTags = _selectedTags.value,
+        )
     }
 
     companion object {
         fun sessionKey(provider: String, id: String): String = "$provider:$id"
         fun threadKeyFor(provider: String, sessionId: String): String = "history:$provider:$sessionId"
+
+        fun dedupeSearchResults(items: List<SearchResult>): List<SearchResult> {
+            val seen = linkedSetOf<String>()
+            return items.filter { result ->
+                seen.add(listOf(result.kind, result.id, result.turnId, result.path).joinToString(":"))
+            }
+        }
 
         private fun providerLabel(value: String): String = when (value) {
             "codex" -> "Codex"
@@ -380,22 +597,22 @@ class SessionListViewModel : ViewModel() {
             )
         }
 
-        private fun desktopStatusText(value: DesktopRemoteState?): String {
-            val desktop = value?.desktop ?: return "Codex 远程：未检查"
+        private fun desktopStatusText(value: DesktopRemoteState?, strings: AppStrings): String {
+            val desktop = value?.desktop ?: return strings.codexRemoteUnchecked
             return when {
-                desktop.ready -> "Codex 远程：已就绪"
-                desktop.found -> "Codex 远程：${desktopReasonLabel(desktop.reason.ifBlank { "window found" })}"
-                else -> "Codex 远程：未连接"
+                desktop.ready -> strings.codexRemoteReady
+                desktop.found -> strings.codexRemoteWithReason(desktopReasonLabel(desktop.reason.ifBlank { "window found" }, strings))
+                else -> strings.codexRemoteDisconnected
             }
         }
 
-        private fun desktopReasonLabel(reason: String?): String {
+        private fun desktopReasonLabel(reason: String?, strings: AppStrings): String {
             val value = reason.orEmpty()
             return when {
-                value.isBlank() -> "Codex Desktop 未连接。"
-                value.equals("window found", ignoreCase = true) -> "已找到窗口"
-                value.contains("window was not found", ignoreCase = true) -> "未找到 Codex Desktop 窗口。"
-                value.contains("not connected", ignoreCase = true) -> "Codex Desktop 未连接。"
+                value.isBlank() -> strings.codexDesktopDisconnected
+                value.equals("window found", ignoreCase = true) -> strings.codexDesktopFound
+                value.contains("window was not found", ignoreCase = true) -> strings.codexDesktopWindowMissing
+                value.contains("not connected", ignoreCase = true) -> strings.codexDesktopDisconnected
                 else -> value
             }
         }

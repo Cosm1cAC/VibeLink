@@ -828,6 +828,7 @@ data class ConversationItem(
     val archived: Boolean = false,
     val tags: List<String> = emptyList(),
     val favorite: Boolean = false,
+    val revision: Int = 0,
     @SerializedName("desktopIndex") val desktopIndex: Int? = null,
     @SerializedName("desktopTitle") val desktopTitle: String = "",
     @SerializedName("desktopLinked") val desktopLinked: Boolean = false,
@@ -885,6 +886,7 @@ data class ThreadMeta(
     val archived: Boolean = false,
     val tags: List<String> = emptyList(),
     val favorite: Boolean = false,
+    val revision: Int = 0,
     @SerializedName("updatedAt") val updatedAt: String = "",
     val messageOverrides: List<Map<String, Any?>> = emptyList(),
 )
@@ -909,6 +911,15 @@ data class SearchResult(
 )
 
 data class CommandRegistryResponse(val items: List<CommandDefinition> = emptyList())
+data class CommandAction(
+    val type: String = "",
+    val route: String = "",
+    val patch: String = "",
+)
+data class CommandUi(
+    val label: String = "",
+    val detail: String = "",
+)
 data class CommandDefinition(
     val id: String = "",
     val name: String = "",
@@ -917,6 +928,8 @@ data class CommandDefinition(
     val permission: String = "none",
     val requiresApproval: Boolean = false,
     val toolKind: String = "",
+    val action: CommandAction = CommandAction(),
+    val ui: CommandUi = CommandUi(),
 )
 
 data class ReviewListResponse(val items: List<ReviewSession> = emptyList())
@@ -967,6 +980,8 @@ data class ThreadPatch(
     val pinned: Boolean? = null,
     val archived: Boolean? = null,
     val tags: List<String>? = null,
+    val addTags: List<String>? = null,
+    val removeTags: List<String>? = null,
     val favorite: Boolean? = null,
     val provider: String? = null,
     val sessionId: String? = null,
@@ -976,6 +991,7 @@ data class ThreadPatch(
 data class ThreadPatchRequest(
     val key: String,
     val patch: ThreadPatch,
+    val expectedRevision: Int? = null,
 )
 
 data class ThreadFork(

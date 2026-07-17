@@ -163,6 +163,8 @@ export function initDb() {
       archived INTEGER NOT NULL DEFAULT 0,
       source TEXT NOT NULL DEFAULT 'local',
       meta_json TEXT,
+      revision INTEGER NOT NULL DEFAULT 0,
+      field_revisions_json TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -402,6 +404,8 @@ export function initDb() {
   try { db.exec("ALTER TABLE task_events ADD COLUMN event_kind TEXT"); } catch {}
   try { db.exec("ALTER TABLE task_events ADD COLUMN turn_id TEXT"); } catch {}
   try { db.exec("ALTER TABLE task_events ADD COLUMN block_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE threads ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"); } catch {}
+  try { db.exec("ALTER TABLE threads ADD COLUMN field_revisions_json TEXT"); } catch {}
 
   return db;
 }
@@ -1757,6 +1761,7 @@ export function getThreadStateFromDb() {
       archived: rowBool(row.archived),
       tags: Array.isArray(rowMeta.tags) ? rowMeta.tags : [],
       favorite: Boolean(rowMeta.favorite),
+      revision: Number(row.revision || 0),
       updatedAt: row.updated_at
     };
   }
@@ -1782,39 +1787,141 @@ export function getThreadStateFromDb() {
   };
 }
 
-export function upsertThreadMeta(key, patch = {}) {
-  const cleanKey = cleanString(key, 320);
-  if (!cleanKey) throw new Error("Thread key is required.");
+function cleanTags(value) {
+  const tags = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const result = [];
+  for (const raw of tags) {
+    const tag = cleanString(raw, 40);
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
+    result.push(tag);
+    if (result.length >= 20) break;
+  }
+  return result;
+}
 
-  const existing = database().prepare("SELECT * FROM threads WHERE key = ?").get(cleanKey);
+function threadStateError(message, status = 400, code = "THREAD_STATE_INVALID") {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
+function threadStateConflict(conflicts) {
+  const error = threadStateError("Thread state conflict.", 409, "THREAD_STATE_CONFLICT");
+  error.conflicts = conflicts;
+  return error;
+}
+
+function publicThreadItem(key, row, next) {
+  return {
+    key,
+    title: next.title || "",
+    group: next.group || "",
+    pinned: Boolean(next.pinned),
+    archived: Boolean(next.archived),
+    tags: Array.isArray(next.meta?.tags) ? next.meta.tags : [],
+    favorite: Boolean(next.meta?.favorite),
+    revision: Number(row?.revision || 0),
+    updatedAt: row?.updated_at || ""
+  };
+}
+
+function expectedRevisionValue(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const revision = Number(value);
+  return Number.isFinite(revision) && revision >= 0 ? revision : null;
+}
+
+function applyThreadMetaPatch(db, cleanKey, patch = {}, options = {}) {
+  const hasTagsReplace = Object.hasOwn(patch, "tags");
+  const hasTagOps = Object.hasOwn(patch, "addTags") || Object.hasOwn(patch, "removeTags");
+  if (hasTagsReplace && hasTagOps) {
+    throw threadStateError("Use either tags replacement or addTags/removeTags, not both.", 400);
+  }
+
+  const existing = db.prepare("SELECT * FROM threads WHERE key = ?").get(cleanKey);
   const current = nowIso();
+  const currentMeta = fromJson(existing?.meta_json, {}) || {};
+  const currentTags = cleanTags(currentMeta.tags);
+  const fieldRevisions = fromJson(existing?.field_revisions_json, {}) || {};
+  const currentRevision = Number(existing?.revision || 0);
+  const expectedRevision = expectedRevisionValue(options.expectedRevision);
+  const touched = new Set();
+  const mergeSafeFields = new Set();
+
   const next = {
     title: Object.hasOwn(patch, "title") ? cleanString(patch.title, 160) : existing?.title || "",
     group: Object.hasOwn(patch, "group") ? cleanString(patch.group, 80) : existing?.group_name || "",
     pinned: Object.hasOwn(patch, "pinned") ? Boolean(patch.pinned) : rowBool(existing?.pinned),
     archived: Object.hasOwn(patch, "archived") ? Boolean(patch.archived) : rowBool(existing?.archived),
     meta: {
-      ...(fromJson(existing?.meta_json, {}) || {}),
+      ...currentMeta,
       ...(patch.meta && typeof patch.meta === "object" ? patch.meta : {})
     }
   };
-  if (Object.hasOwn(patch, "tags")) next.meta.tags = Array.isArray(patch.tags) ? patch.tags.map((tag) => cleanString(tag, 40)).filter(Boolean).slice(0, 20) : [];
+
+  for (const field of ["title", "group", "pinned", "archived", "favorite"]) {
+    if (Object.hasOwn(patch, field)) touched.add(field);
+  }
+  if (patch.meta && typeof patch.meta === "object") touched.add("meta");
+
+  if (hasTagsReplace) {
+    next.meta.tags = cleanTags(patch.tags);
+    touched.add("tags");
+  } else if (hasTagOps) {
+    const remove = new Set(cleanTags(patch.removeTags));
+    const merged = currentTags.filter((tag) => !remove.has(tag));
+    next.meta.tags = cleanTags([...merged, ...cleanTags(patch.addTags)]);
+    touched.add("tags");
+    mergeSafeFields.add("tags");
+  } else if (Array.isArray(next.meta.tags)) {
+    next.meta.tags = currentTags;
+  }
+
   if (Object.hasOwn(patch, "favorite")) next.meta.favorite = Boolean(patch.favorite);
 
-  database()
-    .prepare(`
-      INSERT INTO threads (
-        key, provider, session_id, workspace_id, title, group_name, pinned,
-        archived, source, meta_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET
-        title = excluded.title,
-        group_name = excluded.group_name,
-        pinned = excluded.pinned,
-        archived = excluded.archived,
-        meta_json = excluded.meta_json,
-        updated_at = excluded.updated_at
-    `)
+  if (expectedRevision !== null && currentRevision > expectedRevision) {
+    const conflictingFields = [...touched].filter((field) => {
+      if (mergeSafeFields.has(field)) return false;
+      return Number(fieldRevisions[field] || 0) > expectedRevision;
+    });
+    if (conflictingFields.length) {
+      throw threadStateConflict([{
+        key: cleanKey,
+        expectedRevision,
+        actualRevision: currentRevision,
+        conflictingFields,
+        current: publicThreadItem(cleanKey, { ...existing, revision: currentRevision, updated_at: existing?.updated_at || "" }, {
+          title: existing?.title || "",
+          group: existing?.group_name || "",
+          pinned: rowBool(existing?.pinned),
+          archived: rowBool(existing?.archived),
+          meta: currentMeta
+        })
+      }]);
+    }
+  }
+
+  const nextRevision = currentRevision + 1;
+  for (const field of touched) fieldRevisions[field] = nextRevision;
+
+  db.prepare(`
+    INSERT INTO threads (
+      key, provider, session_id, workspace_id, title, group_name, pinned,
+      archived, source, meta_json, revision, field_revisions_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      title = excluded.title,
+      group_name = excluded.group_name,
+      pinned = excluded.pinned,
+      archived = excluded.archived,
+      meta_json = excluded.meta_json,
+      revision = excluded.revision,
+      field_revisions_json = excluded.field_revisions_json,
+      updated_at = excluded.updated_at
+  `)
     .run(
       cleanKey,
       patch.provider || existing?.provider || "",
@@ -1826,25 +1933,55 @@ export function upsertThreadMeta(key, patch = {}) {
       boolInt(next.archived),
       patch.source || existing?.source || "local",
       toJson(next.meta),
+      nextRevision,
+      toJson(fieldRevisions),
       existing?.created_at || current,
       current
     );
 
   if (cleanKey.startsWith("fork:")) {
     const forkId = cleanKey.slice("fork:".length);
-    database()
-      .prepare(`
-        UPDATE thread_forks
-        SET title = COALESCE(NULLIF(?, ''), title),
-            group_name = ?,
-            pinned = ?,
-            archived = ?,
-            updated_at = ?
-        WHERE id = ?
-      `)
+    db.prepare(`
+      UPDATE thread_forks
+      SET title = COALESCE(NULLIF(?, ''), title),
+          group_name = ?,
+          pinned = ?,
+          archived = ?,
+          updated_at = ?
+      WHERE id = ?
+    `)
       .run(next.title, next.group, boolInt(next.pinned), boolInt(next.archived), current, forkId);
   }
+}
 
+export function upsertThreadMeta(key, patch = {}, options = {}) {
+  const cleanKey = cleanString(key, 320);
+  if (!cleanKey) throw new Error("Thread key is required.");
+
+  applyThreadMetaPatch(database(), cleanKey, patch, options);
+  return getThreadStateFromDb();
+}
+
+export function upsertThreadMetaBatch(updates = []) {
+  if (!Array.isArray(updates) || updates.length === 0) throw new Error("At least one thread update is required.");
+  const bounded = updates.slice(0, 200).map((update) => ({
+    key: cleanString(update?.key, 320),
+    patch: update?.patch || {},
+    expectedRevision: update?.expectedRevision
+  }));
+  if (bounded.some((update) => !update.key)) throw new Error("Thread key is required.");
+
+  const db = database();
+  db.exec("BEGIN");
+  try {
+    for (const update of bounded) {
+      applyThreadMetaPatch(db, update.key, update.patch, { expectedRevision: update.expectedRevision });
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
   return getThreadStateFromDb();
 }
 

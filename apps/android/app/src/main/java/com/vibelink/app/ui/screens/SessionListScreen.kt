@@ -1,6 +1,9 @@
 package com.vibelink.app.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +27,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
@@ -38,6 +42,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -50,15 +55,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.Button
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -66,21 +75,23 @@ import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ConversationItem
 import com.vibelink.app.network.CommandDefinition
 import com.vibelink.app.network.ThreadPatch
+import com.vibelink.app.network.SearchResult
 import com.vibelink.app.ui.i18n.AppStrings
 import com.vibelink.app.ui.i18n.LocalAppStrings
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SessionListScreen(
     apiClient: ApiClient,
     viewModel: SessionListViewModel,
     onSelectConversation: (ConversationItem) -> Unit,
+    onOpenSearchResult: (SearchResult) -> Unit,
     onNewConversation: () -> Unit,
     onLogout: () -> Unit,
     onOpenLiveCall: () -> Unit,
     onOpenWorkspace: () -> Unit,
     onOpenReview: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenSettings: (String) -> Unit,
 ) {
     val conversations by viewModel.conversations.collectAsState()
     val query by viewModel.query.collectAsState()
@@ -91,7 +102,15 @@ fun SessionListScreen(
     val error by viewModel.error.collectAsState()
     val searchResults by viewModel.searchResults.collectAsState()
     val searchLoading by viewModel.searchLoading.collectAsState()
+    val searchAppending by viewModel.searchAppending.collectAsState()
     val searchError by viewModel.searchError.collectAsState()
+    val searchNextCursor by viewModel.searchNextCursor.collectAsState()
+    val searchScope by viewModel.searchScope.collectAsState()
+    val selectedSearchTag by viewModel.selectedSearchTag.collectAsState()
+    val selectedTags by viewModel.selectedTags.collectAsState()
+    val availableTags by viewModel.availableTags.collectAsState()
+    val selectedConversationKeys by viewModel.selectedConversationKeys.collectAsState()
+    val selectionMode = selectedConversationKeys.isNotEmpty()
     val commands by viewModel.commands.collectAsState()
     val strings = LocalAppStrings.current
 
@@ -103,92 +122,136 @@ fun SessionListScreen(
     val showFavorites by viewModel.showFavorites.collectAsState()
     var tagsTarget by remember { mutableStateOf<ConversationItem?>(null) }
     var tagsText by remember { mutableStateOf("") }
+    var batchAddTagsOpen by remember { mutableStateOf(false) }
+    var batchRemoveTagsOpen by remember { mutableStateOf(false) }
+    var batchTagsText by remember { mutableStateOf("") }
     var commandPaletteOpen by remember { mutableStateOf(false) }
     var commandFilter by remember { mutableStateOf("") }
+    var focusSearchRequested by remember { mutableStateOf(false) }
+    var tagMenuOpen by remember { mutableStateOf(false) }
+    val searchFocusRequester = remember { FocusRequester() }
+    val unifiedSearchActive = query.trim().length >= 2
+    val searchScopes = listOf(
+        "all" to "All",
+        "sessions" to "Sessions",
+        "messages" to "Messages",
+        "files" to "Files",
+        "tasks" to "Tasks",
+    )
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(strings.currentLanguage) {
+        viewModel.setLanguage(strings.currentLanguage)
         viewModel.load(apiClient)
+    }
+
+    LaunchedEffect(focusSearchRequested) {
+        if (focusSearchRequested) {
+            searchFocusRequester.requestFocus()
+            focusSearchRequested = false
+        }
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            strings.brandName,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Clip,
-                        )
-                        Text(
-                            text = desktopStatus,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    if (selectionMode) {
+                        Text("${selectedConversationKeys.size} selected", style = MaterialTheme.typography.titleMedium)
+                    } else {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                strings.brandName,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Clip,
+                            )
+                            Text(
+                                text = desktopStatus,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 },
                 actions = {
-                    IconButton(onClick = onNewConversation) {
-                        Icon(Icons.Default.Add, contentDescription = strings.newChat)
-                    }
-                    IconButton(onClick = { viewModel.load(apiClient, isRefresh = true) }) {
-                        if (refreshing) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
+                    if (selectionMode) {
+                        IconButton(onClick = { viewModel.batchSetFavorite(apiClient, true) }) {
+                            Icon(Icons.Default.Favorite, contentDescription = "Favorite selected")
                         }
-                    }
-                    Box {
-                    IconButton(onClick = { topMenuOpen = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = strings.more)
+                        IconButton(onClick = { viewModel.batchSetFavorite(apiClient, false) }) {
+                            Icon(Icons.Default.FavoriteBorder, contentDescription = "Remove favorite selected")
                         }
-                        DropdownMenu(expanded = topMenuOpen, onDismissRequest = { topMenuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Command palette") },
-                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                                onClick = { topMenuOpen = false; commandPaletteOpen = true },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(strings.liveCall) },
-                                leadingIcon = { Icon(Icons.Default.Chat, contentDescription = null) },
-                                onClick = {
-                                    topMenuOpen = false
-                                    onOpenLiveCall()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(strings.workspace) },
-                                leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
-                                onClick = {
-                                    topMenuOpen = false
-                                    onOpenWorkspace()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(strings.settings) },
-                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                                onClick = {
-                                    topMenuOpen = false
-                                    onOpenSettings()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (showArchived) strings.showActiveChats else strings.showArchivedChats) },
-                                onClick = {
-                                    topMenuOpen = false
-                                    viewModel.setShowArchived(!showArchived)
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(strings.logout) },
-                                onClick = {
-                                    topMenuOpen = false
-                                    onLogout()
-                                },
-                            )
+                        IconButton(onClick = { batchTagsText = ""; batchAddTagsOpen = true }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Add tags to selected")
+                        }
+                        IconButton(onClick = { batchTagsText = ""; batchRemoveTagsOpen = true }) {
+                            Icon(Icons.Default.Archive, contentDescription = "Remove tags from selected")
+                        }
+                        IconButton(onClick = viewModel::clearSelection) {
+                            Icon(Icons.Default.Close, contentDescription = strings.close)
+                        }
+                    } else {
+                        IconButton(onClick = onNewConversation) {
+                            Icon(Icons.Default.Add, contentDescription = strings.newChat)
+                        }
+                        IconButton(onClick = { viewModel.load(apiClient, isRefresh = true) }) {
+                            if (refreshing) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
+                            }
+                        }
+                        Box {
+                            IconButton(onClick = { topMenuOpen = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = strings.more)
+                            }
+                            DropdownMenu(expanded = topMenuOpen, onDismissRequest = { topMenuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Command palette") },
+                                    leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                    onClick = { topMenuOpen = false; commandPaletteOpen = true },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(strings.liveCall) },
+                                    leadingIcon = { Icon(Icons.Default.Chat, contentDescription = null) },
+                                    onClick = {
+                                        topMenuOpen = false
+                                        onOpenLiveCall()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(strings.workspace) },
+                                    leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                                    onClick = {
+                                        topMenuOpen = false
+                                        onOpenWorkspace()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(strings.settings) },
+                                    leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                    onClick = {
+                                        topMenuOpen = false
+                                        onOpenSettings("")
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (showArchived) strings.showActiveChats else strings.showArchivedChats) },
+                                    onClick = {
+                                        topMenuOpen = false
+                                        viewModel.setShowArchived(!showArchived)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(strings.logout) },
+                                    onClick = {
+                                        topMenuOpen = false
+                                        onLogout()
+                                    },
+                                )
+                            }
                         }
                     }
                 },
@@ -205,6 +268,7 @@ fun SessionListScreen(
                 onValueChange = viewModel::setQuery,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .focusRequester(searchFocusRequester)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 label = { Text(strings.searchChats) },
@@ -214,6 +278,7 @@ fun SessionListScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -236,18 +301,58 @@ fun SessionListScreen(
                         Icon(if (showFavorites) Icons.Default.Favorite else Icons.Default.FavoriteBorder, contentDescription = null, modifier = Modifier.size(16.dp))
                     },
                 )
+                Box {
+                    AssistChip(
+                        onClick = { tagMenuOpen = true },
+                        label = { Text(if (selectedTags.isEmpty()) "All tags" else "Tags: ${selectedTags.size}") },
+                    )
+                    DropdownMenu(expanded = tagMenuOpen, onDismissRequest = { tagMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("All tags") },
+                            onClick = {
+                                viewModel.clearTagFilters()
+                                tagMenuOpen = false
+                            },
+                        )
+                        availableTags.forEach { tag ->
+                            DropdownMenuItem(
+                                text = { Text(tag) },
+                                onClick = {
+                                    viewModel.toggleTagFilter(tag)
+                                },
+                            )
+                        }
+                    }
+                }
                 AssistChip(
                     onClick = { viewModel.load(apiClient, isRefresh = true) },
                     label = { Text(strings.syncNow) },
                 )
             }
 
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                searchScopes.forEach { (scope, label) ->
+                    FilterChip(
+                        selected = searchScope == scope,
+                        onClick = { viewModel.setSearchScope(scope) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+
             Box(modifier = Modifier.fillMaxSize()) {
                 when {
-                    loading && conversations.isEmpty() -> {
+                    loading && conversations.isEmpty() && !unifiedSearchActive -> {
                         CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                     }
-                    error.isNotBlank() && conversations.isEmpty() -> {
+                    error.isNotBlank() && conversations.isEmpty() && !unifiedSearchActive -> {
                         EmptyOrErrorState(
                             title = strings.couldNotLoadChats,
                             body = error,
@@ -256,7 +361,7 @@ fun SessionListScreen(
                             modifier = Modifier.align(Alignment.Center),
                         )
                     }
-                    conversations.isEmpty() -> {
+                    conversations.isEmpty() && !unifiedSearchActive -> {
                         EmptyOrErrorState(
                             title = if (showArchived) strings.noArchivedChats else strings.noChatsYet,
                             body = if (showArchived) strings.archivedChatsHint else strings.emptyChatsHint,
@@ -271,31 +376,41 @@ fun SessionListScreen(
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            if (query.trim().length >= 2 && searchLoading) {
+                            if (unifiedSearchActive && searchLoading) {
                                 item(key = "remote-search-loading") {
                                     ListItem(headlineContent = { Text("Searching…") }, supportingContent = { Text("Loading unified results") })
                                 }
                             }
-                            if (query.trim().length >= 2 && searchError.isNotBlank()) {
+                            if (unifiedSearchActive && searchError.isNotBlank()) {
                                 item(key = "remote-search-error") {
                                     ListItem(headlineContent = { Text("Search failed") }, supportingContent = { Text(searchError) })
                                 }
                             }
-                            if (query.trim().length >= 2 && !searchLoading && searchError.isBlank() && searchResults.isEmpty()) {
+                            if (unifiedSearchActive && !searchLoading && searchError.isBlank() && searchResults.isEmpty()) {
                                 item(key = "remote-search-empty") {
                                     ListItem(headlineContent = { Text("No matching results") })
                                 }
                             }
-                            if (query.trim().length >= 2 && searchResults.isNotEmpty()) {
+                            if (unifiedSearchActive && searchResults.isNotEmpty()) {
                                 item(key = "remote-search-header") { Text("Search results", style = MaterialTheme.typography.titleSmall) }
-                                items(searchResults, key = { "search:${it.kind}:${it.id}" }) { result ->
+                                items(searchResults, key = { "search:${it.kind}:${it.id}:${it.turnId}:${it.path}" }) { result ->
                                     ListItem(
                                         headlineContent = { Text(result.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                         supportingContent = { Text(result.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                                        modifier = Modifier.clickable {
-                                            onSelectConversation(ConversationItem(key = "${result.kind}:${result.id}", kind = result.kind, id = result.id, provider = result.provider, title = result.title, preview = result.snippet))
-                                        },
+                                        leadingContent = { Text(result.kind, style = MaterialTheme.typography.labelSmall) },
+                                        modifier = Modifier.clickable { onOpenSearchResult(result) },
                                     )
+                                }
+                                if (searchAppending) {
+                                    item(key = "remote-search-appending") {
+                                        ListItem(headlineContent = { Text("Loading more…") })
+                                    }
+                                } else if (searchNextCursor.isNotBlank()) {
+                                    item(key = "remote-search-load-more") {
+                                        Button(onClick = { viewModel.loadMoreSearch(apiClient) }, modifier = Modifier.fillMaxWidth()) {
+                                            Text("Load more")
+                                        }
+                                    }
                                 }
                             }
                             if (SessionListErrorPolicy.showCachedContentError(error, conversations.size)) {
@@ -310,7 +425,12 @@ fun SessionListScreen(
                             items(items = conversations, key = { it.key }) { item ->
                                 ConversationCard(
                                     item = item,
-                                    onClick = { onSelectConversation(item) },
+                                    selected = item.key in selectedConversationKeys,
+                                    selectionMode = selectionMode,
+                                    onClick = {
+                                        if (selectionMode) viewModel.toggleConversationSelection(item) else onSelectConversation(item)
+                                    },
+                                    onLongClick = { viewModel.toggleConversationSelection(item) },
                                     onRename = {
                                         renameTarget = item
                                         renameText = item.title
@@ -387,6 +507,34 @@ fun SessionListScreen(
         )
     }
 
+    if (batchAddTagsOpen) {
+        TextInputDialog(
+            title = "Add tags to selected",
+            value = batchTagsText,
+            onValueChange = { batchTagsText = it },
+            confirmText = strings.save,
+            onDismiss = { batchAddTagsOpen = false },
+            onConfirm = {
+                viewModel.batchAddTags(apiClient, batchTagsText.split(",").map { it.trim() }.filter { it.isNotBlank() })
+                batchAddTagsOpen = false
+            },
+        )
+    }
+
+    if (batchRemoveTagsOpen) {
+        TextInputDialog(
+            title = "Remove tags from selected",
+            value = batchTagsText,
+            onValueChange = { batchTagsText = it },
+            confirmText = strings.save,
+            onDismiss = { batchRemoveTagsOpen = false },
+            onConfirm = {
+                viewModel.batchRemoveTags(apiClient, batchTagsText.split(",").map { it.trim() }.filter { it.isNotBlank() })
+                batchRemoveTagsOpen = false
+            },
+        )
+    }
+
     if (commandPaletteOpen) {
         AlertDialog(
             onDismissRequest = { commandPaletteOpen = false },
@@ -395,24 +543,30 @@ fun SessionListScreen(
                 Column {
                     OutlinedTextField(value = commandFilter, onValueChange = { commandFilter = it }, label = { Text("Filter commands") }, singleLine = true)
                     LazyColumn {
-                        items(commands.filter { commandFilter.isBlank() || it.name.contains(commandFilter, true) || it.description.contains(commandFilter, true) }, key = { it.id }) { command ->
+                        items(filterSessionCommands(commands, commandFilter), key = { it.id }) { command ->
+                            val plan = resolveSessionCommand(command)
+                            val disabledReason = (plan as? SessionCommand.Disabled)?.reason.orEmpty()
                             ListItem(
-                                headlineContent = { Text(command.name) },
-                                supportingContent = { Text(command.description) },
-                                modifier = Modifier.clickable {
+                                headlineContent = { Text(command.ui.label.ifBlank { command.name }) },
+                                supportingContent = {
+                                    Text(if (disabledReason.isBlank()) command.ui.detail.ifBlank { command.description } else disabledReason)
+                                },
+                                modifier = Modifier.clickable(enabled = plan !is SessionCommand.Disabled) {
                                     commandPaletteOpen = false
-                                    when (command.id) {
-                                        "session.new" -> onNewConversation()
-                                        "sessions.refresh" -> viewModel.load(apiClient, isRefresh = true)
-                                        "workspace.open" -> onOpenWorkspace()
-                                        "approvals.review" -> onOpenSettings()
+                                    when (plan) {
+                                        SessionCommand.NewSession -> onNewConversation()
+                                        SessionCommand.Refresh -> viewModel.load(apiClient, isRefresh = true)
+                                        SessionCommand.FocusSearch -> focusSearchRequested = true
+                                        is SessionCommand.Navigate -> when (plan.route) {
+                                            "call" -> onOpenLiveCall()
+                                            "workspace" -> onOpenWorkspace()
+                                            "review" -> onOpenReview()
+                                            "settings" -> onOpenSettings("")
+                                            "settings?section=approvals" -> onOpenSettings("approvals")
+                                        }
+                                        is SessionCommand.Disabled -> Unit
                                     }
                                 },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("PR Review") },
-                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                                onClick = { topMenuOpen = false; onOpenReview() },
                             )
                         }
                     }
@@ -449,10 +603,14 @@ private fun CachedRefreshError(message: String, retryText: String, onRetry: () -
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationCard(
     item: ConversationItem,
+    selected: Boolean = false,
+    selectionMode: Boolean = false,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
     onRename: () -> Unit,
     onPin: () -> Unit,
     onFavorite: () -> Unit,
@@ -475,13 +633,13 @@ private fun ConversationCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (item.kind == "desktop") {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surface
+            containerColor = when {
+                selected -> MaterialTheme.colorScheme.secondaryContainer
+                item.kind == "desktop" -> MaterialTheme.colorScheme.primaryContainer
+                else -> MaterialTheme.colorScheme.surface
             },
         ),
     ) {
@@ -508,6 +666,17 @@ private fun ConversationCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (item.tags.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            item.tags.take(3).forEach { tag ->
+                                AssistChip(onClick = {}, label = { Text(tag, maxLines = 1) })
+                            }
+                            if (item.tags.size > 3) {
+                                Text("+${item.tags.size - 3}", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
                 }
                 if (item.pinned) {
                     Icon(
@@ -523,7 +692,7 @@ private fun ConversationCard(
                     color = statusColor,
                     fontFamily = FontFamily.Monospace,
                 )
-                if (item.kind != "desktop") {
+                if (item.kind != "desktop" && !selectionMode) {
                     Box {
                         IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(36.dp)) {
                             Icon(Icons.Default.MoreVert, contentDescription = strings.chatActions)

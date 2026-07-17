@@ -83,6 +83,101 @@ const PROVIDERS = [
   }
 ];
 
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
+
+function cleanCatalogText(value, maxLength) {
+  return String(value || "").replace(CONTROL_CHARACTERS, "").trim().slice(0, maxLength);
+}
+
+function builtinCatalog(provider, status = "builtin", error = "") {
+  return {
+    models: provider.models.map((model) => ({ ...model })),
+    catalog: {
+      status,
+      source: "builtin",
+      fetchedAt: "",
+      expiresAt: "",
+      error
+    }
+  };
+}
+
+function normalizeCatalogModels(provider, value) {
+  if (!Array.isArray(value)) throw new Error("Provider model catalog must be an array.");
+
+  const models = [];
+  const seen = new Set();
+  for (const model of provider.models.filter((item) => item.default)) {
+    models.push({ ...model });
+    seen.add(model.id);
+  }
+  for (const item of value.slice(0, 200)) {
+    if (!item || typeof item !== "object" || typeof item.id !== "string") continue;
+    const rawId = item.id.trim();
+    if (!rawId || CONTROL_CHARACTER_PATTERN.test(rawId)) continue;
+    const id = rawId.slice(0, 160);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const label = cleanCatalogText(item.label, 160);
+    models.push({
+      id,
+      label: label || id,
+      ...(id === provider.defaultModel ? { default: true } : {})
+    });
+  }
+  if (models.length === provider.models.filter((item) => item.default).length) {
+    throw new Error("Provider model catalog did not contain a valid model.");
+  }
+  return models;
+}
+
+export function createProviderCatalogResolver({ loaders = {}, ttlMs = 5 * 60 * 1000, now = Date.now } = {}) {
+  const cache = new Map();
+
+  return {
+    async resolve(provider, { fresh = false } = {}) {
+      const loader = loaders[provider.id];
+      if (typeof loader !== "function") return builtinCatalog(provider);
+
+      const current = Number(now());
+      const cached = cache.get(provider.id);
+      if (!fresh && cached && cached.expiresAtMs > current) {
+        return {
+          models: cached.models.map((model) => ({ ...model })),
+          catalog: { ...cached.catalog, status: "cached" }
+        };
+      }
+
+      try {
+        const loaded = await loader({ providerId: provider.id });
+        const models = normalizeCatalogModels(provider, loaded?.models);
+        const fetchedAt = new Date(current).toISOString();
+        const expiresAtMs = current + Math.max(1000, Number(ttlMs) || 0);
+        const result = {
+          models,
+          catalog: {
+            status: "fresh",
+            source: cleanCatalogText(loaded?.source, 120) || provider.id,
+            fetchedAt,
+            expiresAt: new Date(expiresAtMs).toISOString(),
+            error: ""
+          }
+        };
+        cache.set(provider.id, { ...result, expiresAtMs });
+        return result;
+      } catch (error) {
+        const message = cleanCatalogText(error?.message || error || "Provider model catalog refresh failed.", 500);
+        if (!cached) return builtinCatalog(provider, "fallback", message);
+        return {
+          models: cached.models.map((model) => ({ ...model })),
+          catalog: { ...cached.catalog, status: "stale", error: message }
+        };
+      }
+    }
+  };
+}
+
 function commandConfigured(settings = {}, provider) {
   if (!provider.settingKey) return true;
   const value = settings[provider.settingKey];
@@ -135,9 +230,12 @@ function readinessFor(provider, settings = {}, probes = {}) {
   };
 }
 
-export async function buildProviderRegistry({ settings = {}, probes = {} } = {}) {
-  const providers = PROVIDERS.map((provider) => {
+export async function buildProviderRegistry({ settings = {}, probes = {}, catalogResolver = null, freshCatalogs = false } = {}) {
+  const providers = await Promise.all(PROVIDERS.map(async (provider) => {
     const readiness = readinessFor(provider, settings, probes);
+    const catalog = catalogResolver
+      ? await catalogResolver.resolve(provider, { fresh: freshCatalogs })
+      : builtinCatalog(provider);
     return {
       id: provider.id,
       label: provider.label,
@@ -146,11 +244,12 @@ export async function buildProviderRegistry({ settings = {}, probes = {} } = {})
       status: readiness.status,
       reason: readiness.reason,
       defaultModel: provider.defaultModel,
-      models: provider.models,
+      models: catalog.models,
+      catalog: catalog.catalog,
       reasoningEfforts: provider.reasoningEfforts,
       capabilities: provider.capabilities
     };
-  });
+  }));
 
   const defaultProvider =
     providers.find((provider) => provider.id === "codex" && provider.available)?.id ||
@@ -159,6 +258,7 @@ export async function buildProviderRegistry({ settings = {}, probes = {} } = {})
 
   return {
     version: 1,
+    catalogVersion: 1,
     defaultProvider,
     providers,
     generatedAt: new Date().toISOString()

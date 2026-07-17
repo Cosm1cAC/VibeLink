@@ -7,6 +7,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.ui.i18n.LocalAppStrings
 import kotlinx.coroutines.launch
 
 /**
@@ -23,6 +24,7 @@ fun LegacyLoginScreen(
     var status by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val strings = LocalAppStrings.current
 
     Scaffold(
         topBar = {
@@ -36,7 +38,7 @@ fun LegacyLoginScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text("Bridge 连接", style = MaterialTheme.typography.titleMedium)
+            Text(strings.legacyLoginBridgeConnection, style = MaterialTheme.typography.titleMedium)
 
             OutlinedTextField(
                 value = bridgeUrl,
@@ -50,8 +52,8 @@ fun LegacyLoginScreen(
             OutlinedTextField(
                 value = pairingToken,
                 onValueChange = { pairingToken = it },
-                label = { Text("配对 Token") },
-                placeholder = { Text("从 Settings 获取") },
+                label = { Text(strings.legacyPairingToken) },
+                placeholder = { Text(strings.legacyPairingTokenHint) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -60,28 +62,28 @@ fun LegacyLoginScreen(
                 onClick = {
                     scope.launch {
                         loading = true
-                        status = "连接中…"
+                        status = strings.legacyConnecting
                         apiClient.baseUrl = bridgeUrl.trim()
                         try {
                             val health = apiClient.checkStatus()
                             if (!health.ok) {
-                                status = "服务不可用"
+                                status = strings.legacyServiceUnavailable
                                 return@launch
                             }
                             if (pairingToken.isNotBlank()) {
                                 val login = apiClient.login(pairingToken.trim())
                                 if (login.token.isNotBlank()) {
                                     apiClient.token = login.token
-                                    status = "登录成功"
+                                    status = strings.legacyLoginSuccess
                                     onLoginSuccess()
                                 } else {
-                                    status = "登录失败：token 无效"
+                                    status = strings.legacyInvalidToken
                                 }
                             } else {
-                                status = "已连接到服务，输入配对 Token 登录"
+                                status = strings.legacyConnectedPrompt
                             }
                         } catch (e: Exception) {
-                            status = "连接失败: ${e.message}"
+                            status = strings.legacyConnectionFailed(e.message.orEmpty())
                         } finally {
                             loading = false
                         }
@@ -91,14 +93,14 @@ fun LegacyLoginScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 if (loading) CircularProgressIndicator(modifier = Modifier.size(16.dp))
-                else Text("连接")
+                else Text(strings.legacyConnect)
             }
 
             if (status.isNotBlank()) {
                 Text(
                     text = status,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (status.contains("失败") || status.contains("错误"))
+                    color = if (strings.isNegativeStatus(status) || status.contains(strings.error))
                         MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -13,6 +13,7 @@ import com.vibelink.app.network.LiveCallEvent
 import com.vibelink.app.ui.components.LevelIndicator
 import com.vibelink.app.ui.components.QaCard
 import com.vibelink.app.ui.components.TranscriptFeed
+import com.vibelink.app.ui.i18n.LocalAppStrings
 import kotlinx.coroutines.launch
 
 data class LegacyQaPair(
@@ -40,16 +41,17 @@ fun LegacyCallScreen(
     var errorText by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val strings = LocalAppStrings.current
 
     // Mock question input
-    var questionInput by remember { mutableStateOf("请介绍一下你自己") }
+    var questionInput by remember { mutableStateOf(strings.legacyQuestionPlaceholder) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Live Call") },
                 actions = {
-                    TextButton(onClick = onLogout) { Text("断开") }
+                    TextButton(onClick = onLogout) { Text(strings.legacyDisconnect) }
                 }
             )
         }
@@ -80,7 +82,7 @@ fun LegacyCallScreen(
                             strokeWidth = 2.dp,
                             color = MaterialTheme.colorScheme.primary,
                         )
-                        Text("通话中 ($sessionId)", style = MaterialTheme.typography.bodySmall)
+                        Text(strings.legacyCallActive(sessionId), style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
@@ -99,12 +101,12 @@ fun LegacyCallScreen(
                                     statusText = "Session ${s.id.take(8)}…"
                                 }
                             } catch (e: Exception) {
-                                errorText = "创建失败: ${e.message}"
+                                errorText = strings.legacyCreateFailed(e.message.orEmpty())
                             } finally { loading = false }
                         }
                     },
                     enabled = !sessionActive && !loading
-                ) { Text("创建通话") }
+                ) { Text(strings.legacyCreateCall) }
 
                 Button(
                     onClick = {
@@ -112,9 +114,9 @@ fun LegacyCallScreen(
                             try {
                                 apiClient.stopSession(sessionId)
                                 sessionActive = false
-                                statusText = "已停止"
+                                statusText = strings.legacyStopped
                             } catch (e: Exception) {
-                                errorText = "停止失败: ${e.message}"
+                                errorText = strings.legacyStopFailed(e.message.orEmpty())
                             }
                         }
                     },
@@ -122,7 +124,7 @@ fun LegacyCallScreen(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error
                     )
-                ) { Text("停止通话") }
+                ) { Text(strings.legacyStopCall) }
             }
 
             if (errorText.isNotBlank()) {
@@ -134,9 +136,9 @@ fun LegacyCallScreen(
             if (sessionActive) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("音频电平", style = MaterialTheme.typography.labelMedium)
-                        LevelIndicator("远程", remoteLevel)
-                        LevelIndicator("本地", localLevel)
+                        Text(strings.legacyAudioLevel, style = MaterialTheme.typography.labelMedium)
+                        LevelIndicator(strings.legacyRemote, remoteLevel)
+                        LevelIndicator(strings.legacyLocal, localLevel)
                     }
                 }
             }
@@ -145,7 +147,7 @@ fun LegacyCallScreen(
             if (sessionActive) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("模拟问题", style = MaterialTheme.typography.labelMedium)
+                        Text(strings.legacyMockQuestion, style = MaterialTheme.typography.labelMedium)
                         OutlinedTextField(
                             value = questionInput,
                             onValueChange = { questionInput = it },
@@ -156,12 +158,12 @@ fun LegacyCallScreen(
                             scope.launch {
                                 try {
                                     apiClient.sendTranscript(sessionId, questionInput, true)
-                                    statusText = "问题已发送"
+                                    statusText = strings.legacyQuestionSent
                                 } catch (e: Exception) {
-                                    errorText = "发送失败: ${e.message}"
+                                    errorText = strings.legacySendFailed(e.message.orEmpty())
                                 }
                             }
-                        }) { Text("发送问题") }
+                        }) { Text(strings.legacySendQuestion) }
                     }
                 }
             }

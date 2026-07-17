@@ -10,7 +10,10 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import com.vibelink.app.MainActivity
+import com.vibelink.app.data.AppLanguage
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.ui.i18n.AppStrings
+import com.vibelink.app.ui.i18n.appStringsFor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,6 +26,7 @@ class LiveCallAudioService : Service() {
     private var streamer: LiveCallAudioStreamer? = null
     private var controlCoordinator: LiveCallControlCoordinator? = null
     private var sessionId: String = ""
+    private var strings: AppStrings = appStringsFor(AppLanguage.Default)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -32,6 +36,7 @@ class LiveCallAudioService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.getStringExtra(EXTRA_LANGUAGE)?.let { strings = appStringsFor(AppLanguage.fromCode(it)) }
         when (intent?.action) {
             ACTION_START -> startStreaming(intent)
             ACTION_PAUSE -> handleControl(ACTION_PAUSE, intent.getBooleanExtra(EXTRA_SYNC_SERVER, false))
@@ -54,12 +59,13 @@ class LiveCallAudioService : Service() {
         val baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
         val token = intent.getStringExtra(EXTRA_TOKEN).orEmpty()
         sessionId = intent.getStringExtra(EXTRA_SESSION_ID).orEmpty()
+        strings = appStringsFor(AppLanguage.fromCode(intent.getStringExtra(EXTRA_LANGUAGE)))
         if (baseUrl.isBlank() || sessionId.isBlank()) {
             stopSelf()
             return
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("正在连接"))
+        startForeground(NOTIFICATION_ID, buildNotification(strings.connecting))
         val apiClient = ApiClient(baseUrl = baseUrl, token = token)
         val file = recordingFile(sessionId)
         val nextStreamer = LiveCallAudioStreamer(apiClient, scope)
@@ -77,7 +83,7 @@ class LiveCallAudioService : Service() {
             context = applicationContext,
             sessionId = sessionId,
             onStatus = { updateNotification(it) },
-            onError = { updateNotification("错误：$it") },
+            onError = { updateNotification(strings.runtimeError(it)) },
             recordingFile = file,
         )
     }
@@ -87,11 +93,11 @@ class LiveCallAudioService : Service() {
             when (action) {
                 ACTION_PAUSE -> {
                     streamer?.pause()
-                    updateNotification("已暂停")
+                    updateNotification(strings.paused)
                 }
                 ACTION_RESUME -> {
                     streamer?.resume()
-                    updateNotification("录音中")
+                    updateNotification(strings.recording)
                 }
                 ACTION_STOP -> stopSelf()
             }
@@ -100,14 +106,14 @@ class LiveCallAudioService : Service() {
 
         val coordinator = controlCoordinator
         if (sessionId.isBlank() || coordinator == null) {
-            updateNotification("控制失败：实时通话尚未连接")
+            updateNotification(strings.liveCallNotConnected)
             return
         }
         scope.launch {
             val pendingText = when (action) {
-                ACTION_PAUSE -> "正在暂停"
-                ACTION_RESUME -> "正在继续"
-                else -> "正在停止"
+                ACTION_PAUSE -> strings.pausing
+                ACTION_RESUME -> strings.resuming
+                else -> strings.stopping
             }
             updateNotification(pendingText)
             runCatching {
@@ -118,17 +124,17 @@ class LiveCallAudioService : Service() {
                 }
             }.onSuccess {
                 when (action) {
-                    ACTION_PAUSE -> updateNotification("已暂停")
-                    ACTION_RESUME -> updateNotification("录音中")
+                    ACTION_PAUSE -> updateNotification(strings.paused)
+                    ACTION_RESUME -> updateNotification(strings.recording)
                     ACTION_STOP -> stopSelf()
                 }
             }.onFailure { error ->
                 val label = when (action) {
-                    ACTION_PAUSE -> "暂停"
-                    ACTION_RESUME -> "继续"
-                    else -> "停止"
+                    ACTION_PAUSE -> strings.pause
+                    ACTION_RESUME -> strings.resume
+                    else -> strings.stop
                 }
-                updateNotification("${label}失败：${error.message ?: "网络请求失败"}")
+                updateNotification(strings.controlFailed(label, error.message ?: strings.networkRequestFailed))
             }
         }
     }
@@ -146,14 +152,14 @@ class LiveCallAudioService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("实时通话助手")
+            .setContentTitle(strings.liveCallNotificationChannel)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setContentIntent(openIntent)
-            .addAction(android.R.drawable.ic_media_pause, "暂停", serviceIntent(ACTION_PAUSE, 1))
-            .addAction(android.R.drawable.ic_media_play, "继续", serviceIntent(ACTION_RESUME, 2))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", serviceIntent(ACTION_STOP, 3))
+            .addAction(android.R.drawable.ic_media_pause, strings.pause, serviceIntent(ACTION_PAUSE, 1))
+            .addAction(android.R.drawable.ic_media_play, strings.resume, serviceIntent(ACTION_RESUME, 2))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, strings.stop, serviceIntent(ACTION_STOP, 3))
             .build()
     }
 
@@ -173,7 +179,8 @@ class LiveCallAudioService : Service() {
             requestCode,
             Intent(this, LiveCallAudioService::class.java)
                 .setAction(action)
-                .putExtra(EXTRA_SYNC_SERVER, true),
+                .putExtra(EXTRA_SYNC_SERVER, true)
+                .putExtra(EXTRA_LANGUAGE, strings.currentLanguage.code),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
     }
@@ -182,10 +189,10 @@ class LiveCallAudioService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "实时通话助手", NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(CHANNEL_ID, strings.liveCallNotificationChannel, NotificationManager.IMPORTANCE_LOW),
         )
         manager.createNotificationChannel(
-            NotificationChannel(PUSH_CHANNEL_ID, "VibeLink 通知", NotificationManager.IMPORTANCE_DEFAULT),
+            NotificationChannel(PUSH_CHANNEL_ID, strings.pushNotificationChannel, NotificationManager.IMPORTANCE_DEFAULT),
         )
     }
 
@@ -205,25 +212,27 @@ class LiveCallAudioService : Service() {
         const val EXTRA_TOKEN = "token"
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_SYNC_SERVER = "syncServer"
+        const val EXTRA_LANGUAGE = "language"
 
-        fun startIntent(context: Context, baseUrl: String, token: String, sessionId: String): Intent {
+        fun startIntent(context: Context, baseUrl: String, token: String, sessionId: String, language: AppLanguage = AppLanguage.Default): Intent {
             return Intent(context, LiveCallAudioService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_BASE_URL, baseUrl)
                 .putExtra(EXTRA_TOKEN, token)
                 .putExtra(EXTRA_SESSION_ID, sessionId)
+                .putExtra(EXTRA_LANGUAGE, language.code)
         }
 
-        fun stopIntent(context: Context): Intent {
-            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_STOP)
+        fun stopIntent(context: Context, language: AppLanguage = AppLanguage.Default): Intent {
+            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_STOP).putExtra(EXTRA_LANGUAGE, language.code)
         }
 
-        fun pauseIntent(context: Context): Intent {
-            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_PAUSE)
+        fun pauseIntent(context: Context, language: AppLanguage = AppLanguage.Default): Intent {
+            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_PAUSE).putExtra(EXTRA_LANGUAGE, language.code)
         }
 
-        fun resumeIntent(context: Context): Intent {
-            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_RESUME)
+        fun resumeIntent(context: Context, language: AppLanguage = AppLanguage.Default): Intent {
+            return Intent(context, LiveCallAudioService::class.java).setAction(ACTION_RESUME).putExtra(EXTRA_LANGUAGE, language.code)
         }
     }
 }

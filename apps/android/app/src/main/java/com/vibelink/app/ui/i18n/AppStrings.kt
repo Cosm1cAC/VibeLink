@@ -4,6 +4,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import com.vibelink.app.data.AppLanguage
 
 class AppStrings(private val appLanguage: AppLanguage) {
+    val currentLanguage: AppLanguage get() = appLanguage
     val languageName: String = select("中文", "English")
     val brandName: String = "VibeLink"
 
@@ -118,6 +119,59 @@ class AppStrings(private val appLanguage: AppLanguage) {
     val resume: String = select("继续", "Resume")
     val startMic: String = select("启动麦克风", "Start mic")
     val stopMic: String = select("停止麦克风", "Stop mic")
+    val foregroundMicHint: String = select(
+        "前台麦克风采集可在后台继续运行；页面恢复后会自动补齐实时通话事件。",
+        "Foreground microphone capture can keep running in the background; live-call events catch up when the page resumes.",
+    )
+    val loadingLiveCallSession: String = select("正在加载会话", "Loading session")
+    val creatingLiveCall: String = select("正在创建实时通话", "Creating live call")
+    val emptyLiveCallSession: String = select("Bridge 返回了空会话", "Bridge returned an empty session")
+    val liveCallStarted: String = select("实时通话已开始", "Live call started")
+    val audioStreamConnected: String = select("音频流已连接", "Audio stream connected")
+    val audioStreamDisconnected: String = select("音频流已断开", "Audio stream disconnected")
+    val asrProviderSelected: String = select("已选择 ASR 提供方", "ASR provider selected")
+    val audioSegmentReady: String = select("语音片段已就绪", "Audio segment ready")
+    val asrCheckpointRecovered: String = select("ASR 检查点已恢复", "ASR checkpoint recovered")
+    val listening: String = select("正在聆听", "Listening")
+    val transcriptReceived: String = select("已收到转录", "Transcript received")
+    val questionDetected: String = select("检测到问题", "Question detected")
+    val assistantThinking: String = select("助手正在思考", "Assistant is thinking")
+    val assistantAnswering: String = select("助手正在回答", "Assistant is answering")
+    val assistantAnswerReady: String = select("助手回答已就绪", "Assistant answer ready")
+    val paused: String = select("已暂停", "Paused")
+    val continued: String = select("已继续", "Resumed")
+    val recording: String = select("录音中", "Recording")
+    val connecting: String = select("正在连接", "Connecting")
+    val pausing: String = select("正在暂停", "Pausing")
+    val resuming: String = select("正在继续", "Resuming")
+    val stopping: String = select("正在停止", "Stopping")
+    val networkRequestFailed: String = select("网络请求失败", "Network request failed")
+    val liveCallNotConnected: String = select("控制失败：实时通话尚未连接", "Control failed: live call is not connected")
+    val liveCallNotificationChannel: String = select("实时通话助手", "Live Call Assistant")
+    val pushNotificationChannel: String = select("VibeLink 通知", "VibeLink notifications")
+    val liveTranscript: String = select("实时转录", "Live transcript")
+    val thinking: String = select("思考中…", "Thinking…")
+    fun liveCallReady(id: String): String = select("实时通话 ${id.take(8)} 已就绪", "Live call ${id.take(8)} is ready")
+    fun loadingLiveCallSessionsFailed(message: String): String = select("加载实时通话会话失败", "Failed to load live-call sessions").withMessage(message)
+    fun loadingLiveCallEventsFailed(message: String): String = select("加载实时通话事件失败", "Failed to load live-call events").withMessage(message)
+    fun createLiveCallFailed(message: String): String = select("创建实时通话失败", "Failed to create live call").withMessage(message)
+    fun stopLiveCallFailed(message: String): String = select("停止实时通话失败", "Failed to stop live call").withMessage(message)
+    fun pauseLiveCallFailed(message: String): String = select("暂停实时通话失败", "Failed to pause live call").withMessage(message)
+    fun resumeLiveCallFailed(message: String): String = select("继续实时通话失败", "Failed to resume live call").withMessage(message)
+    fun asrDiagnosticsRefreshed(): String = select("ASR 诊断已刷新。", "ASR diagnostics refreshed.")
+    fun asrRecoverySent(count: Int): String = select("已为 $count 个检查点发送恢复事件。", "Sent recovery events for $count checkpoint(s).")
+    fun asrCheckpointRecoveryFailed(message: String): String = select("恢复 ASR 检查点失败", "Failed to recover ASR checkpoints").withMessage(message)
+    fun transcriptSent(final: Boolean): String = if (final) select("转录已发送", "Transcript sent") else select("临时转录已发送", "Partial transcript sent")
+    fun sendTranscriptFailed(message: String): String = select("发送转录失败", "Failed to send transcript").withMessage(message)
+    val createOrSelectLiveCallFirst: String = select("请先创建或选择实时通话。", "Create or select a live call first.")
+    val backgroundMicServiceStarted: String = select("后台麦克风服务已启动", "Background microphone service started")
+    val startingMic: String = select("正在启动麦克风", "Starting microphone")
+    fun parseLiveCallEventFailed(message: String): String = select("解析实时通话事件失败", "Failed to parse live-call event").withMessage(message)
+    val liveCallEventStreamDisconnected: String = select("实时通话事件流已断开，正在重连", "Live-call event stream disconnected; reconnecting")
+    fun liveCallReconnectFailed(message: String): String = select("实时通话重连失败", "Live-call reconnect failed").withMessage(message)
+    val liveCallEventsRecovered: String = select("实时通话事件已恢复", "Live-call events recovered")
+    fun runtimeError(message: String): String = select("错误：$message", "Error: $message")
+    fun controlFailed(action: String, message: String): String = select("${action}失败：$message", "$action failed: $message")
 
     val bridgeConnection: String = select("Bridge 连接", "Bridge connection")
     val scanQrCode: String = select("扫描二维码", "Scan QR code")
@@ -136,6 +190,101 @@ class AppStrings(private val appLanguage: AppLanguage) {
         "扫描 VibeLink 二维码，或输入配对 Token。",
         "Scan the VibeLink QR code or enter a pairing token.",
     )
+    val pairingQrScanned: String = select(
+        "已扫描配对二维码。请在 VibeLink 中确认此设备，并保持本页打开。",
+        "Pairing QR scanned. Confirm this device in VibeLink and keep this page open.",
+    )
+    val savedConnectionUnavailable: String = select("已保存连接不可用。", "Saved connection is unavailable.")
+    fun savedTokenConnectionFailed(message: String): String = select("已保存 Token 连接失败", "Saved token connection failed").withMessage(message)
+    fun pairingStatus(status: String, code: String): String = select("配对状态：$status。验证码：$code", "Pairing status: $status. Verification code: $code")
+    fun pairingCheckFailed(message: String): String = select("配对检查失败", "Pairing check failed").withMessage(message)
+    val loginFailedEmptyDeviceToken: String = select("登录失败：设备 Token 为空。", "Login failed: device token is empty.")
+    fun loginFailed(message: String): String = select("登录失败", "Login failed").withMessage(message)
+    fun approveDevicePrompt(code: String): String = select(
+        "请在 VibeLink 中批准此设备，并保持本页打开。验证码：$code",
+        "Approve this device in VibeLink and keep this page open. Verification code: $code",
+    )
+    val pairingRequestEmpty: String = select("配对请求失败：会话为空。", "Pairing request failed: session is empty.")
+    fun pairingRequestFailed(message: String): String = select("配对请求失败", "Pairing request failed").withMessage(message)
+    fun pairingIdAndCode(id: String, code: String): String = select("配对 ID：${id.take(8)} / 验证码：$code", "Pairing ID: ${id.take(8)} / code: $code")
+    fun isNegativeStatus(value: String): Boolean = value.contains(select("失败", "failed"), ignoreCase = true) ||
+        value.contains(select("拒绝", "denied"), ignoreCase = true) ||
+        value.contains("failed", ignoreCase = true) ||
+        value.contains("denied", ignoreCase = true)
+
+    val loadChatsFailed: String = select("加载会话失败", "Failed to load chats")
+    val updateConversationFailed: String = select("更新会话失败", "Failed to update conversation")
+    val conversationChangedElsewhere: String = select("会话已在其他设备修改，已刷新", "Conversation changed on another device; refreshed")
+    val someConversationsChangedElsewhere: String = select("部分会话已在其他设备修改，已刷新", "Some conversations changed on another device; refreshed")
+    val batchUpdateConversationFailed: String = select("批量更新会话失败", "Failed to update conversations")
+    val forkConversationFailed: String = select("分叉会话失败", "Failed to fork conversation")
+    val searchFailed: String = select("搜索失败", "Search failed")
+    val codexRemoteUnchecked: String = select("Codex 远程：未检查", "Codex Remote: not checked")
+    val codexRemoteReady: String = select("Codex 远程：已就绪", "Codex Remote: ready")
+    val codexRemoteDisconnected: String = select("Codex 远程：未连接", "Codex Remote: disconnected")
+    val codexDesktopDisconnected: String = select("Codex Desktop 未连接。", "Codex Desktop is not connected.")
+    val codexDesktopFound: String = select("已找到窗口", "Window found")
+    val codexDesktopWindowMissing: String = select("未找到 Codex Desktop 窗口。", "Codex Desktop window was not found.")
+    val codexDesktopRemoteTitle: String = select("Codex Desktop 远程", "Codex Desktop Remote")
+    fun forkTitle(title: String): String = select("$title 分叉", "$title fork")
+    fun agentTask(provider: String): String = select("$provider 任务", "$provider task")
+    fun codexRemoteWithReason(reason: String): String = select("Codex 远程：$reason", "Codex Remote: $reason")
+
+    val loadSettingsFailed: String = select("加载设置失败", "Failed to load settings")
+    val settingsSaved: String = select("设置已保存。", "Settings saved.")
+    val saveSettingsFailed: String = select("保存设置失败", "Failed to save settings")
+    val androidApprovalApprovedReason: String = select("已在 Android 端批准。", "Approved on Android.")
+    val androidApprovalDeniedReason: String = select("已在 Android 端拒绝。", "Denied on Android.")
+    val approvalApproved: String = select("审批已批准。", "Approval approved.")
+    val approvalDenied: String = select("审批已拒绝。", "Approval denied.")
+    val approvalActionFailed: String = select("审批操作失败", "Approval action failed")
+    val pairingApproved: String = select("配对已批准。", "Pairing approved.")
+    val pairingDenied: String = select("配对已拒绝。", "Pairing denied.")
+    val pairingActionFailed: String = select("配对操作失败", "Pairing action failed")
+    val deviceRevoked: String = select("设备已撤销。", "Device revoked.")
+    val revokeDeviceFailed: String = select("撤销设备失败", "Failed to revoke device")
+    val mcpProbeCompleted: String = select("MCP 探测已完成。", "MCP probe completed.")
+    val mcpProbeFoundIssues: String = select("MCP 探测发现问题。", "MCP probe found issues.")
+    val mcpProbeFailed: String = select("MCP 探测失败", "MCP probe failed")
+    val toolPrunePreviewReady: String = select("工具事件清理预览已就绪。", "Tool-event prune preview is ready.")
+    val toolPruned: String = select("工具事件已清理。", "Tool events pruned.")
+    val toolPruneFailed: String = select("工具事件清理失败", "Tool-event prune failed")
+    val settingsExportReady: String = select("设置导出已就绪。", "Settings export is ready.")
+    val settingsExportFailed: String = select("设置导出失败", "Settings export failed")
+    val settingsImportPreviewReady: String = select("导入预览已就绪。", "Import preview is ready.")
+    val settingsImportPreviewFailed: String = select("设置导入预览失败", "Settings import preview failed")
+    val settingsImported: String = select("设置已导入。", "Settings imported.")
+    val settingsImportFailed: String = select("设置导入失败", "Settings import failed")
+    val nativePushTokenRegistered: String = select("原生推送 Token 已注册。", "Native push token registered.")
+    val nativePushRegistrationFailed: String = select("原生推送注册失败", "Native push registration failed")
+    val currentDeviceTokenRotated: String = select("当前设备 token 已轮换，请重新连接。", "Current device token rotated; reconnect.")
+    val rotateDeviceTokenFailed: String = select("轮换设备 token 失败", "Failed to rotate device token")
+
+    val legacyDisconnect: String = select("断开", "Disconnect")
+    val legacyQuestionPlaceholder: String = select("请介绍一下你自己", "Please introduce yourself")
+    fun legacyCallActive(id: String): String = select("通话中 ($id)", "In call ($id)")
+    val legacyCreateCall: String = select("创建通话", "Create call")
+    val legacyStopCall: String = select("停止通话", "Stop call")
+    val legacyAudioLevel: String = select("音频电平", "Audio level")
+    val legacyRemote: String = select("远程", "Remote")
+    val legacyLocal: String = select("本地", "Local")
+    val legacyMockQuestion: String = select("模拟问题", "Mock question")
+    val legacySendQuestion: String = select("发送问题", "Send question")
+    val legacyQuestionSent: String = select("问题已发送", "Question sent")
+    fun legacyCreateFailed(message: String): String = select("创建失败", "Create failed").withMessage(message)
+    fun legacyStopFailed(message: String): String = select("停止失败", "Stop failed").withMessage(message)
+    fun legacySendFailed(message: String): String = select("发送失败", "Send failed").withMessage(message)
+    val legacyStopped: String = select("已停止", "Stopped")
+    val legacyLoginBridgeConnection: String = select("Bridge 连接", "Bridge connection")
+    val legacyPairingToken: String = select("配对 Token", "Pairing token")
+    val legacyPairingTokenHint: String = select("从 Settings 获取", "Get it from Settings")
+    val legacyConnecting: String = select("连接中…", "Connecting…")
+    val legacyServiceUnavailable: String = select("服务不可用", "Service unavailable")
+    val legacyLoginSuccess: String = select("登录成功", "Login successful")
+    val legacyInvalidToken: String = select("登录失败：token 无效", "Login failed: invalid token")
+    val legacyConnectedPrompt: String = select("已连接到服务，输入配对 Token 登录", "Connected to service; enter a pairing token to log in")
+    fun legacyConnectionFailed(message: String): String = select("连接失败", "Connection failed").withMessage(message)
+    val legacyConnect: String = select("连接", "Connect")
 
     val loading: String = select("加载中", "Loading")
     val quickCommands: String = select("快捷指令", "Quick commands")
@@ -228,6 +377,8 @@ class AppStrings(private val appLanguage: AppLanguage) {
     private fun select(chinese: String, english: String): String {
         return if (appLanguage == AppLanguage.Chinese) chinese else english
     }
+
+    private fun String.withMessage(message: String): String = if (message.isBlank()) this else "$this: $message"
 
     fun text(chinese: String, english: String): String = select(chinese, english)
 }

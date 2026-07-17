@@ -7,6 +7,8 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.google.firebase.messaging.FirebaseMessagingService
+import com.vibelink.app.data.AppLanguage
+import com.vibelink.app.ui.i18n.appStringsFor
 import com.google.firebase.messaging.RemoteMessage
 import com.vibelink.app.MainActivity
 
@@ -20,7 +22,13 @@ class VibeLinkFirebaseMessagingService : FirebaseMessagingService() {
         val body = message.notification?.body ?: message.data["body"].orEmpty()
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "VibeLink 通知", NotificationManager.IMPORTANCE_DEFAULT))
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ID,
+                    appStringsFor(AppLanguage.Default).pushNotificationChannel,
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ),
+            )
         }
         val intent = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),

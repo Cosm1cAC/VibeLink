@@ -81,7 +81,7 @@ fun LoginScreen(
         settingsStore.setBridgeUrl(server)
         pairingSessionId = session
         pairingCode = code
-        status = "已扫描配对二维码。请在 VibeLink 中确认此设备，并保持本页打开。"
+        status = strings.pairingQrScanned
         return true
     }
 
@@ -101,9 +101,9 @@ fun LoginScreen(
         apiClient.token = savedToken
         try {
             if (apiClient.checkStatus().ok) onLoginSuccess()
-            else status = "已保存连接不可用。"
+            else status = strings.savedConnectionUnavailable
         } catch (error: Exception) {
-            status = "已保存 Token 连接失败：${error.message}"
+            status = strings.savedTokenConnectionFailed(error.message.orEmpty())
             apiClient.token = ""
         }
     }
@@ -115,7 +115,7 @@ fun LoginScreen(
             try {
                 val current = apiClient.getPairingSession(pairingSessionId).session
                 val currentStatus = current?.status ?: "unknown"
-                status = "配对状态：$currentStatus。验证码：$pairingCode"
+                status = strings.pairingStatus(currentStatus, pairingCode)
                 if (current?.status == "approved") {
                     val claim = apiClient.claimPairingSession(pairingSessionId, pairingCode, "VibeLink Android")
                     if (claim.token.isNotBlank()) {
@@ -125,7 +125,7 @@ fun LoginScreen(
                 }
                 if (current?.status == "denied" || current?.status == "expired") pairingSessionId = ""
             } catch (error: Exception) {
-                status = "配对检查失败：${error.message}"
+                status = strings.pairingCheckFailed(error.message.orEmpty())
             }
         }
     }
@@ -188,7 +188,7 @@ fun LoginScreen(
                 onClick = {
                     scope.launch {
                         loading = true
-                        status = "正在连接"
+                        status = strings.connecting
                         val url = bridgeUrl.trim().trimEnd('/')
                         apiClient.baseUrl = url
                         try {
@@ -196,10 +196,10 @@ fun LoginScreen(
                             if (login.token.isNotBlank()) {
                                 persistLogin(url, login.token)
                             } else {
-                                status = "登录失败：设备 Token 为空。"
+                                status = strings.loginFailedEmptyDeviceToken
                             }
                         } catch (error: Exception) {
-                            status = "登录失败：${error.message}"
+                            status = strings.loginFailed(error.message.orEmpty())
                         } finally {
                             loading = false
                         }
@@ -224,12 +224,12 @@ fun LoginScreen(
                             if (session != null) {
                                 pairingSessionId = session.id
                                 pairingCode = session.code
-                                status = "请在 VibeLink 中批准此设备，并保持本页打开。验证码：${session.code}"
+                                status = strings.approveDevicePrompt(session.code)
                             } else {
-                                status = "配对请求失败：会话为空。"
+                                status = strings.pairingRequestEmpty
                             }
                         } catch (error: Exception) {
-                            status = "配对请求失败：${error.message}"
+                            status = strings.pairingRequestFailed(error.message.orEmpty())
                         } finally {
                             loading = false
                         }
@@ -240,7 +240,7 @@ fun LoginScreen(
             ) { Text(strings.createPairingRequest) }
 
             if (pairingSessionId.isNotBlank()) {
-                Text("配对 ID：${pairingSessionId.take(8)} / 验证码：$pairingCode", style = MaterialTheme.typography.bodySmall)
+                Text(strings.pairingIdAndCode(pairingSessionId, pairingCode), style = MaterialTheme.typography.bodySmall)
             }
 
             if (status.isNotBlank()) {
@@ -248,10 +248,7 @@ fun LoginScreen(
                     text = status,
                     style = MaterialTheme.typography.bodySmall,
                     color = if (
-                        status.contains("failed", ignoreCase = true) ||
-                        status.contains("denied", ignoreCase = true) ||
-                        status.contains("失败") ||
-                        status.contains("拒绝")
+                        strings.isNegativeStatus(status)
                     ) {
                         MaterialTheme.colorScheme.error
                     } else {

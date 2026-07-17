@@ -725,7 +725,11 @@ class MessageListViewModel : ViewModel() {
             return transcript.mapNotNull { entry ->
                 val text = entry.text.trim()
                 if (text.isBlank()) return@mapNotNull null
-                ChatMessage(role = normalizeRole(entry.role), text = text)
+                ChatMessage(
+                    role = normalizeRole(entry.role),
+                    text = text,
+                    turnId = entry.turnId,
+                )
             }
         }
 

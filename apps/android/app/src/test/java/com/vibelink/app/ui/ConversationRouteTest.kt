@@ -1,6 +1,7 @@
 package com.vibelink.app.ui
 
 import com.vibelink.app.network.ConversationItem
+import com.vibelink.app.network.SearchResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -49,5 +50,47 @@ class ConversationRouteTest {
         )
 
         assertNull(restored)
+    }
+
+    @Test
+    fun mapsHistorySearchResultToConversation() {
+        val conversation = ConversationRoute.conversationFromSearchResult(
+            SearchResult(kind = "history", id = "session-1", provider = "codex", title = "Session", snippet = "match"),
+        )
+
+        assertNotNull(conversation)
+        assertEquals("history:codex:session-1", conversation.key)
+        assertEquals("history", conversation.kind)
+        assertEquals("session-1", conversation.sessionId)
+    }
+
+    @Test
+    fun mapsMessageSearchResultToOwningHistoryConversation() {
+        val conversation = ConversationRoute.conversationFromSearchResult(
+            SearchResult(kind = "message", id = "session-2", provider = "claude", title = "Chat", turnId = "turn-9"),
+        )
+
+        assertNotNull(conversation)
+        assertEquals("history:claude:session-2", conversation.key)
+        assertEquals("history", conversation.kind)
+        assertEquals("session-2", conversation.sessionId)
+    }
+
+    @Test
+    fun mapsTaskSearchResultToTaskConversation() {
+        val conversation = ConversationRoute.conversationFromSearchResult(
+            SearchResult(kind = "task", id = "task-1", provider = "codex", title = "Task"),
+        )
+
+        assertNotNull(conversation)
+        assertEquals("task:task-1", conversation.key)
+        assertEquals("task", conversation.kind)
+        assertEquals("task-1", conversation.id)
+    }
+
+    @Test
+    fun identifiesFileSearchResultsAsWorkspaceTargets() {
+        assertEquals(true, ConversationRoute.isFileSearchResult(SearchResult(kind = "file", path = "src/Main.kt")))
+        assertEquals(false, ConversationRoute.isFileSearchResult(SearchResult(kind = "message")))
     }
 }

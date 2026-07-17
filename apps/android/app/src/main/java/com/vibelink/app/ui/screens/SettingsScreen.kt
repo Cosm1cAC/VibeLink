@@ -69,7 +69,9 @@ import com.vibelink.app.network.SecuritySettings
 import com.vibelink.app.network.SettingsPatchRequest
 import com.vibelink.app.network.ToolEventStatsResponse
 import com.vibelink.app.network.ToolEventsPruneResponse
+import com.vibelink.app.ui.i18n.AppStrings
 import com.vibelink.app.ui.i18n.LocalAppStrings
+import com.vibelink.app.ui.i18n.appStringsFor
 import com.google.gson.GsonBuilder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -101,8 +103,13 @@ data class SettingsUiState(
 )
 
 class SettingsViewModel : ViewModel() {
+    private var strings: AppStrings = appStringsFor(AppLanguage.Default)
     private val _uiState = MutableStateFlow(SettingsUiState())
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
+
+    fun setLanguage(language: AppLanguage) {
+        strings = appStringsFor(language)
+    }
 
     fun load(apiClient: ApiClient) {
         viewModelScope.launch {
@@ -135,7 +142,7 @@ class SettingsViewModel : ViewModel() {
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(loading = false, error = error.message ?: "加载设置失败") }
+                _uiState.update { it.copy(loading = false, error = strings.loadSettingsFailed.withFallback(error.message)) }
             }
         }
     }
@@ -149,11 +156,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         settings = result.settings ?: it.settings,
                         saving = false,
-                        notice = "设置已保存。",
+                        notice = strings.settingsSaved,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(saving = false, error = error.message ?: "保存设置失败") }
+                _uiState.update { it.copy(saving = false, error = strings.saveSettingsFailed.withFallback(error.message)) }
             }
         }
     }
@@ -170,18 +177,18 @@ class SettingsViewModel : ViewModel() {
                 val result = apiClient.decideApproval(
                     approvalId = approvalId,
                     approve = approve,
-                    reason = if (approve) "已在 Android 端批准。" else "已在 Android 端拒绝。",
+                    reason = if (approve) strings.androidApprovalApprovedReason else strings.androidApprovalDeniedReason,
                 )
                 val approvals = apiClient.listApprovals(status = "pending", limit = 50)
                 _uiState.update {
                     it.copy(
                         approvals = approvals,
-                        notice = if (approve) "审批已批准。" else "审批已拒绝。",
+                        notice = if (approve) strings.approvalApproved else strings.approvalDenied,
                     )
                 }
                 onResolved(result)
             } catch (error: Exception) {
-                _uiState.update { it.copy(error = error.message ?: "审批操作失败") }
+                _uiState.update { it.copy(error = strings.approvalActionFailed.withFallback(error.message)) }
             }
         }
     }
@@ -195,11 +202,11 @@ class SettingsViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         pairingSessions = pairings,
-                        notice = if (approve) "配对已批准。" else "配对已拒绝。",
+                        notice = if (approve) strings.pairingApproved else strings.pairingDenied,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(error = error.message ?: "配对操作失败") }
+                _uiState.update { it.copy(error = strings.pairingActionFailed.withFallback(error.message)) }
             }
         }
     }
@@ -214,11 +221,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         devices = devices.items,
                         currentDeviceId = devices.currentDeviceId,
-                        notice = "设备已撤销。",
+                        notice = strings.deviceRevoked,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(error = error.message ?: "撤销设备失败") }
+                _uiState.update { it.copy(error = strings.revokeDeviceFailed.withFallback(error.message)) }
             }
         }
     }
@@ -233,11 +240,11 @@ class SettingsViewModel : ViewModel() {
                         mcpProbe = result,
                         mcpStatus = apiClient.getMcpStatus(),
                         adminBusy = "",
-                        notice = if (result.ok) "MCP 探测已完成。" else "MCP 探测发现问题。",
+                        notice = if (result.ok) strings.mcpProbeCompleted else strings.mcpProbeFoundIssues,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "MCP 探测失败") }
+                _uiState.update { it.copy(adminBusy = "", error = strings.mcpProbeFailed.withFallback(error.message)) }
             }
         }
     }
@@ -253,11 +260,11 @@ class SettingsViewModel : ViewModel() {
                         toolEventPrune = result,
                         toolEventStats = stats,
                         adminBusy = "",
-                        notice = if (dryRun) "工具事件清理预览已就绪。" else "工具事件已清理。",
+                        notice = if (dryRun) strings.toolPrunePreviewReady else strings.toolPruned,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "工具事件清理失败") }
+                _uiState.update { it.copy(adminBusy = "", error = strings.toolPruneFailed.withFallback(error.message)) }
             }
         }
     }
@@ -271,11 +278,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         settingsExportText = settingsJson.toJson(exported),
                         adminBusy = "",
-                        notice = "设置导出已就绪。",
+                        notice = strings.settingsExportReady,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "设置导出失败") }
+                _uiState.update { it.copy(adminBusy = "", error = strings.settingsExportFailed.withFallback(error.message)) }
             }
         }
     }
@@ -290,11 +297,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         settingsImportPreview = preview.changedKeys,
                         adminBusy = "",
-                        notice = "导入预览已就绪。",
+                        notice = strings.settingsImportPreviewReady,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "设置导入预览失败") }
+                _uiState.update { it.copy(adminBusy = "", error = strings.settingsImportPreviewFailed.withFallback(error.message)) }
             }
         }
     }
@@ -310,12 +317,12 @@ class SettingsViewModel : ViewModel() {
                         settings = imported.settings ?: it.settings,
                         settingsImportPreview = imported.changedKeys,
                         adminBusy = "",
-                        notice = "设置已导入。",
+                        notice = strings.settingsImported,
                     )
                 }
                 load(apiClient)
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "设置导入失败") }
+                _uiState.update { it.copy(adminBusy = "", error = strings.settingsImportFailed.withFallback(error.message)) }
             }
         }
     }
@@ -331,11 +338,11 @@ class SettingsViewModel : ViewModel() {
                     it.copy(
                         pushSubscriptions = subscriptions,
                         adminBusy = "",
-                        notice = "原生推送 Token 已注册。",
+                        notice = strings.nativePushTokenRegistered,
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update { it.copy(adminBusy = "", error = error.message ?: "原生推送注册失败") }
+                _uiState.update { it.copy(adminBusy = "", error = strings.nativePushRegistrationFailed.withFallback(error.message)) }
             }
         }
     }
@@ -344,8 +351,8 @@ class SettingsViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(error = "", notice = "") }
             runCatching { apiClient.rotateCurrentDevice() }
-                .onSuccess { _uiState.update { it.copy(notice = "当前设备 token 已轮换，请重新连接。") } }
-                .onFailure { error -> _uiState.update { it.copy(error = error.message ?: "轮换设备 token 失败") } }
+                .onSuccess { _uiState.update { it.copy(notice = strings.currentDeviceTokenRotated) } }
+                .onFailure { error -> _uiState.update { it.copy(error = strings.rotateDeviceTokenFailed.withFallback(error.message)) } }
         }
     }
 }
@@ -409,7 +416,8 @@ fun SettingsScreen(
     var anthropicKey by remember { mutableStateOf("") }
     var zhipuKey by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(strings.currentLanguage) {
+        viewModel.setLanguage(strings.currentLanguage)
         viewModel.load(apiClient)
     }
 
@@ -970,6 +978,8 @@ fun SettingsScreen(
         }
     }
 }
+
+private fun String.withFallback(message: String?): String = message?.takeIf { it.isNotBlank() } ?: this
 
 @Composable
 private fun SectionCard(title: String, content: @Composable () -> Unit) {

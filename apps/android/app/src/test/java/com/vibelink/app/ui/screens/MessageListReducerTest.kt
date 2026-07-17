@@ -3,12 +3,22 @@ package com.vibelink.app.ui.screens
 import com.vibelink.app.network.ChatMessage
 import com.vibelink.app.network.TaskEvent
 import com.vibelink.app.network.ToolEvent
+import com.vibelink.app.network.TranscriptEntry
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MessageListReducerTest {
+    @Test
+    fun preservesTranscriptTurnIdsForSearchResultNavigation() {
+        val messages = MessageListViewModel.messagesFromTranscript(
+            listOf(TranscriptEntry(role = "assistant", text = "Match", turnId = "turn-7")),
+        )
+
+        assertEquals("turn-7", messages.single().turnId)
+    }
+
     @Test
     fun mergesAssistantDeltasIntoOneStreamingTurn() {
         val incoming = MessageListViewModel.messagesFromEvents(

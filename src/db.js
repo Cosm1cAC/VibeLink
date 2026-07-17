@@ -10,6 +10,8 @@ import { EVENT_STORE_CONTRACT_METHODS, EVENT_STORE_SIDECAR_PROTOCOL_VERSION } fr
 import { createEventStoreMetrics } from "./eventStoreMetrics.js";
 import { createEventStoreSidecarClient } from "./eventStoreSidecarClient.js";
 import { createEventStoreWorkerClient } from "./eventStoreWorkerClient.js";
+import { createApprovalOutboxPersistence } from "./approvalOutbox.js";
+import { createExecutionPersistence, ensureExecutionPersistenceSchema } from "./executionPersistence.js";
 
 const dbPath = path.join(dataDir, "mobile-agent.sqlite");
 
@@ -406,12 +408,26 @@ export function initDb() {
   try { db.exec("ALTER TABLE task_events ADD COLUMN block_id TEXT"); } catch {}
   try { db.exec("ALTER TABLE threads ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"); } catch {}
   try { db.exec("ALTER TABLE threads ADD COLUMN field_revisions_json TEXT"); } catch {}
+  ensureExecutionPersistenceSchema(db);
 
   return db;
 }
 
 function database() {
   return initDb();
+}
+
+let executionPersistence = null;
+let approvalOutboxPersistence = null;
+
+function executionPersistenceStore() {
+  if (!executionPersistence) executionPersistence = createExecutionPersistence({ database });
+  return executionPersistence;
+}
+
+function approvalOutboxStore() {
+  if (!approvalOutboxPersistence) approvalOutboxPersistence = createApprovalOutboxPersistence({ database });
+  return approvalOutboxPersistence;
 }
 
 let eventStore = null;

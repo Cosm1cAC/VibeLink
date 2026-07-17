@@ -12,6 +12,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vibelink.app.network.LiveCallEvent
+import com.vibelink.app.ui.i18n.LocalAppStrings
 
 @Composable
 fun TranscriptFeed(events: List<LiveCallEvent>) {
@@ -19,6 +20,7 @@ fun TranscriptFeed(events: List<LiveCallEvent>) {
         .filter { it.type == "live_call.transcript.final" || it.type == "live_call.transcript.partial" }
         .takeLast(40)
     if (transcripts.isEmpty()) return
+    val strings = LocalAppStrings.current
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -26,11 +28,11 @@ fun TranscriptFeed(events: List<LiveCallEvent>) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text("实时转录", style = MaterialTheme.typography.labelMedium,
+            Text(strings.liveTranscript, style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
             transcripts.forEach { event ->
-                val speaker = if (event.speaker == "local") "本地" else "远程"
+                val speaker = if (event.speaker == "local") strings.local else strings.remote
                 val suffix = if (event.type == "live_call.transcript.partial") " ..." else ""
                 Text(
                     text = "[$speaker] ${event.text}$suffix",
@@ -46,6 +48,7 @@ fun TranscriptFeed(events: List<LiveCallEvent>) {
 
 @Composable
 fun QaCard(question: String, answer: String, agentState: String?) {
+    val strings = LocalAppStrings.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -62,7 +65,7 @@ fun QaCard(question: String, answer: String, agentState: String?) {
                         CircularProgressIndicator(modifier = Modifier.size(14.dp),
                             strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
-                        Text("思考中…", style = MaterialTheme.typography.bodySmall,
+                        Text(strings.thinking, style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }

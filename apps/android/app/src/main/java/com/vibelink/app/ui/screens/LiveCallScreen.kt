@@ -95,7 +95,8 @@ fun CallScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(strings.currentLanguage) {
+        viewModel.setLanguage(strings.currentLanguage)
         viewModel.load(apiClient)
     }
 

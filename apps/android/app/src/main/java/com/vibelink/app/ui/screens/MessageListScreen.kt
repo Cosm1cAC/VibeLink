@@ -109,6 +109,16 @@ object ComposerLayoutPolicy {
     fun showSupplementalContent(imeVisible: Boolean): Boolean = !imeVisible
 }
 
+object MessageListScrollTarget {
+    fun findMessageIndex(messages: List<ChatMessage>, targetTurnId: String): Int? {
+        val target = targetTurnId.trim()
+        if (target.isBlank()) return null
+        return messages.indexOfFirst { it.turnId == target }
+            .takeIf { it >= 0 }
+            ?: messages.indexOfFirst { it.id == target }.takeIf { it >= 0 }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageListScreen(
@@ -125,6 +135,7 @@ fun MessageListScreen(
     initialAttachmentUris: List<String> = emptyList(),
     onInitialAttachmentsConsumed: () -> Unit = {},
     workspaceId: String = "",
+    targetTurnId: String = "",
 ) {
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
@@ -154,6 +165,7 @@ fun MessageListScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    var consumedTargetTurnId by remember(conversation?.key, targetTurnId) { mutableStateOf("") }
     val isDesktopRemote = conversation?.kind == "desktop"
     val selectableProviders = remember(providerRegistry) { providersForComposer(providerRegistry) }
     val canSend = prompt.trim().isNotBlank() && !sending && conversation != null
@@ -204,8 +216,13 @@ fun MessageListScreen(
         onInitialAttachmentsConsumed()
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
+    LaunchedEffect(messages.size, targetTurnId) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val targetIndex = MessageListScrollTarget.findMessageIndex(messages, targetTurnId)
+        if (targetIndex != null && consumedTargetTurnId != targetTurnId) {
+            listState.animateScrollToItem(targetIndex)
+            consumedTargetTurnId = targetTurnId
+        } else if (targetTurnId.isBlank()) {
             listState.animateScrollToItem(messages.lastIndex)
         }
     }

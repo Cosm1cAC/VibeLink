@@ -224,6 +224,30 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
+    fun openSearchFile(apiClient: ApiClient, workspaceId: String, path: String) {
+        val cleanPath = path.trim().replace('\\', '/').trimStart('/')
+        if (workspaceId.isBlank() || cleanPath.isBlank()) return
+        _selectedWorkspaceId.value = workspaceId
+        _currentDir.value = cleanPath.substringBeforeLast('/', "")
+        viewModelScope.launch {
+            _refreshing.value = true
+            _error.value = ""
+            try {
+                val items = _workspaces.value.ifEmpty {
+                    apiClient.listWorkspaces().also { _workspaces.value = it }
+                }
+                val workspace = items.firstOrNull { it.id == workspaceId }
+                    ?: error("The workspace for this search result is no longer available")
+                _selectedFile.value = apiClient.getWorkspaceFile(workspace.id, cleanPath)
+                loadWorkspaceDetails(apiClient, workspace.id, _currentDir.value)
+            } catch (error: Exception) {
+                _error.value = error.message ?: "Failed to open search result"
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
     fun clearFilePreview() {
         _selectedFile.value = null
     }

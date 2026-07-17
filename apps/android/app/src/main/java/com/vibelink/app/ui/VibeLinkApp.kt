@@ -118,6 +118,20 @@ fun VibeLinkApp(
                     pendingConversation = conversation
                     navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
                 },
+                onOpenSearchResult = { result ->
+                    when (val target = resolveSearchResultTarget(result)) {
+                        is SearchResultTarget.Conversation -> {
+                            pendingConversation = target.item
+                            val targetQuery = if (target.targetTurnId.isBlank()) "" else "?targetTurnId=${ConversationRoute.encodeQueryValue(target.targetTurnId)}"
+                            navController.navigate("messageList/${ConversationRoute.encodeKey(target.item.key)}$targetQuery")
+                        }
+                        is SearchResultTarget.WorkspaceFile -> {
+                            workspaceViewModel.openSearchFile(apiClient, target.workspaceId, target.path)
+                            navController.navigate("workspace")
+                        }
+                        is SearchResultTarget.Unsupported -> Unit
+                    }
+                },
                 onNewConversation = {
                     val conversation = ConversationItem(
                         key = "new:${System.currentTimeMillis()}",
@@ -151,18 +165,25 @@ fun VibeLinkApp(
                 onOpenReview = {
                     navController.navigate("review")
                 },
-                onOpenSettings = {
-                    navController.navigate("settings")
+                onOpenSettings = { section ->
+                    navController.navigate(if (section.isBlank()) "settings" else "settings?section=$section")
                 },
             )
         }
 
         // 鈹€鈹€ Message List (detail) 鈹€鈹€
         composable(
-            route = "messageList/{conversationKey}",
-            arguments = listOf(navArgument("conversationKey") { type = NavType.StringType }),
+            route = "messageList/{conversationKey}?targetTurnId={targetTurnId}",
+            arguments = listOf(
+                navArgument("conversationKey") { type = NavType.StringType },
+                navArgument("targetTurnId") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+            ),
         ) { backStackEntry ->
             val routeKey = backStackEntry.arguments?.getString("conversationKey") ?: ""
+            val targetTurnId = backStackEntry.arguments?.getString("targetTurnId").orEmpty()
             val conversation = ConversationRoute.restoreConversation(
                 routeKey = routeKey,
                 pending = pendingConversation,
@@ -195,6 +216,7 @@ fun VibeLinkApp(
                 initialAttachmentUris = if (conversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
                 onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
                 workspaceId = workspaceViewModel.selectedWorkspaceId.collectAsState().value,
+                targetTurnId = targetTurnId,
             )
         }
 

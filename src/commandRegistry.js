@@ -47,8 +47,9 @@ const BUILTIN_COMMANDS = [
   {
     id: "thread.favorite",
     name: "Toggle favorite",
-    description: "Favorite or unfavorite the current session",
+    description: "Pin/favorite or unpin the current session",
     args: [{ name: "key", type: "string", required: true }], usage: "Toggle favorite <thread-key>", permission: "none", toolKind: "thread", icon: "Star",
+    ui: { label: "Toggle favorite", detail: "Pin/favorite or unpin the current session" },
     action: { type: "thread-patch", patch: "favorite" }
   },
   {
@@ -57,6 +58,27 @@ const BUILTIN_COMMANDS = [
     description: "Browse files and Git state in a Workspace",
     args: [], usage: "Open Workspace", permission: "none", toolKind: "workspace", icon: "FolderOpen",
     action: { type: "navigate", route: "workspace" }
+  },
+  {
+    id: "live-call.open",
+    name: "Open Live Call",
+    description: "Open the live transcription and call assistant",
+    args: [], usage: "Open Live Call", permission: "none", toolKind: "navigation", icon: "AudioLines",
+    action: { type: "navigate", route: "call" }
+  },
+  {
+    id: "review.open",
+    name: "Open PR Review",
+    description: "Open the pull request review workspace",
+    args: [], usage: "Open PR Review", permission: "none", toolKind: "navigation", icon: "MessagesSquare",
+    action: { type: "navigate", route: "review" }
+  },
+  {
+    id: "settings.open",
+    name: "Open Settings",
+    description: "Open bridge, security, and device settings",
+    args: [], usage: "Open Settings", permission: "none", toolKind: "navigation", icon: "Settings",
+    action: { type: "navigate", route: "settings" }
   },
   {
     id: "approvals.review",
@@ -205,6 +227,22 @@ const SKILL_SCAN_DIRS = [
  * Scan the skills directories for SKILL.md files.
  * Returns an array of Command-shaped objects.
  */
+function commandSearchText(cmd = {}) {
+  return [
+    cmd.id,
+    cmd.name,
+    cmd.description,
+    cmd.usage,
+    cmd.toolKind,
+    cmd.permission,
+    cmd.ui?.label,
+    cmd.ui?.detail
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
 function scanSkills() {
   const skills = [];
   for (const dir of SKILL_SCAN_DIRS) {
@@ -272,12 +310,7 @@ export function getCommands(filter = "") {
 
   if (!filter) return all;
   const lower = filter.toLowerCase();
-  return all.filter(
-    (cmd) =>
-      cmd.name.toLowerCase().includes(lower) ||
-      cmd.description.toLowerCase().includes(lower) ||
-      cmd.ui?.label?.toLowerCase().includes(lower)
-  );
+  return all.filter((cmd) => commandSearchText(cmd).includes(lower));
 }
 
 /**

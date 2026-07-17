@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
@@ -9,6 +9,7 @@ import "katex/dist/katex.min.css";
 import {
   ArrowUp,
   Archive,
+  AudioLines,
   CheckSquare,
   ChevronDown,
   ChevronLeft,
@@ -32,6 +33,8 @@ import {
   Menu,
   Maximize2,
   MessageCircle,
+  MessageSquare,
+  MessagesSquare,
   Minimize2,
   Monitor,
   MoreHorizontal,
@@ -42,9 +45,12 @@ import {
   Plus,
   RotateCcw,
   RefreshCw,
+  Search,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   Square,
+  Star,
   Target,
   Terminal,
   Trash2,
@@ -54,6 +60,14 @@ import {
 import "./styles.css";
 import { selectionStartState } from "./chatSelection.js";
 import { remoteTranscriptItems } from "./remoteTranscript.js";
+import {
+  commandArgumentDraft,
+  commandQueryFromText,
+  filterCommandCandidates,
+  normalizeCommandCandidate,
+  paletteCommandArgumentHint,
+  resolvePaletteCommandPlan
+} from "./commandPaletteModel.js";
 import { buildConversationTree, filterConversationNodes, projectNameFromPath } from "./sidebarModel.js";
 
 const savedToken = localStorage.getItem("mat.token") || "";
@@ -61,6 +75,34 @@ const typedTextAnimationKeys = new Set();
 
 function cx(...parts) {
   return parts.filter(Boolean).join(" ");
+}
+
+const COMMAND_ICONS = {
+  AudioLines,
+  CheckSquare,
+  Code2,
+  FileText,
+  Folder,
+  FolderOpen,
+  History,
+  ImageIcon,
+  MessageSquare,
+  MessagesSquare,
+  Monitor,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings,
+  ShieldCheck,
+  SlidersHorizontal,
+  Star,
+  Target,
+  Terminal,
+  X
+};
+
+function commandIcon(command = {}) {
+  return COMMAND_ICONS[command.icon] || COMMAND_ICONS[command.ui?.icon] || Code2;
 }
 
 function streamCursorKey(kind, id) {
@@ -2345,7 +2387,9 @@ function WorkspaceWorkbench({
   onSummary,
   onToolEventsChanged,
   openRequest,
-  onOpenHandled
+  onOpenHandled,
+  commandRequest,
+  onCommandRequestHandled
 }) {
   const defaultWorkspace = useMemo(() => chooseWorkspaceForPath(workspaces, selected?.cwd || ""), [workspaces, selected?.cwd]);
   const [workspaceId, setWorkspaceId] = useState(defaultWorkspace?.id || "");
@@ -2388,14 +2432,33 @@ function WorkspaceWorkbench({
   }, [activeWorkspaceId]);
 
   useEffect(() => {
-    if (!openRequest?.path || !activeWorkspaceId) return;
-    openWorkspacePath(openRequest.path, openRequest.line || 0).catch((err) => onError?.(err.message));
+    if (!openRequest || !activeWorkspaceId) return;
+    if (openRequest.path) openWorkspacePath(openRequest.path, openRequest.line || 0).catch((err) => onError?.(err.message));
     if (panelCollapsed) {
       setPanelCollapsed(false);
       try { localStorage.setItem("mat.workspace.collapsed", "0"); } catch {}
     }
     onOpenHandled?.();
   }, [openRequest?.id, activeWorkspaceId, panelCollapsed]);
+
+  useEffect(() => {
+    if (!commandRequest?.id || !activeWorkspaceId) return;
+    const requestWorkspaceId = commandRequest.workspaceId || activeWorkspaceId;
+    if (requestWorkspaceId && requestWorkspaceId !== workspaceId) setWorkspaceId(requestWorkspaceId);
+    setPanelCollapsed(false);
+    try { localStorage.setItem("mat.workspace.collapsed", "0"); } catch {}
+    setActiveTab(commandRequest.kind === "test" ? "tests" : "terminal");
+    if (commandRequest.command) {
+      if (commandRequest.kind === "test") setTestCommand(commandRequest.command);
+      else setTerminalCommand(commandRequest.command);
+      runTerminal(commandRequest.kind || "terminal", {
+        command: commandRequest.command,
+        workspaceId: requestWorkspaceId,
+        source: commandRequest.source
+      }).catch((err) => onError?.(err.message));
+    }
+    onCommandRequestHandled?.();
+  }, [commandRequest?.id, activeWorkspaceId]);
 
   useEffect(() => {
     if (!runningCommand?.toolRunId) return;
@@ -2533,15 +2596,16 @@ function WorkspaceWorkbench({
     }
   }
 
-  async function runTerminal(kind = "terminal") {
-    if (!activeWorkspaceId) return;
-    const command = kind === "test" ? testCommand : terminalCommand;
+  async function runTerminal(kind = "terminal", overrides = {}) {
+    const targetWorkspaceId = overrides.workspaceId || activeWorkspaceId;
+    if (!targetWorkspaceId) return;
+    const command = String(overrides.command || (kind === "test" ? testCommand : terminalCommand) || "");
     if (!command.trim()) return;
     setBusy(kind);
     const payload = { command, kind, taskId: activeTaskId, timeoutMs: kind === "test" ? 180000 : 120000, background: true };
     try {
       const result = await request(
-        `/api/workspaces/${activeWorkspaceId}/command`,
+        `/api/workspaces/${targetWorkspaceId}/command`,
         { method: "POST", body: JSON.stringify(payload) },
         token
       );
@@ -2587,9 +2651,10 @@ function WorkspaceWorkbench({
             token
           );
           const result = approvedResponse.result || approvedResponse;
-          if (approvedResponse.background && approvedResponse.toolRunId) {
-            const pending = { ok: null, command, stdout: "", stderr: "", status: "running", toolRunId: approvedResponse.toolRunId };
-            setRunningCommand({ kind, toolRunId: approvedResponse.toolRunId, command });
+          const resumedToolRunId = approvedResponse.toolRunId || approvedResponse.approval?.toolRunId || result.toolRunId || result.toolRun?.id;
+          if (resumedToolRunId) {
+            const pending = { ...(result || {}), ok: result.ok ?? null, command, stdout: result.stdout || "", stderr: result.stderr || "", status: result.status || "running", toolRunId: resumedToolRunId };
+            setRunningCommand({ kind, toolRunId: resumedToolRunId, command });
             if (kind === "test") setTestResult(pending);
             else setTerminalResult(pending);
             onToolEventsChanged?.();
@@ -3152,7 +3217,8 @@ function Composer({
   selected,
   runningTaskId,
   onRunningInput,
-  onStop
+  onStop,
+  onExecuteCommand
 }) {
   const [text, setText] = useState(() => localStorage.getItem("mat.composerDraft") || "");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -3162,6 +3228,9 @@ function Composer({
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [workspaceTree, setWorkspaceTree] = useState({ workspaceId: "", dir: "", items: [], selected: {} });
   const [commandOpen, setCommandOpen] = useState(false);
+  const [registryCommands, setRegistryCommands] = useState([]);
+  const [commandLoading, setCommandLoading] = useState(false);
+  const [commandError, setCommandError] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [targetMenuOpen, setTargetMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -3446,6 +3515,31 @@ function Composer({
     requestAnimationFrame(() => textRef.current?.focus());
   }
 
+  const commandQuery = commandQueryFromText(text);
+  const commandArgument = commandArgumentDraft(text);
+  const commandCandidates = filterCommandCandidates(registryCommands, commandQuery).slice(0, 12);
+
+  useEffect(() => {
+    if (!commandOpen) return undefined;
+    let cancelled = false;
+    setCommandLoading(true);
+    setCommandError("");
+    request(`/api/command-registry?filter=${encodeURIComponent(commandQuery)}`, {}, token)
+      .then((result) => {
+        if (!cancelled) setRegistryCommands(result.items || []);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setCommandError(error.message || "Command registry unavailable");
+      })
+      .finally(() => {
+        if (!cancelled) setCommandLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [commandOpen, commandQuery, token]);
+
   function applySlashCommand(command) {
     const normalized = command.trim();
     if (normalized === "/image") return openImagePicker();
@@ -3486,18 +3580,32 @@ function Composer({
     return undefined;
   }
 
-  const slashCommands = [
-    { command: "/image", title: "Attach image", detail: "Select or paste an image", icon: ImageIcon },
-    { command: "/file", title: "Attach file", detail: "Upload PDF, text, data, or code", icon: FileText },
-    { command: "/folder", title: "Attach folder", detail: "Upload files from a local folder", icon: Folder },
-    { command: "/workspace", title: "Workspace context", detail: "Pick files from this computer", icon: FolderOpen },
-    { command: "/permissions bypassPermissions", title: "Full access", detail: "Switch permission mode", icon: CheckSquare },
-    { command: "/model gpt-5.5", title: "Model", detail: "Set Codex/Claude model", icon: SlidersHorizontal },
-    { command: "/effort high", title: "Reasoning effort", detail: "Set low, medium, high, xhigh, max", icon: Target },
-    { command: "/agent codex", title: "Agent", detail: "Switch provider", icon: Monitor },
-    { command: "/history", title: "Prompt history", detail: "Reuse a previous prompt", icon: History },
-    { command: "/clear", title: "Clear input", detail: "Remove current draft", icon: X }
-  ].filter((item) => item.command.includes(text.trim()) || item.title.toLowerCase().includes(text.trim().replace(/^\//, "").toLowerCase()));
+  function applyRegistryCommand(command) {
+    const normalized = normalizeCommandCandidate(command);
+    const slash = normalized.name?.startsWith("/") ? normalized.name : normalized.usage?.startsWith("/") ? normalized.usage.split(/\s+/)[0] : "";
+    const textCommand = slash && commandArgument ? `${slash} ${commandArgument}` : slash || normalized.name || normalized.usage || "";
+    if (textCommand && slash) return applySlashCommand(textCommand);
+    const plan = resolvePaletteCommandPlan(normalized, { selected, workspace: workspaces[0] }, text);
+    if (plan.kind === "disabled") {
+      setCommandError(plan.reason);
+      return undefined;
+    }
+    if (plan.kind === "insert") {
+      setCommandText(plan.text);
+      return undefined;
+    }
+    let args = plan.args || {};
+    if (plan.kind === "needs-argument") {
+      const value = window.prompt(plan.hint || "Command argument", commandArgument || "");
+      if (!value) return undefined;
+      args = { text: value.trim() };
+    }
+    const result = onExecuteCommand?.(normalized, args);
+    if (result?.catch) result.catch((error) => setCommandError(error.message || "Command failed"));
+    setCommandOpen(false);
+    setCommandText("");
+    return undefined;
+  }
 
   function removeAttachment(id) {
     setAttachments((items) => {
@@ -3937,24 +4045,27 @@ function Composer({
       ) : null}
       {commandOpen ? (
         <div className="composer-popover command-palette">
-          {slashCommands.length ? (
-            slashCommands.slice(0, 8).map((item) => {
-              const Icon = item.icon;
+          {commandLoading ? <div className="popover-empty">Loading commands…</div> : null}
+          {commandError ? <div className="popover-empty">{commandError}</div> : null}
+          {!commandLoading && commandCandidates.length ? (
+            commandCandidates.map((item) => {
+              const Icon = commandIcon(item);
+              const hint = paletteCommandArgumentHint(item);
               return (
-                <button className="add-menu-item" type="button" key={item.command} onClick={() => applySlashCommand(item.command)}>
+                <button className="add-menu-item" type="button" key={item.id} onClick={() => applyRegistryCommand(item)}>
                   <span className="menu-icon">
                     <Icon size={17} />
                   </span>
                   <span>
-                    <strong>{item.command}</strong>
-                    <small>{item.detail}</small>
+                    <strong>{item.usage || item.name || item.id}</strong>
+                    <small>{[item.detail, item.requiresApproval ? "requires approval" : "", hint ? `needs ${hint}` : ""].filter(Boolean).join(" · ")}</small>
                   </span>
                 </button>
               );
             })
-          ) : (
+          ) : !commandLoading && !commandError ? (
             <div className="popover-empty">No matching command</div>
-          )}
+          ) : null}
         </div>
       ) : null}
       {historyOpen ? (
@@ -4014,7 +4125,7 @@ function Composer({
   );
 }
 
-function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
+function SettingsDrawer({ settings, token, onClose, onSaved, network, onApprovalResolved }) {
   const [openai, setOpenai] = useState("");
   const [anthropic, setAnthropic] = useState("");
   const [zhipu, setZhipu] = useState("");
@@ -4173,6 +4284,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network }) {
       );
       setSecurityNotice(decision === "approve" ? "Approval accepted and command resumed." : "Approval denied.");
       if (result.result?.ok === false) setSecurityError(result.result.stderr || result.result.stdout || "Approved command failed.");
+      onApprovalResolved?.(result);
       await refreshSecurity();
     } catch (err) {
       setSecurityError(err.message);
@@ -5289,6 +5401,7 @@ function App() {
   const [initialScrollSequence, setInitialScrollSequence] = useState(0);
   const [locatedMessageKey, setLocatedMessageKey] = useState("");
   const [workspaceOpenRequest, setWorkspaceOpenRequest] = useState(null);
+  const [workspaceCommandRequest, setWorkspaceCommandRequest] = useState(null);
   const eventSourceRef = useRef(null);
   const toolEventSourceRef = useRef(null);
   const pollRef = useRef(null);
@@ -5932,6 +6045,67 @@ function App() {
     return state;
   }
 
+  async function executePaletteCommand(command, args = {}) {
+    const action = command?.action || {};
+    if (action.type === "navigate") {
+      if (action.route === "sessionList") {
+        setSidebarOpen(true);
+        return;
+      }
+      if (action.route === "workspace") {
+        setWorkspaceOpenRequest({ id: `workspace:${Date.now()}` });
+        return;
+      }
+      if (action.route === "settings" || action.route === "settings?section=approvals") {
+        setSettingsOpen(true);
+        return;
+      }
+      if (action.route === "call") {
+        setLiveCallOpen(true);
+        return;
+      }
+      if (action.route === "review") {
+        setQuery("review");
+        setSidebarOpen(true);
+        return;
+      }
+    }
+    if (action.type === "new-session") {
+      await selectConversation(null);
+      return;
+    }
+    if (action.type === "refresh") {
+      await refresh({ keepSelection: true, syncDesktopRemote: true });
+      return;
+    }
+    if (action.type === "search") {
+      const queryText = String(args.text || "").trim();
+      if (queryText) setQuery(queryText);
+      setSidebarOpen(true);
+      return;
+    }
+    if (action.type === "thread-patch" && action.patch === "favorite") {
+      if (!selected?.key) throw new Error("Select a session before toggling favorite.");
+      await patchThread(selected, { pinned: !selected.pinned });
+      return;
+    }
+    if (action.type === "workspace-command") {
+      const workspace = chooseWorkspaceForPath(workspaces, selected?.cwd || "") || workspaces[0];
+      if (!workspace?.id) throw new Error("No workspace is available. Add an allowed root in Settings first.");
+      const commandText = String(args.text || "").trim();
+      if (!commandText) throw new Error("Workspace command is required.");
+      setWorkspaceCommandRequest({
+        id: `command:${Date.now()}`,
+        command: commandText,
+        workspaceId: workspace.id,
+        kind: "terminal",
+        source: "command-palette"
+      });
+      return;
+    }
+    throw new Error(`Command ${command?.name || command?.id || ""} cannot be executed directly yet.`);
+  }
+
   async function patchProjectThreads(project, patch) {
     const children = project.children || [];
     if (!children.length) return null;
@@ -6481,6 +6655,8 @@ function App() {
             onToolEventsChanged={() => refreshSelectedToolEvents().catch((err) => setError(err.message))}
             openRequest={workspaceOpenRequest}
             onOpenHandled={() => setWorkspaceOpenRequest(null)}
+            commandRequest={workspaceCommandRequest}
+            onCommandRequestHandled={() => setWorkspaceCommandRequest(null)}
           />
           <ChangeCard
             summary={changeSummary}
@@ -6568,6 +6744,7 @@ function App() {
             setError(err.message);
             setMessages((items) => appendDisplayMessages(items, [{ role: "error", text: err.message || "Send failed" }]));
           })}
+          onExecuteCommand={(command, args) => executePaletteCommand(command, args).catch((err) => setError(err.message))}
         />
       </section>
       {sidebarOpen ? <button className="sidebar-backdrop" aria-label="Close menu" type="button" onClick={() => setSidebarOpen(false)} /> : null}
@@ -6581,6 +6758,7 @@ function App() {
             setSettingsOpen(false);
             refresh({ keepSelection: true }).catch((err) => setError(err.message));
           }}
+          onApprovalResolved={() => refreshSelectedToolEvents().catch((err) => setError(err.message))}
         />
       ) : null}
       {liveCallOpen ? <button className="sidebar-backdrop" aria-label="Close live call" type="button" onClick={() => setLiveCallOpen(false)} /> : null}

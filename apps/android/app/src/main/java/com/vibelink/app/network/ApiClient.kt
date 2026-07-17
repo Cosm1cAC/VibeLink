@@ -79,6 +79,20 @@ class ApiClient(
 
     private suspend fun postRaw(path: String, body: Any? = null): String = post(path, body)
 
+    private suspend fun patch(path: String, body: Any? = null): String = withContext(Dispatchers.IO) {
+        val jsonBody = if (body != null) gson.toJson(body) else ""
+        val req = Request.Builder()
+            .url("$baseUrl$path")
+            .apply { authHeaders().forEach { (k, v) -> addHeader(k, v) } }
+            .patch(jsonBody.toRequestBody(jsonType))
+            .build()
+        httpClient.newCall(req).execute().use { response ->
+            val responseBody = response.body?.string() ?: ""
+            if (!response.isSuccessful) throw ApiException(response.code, responseBody)
+            responseBody
+        }
+    }
+
     // ── Auth ──
 
     suspend fun checkStatus(): StatusResponse {
@@ -202,6 +216,8 @@ class ApiClient(
     suspend fun getReview(id: String): ReviewSession = gson.fromJson(get("/api/reviews/${encode(id)}"), ReviewSession::class.java)
 
     suspend fun addReviewComment(id: String, request: ReviewCommentRequest): ReviewSession = gson.fromJson(post("/api/reviews/${encode(id)}/comments", request), ReviewSession::class.java)
+
+    suspend fun updateReview(id: String, patch: Map<String, Any?>): ReviewSession = gson.fromJson(patch("/api/reviews/${encode(id)}", patch), ReviewSession::class.java)
 
     private suspend fun delete(path: String): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()

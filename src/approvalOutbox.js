@@ -1,6 +1,16 @@
 import crypto from "node:crypto";
 
 const MAX_DECISION_BYTES = 64 * 1024;
+const APPROVED_DECISIONS = new Set([
+  "approve",
+  "approved",
+  "accept",
+  "accepted",
+  "acceptforsession",
+  "grant",
+  "granted"
+]);
+const DENIED_DECISIONS = new Set(["deny", "denied", "decline", "declined", "cancel", "canceled", "cancelled"]);
 
 function outboxError(code, message, details = {}) {
   const error = new Error(message);
@@ -50,8 +60,8 @@ function decisionName(value) {
 
 function approvalStatus(name) {
   const normalized = name.toLowerCase().replace(/[^a-z]/g, "");
-  if (normalized.includes("accept") || normalized.includes("approv") || normalized.includes("grant")) return "approved";
-  if (normalized.includes("deny") || normalized.includes("deni") || normalized.includes("declin") || normalized.includes("cancel")) return "denied";
+  if (APPROVED_DECISIONS.has(normalized)) return "approved";
+  if (DENIED_DECISIONS.has(normalized)) return "denied";
   throw outboxError("APPROVAL_DECISION_INVALID", "Decision type is not supported.", { decision: name });
 }
 
@@ -221,23 +231,31 @@ export function createApprovalOutboxPersistence({
     }
   }
 
-  function claimApprovalOutbox({ at = now(), limit = 20 } = {}) {
+  function claimApprovalOutbox({ at = now(), limit = 20, leaseMs = 30_000 } = {}) {
     const current = cleanString(at, 80) || now();
     const boundedLimit = Math.min(100, Math.max(1, Math.floor(Number(limit) || 20)));
+    const currentMs = new Date(current).getTime();
+    if (!Number.isFinite(currentMs)) throw outboxError("OUTBOX_TIME_INVALID", "Claim time is invalid.");
+    const boundedLeaseMs = Math.min(5 * 60_000, Math.max(1000, Math.floor(Number(leaseMs) || 30_000)));
+    const leaseExpiresAt = new Date(currentMs + boundedLeaseMs).toISOString();
     const db = database();
     db.exec("BEGIN IMMEDIATE");
     try {
       const rows = db.prepare(`
-        SELECT id FROM approval_outbox
-        WHERE status = 'decision_recorded' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        SELECT id, approval_id FROM approval_outbox
+        WHERE (status = 'decision_recorded' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+           OR (status = 'delivering' AND next_attempt_at <= ?)
         ORDER BY created_at ASC LIMIT ?
-      `).all(current, boundedLimit);
+      `).all(current, current, boundedLimit);
       for (const row of rows) {
         db.prepare(`
           UPDATE approval_outbox
-          SET status = 'delivering', attempts = attempts + 1, updated_at = ?
-          WHERE id = ? AND status = 'decision_recorded'
-        `).run(current, row.id);
+          SET status = 'delivering', attempts = attempts + 1,
+              next_attempt_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('decision_recorded', 'delivering')
+        `).run(leaseExpiresAt, current, row.id);
+        db.prepare("UPDATE approval_requests SET delivery_status = 'delivering', updated_at = ? WHERE id = ?")
+          .run(current, row.approval_id);
       }
       db.exec("COMMIT");
       return rows.map((row) => getApprovalOutbox(row.id));
@@ -248,13 +266,28 @@ export function createApprovalOutboxPersistence({
   }
 
   function retryApprovalOutbox(id, { error = "", nextAttemptAt = now() } = {}) {
-    const result = database().prepare(`
-      UPDATE approval_outbox SET
-        status = 'decision_recorded', next_attempt_at = ?, updated_at = ?, last_error = ?
-      WHERE id = ? AND status = 'delivering'
-    `).run(cleanString(nextAttemptAt, 80), now(), cleanString(error, 2000), cleanString(id, 160));
-    if (result.changes !== 1) throw outboxError("OUTBOX_STATE_CONFLICT", "Outbox command is not delivering.");
-    return getApprovalOutbox(id);
+    const outboxId = cleanString(id, 160);
+    const current = now();
+    const db = database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = db.prepare("SELECT * FROM approval_outbox WHERE id = ?").get(outboxId);
+      if (!existing || existing.status !== "delivering") {
+        throw outboxError("OUTBOX_STATE_CONFLICT", "Outbox command is not delivering.");
+      }
+      db.prepare(`
+        UPDATE approval_outbox SET
+          status = 'decision_recorded', next_attempt_at = ?, updated_at = ?, last_error = ?
+        WHERE id = ?
+      `).run(cleanString(nextAttemptAt, 80), current, cleanString(error, 2000), outboxId);
+      db.prepare("UPDATE approval_requests SET delivery_status = 'decision_recorded', updated_at = ? WHERE id = ?")
+        .run(current, existing.approval_id);
+      db.exec("COMMIT");
+      return getApprovalOutbox(outboxId);
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
   }
 
   function markApprovalOutboxApplied(id, { deliveredAt = now(), appliedAt = now() } = {}) {

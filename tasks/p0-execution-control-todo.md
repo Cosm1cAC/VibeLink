@@ -16,9 +16,9 @@
 
 ## Phase 1: Persistence And Host
 
-- [ ] 添加 `execution_bindings` migration 和 repository API。
-- [ ] 添加 approval continuation 字段和 `approval_outbox`。
-- [ ] 添加 event ingest + host cursor 原子事务。
+- [x] 添加 `execution_bindings` migration 和 repository API。
+- [x] 添加 approval continuation 字段和 `approval_outbox`。
+- [x] 添加 event ingest + host cursor 原子事务。
 - [ ] 实现 Rust `execd` mode 和 named-pipe handshake。
 - [ ] 实现 manifest discovery 与 worker identity 校验。
 - [ ] 实现 execution worker 与 Windows Job Object。
@@ -59,7 +59,7 @@
 - [ ] 映射 command execution approval request/response。
 - [ ] 映射 file change approval request/response。
 - [ ] 映射 permission request/grant scope。
-- [ ] 实现 approval decision transactional outbox。
+- [x] 实现 approval decision transactional outbox。
 - [ ] 实现 continuationRef、available decisions 和 expected version 校验。
 - [ ] 实现 decision recorded/delivered/applied/stale 状态。
 - [ ] 验证 Bridge restart 后继续同一个上游 request 和 tool call。

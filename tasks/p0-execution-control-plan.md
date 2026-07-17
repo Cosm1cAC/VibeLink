@@ -306,13 +306,13 @@ Manifest、pipe token、完整环境变量和 Provider 凭据不进入公开 API
 
 **Acceptance criteria:**
 
-- [ ] Migration 可重复执行，旧数据库无数据丢失。
-- [ ] Event ingest 与 `last_ingested_host_seq` 同事务、幂等。
-- [ ] Approval decision 与 outbox 同事务，重复 operation 不产生第二条命令。
+- [x] Migration 可重复执行，旧数据库无数据丢失。
+- [x] Event ingest 与 `last_ingested_host_seq` 同事务、幂等。
+- [x] Approval decision 与 outbox 同事务，重复 operation 不产生第二条命令。
 
 **Verification:**
 
-- [ ] DB migration、duplicate replay、outbox retry 和 stale decision tests 通过。
+- [x] DB migration、duplicate replay、outbox retry 和 stale decision tests 通过。
 
 **Dependencies:** Task 1.
 

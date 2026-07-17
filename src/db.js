@@ -1561,6 +1561,15 @@ function publicApprovalRequest(row) {
     reason: row.reason || "",
     request: fromJson(row.request_json, null),
     risk: fromJson(row.risk_json, null),
+    provider: row.provider || "",
+    threadId: row.thread_id || "",
+    turnId: row.turn_id || "",
+    itemId: row.item_id || "",
+    continuationRef: row.continuation_ref || "",
+    decisionVersion: Number(row.decision_version || 0),
+    deliveryStatus: row.delivery_status || "pending",
+    requestedPermissions: fromJson(row.requested_permissions_json, null),
+    availableDecisions: fromJson(row.available_decisions_json, []),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     expiresAt,
@@ -1579,13 +1588,16 @@ export function createApprovalRequest(input = {}) {
     .prepare(`
       INSERT INTO approval_requests (
         id, tool_run_id, task_id, workspace_id, kind, status, title, reason,
-        request_json, risk_json, created_at, updated_at, expires_at, decided_at,
+        request_json, risk_json, provider, thread_id, turn_id, item_id,
+        continuation_ref, decision_version, delivery_status,
+        requested_permissions_json, available_decisions_json,
+        created_at, updated_at, expires_at, decided_at,
         decided_by_device_id, decision_reason, decision_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
     `)
     .run(
       id,
-      cleanString(input.toolRunId || "", 160),
+      input.toolRunId ? cleanString(input.toolRunId, 160) : null,
       cleanString(input.taskId || "", 160),
       cleanString(input.workspaceId || "", 160),
       cleanString(input.kind || "tool", 120),
@@ -1594,6 +1606,15 @@ export function createApprovalRequest(input = {}) {
       cleanString(input.reason || "", 2000),
       toJson(input.request || null),
       toJson(input.risk || null),
+      cleanString(input.provider || "", 80),
+      cleanString(input.threadId || "", 160),
+      cleanString(input.turnId || "", 160),
+      cleanString(input.itemId || "", 160),
+      cleanString(input.continuationRef || "", 2000),
+      Math.max(0, Math.floor(Number(input.decisionVersion || 0))),
+      cleanString(input.deliveryStatus || "pending", 40),
+      toJson(input.requestedPermissions || null),
+      toJson(Array.isArray(input.availableDecisions) ? input.availableDecisions : []),
       input.createdAt || current,
       input.updatedAt || current,
       input.expiresAt || ""
@@ -1624,6 +1645,42 @@ export function listApprovalRequests({ status = "", workspaceId = "", after = 0,
     .all(cleanString(status, 40), cleanString(status, 40), cleanString(workspaceId, 160), cleanString(workspaceId, 160), Number(after || 0), Number(limit || 100))
     .map(publicApprovalRequest)
     .map((approval) => (approval?.status === "pending" && approval.expired ? updateApprovalRequest(approval.id, { status: "expired", decisionReason: "Approval request expired." }) : approval));
+}
+
+export function getExecutionBinding(id) {
+  return executionPersistenceStore().getExecutionBinding(id);
+}
+
+export function upsertExecutionBinding(input = {}) {
+  return executionPersistenceStore().upsertExecutionBinding(input);
+}
+
+export function ingestExecutionHostEvent(executionId, event = {}) {
+  return executionPersistenceStore().ingestExecutionEvent(executionId, event);
+}
+
+export function listExecutionHostEvents(executionId, options = {}) {
+  return executionPersistenceStore().listExecutionEvents(executionId, options);
+}
+
+export function acknowledgeExecutionHostEvents(executionId, hostSeq) {
+  return executionPersistenceStore().ackExecutionEvents(executionId, hostSeq);
+}
+
+export function recordApprovalDecisionWithOutbox(input = {}) {
+  return approvalOutboxStore().recordApprovalDecision(input);
+}
+
+export function claimApprovalOutboxCommands(options = {}) {
+  return approvalOutboxStore().claimApprovalOutbox(options);
+}
+
+export function retryApprovalOutboxCommand(id, options = {}) {
+  return approvalOutboxStore().retryApprovalOutbox(id, options);
+}
+
+export function markApprovalOutboxCommandApplied(id, options = {}) {
+  return approvalOutboxStore().markApprovalOutboxApplied(id, options);
 }
 
 export function updateApprovalRequest(id, patch = {}) {

@@ -73,6 +73,18 @@ test("execution event ingest advances the host cursor atomically and deduplicate
     workerInstanceId: "worker-1",
     protocolVersion: 1
   });
+  assert.throws(
+    () => store.upsertExecutionBinding({
+      id: "invalid-cursors",
+      kind: "command",
+      status: "running",
+      attachState: "attached",
+      lastSeenHostSeq: 1,
+      lastIngestedHostSeq: 2,
+      lastAckedHostSeq: 1
+    }),
+    (error) => error.code === "EXECUTION_CURSOR_INVALID"
+  );
 
   const event = {
     eventId: "execution-1:1",

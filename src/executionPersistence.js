@@ -13,8 +13,11 @@ const EXECUTION_STATUSES = new Set([
 ]);
 const ATTACH_STATES = new Set(["attached", "reconnecting", "unreachable", "lost", "external"]);
 
-export const EXECUTION_PERSISTENCE_SCHEMA_VERSION = 2026071701;
 export const MAX_EXECUTION_EVENT_BYTES = 1024 * 1024;
+export {
+  EXECUTION_PERSISTENCE_SCHEMA_VERSION,
+  ensureExecutionPersistenceSchema
+} from "./executionPersistenceSchema.js";
 
 function persistenceError(code, message, details = {}) {
   const error = new Error(message);
@@ -69,102 +72,10 @@ function nonNegativeInteger(value, field, fallback = 0) {
   return candidate;
 }
 
-function ensureColumn(db, table, name, definition) {
-  const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
-  if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
-}
-
-export function ensureExecutionPersistenceSchema(db) {
-  if (!db?.exec || !db?.prepare) throw new TypeError("A SQLite database is required.");
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS execution_bindings (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        task_id TEXT,
-        tool_run_id TEXT,
-        provider TEXT,
-        owner TEXT NOT NULL,
-        status TEXT NOT NULL,
-        attach_state TEXT NOT NULL,
-        worker_pid INTEGER,
-        process_pid INTEGER,
-        process_started_at TEXT,
-        worker_instance_id TEXT,
-        protocol_version INTEGER NOT NULL DEFAULT 1,
-        capabilities_json TEXT,
-        last_seen_host_seq INTEGER NOT NULL DEFAULT 0,
-        last_ingested_host_seq INTEGER NOT NULL DEFAULT 0,
-        last_acked_host_seq INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        ended_at TEXT,
-        exit_code INTEGER,
-        signal TEXT,
-        lost_reason TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_execution_bindings_status ON execution_bindings(status, updated_at);
-      CREATE INDEX IF NOT EXISTS idx_execution_bindings_task ON execution_bindings(task_id);
-      CREATE INDEX IF NOT EXISTS idx_execution_bindings_tool ON execution_bindings(tool_run_id);
-      CREATE TABLE IF NOT EXISTS execution_host_events (
-        execution_id TEXT NOT NULL,
-        host_seq INTEGER NOT NULL,
-        event_id TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        event_at TEXT NOT NULL,
-        payload_json TEXT,
-        event_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY(execution_id, host_seq),
-        UNIQUE(execution_id, event_id),
-        FOREIGN KEY(execution_id) REFERENCES execution_bindings(id) ON DELETE CASCADE
-      );
-      CREATE TABLE IF NOT EXISTS approval_outbox (
-        id TEXT PRIMARY KEY,
-        approval_id TEXT NOT NULL UNIQUE,
-        operation_id TEXT NOT NULL UNIQUE,
-        continuation_ref TEXT NOT NULL,
-        decision_json TEXT NOT NULL,
-        status TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        next_attempt_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        delivered_at TEXT,
-        applied_at TEXT,
-        last_error TEXT,
-        FOREIGN KEY(approval_id) REFERENCES approval_requests(id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_approval_outbox_ready
-        ON approval_outbox(status, next_attempt_at, created_at);
-    `);
-
-    const approvalColumns = [
-      ["provider", "TEXT"],
-      ["thread_id", "TEXT"],
-      ["turn_id", "TEXT"],
-      ["item_id", "TEXT"],
-      ["continuation_ref", "TEXT"],
-      ["decision_version", "INTEGER NOT NULL DEFAULT 0"],
-      ["delivery_status", "TEXT NOT NULL DEFAULT 'pending'"],
-      ["requested_permissions_json", "TEXT"],
-      ["available_decisions_json", "TEXT"]
-    ];
-    for (const [name, definition] of approvalColumns) {
-      ensureColumn(db, "approval_requests", name, definition);
-    }
-    db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)")
-      .run(EXECUTION_PERSISTENCE_SCHEMA_VERSION, new Date().toISOString());
-    db.exec("COMMIT");
-  } catch (error) {
-    try { db.exec("ROLLBACK"); } catch {}
-    throw error;
-  }
+function positiveInteger(value, field, fallback = 1) {
+  const candidate = nonNegativeInteger(value, field, fallback);
+  if (candidate < 1) throw persistenceError("EXECUTION_FIELD_INVALID", `Invalid ${field}.`, { field });
+  return candidate;
 }
 
 function publicBinding(row) {
@@ -219,6 +130,12 @@ export function createExecutionPersistence({ database, now = () => new Date().to
       owner === "external" ? "external" : "reconnecting"
     );
     const capabilities = boundedJson(input.capabilities ?? fromJson(existing?.capabilities_json, {}), 64 * 1024, "CAPABILITIES_TOO_LARGE");
+    const lastSeenHostSeq = nonNegativeInteger(input.lastSeenHostSeq, "lastSeenHostSeq", existing?.last_seen_host_seq ?? 0);
+    const lastIngestedHostSeq = nonNegativeInteger(input.lastIngestedHostSeq, "lastIngestedHostSeq", existing?.last_ingested_host_seq ?? 0);
+    const lastAckedHostSeq = nonNegativeInteger(input.lastAckedHostSeq, "lastAckedHostSeq", existing?.last_acked_host_seq ?? 0);
+    if (lastIngestedHostSeq > lastSeenHostSeq || lastAckedHostSeq > lastIngestedHostSeq) {
+      throw persistenceError("EXECUTION_CURSOR_INVALID", "Execution host cursors must be monotonic.");
+    }
     db.prepare(`
       INSERT INTO execution_bindings (
         id, kind, task_id, tool_run_id, provider, owner, status, attach_state,
@@ -250,11 +167,11 @@ export function createExecutionPersistence({ database, now = () => new Date().to
       input.processPid === null ? null : nonNegativeInteger(input.processPid, "processPid", existing?.process_pid ?? 0) || null,
       cleanString(input.processStartedAt ?? existing?.process_started_at, 80),
       cleanString(input.workerInstanceId ?? existing?.worker_instance_id, 160),
-      nonNegativeInteger(input.protocolVersion, "protocolVersion", existing?.protocol_version ?? 1),
+      positiveInteger(input.protocolVersion, "protocolVersion", existing?.protocol_version ?? 1),
       capabilities,
-      nonNegativeInteger(input.lastSeenHostSeq, "lastSeenHostSeq", existing?.last_seen_host_seq ?? 0),
-      nonNegativeInteger(input.lastIngestedHostSeq, "lastIngestedHostSeq", existing?.last_ingested_host_seq ?? 0),
-      nonNegativeInteger(input.lastAckedHostSeq, "lastAckedHostSeq", existing?.last_acked_host_seq ?? 0),
+      lastSeenHostSeq,
+      lastIngestedHostSeq,
+      lastAckedHostSeq,
       existing?.created_at || input.createdAt || current,
       current,
       cleanString(input.endedAt ?? existing?.ended_at, 80),

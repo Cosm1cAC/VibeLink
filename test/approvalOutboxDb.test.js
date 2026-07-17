@@ -133,11 +133,13 @@ test("approval outbox retries transport failures and marks the original approval
   assert.equal(firstAttempt.id, recorded.outbox.id);
   assert.equal(firstAttempt.status, "delivering");
   assert.equal(firstAttempt.attempts, 1);
+  assert.equal(store.getApproval("approval-1").deliveryStatus, "delivering");
 
   store.retryApprovalOutbox(firstAttempt.id, {
     error: "worker unavailable",
     nextAttemptAt: "2026-01-01T00:01:00.000Z"
   });
+  assert.equal(store.getApproval("approval-1").deliveryStatus, "decision_recorded");
   assert.deepEqual(store.claimApprovalOutbox({ at: "2026-01-01T00:00:59.000Z" }), []);
   const [secondAttempt] = store.claimApprovalOutbox({ at: "2026-01-01T00:01:00.000Z" });
   assert.equal(secondAttempt.attempts, 2);
@@ -150,6 +152,33 @@ test("approval outbox retries transport failures and marks the original approval
   assert.equal(applied.status, "applied");
   assert.equal(store.getApproval("approval-1").deliveryStatus, "applied");
   assert.deepEqual(store.claimApprovalOutbox({ at: "2026-01-01T00:02:00.000Z" }), []);
+});
+
+test("approval outbox reclaims an expired delivery lease after a dispatcher crash", () => {
+  const db = createDb();
+  insertApproval(db);
+  const store = createStore(db);
+  store.recordApprovalDecision({
+    approvalId: "approval-1",
+    operationId: "operation-1",
+    continuationRef: "continuation-1",
+    expectedDecisionVersion: 0,
+    decision: { decision: "approved" }
+  });
+
+  const [firstAttempt] = store.claimApprovalOutbox({ at: START, leaseMs: 30_000 });
+  assert.equal(firstAttempt.attempts, 1);
+  assert.deepEqual(
+    store.claimApprovalOutbox({ at: "2026-01-01T00:00:29.999Z", leaseMs: 30_000 }),
+    []
+  );
+  const [reclaimed] = store.claimApprovalOutbox({
+    at: "2026-01-01T00:00:30.000Z",
+    leaseMs: 30_000
+  });
+  assert.equal(reclaimed.id, firstAttempt.id);
+  assert.equal(reclaimed.status, "delivering");
+  assert.equal(reclaimed.attempts, 2);
 });
 
 test("stale approval decisions fail without creating an outbox command", () => {

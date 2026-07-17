@@ -285,14 +285,14 @@ Manifest、pipe token、完整环境变量和 Provider 凭据不进入公开 API
 
 **Acceptance criteria:**
 
-- [ ] ADR 明确支持/不支持的 restart 边界和故障语义。
-- [ ] execution/approval/provider contract 有版本、输入输出和统一错误定义。
-- [ ] 当前 Codex schema probe 产出可审计的 capability 结果，不提交整份易漂移生成物。
+- [x] ADR 明确支持/不支持的 restart 边界和故障语义。
+- [x] execution/approval/provider contract 有版本、输入输出和统一错误定义。
+- [x] 当前 Codex schema probe 产出可审计的 capability 结果，不提交整份易漂移生成物。
 
 **Verification:**
 
-- [ ] Contract fixture tests 能识别缺失方法、字段漂移和不支持版本。
-- [ ] `npm run openapi:gen` 后现有 HTTP contract 无破坏性变化。
+- [x] Contract fixture tests 能识别缺失方法、字段漂移和不支持版本。
+- [x] `npm run openapi:gen` 后现有 HTTP contract 无破坏性变化。
 
 **Dependencies:** None.
 

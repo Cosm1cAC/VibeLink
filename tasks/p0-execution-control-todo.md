@@ -2,17 +2,17 @@
 
 ## Phase 0: Contract
 
-- [ ] 评审并确认 P0 支持边界与非目标。
-- [ ] 新增 durable execution host ADR。
-- [ ] 定义 named-pipe v1 request/response/event/error contract。
-- [ ] 定义 execution、attach、fidelity 和 approval delivery 状态机。
-- [ ] 增加 Codex app-server schema/capability probe fixture。
+- [x] 评审并确认 P0 支持边界与非目标。
+- [x] 新增 durable execution host ADR。
+- [x] 定义 named-pipe v1 request/response/event/error contract。
+- [x] 定义 execution、attach、fidelity 和 approval delivery 状态机。
+- [x] 增加 Codex app-server schema/capability probe fixture。
 
 ## Checkpoint 0
 
-- [ ] HTTP 兼容字段均为 additive/optional。
-- [ ] 未支持 Provider 的降级语义明确。
-- [ ] 人工批准架构后再开始实现。
+- [x] HTTP 兼容字段均为 additive/optional。
+- [x] 未支持 Provider 的降级语义明确。
+- [x] 人工批准架构后再开始实现。
 
 ## Phase 1: Persistence And Host
 

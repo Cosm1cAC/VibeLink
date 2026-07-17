@@ -1283,6 +1283,20 @@
               "type": "string"
             },
             "description": "Set to 1 to bypass cache"
+          },
+          {
+            "name": "sessionOrigin",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "codex-desktop",
+                "vibelink-cli",
+                "unknown"
+              ]
+            },
+            "description": "Filter histories by their creation origin"
           }
         ],
         "responses": {

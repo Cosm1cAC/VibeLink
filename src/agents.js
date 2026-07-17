@@ -12,6 +12,7 @@ import { getDefaultEventReplayLimit, insertTaskEvent, listTaskEvents, listTaskEv
 import { resolveAllowedPath } from "./security.js";
 import { settingsWithSecrets } from "./store.js";
 import { zhipuAgentArgs, zhipuCliPath } from "./zhipuRuntime.js";
+import { recordSessionOrigin, SESSION_ORIGINS } from "./sessionOrigins.js";
 
 const tasks = new Map();
 const MAX_RESTORED_TASKS = 80;
@@ -24,6 +25,19 @@ function nowIso() {
 function appendTaskEvent(task, event) {
   if (event.payload?.thread_id && !task.sessionId) {
     task.sessionId = event.payload.thread_id;
+    if (task.launchMode === "new") {
+      try {
+        recordSessionOrigin({
+          provider: task.agent,
+          sessionId: task.sessionId,
+          sessionOrigin: SESSION_ORIGINS.VIBELINK_CLI,
+          taskId: task.id,
+          createdAt: task.createdAt
+        });
+      } catch {
+        // Origin persistence should never interrupt the agent process.
+      }
+    }
   }
 
   const enriched = {
@@ -126,6 +140,12 @@ function inferResumeSessionId(events) {
   return resumeCommand.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] || "";
 }
 
+function inferLaunchMode(events) {
+  const explicit = events.find((event) => event.payload?.launchMode)?.payload?.launchMode;
+  if (explicit) return explicit;
+  return inferResumeSessionId(events) ? "resume" : "new";
+}
+
 function restoreTaskFromLog(filePath) {
   const events = fs
     .readFileSync(filePath, "utf8")
@@ -155,6 +175,8 @@ function restoreTaskFromLog(filePath) {
     updatedAt: events[events.length - 1]?.at || nowIso(),
     exitCode: eventExitCode(events),
     sessionId: events.find((event) => event.payload?.thread_id)?.payload?.thread_id || inferResumeSessionId(events),
+    launchMode: inferLaunchMode(events),
+    sessionOrigin: SESSION_ORIGINS.VIBELINK_CLI,
     commandLabel,
     process: null,
     listeners: new Set(),
@@ -540,7 +562,8 @@ export function getTasks() {
       exitCode: task.exitCode,
       sessionId: task.sessionId,
       commandLabel: task.commandLabel,
-      eventCount: task.events.length
+      eventCount: task.events.length,
+      sessionOrigin: task.sessionOrigin || SESSION_ORIGINS.VIBELINK_CLI
     }))
     .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 }
@@ -613,6 +636,8 @@ export async function createTask(payload, settings) {
     updatedAt: nowIso(),
     exitCode: null,
     sessionId: payload.sessionId || "",
+    launchMode: payload.mode || "new",
+    sessionOrigin: SESSION_ORIGINS.VIBELINK_CLI,
     commandLabel: commandLabel(base.command, args),
     security: policy,
     process: null,
@@ -623,7 +648,11 @@ export async function createTask(payload, settings) {
 
   tasks.set(id, task);
   upsertTask(task);
-  appendTaskEvent(task, { type: "system", text: `Starting ${agent} in ${cwd}` });
+  appendTaskEvent(task, {
+    type: "system",
+    text: `Starting ${agent} in ${cwd}`,
+    payload: { agent, launchMode: task.launchMode }
+  });
   appendTaskEvent(task, {
     type: "security",
     text: `Security policy: sandbox=${policy.sandboxMode || "default"}, approval=${policy.approvalPolicy || "default"}, network=${policy.networkAccess ? "enabled" : "disabled"}`

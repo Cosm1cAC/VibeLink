@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getHomeDir } from "./config.js";
 import { backfillHistoryToolEvents, historyToolTaskId } from "./historyToolBridge.js";
+import { classifySessionOrigin, filterBySessionOrigin, loadSessionOriginBindings } from "./sessionOrigins.js";
 import { readJsonLines } from "./store.js";
 
 const MAX_HISTORY_FILES = 600;
@@ -761,6 +762,7 @@ function summarizeJsonl(filePath, provider, projectPath = "") {
   return {
     id,
     provider,
+    originator: meta.originator || "",
     title: decodeMaybeMojibake(String(title)).slice(0, 120),
     projectPath: cwd,
     updatedAt: stat?.mtime?.toISOString() || "",
@@ -837,10 +839,10 @@ function claudeSessions(home) {
     .slice(0, 300);
 }
 
-export function listHistories({ fresh = false } = {}) {
+export function listHistories({ fresh = false, sessionOrigin = "all", originBindings } = {}) {
   const current = Date.now();
   if (!fresh && historyListCache.items && historyListCache.expiresAt > current) {
-    return historyListCache.items;
+    return filterBySessionOrigin(historyListCache.items, sessionOrigin);
   }
 
   const home = getHomeDir();
@@ -871,8 +873,12 @@ export function listHistories({ fresh = false } = {}) {
     });
   }
 
+  const bindings = originBindings || loadSessionOriginBindings();
   const items = [...codexById.values(), ...claudeSessions(home)]
-    .map(({ source, ...item }) => item)
+    .map(({ source, originator, ...item }) => ({
+      ...item,
+      sessionOrigin: classifySessionOrigin({ ...item, originator }, bindings)
+    }))
     .sort((a, b) => {
       const bt = new Date(b.updatedAt || 0).getTime();
       const at = new Date(a.updatedAt || 0).getTime();
@@ -882,7 +888,7 @@ export function listHistories({ fresh = false } = {}) {
     expiresAt: current + HISTORY_LIST_CACHE_MS,
     items
   };
-  return items;
+  return filterBySessionOrigin(items, sessionOrigin);
 }
 
 export function getHistory(provider, id, { fresh = false } = {}) {

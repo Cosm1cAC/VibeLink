@@ -57,7 +57,7 @@ test("listHistories excludes Codex sessions archived by Codex Desktop", () => {
 
     assert.deepEqual([...__testInternals.archivedCodexSessionIds(home)], [archivedId]);
 
-    const histories = listHistories({ fresh: true });
+    const histories = listHistories({ fresh: true, originBindings: new Map() });
     assert.equal(histories.some((item) => item.provider === "codex" && item.id === activeId), true);
     assert.equal(histories.some((item) => item.provider === "codex" && item.id === archivedId), false);
 
@@ -113,12 +113,51 @@ test("history previews exclude internal reasoning and developer content", () => 
       }
     ]);
 
-    const item = listHistories({ fresh: true }).find((entry) => entry.id === sessionId);
+    const item = listHistories({ fresh: true, originBindings: new Map() }).find((entry) => entry.id === sessionId);
 
     assert.ok(item);
     assert.match(item.preview, /user: visible user prompt/);
     assert.match(item.preview, /assistant: visible assistant reply/);
     assert.doesNotMatch(item.preview, /agent_reasoning|private chain of thought|developer instruction|\[object Object\]/i);
+  } finally {
+    if (originalHome === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("listHistories exposes and filters stable session origins", () => {
+  const originalHome = process.env.USERPROFILE;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-history-origin-"));
+
+  process.env.USERPROFILE = home;
+  try {
+    writeJsonl(path.join(home, ".codex", "sessions", "cli.jsonl"), [
+      {
+        timestamp: "2026-07-17T00:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "cli-session", cwd: "C:\\work\\cli", originator: "Codex Desktop" }
+      }
+    ]);
+    writeJsonl(path.join(home, ".codex", "sessions", "desktop.jsonl"), [
+      {
+        timestamp: "2026-07-17T00:01:00.000Z",
+        type: "session_meta",
+        payload: { id: "desktop-session", cwd: "C:\\work\\desktop", originator: "Codex Desktop" }
+      }
+    ]);
+    const originBindings = new Map([
+      ["codex:cli-session", { provider: "codex", sessionId: "cli-session", sessionOrigin: "vibelink-cli" }]
+    ]);
+
+    const all = listHistories({ fresh: true, originBindings });
+    const cliOnly = listHistories({ fresh: false, sessionOrigin: "vibelink-cli" });
+    const desktopOnly = listHistories({ fresh: false, sessionOrigin: "codex-desktop" });
+
+    assert.equal(all.find((item) => item.id === "cli-session")?.sessionOrigin, "vibelink-cli");
+    assert.equal(all.find((item) => item.id === "desktop-session")?.sessionOrigin, "codex-desktop");
+    assert.deepEqual(cliOnly.map((item) => item.id), ["cli-session"]);
+    assert.deepEqual(desktopOnly.map((item) => item.id), ["desktop-session"]);
   } finally {
     if (originalHome === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalHome;

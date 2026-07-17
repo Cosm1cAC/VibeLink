@@ -75,6 +75,7 @@ import {
 import { getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
 import { searchAll } from "./search.js";
+import { filterBySessionOrigin, resolveSessionOriginFilter } from "./sessionOrigins.js";
 import { addReviewComment, createReview, getReview, listReviews, updateReview } from "./reviews.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
@@ -356,6 +357,15 @@ function applyFields(items, url) {
   const fields = url.searchParams.get("fields");
   if (!fields || !Array.isArray(items)) return items;
   return items.map((item) => pickFields(item, fields));
+}
+
+function sessionOriginForRequest(response, url) {
+  try {
+    return resolveSessionOriginFilter(url.searchParams.get("sessionOrigin"));
+  } catch (error) {
+    sendError(response, 400, error.message);
+    return null;
+  }
 }
 
 function conversationTasks() {
@@ -3247,11 +3257,17 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/histories" && request.method === "GET") {
-    sendJson(response, 200, { items: applyFields(listHistories({ fresh: url.searchParams.get("fresh") === "1" }), url) });
+    const sessionOrigin = sessionOriginForRequest(response, url);
+    if (!sessionOrigin) return;
+    sendJson(response, 200, {
+      items: applyFields(listHistories({ fresh: url.searchParams.get("fresh") === "1", sessionOrigin }), url)
+    });
     return;
   }
 
   if (url.pathname === "/api/search" && request.method === "GET") {
+    const sessionOrigin = sessionOriginForRequest(response, url);
+    if (!sessionOrigin) return;
     const result = await searchAll({
       query: url.searchParams.get("q") || "",
       scope: url.searchParams.get("scope") || "all",
@@ -3259,8 +3275,8 @@ async function routeApi(request, response, url) {
       cursor: url.searchParams.get("cursor") || "0",
       tag: url.searchParams.get("tag") || "",
       favorite: url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true",
-      histories: listHistories({ fresh: false }),
-      tasks: conversationTasks(),
+      histories: listHistories({ fresh: false, sessionOrigin }),
+      tasks: filterBySessionOrigin(conversationTasks(), sessionOrigin),
       workspaces: getWorkspaces(settings),
       threadState: getThreadState()
     });

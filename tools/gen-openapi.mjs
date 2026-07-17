@@ -316,7 +316,15 @@ const paths = {
   ...path("/api/histories", get("List histories",
     "Returns conversation history from Codex and Claude sessions.",
     { type: "object", properties: { items: { type: "array", items: { type: "object" } } } },
-    [{ name: "fresh", in: "query", schema: { type: "string" }, description: "Set to 1 to bypass cache" }]
+    [
+      { name: "fresh", in: "query", schema: { type: "string" }, description: "Set to 1 to bypass cache" },
+      {
+        name: "sessionOrigin",
+        in: "query",
+        schema: { type: "string", enum: ["all", "codex-desktop", "vibelink-cli", "unknown"] },
+        description: "Filter histories by their creation origin"
+      }
+    ]
   )),
   ...path("/api/histories/{provider}/{id}", get("Get history detail",
     "Returns the full transcript and state of a specific history entry.",

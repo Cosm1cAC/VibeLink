@@ -7,6 +7,8 @@ set "JAVA_EXE="
 
 if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA_EXE=%JAVA_HOME%\bin\java.exe"
 
+if not defined JAVA_EXE if exist "%ProgramFiles%\Microsoft\jdk-17.0.19.10-hotspot\bin\java.exe" set "JAVA_EXE=%ProgramFiles%\Microsoft\jdk-17.0.19.10-hotspot\bin\java.exe"
+
 if not defined JAVA_EXE (
     for /f "delims=" %%J in ('where java 2^>nul') do if not defined JAVA_EXE set "JAVA_EXE=%%J"
 )

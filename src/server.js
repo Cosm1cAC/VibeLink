@@ -42,6 +42,7 @@ import {
   updateToolRun,
   eventStoreMode,
   getEventStoreRuntimeStats,
+  initDb,
   replayEventWindowAsync,
   upsertNativePushToken,
   upsertPushSubscription
@@ -112,6 +113,8 @@ import {
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
 import { buildProviderRegistry, createProviderCatalogResolver, createProviderHealthResolver } from "./providerRegistry.js";
+import { createPersistentProviderCacheLoader } from "./providerCacheLoader.js";
+import { createProviderCacheStore } from "./providerCacheStore.js";
 import { createProviderRuntimeLoaders } from "./providerRuntimeLoaders.js";
 import { internalControlAuthorized, originalHostRequest } from "./internalControl.js";
 import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
@@ -147,10 +150,20 @@ await saveSettings(settings);
 const providerRuntimeLoaders = createProviderRuntimeLoaders({
   getSettings: () => settingsWithSecrets(settings)
 });
-const providerCatalogResolver = createProviderCatalogResolver({ loaders: providerRuntimeLoaders.catalogLoaders });
-const providerHealthResolver = createProviderHealthResolver({ loaders: providerRuntimeLoaders.healthLoaders });
+const persistentProviderCache = createPersistentProviderCacheLoader({
+  store: createProviderCacheStore({ database: initDb }),
+  catalogResolver: createProviderCatalogResolver({ loaders: providerRuntimeLoaders.catalogLoaders }),
+  healthResolver: createProviderHealthResolver({ loaders: providerRuntimeLoaders.healthLoaders })
+});
+const providerCatalogResolver = persistentProviderCache.catalogResolver;
+const providerHealthResolver = persistentProviderCache.healthResolver;
 settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
+try {
+  await providerRegistryPayload({ backgroundRefresh: true });
+} catch (error) {
+  console.error(`[provider-cache] startup hydration failed: ${error.message}`);
+}
 try {
   await startSearchIndex({
     getWorkspaces: () => getWorkspaces(settings),

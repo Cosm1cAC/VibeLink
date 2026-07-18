@@ -6,8 +6,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const CODEX_APP_SERVER_CONTRACT_VERSION = 1;
-export const SUPPORTED_CODEX_CLI_MINORS = Object.freeze(["0.117"]);
+export const CODEX_APP_SERVER_CONTRACT_VERSION = 2;
+export const SUPPORTED_CODEX_CLI_MINORS = Object.freeze(["0.117", "0.144"]);
 export const MAX_SCHEMA_FILE_BYTES = 4 * 1024 * 1024;
 
 const supportedCliMinorSet = new Set(SUPPORTED_CODEX_CLI_MINORS);
@@ -18,10 +18,16 @@ const REQUIRED_REQUESTS = {
   "item/tool/call": "DynamicToolCallParams"
 };
 const REQUIRED_NOTIFICATIONS = {
+  "thread/started": "ThreadStartedNotification",
+  "turn/started": "TurnStartedNotification",
+  "item/started": "ItemStartedNotification",
   "item/commandExecution/outputDelta": "CommandExecutionOutputDeltaNotification",
+  "item/agentMessage/delta": "AgentMessageDeltaNotification",
+  "item/mcpToolCall/progress": "McpToolCallProgressNotification",
   "item/completed": "ItemCompletedNotification",
   "turn/completed": "TurnCompletedNotification"
 };
+const REQUIRED_TOOL_ITEM_TYPES = Object.freeze(["commandExecution", "mcpToolCall", "dynamicToolCall"]);
 const REQUIRED_RESPONSES = {
   "CommandExecutionRequestApprovalResponse.json": ["decision"],
   "FileChangeRequestApprovalResponse.json": ["decision"],
@@ -108,6 +114,18 @@ function hasRequiredFields(schema, file, fields, errors) {
   return false;
 }
 
+function hasRequiredToolItemTypes(schema, errors) {
+  const actual = new Set(
+    (schema?.definitions?.ThreadItem?.oneOf || [])
+      .map((variant) => variant?.properties?.type?.enum?.[0])
+      .filter(Boolean)
+  );
+  const missing = REQUIRED_TOOL_ITEM_TYPES.filter((type) => !actual.has(type));
+  if (!missing.length) return true;
+  errors.push({ code: "TOOL_ITEM_TYPES_MISSING", types: missing });
+  return false;
+}
+
 export function analyzeCodexAppServerSchemas({ cliVersion = "", schemas = {}, schemaFileSizes = {} } = {}) {
   const errors = [];
   const parsedVersion = parseCliVersion(cliVersion);
@@ -156,17 +174,29 @@ export function analyzeCodexAppServerSchemas({ cliVersion = "", schemas = {}, sc
   const fileApproval = checkRequest("item/fileChange/requestApproval");
   const permissionApproval = checkRequest("item/permissions/requestApproval");
   const dynamicToolRequest = checkRequest("item/tool/call");
+  const threadStarted = checkNotification("thread/started");
+  const turnStarted = checkNotification("turn/started");
+  const itemStarted = checkNotification("item/started");
   const commandOutput = checkNotification("item/commandExecution/outputDelta");
+  const agentOutput = checkNotification("item/agentMessage/delta");
+  const toolProgress = checkNotification("item/mcpToolCall/progress");
   const itemCompletion = checkNotification("item/completed");
   const turnCompletion = checkNotification("turn/completed");
+  const toolItemTypes = hasRequiredToolItemTypes(notifications, errors);
 
   const capabilities = {
+    threadLifecycle: threadStarted,
+    turnLifecycle: turnStarted && turnCompletion,
+    itemLifecycle: itemStarted && itemCompletion,
+    toolLifecycle: itemStarted && itemCompletion && toolItemTypes,
+    agentOutput,
     approvalContinuation: commandApproval && fileApproval && permissionApproval &&
       responseChecks["CommandExecutionRequestApprovalResponse.json"] &&
       responseChecks["FileChangeRequestApprovalResponse.json"] &&
       responseChecks["PermissionsRequestApprovalResponse.json"],
     dynamicToolCalls: dynamicToolRequest && responseChecks["DynamicToolCallResponse.json"],
     authoritativeCommandOutput: commandOutput && itemCompletion,
+    toolProgress,
     turnCompletion
   };
 
@@ -189,9 +219,15 @@ function probeFailure(code, message, source) {
     supportedCliMinors: [...SUPPORTED_CODEX_CLI_MINORS],
     schemaHash: schemaHash({}),
     capabilities: {
+      threadLifecycle: false,
+      turnLifecycle: false,
+      itemLifecycle: false,
+      toolLifecycle: false,
+      agentOutput: false,
       approvalContinuation: false,
       dynamicToolCalls: false,
       authoritativeCommandOutput: false,
+      toolProgress: false,
       turnCompletion: false
     },
     errors: [{ code, message }],

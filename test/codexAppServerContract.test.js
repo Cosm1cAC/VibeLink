@@ -11,69 +11,39 @@ import {
   runCodexAppServerContractProbe
 } from "../tools/codex-app-server/contract-probe.mjs";
 
-const requestRefs = {
-  "item/commandExecution/requestApproval": "CommandExecutionRequestApprovalParams",
-  "item/fileChange/requestApproval": "FileChangeRequestApprovalParams",
-  "item/permissions/requestApproval": "PermissionsRequestApprovalParams",
-  "item/tool/call": "DynamicToolCallParams"
-};
-
-const notificationRefs = {
-  "item/commandExecution/outputDelta": "CommandExecutionOutputDeltaNotification",
-  "item/completed": "ItemCompletedNotification",
-  "turn/completed": "TurnCompletedNotification"
-};
-
-function methodSchema(method, ref, { request = false } = {}) {
-  return {
-    type: "object",
-    required: request ? ["id", "method", "params"] : ["method", "params"],
-    properties: {
-      ...(request ? { id: { $ref: "#/definitions/RequestId" } } : {}),
-      method: { type: "string", enum: [method] },
-      params: { $ref: `#/definitions/${ref}` }
-    }
-  };
-}
-
-function responseSchema(required) {
-  return { type: "object", required };
-}
+const reviewedFixturePath = path.join(import.meta.dirname, "fixtures", "codex-app-server-0.144.5.reviewed.json");
+const reviewedFixture = JSON.parse(fs.readFileSync(reviewedFixturePath, "utf8"));
 
 function completeSchemas() {
-  return {
-    "ServerRequest.json": JSON.stringify({
-      title: "ServerRequest",
-      oneOf: Object.entries(requestRefs).map(([method, ref]) => methodSchema(method, ref, { request: true }))
-    }),
-    "ServerNotification.json": JSON.stringify({
-      title: "ServerNotification",
-      oneOf: Object.entries(notificationRefs).map(([method, ref]) => methodSchema(method, ref))
-    }),
-    "CommandExecutionRequestApprovalResponse.json": JSON.stringify(responseSchema(["decision"])),
-    "FileChangeRequestApprovalResponse.json": JSON.stringify(responseSchema(["decision"])),
-    "PermissionsRequestApprovalResponse.json": JSON.stringify(responseSchema(["permissions"])),
-    "DynamicToolCallResponse.json": JSON.stringify(responseSchema(["contentItems", "success"]))
-  };
+  return Object.fromEntries(
+    Object.entries(structuredClone(reviewedFixture.schemas)).map(([name, schema]) => [name, JSON.stringify(schema)])
+  );
 }
 
-test("Codex app-server contract gate accepts the reviewed 0.117 schema", () => {
+test("Codex app-server contract gate accepts the reviewed 0.144.5 schema", () => {
   const report = analyzeCodexAppServerSchemas({
-    cliVersion: "codex-cli 0.117.0",
+    cliVersion: `codex-cli ${reviewedFixture.review.cliVersion}`,
     schemas: completeSchemas()
   });
 
   assert.equal(report.ok, true);
-  assert.equal(report.contractVersion, 1);
-  assert.equal(report.cliVersion, "0.117.0");
+  assert.equal(report.contractVersion, 2);
+  assert.equal(report.cliVersion, "0.144.5");
   assert.match(report.schemaHash, /^[a-f0-9]{64}$/);
   assert.deepEqual(report.capabilities, {
+    threadLifecycle: true,
+    turnLifecycle: true,
+    itemLifecycle: true,
+    toolLifecycle: true,
+    agentOutput: true,
     approvalContinuation: true,
     dynamicToolCalls: true,
     authoritativeCommandOutput: true,
+    toolProgress: true,
     turnCompletion: true
   });
   assert.deepEqual(report.errors, []);
+  assert.match(reviewedFixture.review.requiredSchemaBundleSha256, /^[a-f0-9]{64}$/);
 });
 
 test("Codex app-server contract gate rejects a missing approval method", () => {
@@ -85,7 +55,7 @@ test("Codex app-server contract gate rejects a missing approval method", () => {
   schemas["ServerRequest.json"] = JSON.stringify(requests);
 
   const report = analyzeCodexAppServerSchemas({
-    cliVersion: "codex-cli 0.117.0",
+    cliVersion: "codex-cli 0.144.5",
     schemas
   });
 
@@ -108,7 +78,7 @@ test("Codex app-server contract gate reports a params schema drift", () => {
   schemas["ServerRequest.json"] = JSON.stringify(requests);
 
   const report = analyzeCodexAppServerSchemas({
-    cliVersion: "codex-cli 0.117.0",
+    cliVersion: "codex-cli 0.144.5",
     schemas
   });
 
@@ -123,16 +93,33 @@ test("Codex app-server contract gate reports a params schema drift", () => {
 
 test("Codex app-server contract gate rejects an unreviewed CLI minor", () => {
   const report = analyzeCodexAppServerSchemas({
-    cliVersion: "codex-cli 0.118.0",
+    cliVersion: "codex-cli 0.145.0",
     schemas: completeSchemas()
   });
 
   assert.equal(report.ok, false);
-  assert.deepEqual(report.supportedCliMinors, ["0.117"]);
+  assert.deepEqual(report.supportedCliMinors, ["0.117", "0.144"]);
   assert.ok(report.errors.some((error) =>
     error.code === "CLI_VERSION_UNSUPPORTED" &&
-    error.version === "0.118.0" &&
-    error.supported.includes("0.117")
+    error.version === "0.145.0" &&
+    error.supported.includes("0.144")
+  ));
+});
+
+test("Codex app-server contract gate rejects missing tool item discriminators", () => {
+  const schemas = completeSchemas();
+  const notifications = JSON.parse(schemas["ServerNotification.json"]);
+  notifications.definitions.ThreadItem.oneOf = notifications.definitions.ThreadItem.oneOf.filter(
+    (item) => item.properties.type.enum[0] !== "dynamicToolCall"
+  );
+  schemas["ServerNotification.json"] = JSON.stringify(notifications);
+
+  const report = analyzeCodexAppServerSchemas({ cliVersion: "codex-cli 0.144.5", schemas });
+
+  assert.equal(report.ok, false);
+  assert.equal(report.capabilities.toolLifecycle, false);
+  assert.ok(report.errors.some((error) =>
+    error.code === "TOOL_ITEM_TYPES_MISSING" && error.types.includes("dynamicToolCall")
   ));
 });
 
@@ -141,7 +128,7 @@ test("Codex app-server contract gate rejects an oversized schema file", () => {
   schemas["ServerRequest.json"] = " ".repeat(MAX_SCHEMA_FILE_BYTES + 1);
 
   const report = analyzeCodexAppServerSchemas({
-    cliVersion: "codex-cli 0.117.0",
+    cliVersion: "codex-cli 0.144.5",
     schemas
   });
 
@@ -159,7 +146,7 @@ test("Codex app-server contract gate rejects an oversized generated file before 
   delete schemas["ServerRequest.json"];
 
   const report = analyzeCodexAppServerSchemas({
-    cliVersion: "codex-cli 0.117.0",
+    cliVersion: "codex-cli 0.144.5",
     schemas,
     schemaFileSizes: { "ServerRequest.json": MAX_SCHEMA_FILE_BYTES + 1 }
   });
@@ -181,7 +168,7 @@ test("Codex app-server probe generates, audits, and removes a temporary schema b
   let generatedDir = "";
   const execute = (command, args) => {
     calls.push({ command, args });
-    if (args[0] === "--version") return { status: 0, stdout: "codex-cli 0.117.0\n", stderr: "" };
+    if (args[0] === "--version") return { status: 0, stdout: "codex-cli 0.144.5\n", stderr: "" };
     generatedDir = args.at(-1);
     fs.mkdirSync(generatedDir, { recursive: true });
     for (const [name, content] of Object.entries(completeSchemas())) {

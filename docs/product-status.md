@@ -21,7 +21,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - 全局 command registry 已接入 Web 命令面板，并向 Android 暴露导航、搜索、会话、Workspace、Live Call、Review、Settings 和 Approval 动作。
 - PR review 已有本地持久 session/comment API 和 Android Review 工作流。当前实现保存在 `reviews.json`，属于本地审查工作台，不等于 GitHub/GitLab 在线 review 同步。
 - Provider registry 已接入真实动态 catalog/health loader：Codex 走 app-server `model/list`，Claude/GLM 走模型 API，豆包走 browser bridge doctor；catalog/health 具备 TTL、single-flight、失败回退，并发布当前 execution ownership、capability、protocol/version 和逐字段 fidelity。Status 与 Doctor 共用这份 readiness。
-- Codex app-server 已有针对受审版本的 schema/capability contract gate 和独立 probe；它还没有成为 Agent runtime adapter，未知版本会按设计降级而不是尝试宽松解析。
+- Codex app-server contract gate 已审查 CLI 0.144.5，并覆盖 thread/turn/item/tool 生命周期、agent/command output、MCP progress 和 approval schema；纯 normalizer 与 JSON-RPC mock tests 已落地，但尚未接 execution worker 或 approval outbox，未知版本仍会 fail-closed。
 - SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox，具备连续序列校验、幂等 ingest/ack、decision version 与 transactional outbox 基础。`execd`、独立 worker 和审批投递器尚未实现，因此这不是“进程已可跨重启接管”。
 - Windows Rust 前门已覆盖 Status、Doctor、Devices、设备写操作、Pairing、Audit、Settings、Tool Events REST/SSE 和 Workspace 文件写入；其余 HTTP/SSE/WebSocket 仍透明转发 Node，并保留逐 slice 回退。
 - Android 补齐了凭据加密、鉴权附件流、原生 push 注册、前后台实时流挂起/恢复、音频流有界重试、中英文运行文案，以及搜索、标签/收藏、命令发现和 PR review 入口。
@@ -78,7 +78,7 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 
 - Windows 上 `codex remote-control start --json` 的 daemon lifecycle 不可用，但手工启动 `codex app-server --listen ws://127.0.0.1:<port>` 可工作。
 - 第二客户端必须在已有 rollout 后显式 `thread/resume`，才能收到后续 turn delta；被动连接不会得到完整 turn 流。
-- 当前 contract gate 只接受已审查的 Codex CLI 0.117 schema，并校验 command/file-change approval、permission request、dynamic tool call、output delta 和 completion 等关键协议面；它是兼容性门禁，不是已启用的 Provider adapter。
+- 当前 contract gate 接受已审查的 Codex CLI 0.117/0.144 schema；0.144.5 fixture 固定真实 bundle hash，并校验 thread/turn/item/tool 生命周期、command/file/permission approval、dynamic tool call 和 output/progress。它仍是兼容性门禁与纯事件 normalizer，不是已启用的 Provider runtime adapter。
 - UIA 可以定位 Desktop composer 和发送按钮；纯 `ValuePattern.SetValue` 不会触发前端输入事件，可靠路径是窗口校验、点击 composer、剪贴板粘贴、发送并做 postflight。
 
 ## 下一批优先级

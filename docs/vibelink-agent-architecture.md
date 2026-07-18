@@ -104,9 +104,10 @@ Windows 手工启动 `codex app-server --listen ws://127.0.0.1:<port>` 可工作
 仓库已有两个不同层次的 probe：
 
 - `src/codexAppServerProbe.js` 可手工启动真实 app-server，验证双客户端 start/resume 和 live delta，并保存诊断结果。
-- `tools/codex-app-server/contract-probe.mjs` 生成实验 schema，并只接受已审查的 Codex CLI 0.117 协议面；缺少审批方法、schema 漂移、未审 minor 或超限输入都会 fail-closed。
+- `tools/codex-app-server/contract-probe.mjs` 生成实验 schema，并接受已审查的 Codex CLI 0.117/0.144 协议面；0.144.5 fixture 固定了真实 bundle hash、生命周期/输出方法、tool item 类型和 approval response 字段，缺失或漂移都会 fail-closed。
+- `src/codexAppServerEvents.js` 纯函数归一化 thread/turn/item/tool/output/approval JSON-RPC 消息；approval request id 明确是 connection-scoped，尚未形成 durable continuation。
 
-当前没有 app-server Provider adapter，也没有 worker 持有其 JSON-RPC connection。CLI resume 仍是 VibeLink Agent 的稳定 Codex 路径，Desktop UIA 仍是独立的 sampled Remote 路径。
+当前没有 app-server Provider runtime adapter，也没有 worker 持有其 JSON-RPC connection；normalizer 仅由 contract/mock tests 驱动。CLI resume 仍是 VibeLink Agent 的稳定 Codex 路径，Desktop UIA 仍是独立的 sampled Remote 路径。
 
 ## 安全模型
 

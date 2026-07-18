@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { withAgentReachPath } from "./agentReachRuntime.js";
 import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
+import { getExecutionHostFacade } from "./executionHostClient.js";
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
 import { createWorkspaceTreeSidecarClient } from "./workspaceTreeSidecarClient.js";
 
@@ -1647,34 +1648,20 @@ export async function runWorkspaceCommand(id, settings, body = {}) {
   const args = process.platform === "win32"
     ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
     : ["-lc", command];
-  if (typeof body.onOutput === "function") {
-    const result = await runWorkspaceCommandStream({ shell, args, cwd, command, body });
-    return {
-      ...result,
-      workspace,
-      cwd,
-      command,
-      test: body.kind === "test" ? parseTestOutput(result.stdout, result.stderr, result.exitCode || 0) : null
-    };
-  }
-  let result;
-  try {
-    const { stdout, stderr } = await execFileAsync(shell, args, {
-      cwd,
-      env: withAgentReachPath(process.env),
-      windowsHide: true,
-      timeout: Math.min(Number(body.timeoutMs || 120000), 300000),
-      maxBuffer: 20 * 1024 * 1024
-    });
-    result = { ok: true, stdout, stderr, exitCode: 0 };
-  } catch (error) {
-    result = {
-      ok: false,
-      stdout: error.stdout || "",
-      stderr: error.stderr || error.message,
-      exitCode: error.code ?? 1
-    };
-  }
+  const inherited = withAgentReachPath(process.env);
+  const facade = body.executionHost || getExecutionHostFacade();
+  const result = await facade.runCommand({
+    executionId: body.executionId,
+    shell,
+    args,
+    cwd,
+    env: { PATH: inherited.PATH || inherited.Path || "" },
+    timeoutMs: Math.min(Number(body.timeoutMs || 120000), 300000),
+    signal: body.signal || null,
+    onOutput: typeof body.onOutput === "function"
+      ? (chunk) => body.onOutput({ ...chunk, command, cwd })
+      : null
+  });
 
   return {
     ...result,
@@ -1683,102 +1670,6 @@ export async function runWorkspaceCommand(id, settings, body = {}) {
     command,
     test: body.kind === "test" ? parseTestOutput(result.stdout, result.stderr, result.exitCode || 0) : null
   };
-}
-
-function runWorkspaceCommandStream({ shell, args, cwd, command, body = {} }) {
-  return new Promise((resolve) => {
-    const timeoutMs = Math.min(Number(body.timeoutMs || 120000), 300000);
-    const signal = body.signal || null;
-    if (signal?.aborted) {
-      resolve({
-        ok: false,
-        stdout: "",
-        stderr: "Command was stopped before it started.",
-        exitCode: -1,
-        cancelled: true
-      });
-      return;
-    }
-    const child = spawn(shell, args, {
-      cwd,
-      env: withAgentReachPath(process.env),
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const startedAt = Date.now();
-    const onOutput = typeof body.onOutput === "function" ? body.onOutput : null;
-    const emit = (stream, data) => {
-      const text = data.toString();
-      if (stream === "stdout") stdout += text;
-      else stderr += text;
-      onOutput?.({
-        stream,
-        text,
-        command,
-        cwd,
-        elapsedMs: Date.now() - startedAt
-      });
-    };
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener?.("abort", abortCommand);
-      resolve(result);
-    };
-    const abortCommand = () => {
-      try {
-        child.kill();
-      } catch {
-        // Process may already be gone.
-      }
-      finish({
-        ok: false,
-        stdout,
-        stderr: stderr || "Command stopped by user.",
-        exitCode: -1,
-        cancelled: true
-      });
-    };
-    signal?.addEventListener?.("abort", abortCommand, { once: true });
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // Process may already be gone.
-      }
-      finish({
-        ok: false,
-        stdout,
-        stderr: stderr || `Command timed out after ${timeoutMs}ms.`,
-        exitCode: -1,
-        timedOut: true
-      });
-    }, timeoutMs);
-
-    child.stdout?.on("data", (data) => emit("stdout", data));
-    child.stderr?.on("data", (data) => emit("stderr", data));
-    child.on("error", (error) => {
-      finish({
-        ok: false,
-        stdout,
-        stderr: stderr || error.message,
-        exitCode: -1
-      });
-    });
-    child.on("close", (code, signal) => {
-      finish({
-        ok: code === 0,
-        stdout,
-        stderr,
-        exitCode: code ?? (signal ? -1 : 0),
-        signal: signal || ""
-      });
-    });
-  });
 }
 
 export async function getTaskChanges(task, settings) {

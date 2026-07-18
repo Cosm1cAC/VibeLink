@@ -769,6 +769,7 @@ async function executeWorkspaceCommandToolRun(toolRunId, settingsValue) {
           "started"
         );
         const result = await runWorkspaceCommand(input.workspaceId, settingsValue, {
+          executionId: toolRunId,
           command: input.command,
           kind: input.kind,
           timeoutMs: input.timeoutMs,
@@ -783,7 +784,7 @@ async function executeWorkspaceCommandToolRun(toolRunId, settingsValue) {
               command: chunk.command,
               cwd: chunk.cwd
             };
-            const event = emitToolEventBatched(toolRunId, {
+            const event = emitToolEvent(toolRunId, {
               type: "tool.output",
               text: chunk.text,
               payload

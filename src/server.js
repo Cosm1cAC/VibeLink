@@ -94,7 +94,8 @@ import {
   resolveAllowedPath
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
-import { buildProviderRegistry } from "./providerRegistry.js";
+import { buildProviderRegistry, createProviderCatalogResolver, createProviderHealthResolver } from "./providerRegistry.js";
+import { createProviderRuntimeLoaders } from "./providerRuntimeLoaders.js";
 import { internalControlAuthorized, originalHostRequest } from "./internalControl.js";
 import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
 import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
@@ -126,6 +127,11 @@ import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, Bro
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
+const providerRuntimeLoaders = createProviderRuntimeLoaders({
+  getSettings: () => settingsWithSecrets(settings)
+});
+const providerCatalogResolver = createProviderCatalogResolver({ loaders: providerRuntimeLoaders.catalogLoaders });
+const providerHealthResolver = createProviderHealthResolver({ loaders: providerRuntimeLoaders.healthLoaders });
 settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
 restoreTasks();
@@ -1123,19 +1129,18 @@ function sandboxDoctorStatus(settingsValue = settings) {
 
 async function buildDoctorReport(request) {
   const publicSettingsValue = await publicSettings(settings);
-  const [desktop, git, gh, codex, claude, agentReach, doubao] = await Promise.all([
+  const [desktop, git, gh, agentReach, providerRegistry] = await Promise.all([
     getCodexDesktopStatus().catch((error) => ({ ok: false, error: error.message })),
     commandProbe("git"),
     commandProbe("gh"),
-    settings.codexCommand && settings.codexCommand !== "auto" ? commandProbe(settings.codexCommand) : Promise.resolve({ ok: true, command: settings.codexCommand || "auto", version: "auto" }),
-    commandProbe(settings.claudeCommand || "claude"),
     commandProbe("agent-reach", ["version"]),
-    getDoubaoStatus({
-      endpoint: settings.doubaoCdpEndpoint,
-      url: settings.doubaoUrl,
-      timeoutMs: 5000
-    }).catch((error) => ({ ok: false, error: error.message }))
+    providerRegistryPayload({ freshHealth: true })
   ]);
+  const providers = new Map(providerRegistry.providers.map((provider) => [provider.id, provider]));
+  const codex = providers.get("codex");
+  const claude = providers.get("claude");
+  const doubao = providers.get("doubao");
+  const zhipu = providers.get("zhipu");
   const toolStats = await toolEventStatsPayload();
   const workspaces = getWorkspaces(settings);
   const trusted = settings.security?.trustedWorkspaces || [];
@@ -1155,10 +1160,11 @@ async function buildDoctorReport(request) {
     doctorCheck("zhipu-key", Boolean(publicSettingsValue.hasZhipuKey), "Zhipu/GLM key", publicSettingsValue.hasZhipuKey ? "configured" : "missing", "warn"),
     doctorCheck("git", git.ok, "Git", git.version || git.error),
     doctorCheck("gh", gh.ok, "GitHub CLI", gh.version || gh.error, "warn"),
-    doctorCheck("codex", codex.ok, "Codex command", codex.version || codex.error || codex.command, settings.codexCommand && settings.codexCommand !== "auto" ? "error" : "warn"),
-    doctorCheck("claude", claude.ok, "Claude command", claude.version || claude.error, "warn"),
+    doctorCheck("codex", Boolean(codex?.available), "Codex provider", codex?.health?.version || codex?.reason || codex?.health?.error || "unavailable", settings.codexCommand && settings.codexCommand !== "auto" ? "error" : "warn"),
+    doctorCheck("claude", Boolean(claude?.available), "Claude provider", claude?.health?.version || claude?.reason || claude?.health?.error || "unavailable", "warn"),
     doctorCheck("agent-reach", agentReach.ok, "Agent Reach", agentReach.version || agentReach.error, "warn"),
-    doctorCheck("doubao", doubao.ok, "Doubao web CLI", doubao.status?.target?.ok ? doubao.status.target.url : doubao.status?.target?.reason || doubao.doctor?.stderr || doubao.doctor?.stdout || doubao.error || "not ready", "warn"),
+    doctorCheck("doubao", Boolean(doubao?.available), "Doubao web provider", doubao?.reason || doubao?.health?.error || doubao?.health?.source || "not ready", "warn"),
+    doctorCheck("zhipu", Boolean(zhipu?.available), "GLM provider", zhipu?.reason || zhipu?.health?.error || zhipu?.health?.source || "not ready", "warn"),
     doctorCheck("desktop", Boolean(desktop?.ok || desktop?.found), "Codex Desktop", desktop?.target?.windowTitle || desktop?.windowTitle || desktop?.error || "not found", "warn"),
     doctorCheck("host", isHostAllowed(request, settings), "Host allowlist", request.headers.host || "unknown"),
     doctorCheck("workspace-command-network", settings.security?.networkAccess !== false, "Workspace command network", settings.security?.networkAccess === false ? "network commands require approval" : "enabled", "warn"),
@@ -1206,7 +1212,8 @@ async function buildDoctorReport(request) {
       ...agentReach,
       install: agentReachInstallInfo()
     },
-    doubao,
+    doubao: doubao?.health || {},
+    providerRegistry,
     codebaseMemory,
     toolEvents: toolStats,
     mcp,
@@ -1234,29 +1241,19 @@ async function runDoctorToolRequest(request, url, auth) {
 
 async function providerRegistryPayload(options = {}) {
   const settingsValue = await settingsWithSecrets(settings);
-  const probes = {};
-  if (options.fresh) {
-    const [codex, claude, doubao] = await Promise.all([
-      settings.codexCommand && settings.codexCommand !== "auto"
-        ? commandProbe(settings.codexCommand).catch((error) => ({ ok: false, error: error.message }))
-        : Promise.resolve({ ok: true }),
-      commandProbe(settings.claudeCommand || "claude").catch((error) => ({ ok: false, error: error.message })),
-      getDoubaoStatus({
-        endpoint: settings.doubaoCdpEndpoint,
-        url: settings.doubaoUrl,
-        timeoutMs: 5000
-      }).catch((error) => ({ ok: false, error: error.message }))
-    ]);
-    probes.codex = codex;
-    probes.claude = claude;
-    probes.doubao = doubao;
-  }
-  return buildProviderRegistry({ settings: settingsValue, probes });
+  return buildProviderRegistry({
+    settings: settingsValue,
+    catalogResolver: providerCatalogResolver,
+    healthResolver: providerHealthResolver,
+    freshCatalogs: Boolean(options.freshCatalogs ?? options.fresh),
+    freshHealth: Boolean(options.freshHealth ?? options.fresh),
+    backgroundRefresh: Boolean(options.backgroundRefresh)
+  });
 }
 
 async function buildStatusSnapshot(request) {
   const publicSettingsValue = await publicSettings(settings);
-  const providerRegistry = await providerRegistryPayload();
+  const providerRegistry = await providerRegistryPayload({ backgroundRefresh: true });
   return {
     ok: true,
     settings: publicSettingsValue,

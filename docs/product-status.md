@@ -20,7 +20,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - Thread metadata 已迁入 SQLite，支持标签、收藏、批量编辑和 revision/field revision 冲突检测；旧 `thread-state.json` 仅做一次兼容导入。
 - 全局 command registry 已接入 Web 命令面板，并向 Android 暴露导航、搜索、会话、Workspace、Live Call、Review、Settings 和 Approval 动作。
 - PR review 已有本地持久 session/comment API 和 Android Review 工作流。当前实现保存在 `reviews.json`，属于本地审查工作台，不等于 GitHub/GitLab 在线 review 同步。
-- Provider registry 已统一 readiness、capability、reasoning effort 和 catalog metadata；动态 catalog resolver 已实现校验、TTL cache、stale/fallback 语义，但生产 registry 尚未注入 runtime loader，当前仍返回内置模型目录。
+- Provider registry 已接入真实动态 catalog/health loader：Codex 走 app-server `model/list`，Claude/GLM 走模型 API，豆包走 browser bridge doctor；catalog/health 具备 TTL、single-flight、失败回退，并发布当前 execution ownership、capability、protocol/version 和逐字段 fidelity。Status 与 Doctor 共用这份 readiness。
 - Codex app-server 已有针对受审版本的 schema/capability contract gate 和独立 probe；它还没有成为 Agent runtime adapter，未知版本会按设计降级而不是尝试宽松解析。
 - SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox，具备连续序列校验、幂等 ingest/ack、decision version 与 transactional outbox 基础。`execd`、独立 worker 和审批投递器尚未实现，因此这不是“进程已可跨重启接管”。
 - Windows Rust 前门已覆盖 Status、Doctor、Devices、设备写操作、Pairing、Audit、Settings、Tool Events REST/SSE 和 Workspace 文件写入；其余 HTTP/SSE/WebSocket 仍透明转发 Node，并保留逐 slice 回退。
@@ -40,7 +40,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 ### P1
 
 - VibeLink Agent 缺少统一任务队列、并发上限、失败重试、后台调度面板和 durable execution owner。
-- Provider registry 的公共结构已经统一，但动态 loader、健康探测、catalog 持久缓存，以及 execution ownership/fidelity 仍未接入完整生产链。
+- Provider catalog 当前只有进程内 TTL 与 last-known-good cache，没有跨 Bridge 重启的持久缓存；Provider 任务也仍缺统一队列、并发上限、失败重试和后台调度。
 - Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
 - 统一搜索是有界的即时扫描，不是索引式全文搜索：Workspace 单文件上限 256 KiB、每个 Workspace 最多扫描 1200 个文件，大仓库的排序、增量索引和性能仍需完善。
 - Workspace 仍缺大文件分页、富二进制预览、更完整的批量操作和成熟冲突处理。
@@ -85,6 +85,6 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 
 1. 实现 durable execution host Phase 1/2：`execd`、独立 worker、Job Object、ConPTY/stdio、spool/replay 和 Bridge restart reconciliation。
 2. 把 approval outbox 接到 schema-gated Codex app-server continuation，并在 Web/Android 展示 delivery/attach/fidelity 状态。
-3. 为 Provider registry 注入真实动态 catalog/health loader，补齐任务并发、重试和调度策略。
+3. 补齐 Provider 任务并发上限、失败重试、后台调度，以及 catalog 跨重启持久缓存。
 4. 完成 Live Call 生产 ASR 配置与长时间真实音频/弱网 QA。
 5. 补强搜索索引、事件 ack/retention、Workspace 结构化结果和多设备冲突处理。

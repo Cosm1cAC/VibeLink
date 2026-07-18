@@ -68,7 +68,9 @@ Provider adapter 只处理后端特有能力：命令或 bridge、resume/session
 - Workspace/Git/Terminal/MCP 工具入口。
 - Web/Android 的恢复、catch-up、通知和审计展示。
 
-动态 catalog resolver 已实现输入清洗、最多 200 个模型、5 分钟 TTL cache、fresh/cached/stale/fallback 状态和最后成功结果回退；但 `src/server.js` 当前调用 `buildProviderRegistry` 时没有注入 resolver/runtime loader。因此生产响应仍使用内置 catalog，不能把 resolver 的单测能力描述成已完成的动态模型发现。
+生产 registry 已注入长生命周期 catalog/health resolver。Codex 通过真实 app-server `model/list` 发现当前登录态可用模型，Claude 和 GLM 使用各自模型 API，豆包使用本地 browser bridge doctor；catalog 使用 5 分钟 TTL、输入清洗、最多 200 个模型、single-flight、fresh/cached/stale/fallback 和最后成功结果回退，health 使用 30 秒 TTL、single-flight 和明确的 ready/unavailable/disabled/missing_credentials 状态。fresh=1 会同时强制刷新两者，`/api/doctor` 等待真实 health，`/api/status` 读取同一 resolver 的缓存并以 stale-while-revalidate 方式非阻塞刷新。
+
+每个 Provider 同时发布当前实际 adapter 的 `executionOwnership`、reattach、结构化 tool event、tool output、exit status、approval continuation、live input、protocol/version 和逐字段 fidelity。当前 Codex、Claude、GLM 仍由 Node 直接启动，因此 owner 为 `legacy-node` 且不可 reattach；豆包的模型执行发生在外部浏览器会话中，因此 owner 为 `external`，tool output 固定为 sampled。这里发布的是现有执行事实，不表示 durable execution host 或 Codex app-server execution adapter 已启用。
 
 ## 状态、搜索与事件
 

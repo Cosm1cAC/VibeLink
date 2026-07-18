@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { URL } from "node:url";
+import { StringDecoder } from "node:string_decoder";
 import QRCode from "qrcode";
 import { agentReachInstallInfo, getAgentReachStatus, runAgentReachCommand, withAgentReachPath } from "./agentReachRuntime.js";
 import { codebaseMemoryInstallInfo } from "./codebaseMemoryRuntime.js";
@@ -14,10 +15,12 @@ import {
   attachToolRunToTask,
   approvePairingSession,
   claimPairingSession,
+  createApprovalRequest,
   drainEventStoreRuntime,
   createPairingSession,
   denyPairingSession,
   getDbPath,
+  getExecutionBinding,
   getApprovalRequest,
   recordApprovalDecisionWithOutbox,
   getCachedMcpTools,
@@ -28,6 +31,7 @@ import {
   listApprovalRequests,
   listAuditLogs,
   listDesktopObservations,
+  listExecutionBindings,
   listDevices,
   listPairingSessions,
   listTaskEventsAsync,
@@ -40,7 +44,11 @@ import {
   revokeDevice,
   revokePushSubscription,
   rotateDeviceToken,
+  settleApprovalContinuation,
   updateToolRun,
+  upsertExecutionBinding,
+  ingestExecutionHostEvent,
+  acknowledgeExecutionHostEvents,
   eventStoreMode,
   getEventStoreRuntimeStats,
   initDb,
@@ -48,7 +56,7 @@ import {
   upsertNativePushToken,
   upsertPushSubscription
 } from "./db.js";
-import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
+import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTaskExecution, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
 import { artifactMetadata, artifactPreview, readArtifactRange } from "./artifactRuntime.js";
@@ -61,6 +69,7 @@ import { subscribeDesktopObserver } from "./desktopObserver.js";
 import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
 import { filterArchivedCodexTasks, getHistory, listHistories } from "./history.js";
 import { getExecutionHostFacade } from "./executionHostClient.js";
+import { createExecutionStartupReconciler } from "./executionReconciliation.js";
 import {
   createLiveCallSession,
   getLiveCallSession,
@@ -793,6 +802,149 @@ configureTerminalSessionRecovery({
   onExit: projectTerminalExit
 });
 
+const reconciliationDecoders = new Map();
+
+function reconciliationText(binding, event) {
+  const stream = event.type === "stream.stderr" ? "stderr" : "stdout";
+  const key = `${binding.id}:${stream}`;
+  let decoder = reconciliationDecoders.get(key);
+  if (!decoder) {
+    decoder = new StringDecoder("utf8");
+    reconciliationDecoders.set(key, decoder);
+  }
+  const payload = event.payload || {};
+  const bytes = payload.encoding === "base64"
+    ? Buffer.from(String(payload.data || ""), "base64")
+    : Buffer.from(String(payload.text ?? payload.data ?? ""), "utf8");
+  return { stream, text: decoder.write(bytes) };
+}
+
+function projectReconciledExecutionEvent(binding, event) {
+  if (event.type === "provider.event" && event.payload?.type) {
+    event = { ...event.payload, eventId: event.eventId, hostSeq: event.hostSeq, at: event.payload.at || event.at };
+  }
+  if (["stream.stdout", "stream.stderr", "stream.pty"].includes(event.type)) {
+    const chunk = reconciliationText(binding, event);
+    if (!chunk.text) return;
+    if (binding.kind === "terminal") {
+      projectTerminalOutput(binding.toolRunId || binding.id, {
+        ...chunk,
+        mode: binding.capabilities?.backend === "stdio" ? "spawn" : "pty",
+        eventId: event.eventId,
+        hostSeq: event.hostSeq
+      });
+    } else if (binding.kind === "command") {
+      const payload = { executionId: binding.id, stream: chunk.stream, text: chunk.text };
+      emitToolEvent(binding.toolRunId || binding.id, { id: event.eventId, type: "tool.output", text: chunk.text, payload });
+      mirrorWorkspaceCommandTaskEvent(binding.toolRunId || binding.id, chunk.stream, chunk.text, payload, event.eventId);
+    } else if (binding.taskId) {
+      appendExternalTaskEvent(binding.taskId, { id: event.eventId, at: event.at, type: chunk.stream, text: chunk.text });
+    }
+    return;
+  }
+
+  if (binding.taskId && event.type.startsWith("provider.")) {
+    if (event.type === "provider.approval.required") {
+      const payload = event.payload || {};
+      const requestId = payload.requestId === undefined ? "" : String(payload.requestId);
+      const continuationRef = String(payload.continuationRef || `provider:${binding.id}:${requestId}`).slice(0, 2000);
+      const approvalId = String(payload.approvalId || `provider:${binding.id}:${requestId}`).slice(0, 160);
+      try {
+        createApprovalRequest({
+          id: approvalId,
+          toolRunId: binding.toolRunId || "",
+          taskId: binding.taskId,
+          kind: `provider.${payload.kind || "approval"}`,
+          title: "Provider approval required",
+          reason: payload.reason || "",
+          request: { ...(payload.request || payload), executionId: binding.id, approvalHostSeq: event.hostSeq },
+          provider: binding.provider || "",
+          threadId: event.threadId || "",
+          turnId: event.turnId || "",
+          itemId: event.itemId || "",
+          continuationRef,
+          decisionVersion: payload.expectedDecisionVersion || 0,
+          requestedPermissions: payload.requestedPermissions,
+          availableDecisions: Array.isArray(payload.availableDecisions) ? payload.availableDecisions : []
+        });
+      } catch {
+        // Replayed approval events are idempotent at the approval row.
+      }
+    } else if (["provider.approval.delivered", "provider.approval.applied", "provider.approval.stale"].includes(event.type)) {
+      const continuationRef = String(event.payload?.continuationRef || "");
+      if (continuationRef) {
+        try {
+          settleApprovalContinuation(continuationRef, event.type.slice("provider.approval.".length), {
+            reason: event.payload?.reason || "Provider continuation ended before the decision was applied."
+          });
+        } catch (error) {
+          if (error.code !== "OUTBOX_STATE_CONFLICT") throw error;
+        }
+      }
+    }
+    appendExternalTaskEvent(binding.taskId, {
+      id: event.eventId,
+      at: event.at,
+      type: event.type,
+      payload: event.payload || {}
+    });
+  }
+  if (binding.kind === "command" && event.type === "execution.exited") {
+    const exitCode = Number(event.payload?.exitCode ?? 1);
+    const toolRunId = binding.toolRunId || binding.id;
+    updateToolRun(toolRunId, {
+      status: exitCode === 0 ? "completed" : "failed",
+      result: event.payload || {},
+      error: exitCode === 0 ? "" : `Command exited with code ${exitCode}`,
+      completedAt: event.at || new Date().toISOString()
+    });
+    emitToolEvent(toolRunId, {
+      id: event.eventId,
+      type: exitCode === 0 ? "tool.completed" : "tool.failed",
+      text: `Command exited with code ${exitCode}`,
+      payload: event.payload || {}
+    });
+  }
+}
+
+async function monitorReconciledCommand(binding) {
+  const facade = getExecutionHostFacade();
+  let cursor = Number(binding.lastAckedHostSeq || 0);
+  try {
+    while (true) {
+      const page = await facade.executionEvents(binding.id, cursor, 128);
+      const events = Array.isArray(page?.events) ? page.events : [];
+      for (const event of events) {
+        ingestExecutionHostEvent(binding.id, event, () => projectReconciledExecutionEvent(binding, event));
+        cursor = Math.max(cursor, Number(event.hostSeq || 0));
+      }
+      if (cursor > Number(binding.lastAckedHostSeq || 0)) {
+        await facade.acknowledgeExecutionEvents(binding.id, cursor);
+        acknowledgeExecutionHostEvents(binding.id, cursor);
+        binding.lastAckedHostSeq = cursor;
+      }
+      const snapshot = await facade.getExecution(binding.id);
+      upsertExecutionBinding({
+        id: binding.id,
+        status: snapshot.status,
+        attachState: snapshot.attachState || "attached",
+        lastSeenHostSeq: Math.max(cursor, Number(snapshot.lastHostSeq || 0)),
+        endedAt: snapshot.endedAt,
+        exitCode: snapshot.exitCode,
+        signal: snapshot.signal
+      });
+      if (["completed", "failed", "cancelled", "lost", "outcome_unknown"].includes(snapshot.status)) return;
+      if (!events.length) await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 25);
+        timer.unref?.();
+      });
+    }
+  } catch (error) {
+    upsertExecutionBinding({ id: binding.id, attachState: "unreachable", lostReason: error.message });
+    console.error(`[execution-reconciliation] command ${binding.id}: ${error.message}`);
+  }
+}
+
 async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
   const run = getToolRun(toolRunId);
   if (!run) {
@@ -862,6 +1014,39 @@ async function executeWorkspaceCommandToolRun(toolRunId, settingsValue) {
           timeoutMs: input.timeoutMs,
           approved: true,
           signal: controller.signal,
+          onExecutionStart: (snapshot) => upsertExecutionBinding({
+            id: snapshot.executionId || toolRunId,
+            kind: "command",
+            taskId: getToolRun(toolRunId)?.taskId || "",
+            toolRunId,
+            owner: "execution-host",
+            status: snapshot.status || "running",
+            attachState: snapshot.attachState || "attached",
+            workerPid: snapshot.workerPid,
+            processPid: snapshot.processPid,
+            processStartedAt: snapshot.processStartedAt,
+            workerInstanceId: snapshot.workerInstanceId,
+            capabilities: snapshot.capabilities || {},
+            lastSeenHostSeq: Number(snapshot.lastHostSeq || 0),
+            lastIngestedHostSeq: Number(snapshot.lastAckedHostSeq || 0),
+            lastAckedHostSeq: Number(snapshot.lastAckedHostSeq || 0)
+          }),
+          onHostEvent: (event) => ingestExecutionHostEvent(toolRunId, {
+            ...event,
+            executionId: event.executionId || toolRunId,
+            eventId: event.eventId || `${toolRunId}:${event.hostSeq}`,
+            at: event.at || new Date().toISOString()
+          }),
+          onHostAck: (hostSeq) => acknowledgeExecutionHostEvents(toolRunId, hostSeq),
+          onSnapshot: (snapshot) => upsertExecutionBinding({
+            id: toolRunId,
+            status: snapshot.status,
+            attachState: snapshot.attachState || "attached",
+            lastSeenHostSeq: Number(snapshot.lastHostSeq || 0),
+            endedAt: snapshot.endedAt,
+            exitCode: snapshot.exitCode,
+            signal: snapshot.signal
+          }),
           onOutput: (chunk) => {
             const payload = {
               stream: chunk.stream,
@@ -4033,9 +4218,41 @@ server.on("upgrade", async (request, socket, head) => {
 
 scheduleToolEventsPrune();
 
-listTerminalSessions().catch((error) => {
-  console.error(`[terminal] recovery failed: ${error.stack || error.message}`);
-});
+const executionFacade = getExecutionHostFacade();
+if (typeof executionFacade?.getExecution === "function") {
+  const executionReconciler = createExecutionStartupReconciler({
+    persistence: {
+      listExecutionBindings,
+      getExecutionBinding,
+      upsertExecutionBinding,
+      ingestExecutionEvent: ingestExecutionHostEvent,
+      ackExecutionEvents: acknowledgeExecutionHostEvents
+    },
+    host: {
+      get: (id) => executionFacade.getExecution(id),
+      events: (id, after, limit) => executionFacade.executionEvents(id, after, limit),
+      ack: (id, seq, operationId) => executionFacade.acknowledgeExecutionEvents(id, seq, operationId)
+    },
+    projectEvent: projectReconciledExecutionEvent,
+    async restoreSubscription(binding, snapshot) {
+      if (!snapshot || binding.attachState !== "attached") return;
+      if (binding.kind === "terminal") await getTerminalSession(binding.id);
+      else if (binding.kind === "command") void monitorReconciledCommand(binding);
+      else await restoreTaskExecution(binding, snapshot, settings);
+    }
+  });
+  const reconciliationResults = await executionReconciler.reconcile();
+  const failures = reconciliationResults.filter((item) => item.error);
+  console.log(`[execution-reconciliation] bindings=${reconciliationResults.length} failures=${failures.length}`);
+} else {
+  // Legacy execution has no durable host to reconcile; external bindings remain descriptive only.
+  for (const binding of listExecutionBindings({ activeOnly: true })) {
+    upsertExecutionBinding({
+      id: binding.id,
+      attachState: binding.owner === "external" ? "external" : "unreachable"
+    });
+  }
+}
 
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;

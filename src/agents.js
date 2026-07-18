@@ -8,7 +8,7 @@ import { bridgeAgentToolEvent } from "./agentToolBridge.js";
 import { withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 import { tasksDir } from "./config.js";
 import { doubaoAgentArgs, doubaoBridgeCliPath, doubaoCliPath } from "./doubaoRuntime.js";
-import { createApprovalRequest, getDefaultEventReplayLimit, insertTaskEvent, listTaskEvents, listTaskEventsAsync, resolveEventReplayLimit, settleApprovalContinuation, upsertTask } from "./db.js";
+import { acknowledgeExecutionHostEvents, createApprovalRequest, getDefaultEventReplayLimit, ingestExecutionHostEvent, insertTaskEvent, listTaskEvents, listTaskEventsAsync, resolveEventReplayLimit, settleApprovalContinuation, upsertExecutionBinding, upsertTask } from "./db.js";
 import { getExecutionHostFacade } from "./executionHostClient.js";
 import { resolveAllowedPath } from "./security.js";
 import { settingsWithSecrets } from "./store.js";
@@ -583,7 +583,16 @@ async function monitorProviderTurn(task, execution, runtimeSettings) {
     while (!exit) {
       const page = await execution.facade.providerEvents(execution.id, execution.afterHostSeq, 128);
       const events = Array.isArray(page?.events) ? page.events : [];
-      for (const event of events) {
+      for (const hostEvent of events) {
+        ingestExecutionHostEvent(execution.id, {
+          ...hostEvent,
+          executionId: hostEvent.executionId || execution.id,
+          eventId: hostEvent.eventId || `${execution.id}:${hostEvent.hostSeq}`,
+          at: hostEvent.at || nowIso()
+        });
+        const event = hostEvent.type === "provider.event" && hostEvent.payload?.type
+          ? { ...hostEvent.payload, eventId: hostEvent.eventId, hostSeq: hostEvent.hostSeq, at: hostEvent.payload.at || hostEvent.at }
+          : hostEvent;
         execution.afterHostSeq = Math.max(execution.afterHostSeq, Number(event.hostSeq || 0));
         if (event.type === "stream.stdout") normalizer.write(eventBytes(event));
         else if (event.type === "stream.stderr") {
@@ -643,10 +652,25 @@ async function monitorProviderTurn(task, execution, runtimeSettings) {
       }
       if (execution.afterHostSeq > execution.ackedHostSeq) {
         await execution.facade.acknowledgeProviderEvents(execution.id, execution.afterHostSeq);
+        acknowledgeExecutionHostEvents(execution.id, execution.afterHostSeq);
         execution.ackedHostSeq = execution.afterHostSeq;
       }
       if (exit) break;
       const snapshot = await execution.facade.getProvider(execution.id);
+      upsertExecutionBinding({
+        id: execution.id,
+        status: snapshot.status,
+        attachState: snapshot.attachState || "attached",
+        workerPid: snapshot.workerPid,
+        processPid: snapshot.processPid,
+        processStartedAt: snapshot.processStartedAt,
+        workerInstanceId: snapshot.workerInstanceId,
+        capabilities: snapshot.capabilities,
+        lastSeenHostSeq: Math.max(Number(snapshot.lastHostSeq || 0), execution.afterHostSeq),
+        endedAt: snapshot.endedAt,
+        exitCode: snapshot.exitCode,
+        signal: snapshot.signal
+      });
       if (HOST_EXECUTION_STATUSES.has(snapshot.status)) {
         exit = { exitCode: snapshot.exitCode, signal: snapshot.signal || "", status: snapshot.status };
         break;
@@ -722,6 +746,24 @@ async function startProviderTurn(task, payload, runtimeSettings, executionId) {
       }
     })
     : await facade.startProvider({ ...common, args: launch.args });
+  upsertExecutionBinding({
+    id: snapshot.executionId,
+    kind: useAppServer ? "provider.appServer" : "provider.cli",
+    taskId: task.id,
+    toolRunId: task.toolRunId || "",
+    provider: task.agent,
+    owner: "execution-host",
+    status: snapshot.status || "running",
+    attachState: snapshot.attachState || "attached",
+    workerPid: snapshot.workerPid,
+    processPid: snapshot.processPid,
+    processStartedAt: snapshot.processStartedAt,
+    workerInstanceId: snapshot.workerInstanceId,
+    capabilities: snapshot.capabilities || {},
+    lastSeenHostSeq: Number(snapshot.lastHostSeq || 0),
+    lastIngestedHostSeq: Number(snapshot.lastAckedHostSeq || 0),
+    lastAckedHostSeq: Number(snapshot.lastAckedHostSeq || 0)
+  });
   task.execution = {
     id: snapshot.executionId,
     facade,
@@ -733,6 +775,28 @@ async function startProviderTurn(task, payload, runtimeSettings, executionId) {
   upsertTask(task);
   appendTaskEvent(task, { type: "system", text: task.commandLabel });
   void monitorProviderTurn(task, task.execution, runtimeSettings);
+}
+
+export async function restoreTaskExecution(binding, snapshot, settings) {
+  const task = tasks.get(binding.taskId);
+  if (!task || !snapshot || task.execution) return false;
+  const facade = getExecutionHostFacade();
+  if (typeof facade?.providerEvents !== "function") return false;
+  task.executionFacade = facade;
+  task.launchPayload ||= {};
+  task.inputQueue ||= [];
+  task.stopRequested = false;
+  task.execution = {
+    id: binding.id,
+    facade,
+    afterHostSeq: Number(binding.lastAckedHostSeq || 0),
+    ackedHostSeq: Number(binding.lastAckedHostSeq || 0)
+  };
+  task.status = "running";
+  task.updatedAt = nowIso();
+  upsertTask(task);
+  void monitorProviderTurn(task, task.execution, await settingsWithSecrets(settings));
+  return true;
 }
 
 export function getTasks() {

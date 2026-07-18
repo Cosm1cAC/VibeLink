@@ -114,6 +114,19 @@ export function createExecutionPersistence({ database, now = () => new Date().to
     return publicBinding(database().prepare("SELECT * FROM execution_bindings WHERE id = ?").get(cleanString(id, 160)));
   }
 
+  function listExecutionBindings({ activeOnly = false, limit = 5000 } = {}) {
+    const boundedLimit = Math.min(5000, Math.max(1, Math.floor(Number(limit) || 5000)));
+    const terminalStatuses = ["completed", "failed", "cancelled", "lost", "outcome_unknown"];
+    const rows = activeOnly
+      ? database().prepare(`
+          SELECT * FROM execution_bindings
+          WHERE status NOT IN (?, ?, ?, ?, ?)
+          ORDER BY created_at ASC, id ASC LIMIT ?
+        `).all(...terminalStatuses, boundedLimit)
+      : database().prepare("SELECT * FROM execution_bindings ORDER BY created_at ASC, id ASC LIMIT ?").all(boundedLimit);
+    return rows.map(publicBinding);
+  }
+
   function upsertExecutionBinding(input = {}) {
     const db = database();
     const id = cleanString(input.id, 160);
@@ -182,7 +195,7 @@ export function createExecutionPersistence({ database, now = () => new Date().to
     return getExecutionBinding(id);
   }
 
-  function ingestExecutionEvent(executionId, event = {}) {
+  function ingestExecutionEvent(executionId, event = {}, project = null) {
     const id = cleanString(executionId, 160);
     const hostSeq = nonNegativeInteger(event.hostSeq, "hostSeq");
     if (!id) throw persistenceError("EXECUTION_ID_REQUIRED", "Execution id is required.");
@@ -218,6 +231,7 @@ export function createExecutionPersistence({ database, now = () => new Date().to
           execution_id, host_seq, event_id, event_type, event_at, payload_json, event_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, hostSeq, eventId, eventType, eventAt, payloadJson, eventJson, now());
+      if (typeof project === "function") project(normalized, db);
       db.prepare(`
         UPDATE execution_bindings
         SET last_seen_host_seq = ?, last_ingested_host_seq = ?, updated_at = ?
@@ -261,6 +275,7 @@ export function createExecutionPersistence({ database, now = () => new Date().to
 
   return {
     getExecutionBinding,
+    listExecutionBindings,
     upsertExecutionBinding,
     ingestExecutionEvent,
     listExecutionEvents,

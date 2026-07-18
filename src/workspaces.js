@@ -1677,6 +1677,10 @@ export async function runWorkspaceCommand(id, settings, body = {}) {
     env: { PATH: inherited.PATH || inherited.Path || "" },
     timeoutMs: Math.min(Number(body.timeoutMs || 120000), 300000),
     signal: body.signal || null,
+    onExecutionStart: body.onExecutionStart || null,
+    onHostEvent: body.onHostEvent || null,
+    onHostAck: body.onHostAck || null,
+    onSnapshot: body.onSnapshot || null,
     onOutput: typeof body.onOutput === "function"
       ? (chunk) => body.onOutput({ ...chunk, command, cwd })
       : null

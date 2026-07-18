@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { StringDecoder } from "node:string_decoder";
 import { withAgentReachPath } from "./agentReachRuntime.js";
 import { getExecutionHostFacade } from "./executionHostClient.js";
+import { acknowledgeExecutionHostEvents, ingestExecutionHostEvent, upsertExecutionBinding } from "./db.js";
 
 const require = createRequire(import.meta.url);
 const sessions = new Map();
@@ -248,6 +249,12 @@ function startHostMonitor(current) {
         let processedHostSeq = current.afterHostSeq;
         let exitEvent = null;
         for (const event of events) {
+          ingestExecutionHostEvent(current.id, {
+            ...event,
+            executionId: event.executionId || current.id,
+            eventId: event.eventId || `${current.id}:${event.hostSeq}`,
+            at: event.at || new Date().toISOString()
+          });
           if (["stream.stdout", "stream.stderr", "stream.pty"].includes(event.type)) {
             const stream = event.type === "stream.stderr" ? "stderr" : "stdout";
             const payload = event.payload || {};
@@ -262,6 +269,20 @@ function startHostMonitor(current) {
           processedHostSeq = Math.max(processedHostSeq, Number(event.hostSeq || 0));
         }
         const snapshot = await current.facade.getTerminal(current.id);
+        upsertExecutionBinding({
+          id: current.id,
+          status: snapshot.status,
+          attachState: snapshot.attachState || "attached",
+          workerPid: snapshot.workerPid,
+          processPid: snapshot.processPid,
+          processStartedAt: snapshot.processStartedAt,
+          workerInstanceId: snapshot.workerInstanceId,
+          capabilities: snapshot.capabilities,
+          lastSeenHostSeq: Math.max(Number(snapshot.lastHostSeq || 0), processedHostSeq),
+          endedAt: snapshot.endedAt,
+          exitCode: snapshot.exitCode,
+          signal: snapshot.signal
+        });
         current.snapshot = snapshot;
         const terminal = Boolean(exitEvent || HOST_TERMINAL_STATUSES.has(snapshot.status));
         if (terminal) {
@@ -273,6 +294,7 @@ function startHostMonitor(current) {
         }
         if (processedHostSeq > current.ackedHostSeq) {
           await current.facade.acknowledgeTerminalEvents(current.id, processedHostSeq);
+          acknowledgeExecutionHostEvents(current.id, processedHostSeq);
           current.ackedHostSeq = processedHostSeq;
           current.afterHostSeq = processedHostSeq;
         }
@@ -362,6 +384,22 @@ export async function startTerminalSession(options = {}) {
     backend,
     startedAt: snapshot.startedAt || new Date().toISOString()
   };
+  upsertExecutionBinding({
+    id: snapshot.executionId,
+    kind: "terminal",
+    toolRunId: sessionId,
+    owner: "execution-host",
+    status: snapshot.status || "running",
+    attachState: snapshot.attachState || "attached",
+    workerPid: snapshot.workerPid,
+    processPid: snapshot.processPid,
+    processStartedAt: snapshot.processStartedAt,
+    workerInstanceId: snapshot.workerInstanceId,
+    capabilities: snapshot.capabilities || {},
+    lastSeenHostSeq: Number(snapshot.lastHostSeq || 0),
+    lastIngestedHostSeq: Number(snapshot.lastAckedHostSeq || 0),
+    lastAckedHostSeq: Number(snapshot.lastAckedHostSeq || 0)
+  });
   rememberHostSession(facade, snapshot, metadata, options.onOutput, options.onExit);
   return hostPublicSession(snapshot, metadata);
 }

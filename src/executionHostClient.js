@@ -235,7 +235,11 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
     env = {},
     timeoutMs = 120000,
     signal = null,
-    onOutput = null
+    onOutput = null,
+    onExecutionStart = null,
+    onHostEvent = null,
+    onHostAck = null,
+    onSnapshot = null
   } = {}) {
     const boundedTimeoutMs = Math.min(Math.max(1, Number(timeoutMs) || 120000), 300000);
     const startedAt = Date.now();
@@ -254,6 +258,7 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
       env,
       operationId: operationId("workspace-command-start", executionId)
     });
+    await onExecutionStart?.(snapshot);
     let stopReason = "";
     let stopRequestedAt = 0;
     let stopPromise = null;
@@ -284,6 +289,7 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
         const events = Array.isArray(page?.events) ? page.events : [];
         let acknowledgeThrough = ackedHostSeq;
         for (const event of events) {
+          await onHostEvent?.(event);
           afterHostSeq = Math.max(afterHostSeq, Number(event.hostSeq || 0));
           if (event.type === "stream.stdout" || event.type === "stream.stderr") {
             const stream = event.type === "stream.stderr" ? "stderr" : "stdout";
@@ -300,10 +306,12 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
         }
         if (acknowledgeThrough > ackedHostSeq) {
           await client.ack(executionId, acknowledgeThrough, operationId("workspace-command-ack", executionId, acknowledgeThrough));
+          await onHostAck?.(acknowledgeThrough);
           ackedHostSeq = acknowledgeThrough;
         }
         if (exit) break;
         snapshot = await client.get(executionId);
+        await onSnapshot?.(snapshot);
         if (TERMINAL_STATUSES.has(snapshot.status)) {
           exit = { exitCode: snapshot.exitCode, signal: snapshot.signal || "" };
           break;
@@ -374,6 +382,13 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
 
   return {
     runCommand,
+    getExecution: (executionId) => client.get(executionId),
+    executionEvents: (executionId, afterHostSeq = 0, limit = eventLimit) => client.events(executionId, afterHostSeq, limit),
+    acknowledgeExecutionEvents: (executionId, hostSeq, id = "") => client.ack(
+      executionId,
+      hostSeq,
+      id || operationId("bridge-ack", executionId, hostSeq)
+    ),
     startProvider: ({ executionId = crypto.randomUUID(), command, args = [], cwd, env = {} } = {}) => client.start({
       executionId,
       kind: "provider.cli",

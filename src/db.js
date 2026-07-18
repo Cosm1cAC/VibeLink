@@ -1652,12 +1652,16 @@ export function getExecutionBinding(id) {
   return executionPersistenceStore().getExecutionBinding(id);
 }
 
+export function listExecutionBindings(options = {}) {
+  return executionPersistenceStore().listExecutionBindings(options);
+}
+
 export function upsertExecutionBinding(input = {}) {
   return executionPersistenceStore().upsertExecutionBinding(input);
 }
 
-export function ingestExecutionHostEvent(executionId, event = {}) {
-  return executionPersistenceStore().ingestExecutionEvent(executionId, event);
+export function ingestExecutionHostEvent(executionId, event = {}, project = null) {
+  return executionPersistenceStore().ingestExecutionEvent(executionId, event, project);
 }
 
 export function listExecutionHostEvents(executionId, options = {}) {

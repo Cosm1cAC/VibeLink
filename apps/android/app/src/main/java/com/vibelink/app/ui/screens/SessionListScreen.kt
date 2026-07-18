@@ -21,10 +21,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Close
@@ -33,6 +36,8 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -106,6 +111,10 @@ fun SessionListScreen(
     val searchError by viewModel.searchError.collectAsState()
     val searchNextCursor by viewModel.searchNextCursor.collectAsState()
     val searchScope by viewModel.searchScope.collectAsState()
+    val searchSort by viewModel.searchSort.collectAsState()
+    val searchOrder by viewModel.searchOrder.collectAsState()
+    val savedSearches by viewModel.savedSearches.collectAsState()
+    val searchHistory by viewModel.searchHistory.collectAsState()
     val selectedSearchTag by viewModel.selectedSearchTag.collectAsState()
     val selectedTags by viewModel.selectedTags.collectAsState()
     val availableTags by viewModel.availableTags.collectAsState()
@@ -129,6 +138,10 @@ fun SessionListScreen(
     var commandFilter by remember { mutableStateOf("") }
     var focusSearchRequested by remember { mutableStateOf(false) }
     var tagMenuOpen by remember { mutableStateOf(false) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    var searchLibraryOpen by remember { mutableStateOf(false) }
+    var saveSearchOpen by remember { mutableStateOf(false) }
+    var saveSearchName by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
     val unifiedSearchActive = query.trim().length >= 2
     val searchScopes = listOf(
@@ -263,17 +276,89 @@ fun SessionListScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = viewModel::setQuery,
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .focusRequester(searchFocusRequester)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                label = { Text(strings.searchChats) },
-                singleLine = true,
-            )
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = viewModel::setQuery,
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(searchFocusRequester),
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    label = { Text(strings.searchChats) },
+                    singleLine = true,
+                )
+                IconButton(
+                    onClick = {
+                        saveSearchName = query.trim()
+                        saveSearchOpen = true
+                    },
+                    enabled = unifiedSearchActive,
+                ) {
+                    Icon(Icons.Default.BookmarkAdd, contentDescription = "Save search")
+                }
+                Box {
+                    IconButton(onClick = {
+                        viewModel.refreshSearchCollections(apiClient)
+                        searchLibraryOpen = true
+                    }) {
+                        Icon(Icons.Default.History, contentDescription = "Saved searches and history")
+                    }
+                    DropdownMenu(expanded = searchLibraryOpen, onDismissRequest = { searchLibraryOpen = false }) {
+                        if (savedSearches.isNotEmpty()) {
+                            DropdownMenuItem(text = { Text("Saved searches", style = MaterialTheme.typography.labelMedium) }, onClick = {}, enabled = false)
+                            savedSearches.forEach { item ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(item.query, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    },
+                                    trailingIcon = {
+                                        IconButton(onClick = { viewModel.deleteSavedSearch(apiClient, item.id) }, modifier = Modifier.size(36.dp)) {
+                                            Icon(Icons.Default.Delete, contentDescription = "Delete saved search", modifier = Modifier.size(18.dp))
+                                        }
+                                    },
+                                    onClick = {
+                                        searchLibraryOpen = false
+                                        viewModel.applySavedSearch(item)
+                                    },
+                                )
+                            }
+                        }
+                        if (searchHistory.isNotEmpty()) {
+                            DropdownMenuItem(text = { Text("Recent searches", style = MaterialTheme.typography.labelMedium) }, onClick = {}, enabled = false)
+                            searchHistory.forEach { item ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(item.query, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text("${item.resultCount} results · ${item.scope}", style = MaterialTheme.typography.bodySmall)
+                                        }
+                                    },
+                                    onClick = {
+                                        searchLibraryOpen = false
+                                        viewModel.applySearchHistory(item)
+                                    },
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text("Clear search history") },
+                                leadingIcon = { Icon(Icons.Default.ClearAll, contentDescription = null) },
+                                onClick = { viewModel.clearSearchHistory(apiClient) },
+                            )
+                        }
+                        if (savedSearches.isEmpty() && searchHistory.isEmpty()) {
+                            DropdownMenuItem(text = { Text("No saved or recent searches") }, onClick = {}, enabled = false)
+                        }
+                    }
+                }
+            }
 
             Row(
                 modifier = Modifier
@@ -344,6 +429,42 @@ fun SessionListScreen(
                         onClick = { viewModel.setSearchScope(scope) },
                         label = { Text(label) },
                     )
+                }
+                Box {
+                    AssistChip(
+                        onClick = { sortMenuOpen = true },
+                        leadingIcon = { Icon(Icons.Default.Sort, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = {
+                            Text(
+                                when (searchSort to searchOrder) {
+                                    "updatedAt" to "desc" -> "Newest"
+                                    "updatedAt" to "asc" -> "Oldest"
+                                    "title" to "asc" -> "Title A-Z"
+                                    "title" to "desc" -> "Title Z-A"
+                                    "kind" to "asc" -> "Type"
+                                    else -> "Relevant"
+                                },
+                            )
+                        },
+                    )
+                    DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                        listOf(
+                            Triple("relevance", "desc", "Most relevant"),
+                            Triple("updatedAt", "desc", "Newest first"),
+                            Triple("updatedAt", "asc", "Oldest first"),
+                            Triple("title", "asc", "Title A-Z"),
+                            Triple("title", "desc", "Title Z-A"),
+                            Triple("kind", "asc", "Result type"),
+                        ).forEach { (sort, order, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    sortMenuOpen = false
+                                    viewModel.setSearchSort(sort, order)
+                                },
+                            )
+                        }
+                    }
                 }
             }
 
@@ -503,6 +624,20 @@ fun SessionListScreen(
             onConfirm = {
                 viewModel.patchConversation(apiClient, target, ThreadPatch(tags = tagsText.split(",").map { it.trim() }.filter { it.isNotBlank() }))
                 tagsTarget = null
+            },
+        )
+    }
+
+    if (saveSearchOpen) {
+        TextInputDialog(
+            title = "Save search",
+            value = saveSearchName,
+            onValueChange = { saveSearchName = it },
+            confirmText = strings.save,
+            onDismiss = { saveSearchOpen = false },
+            onConfirm = {
+                viewModel.saveCurrentSearch(apiClient, saveSearchName)
+                saveSearchOpen = false
             },
         )
     }

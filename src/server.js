@@ -74,7 +74,24 @@ import {
 } from "./liveCall.js";
 import { getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
-import { searchAll } from "./search.js";
+import {
+  clearSearchHistory,
+  deleteSavedSearch,
+  deleteSearchHistory,
+  getSavedSearch,
+  getSearchIndexStatus,
+  listSavedSearches,
+  listSearchHistory,
+  markSavedSearchUsed,
+  recordSearchHistory,
+  refreshSearchIndex,
+  refreshWorkspaceSearchPaths,
+  saveSearch,
+  searchAll,
+  startSearchIndex,
+  stopSearchIndex,
+  updateSavedSearch
+} from "./search.js";
 import { addReviewComment, createReview, getReview, listReviews, updateReview } from "./reviews.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
@@ -134,6 +151,14 @@ const providerCatalogResolver = createProviderCatalogResolver({ loaders: provide
 const providerHealthResolver = createProviderHealthResolver({ loaders: providerRuntimeLoaders.healthLoaders });
 settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
+try {
+  await startSearchIndex({
+    getWorkspaces: () => getWorkspaces(settings),
+    refreshIntervalMs: Number(process.env.VIBELINK_SEARCH_INDEX_REFRESH_MS || 60_000)
+  });
+} catch (error) {
+  console.error(`[search-index] startup refresh failed: ${error.message}`);
+}
 restoreTasks();
 const restoredLiveCallSessions = restoreLiveCallSessions();
 for (const sessionId of restoredLiveCallSessions) {
@@ -3248,25 +3273,128 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/search/saved" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listSavedSearches(), url) });
+    return;
+  }
+
+  if (url.pathname === "/api/search/saved" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "search.saved", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    try {
+      const item = saveSearch(body);
+      audit(request, url, auth, { type: "search.saved.create", success: true, target: item.id });
+      sendJson(response, 201, item);
+    } catch (error) {
+      sendError(response, 400, error.message);
+    }
+    return;
+  }
+
+  const savedSearchMatch = url.pathname.match(/^\/api\/search\/saved\/([^/]+)$/);
+  if (savedSearchMatch && request.method === "GET") {
+    const item = getSavedSearch(decodeURIComponent(savedSearchMatch[1]));
+    if (!item) { sendError(response, 404, "Saved search not found."); return; }
+    sendJson(response, 200, item);
+    return;
+  }
+  if (savedSearchMatch && request.method === "PATCH") {
+    if (!enforceRateLimit(request, response, url, "search.saved", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    try {
+      const item = updateSavedSearch(decodeURIComponent(savedSearchMatch[1]), body);
+      if (!item) { sendError(response, 404, "Saved search not found."); return; }
+      audit(request, url, auth, { type: "search.saved.update", success: true, target: item.id });
+      sendJson(response, 200, item);
+    } catch (error) {
+      sendError(response, 400, error.message);
+    }
+    return;
+  }
+  if (savedSearchMatch && request.method === "DELETE") {
+    if (!enforceRateLimit(request, response, url, "search.saved", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const id = decodeURIComponent(savedSearchMatch[1]);
+    const deleted = deleteSavedSearch(id);
+    if (!deleted) { sendError(response, 404, "Saved search not found."); return; }
+    audit(request, url, auth, { type: "search.saved.delete", success: true, target: id });
+    sendJson(response, 200, { ok: true, id });
+    return;
+  }
+
+  if (url.pathname === "/api/search/history" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listSearchHistory({ limit: url.searchParams.get("limit") || 50 }), url) });
+    return;
+  }
+  if (url.pathname === "/api/search/history" && request.method === "DELETE") {
+    if (!enforceRateLimit(request, response, url, "search.history", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    const deleted = clearSearchHistory();
+    audit(request, url, auth, { type: "search.history.clear", success: true, meta: { deleted } });
+    sendJson(response, 200, { ok: true, deleted });
+    return;
+  }
+
+  const searchHistoryMatch = url.pathname.match(/^\/api\/search\/history\/([^/]+)$/);
+  if (searchHistoryMatch && request.method === "DELETE") {
+    if (!enforceRateLimit(request, response, url, "search.history", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const id = decodeURIComponent(searchHistoryMatch[1]);
+    const deleted = deleteSearchHistory(id);
+    if (!deleted) { sendError(response, 404, "Search history item not found."); return; }
+    sendJson(response, 200, { ok: true, id });
+    return;
+  }
+
+  if (url.pathname === "/api/search/index" && request.method === "GET") {
+    sendJson(response, 200, getSearchIndexStatus());
+    return;
+  }
+  if (url.pathname === "/api/search/index/refresh" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "search.index", { limit: 6, windowMs: 60 * 1000 }, auth)) return;
+    const result = await refreshSearchIndex();
+    audit(request, url, auth, { type: "search.index.refresh", success: true, meta: { workspaces: result.length } });
+    sendJson(response, 200, { ok: true, result, index: getSearchIndexStatus() });
+    return;
+  }
+
   if (url.pathname === "/api/search" && request.method === "GET") {
+    const savedSearchId = url.searchParams.get("savedSearchId") || "";
+    const saved = savedSearchId ? getSavedSearch(savedSearchId) : null;
+    if (savedSearchId && !saved) { sendError(response, 404, "Saved search not found."); return; }
+    const parameter = (name, fallback = "") => url.searchParams.has(name) ? url.searchParams.get(name) : fallback;
     const result = await searchAll({
-      query: url.searchParams.get("q") || "",
-      scope: url.searchParams.get("scope") || "all",
+      query: parameter("q", saved?.query || ""),
+      scope: parameter("scope", saved?.scope || "all"),
       limit: url.searchParams.get("limit") || 50,
       cursor: url.searchParams.get("cursor") || "0",
-      tag: url.searchParams.get("tag") || "",
-      favorite: url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true",
+      tag: parameter("tag", saved?.tag || ""),
+      favorite: url.searchParams.has("favorite")
+        ? url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true"
+        : Boolean(saved?.favorite),
+      sort: parameter("sort", saved?.sort || "relevance"),
+      order: parameter("order", saved?.order || ""),
       histories: listHistories({ fresh: false }),
       tasks: conversationTasks(),
       workspaces: getWorkspaces(settings),
       threadState: getThreadState()
     });
-    sendJson(response, 200, { ...result, items: applyFields(result.items, url) });
+    if (url.searchParams.get("record") !== "0" && (!url.searchParams.has("cursor") || url.searchParams.get("cursor") === "0")) {
+      recordSearchHistory({
+        ...result,
+        tag: parameter("tag", saved?.tag || ""),
+        favorite: url.searchParams.has("favorite")
+          ? url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true"
+          : Boolean(saved?.favorite),
+        resultCount: result.total,
+        deviceId: auth.device?.id || ""
+      });
+    }
+    if (savedSearchId) markSavedSearchUsed(savedSearchId);
+    sendJson(response, 200, { ...result, savedSearchId, index: getSearchIndexStatus(), items: applyFields(result.items, url) });
     return;
   }
 
   if (url.pathname === "/api/thread-state" && request.method === "GET") {
-    sendJson(response, 200, getThreadState());
+    const state = getThreadState();
+    sendJson(response, 200, state, { ETag: threadStateEtag(state) });
     return;
   }
 
@@ -3621,6 +3749,7 @@ async function shutdown(signal) {
     await drainEventStoreRuntime();
     await closePersistentMcpSessions();
     await closeStatusRuntime();
+    await stopSearchIndex();
   } catch (error) {
     console.error(`[shutdown] runtime drain failed: ${error.stack || error.message}`);
   }

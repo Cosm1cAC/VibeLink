@@ -217,6 +217,28 @@ class MainActivityAuthFlowTest {
     }
 
     @Test
+    fun rotationKeepsLoginDraftAndRestoresUsableControls() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithText("配对 Token").fetchSemanticsNodes().isNotEmpty()
+            }
+            val draft = "rotation-draft-token"
+            composeRule.onNode(hasText("配对 Token") and hasSetTextAction()).performTextInput(draft)
+
+            scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithText(draft).fetchSemanticsNodes().isNotEmpty()
+            }
+            composeRule.onNodeWithText("创建配对请求").assertExists()
+
+            scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithText(draft).fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+    }
+
+    @Test
     fun logoutAfterPairingDoesNotReuseConsumedIntent() {
         val pairingUri = Uri.Builder()
             .scheme("vibelink")

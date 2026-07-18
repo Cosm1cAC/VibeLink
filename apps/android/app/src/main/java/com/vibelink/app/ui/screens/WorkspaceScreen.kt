@@ -66,6 +66,7 @@ import com.vibelink.app.network.GitStatusItem
 import com.vibelink.app.network.WorkspaceFileItem
 import com.vibelink.app.network.WorkspaceFileResponse
 import com.vibelink.app.network.WorkspaceItem
+import com.vibelink.app.ui.i18n.LocalAppStrings
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +76,7 @@ fun WorkspaceScreen(
     onOpenApprovals: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     val workspaces by viewModel.workspaces.collectAsState()
     val selectedWorkspaceId by viewModel.selectedWorkspaceId.collectAsState()
     val currentDir by viewModel.currentDir.collectAsState()
@@ -103,10 +105,10 @@ fun WorkspaceScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Workspace") },
+                title = { Text(strings.workspace) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
                     }
                 },
                 actions = {
@@ -114,7 +116,7 @@ fun WorkspaceScreen(
                         if (refreshing) {
                             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                         } else {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                            Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
                         }
                     }
                 },
@@ -257,16 +259,16 @@ private fun WorkspaceContent(
                     TextButton(
                         onClick = { viewModel.openParentDirectory(apiClient) },
                         enabled = currentDir.isNotBlank(),
-                    ) { Text("Up") }
+                    ) { Text(ws("上一级", "Up")) }
                 }
                 if (files.isEmpty()) {
-                    MutedText("No files in this directory.")
+                    MutedText(ws("此目录中没有文件。", "No files in this directory."))
                 } else {
                     OutlinedTextField(
                         value = fileQuery,
                         onValueChange = { fileQuery = it },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Search files in this folder") },
+                        label = { Text(ws("搜索此文件夹中的文件", "Search files in this folder")) },
                         singleLine = true,
                     )
                     Spacer(Modifier.height(8.dp))
@@ -328,31 +330,31 @@ private fun WorkspaceContent(
                         OutlinedButton(
                             onClick = { viewModel.applyGitAction(apiClient, "stage-all") },
                             enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
-                        ) { Text("Stage all") }
+                        ) { Text(ws("暂存全部", "Stage all")) }
                     }
                     item {
                         OutlinedButton(
                             onClick = { viewModel.applyGitAction(apiClient, "unstage-all") },
                             enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
-                        ) { Text("Unstage all") }
+                        ) { Text(ws("取消暂存全部", "Unstage all")) }
                     }
                     item {
                         OutlinedButton(
                             onClick = { viewModel.applyGitAction(apiClient, "pull") },
                             enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
-                        ) { Text("Pull") }
+                        ) { Text(ws("拉取", "Pull")) }
                     }
                     item {
                         OutlinedButton(
                             onClick = { viewModel.applyGitAction(apiClient, "push") },
                             enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
-                        ) { Text("Push") }
+                        ) { Text(ws("推送", "Push")) }
                     }
                     item {
                         OutlinedButton(
                             onClick = { viewModel.applyGitAction(apiClient, "pr") },
                             enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank(),
-                        ) { Text("PR") }
+                        ) { Text(ws("拉取请求", "PR")) }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -360,7 +362,7 @@ private fun WorkspaceContent(
                     value = commitMessage,
                     onValueChange = onCommitMessageChange,
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Commit message") },
+                    label = { Text(ws("提交说明", "Commit message")) },
                     singleLine = true,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -368,7 +370,7 @@ private fun WorkspaceContent(
                     OutlinedButton(
                         onClick = { viewModel.applyGitAction(apiClient, "commit", message = commitMessage.trim()) },
                         enabled = !gitActionRunning && selectedWorkspaceId.isNotBlank() && commitMessage.trim().isNotBlank(),
-                    ) { Text("Commit") }
+                    ) { Text(ws("提交", "Commit")) }
                     if (gitActionRunning) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 }
                 Spacer(Modifier.height(10.dp))
@@ -415,7 +417,7 @@ private fun WorkspaceContent(
                 )
                 Spacer(Modifier.height(8.dp))
                 if (changedFiles.isEmpty()) {
-                    MutedText("Working tree is clean or Git is unavailable.")
+                    MutedText(ws("工作树干净，或 Git 不可用。", "Working tree is clean or Git is unavailable."))
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         changedFiles.take(changedLimit).forEach { item ->
@@ -444,7 +446,7 @@ private fun WorkspaceContent(
             SectionCard(title = "Diff Preview") {
                 val diff = gitDiff?.diff.orEmpty().trim()
                 if (diff.isBlank()) {
-                    MutedText("No diff preview.")
+                    MutedText(ws("没有差异预览。", "No diff preview."))
                 } else {
                     val truncated = diff.length > 8000 && !showFullDiff
                     CodeBlock(text = if (showFullDiff) diff else diff.take(8000), maxLines = if (showFullDiff) 400 else 80)
@@ -460,10 +462,10 @@ private fun WorkspaceContent(
                     }
                     if (truncated) {
                         Spacer(Modifier.height(8.dp))
-                        MutedText("Diff preview is truncated at 8000 characters.")
-                        TextButton(onClick = { showFullDiff = true }) { Text("Show full diff") }
+                        MutedText(ws("差异预览已截断至 8000 个字符。", "Diff preview is truncated at 8000 characters."))
+                        TextButton(onClick = { showFullDiff = true }) { Text(ws("显示完整差异", "Show full diff")) }
                     } else if (showFullDiff && diff.length > 8000) {
-                        TextButton(onClick = { showFullDiff = false }) { Text("Collapse diff") }
+                        TextButton(onClick = { showFullDiff = false }) { Text(ws("折叠差异", "Collapse diff")) }
                     }
                 }
             }
@@ -477,7 +479,7 @@ private fun WorkspaceContent(
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 1,
                     maxLines = 3,
-                    label = { Text("Test command") },
+                    label = { Text(ws("测试命令", "Test command")) },
                     singleLine = false,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -504,7 +506,7 @@ private fun WorkspaceContent(
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 1,
                     maxLines = 3,
-                    label = { Text("Command") },
+                    label = { Text(ws("命令", "Command")) },
                     singleLine = false,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -557,12 +559,12 @@ private fun WorkspaceFileCreateForm(
     onCreate: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Create or replace file", style = MaterialTheme.typography.labelMedium)
+        Text(ws("创建或替换文件", "Create or replace file"), style = MaterialTheme.typography.labelMedium)
         OutlinedTextField(
             value = path,
             onValueChange = onPathChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Path") },
+            label = { Text(ws("路径", "Path")) },
             singleLine = true,
         )
         OutlinedTextField(
@@ -571,7 +573,7 @@ private fun WorkspaceFileCreateForm(
             modifier = Modifier.fillMaxWidth(),
             minLines = 2,
             maxLines = 8,
-            label = { Text("Text") },
+            label = { Text(ws("文本", "Text")) },
             singleLine = false,
         )
         Button(
@@ -581,7 +583,7 @@ private fun WorkspaceFileCreateForm(
         ) {
             Icon(Icons.Default.Add, contentDescription = null)
             Spacer(Modifier.size(8.dp))
-            Text("Write file")
+            Text(ws("写入文件", "Write file"))
         }
     }
 }
@@ -614,11 +616,11 @@ private fun WorkspaceFilePreviewCard(
                 modifier = Modifier.weight(1f),
             )
             IconButton(onClick = onClose) {
-                Icon(Icons.Default.Close, contentDescription = "Close preview")
+                Icon(Icons.Default.Close, contentDescription = ws("关闭预览", "Close preview"))
             }
         }
         if (file.binary) {
-            MutedText("Binary or large file; preview is unavailable.")
+            MutedText(ws("二进制文件或大文件无法预览。", "Binary or large file; preview is unavailable."))
             return@SectionCard
         }
 
@@ -626,7 +628,7 @@ private fun WorkspaceFilePreviewCard(
             value = renamePath,
             onValueChange = { renamePath = it; deleteArmed = false },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Path") },
+            label = { Text(ws("路径", "Path")) },
             singleLine = true,
         )
         Spacer(Modifier.height(8.dp))
@@ -648,7 +650,7 @@ private fun WorkspaceFilePreviewCard(
                 ) {
                     Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Rename")
+                    Text(ws("重命名", "Rename"))
                 }
             }
             item {
@@ -658,7 +660,7 @@ private fun WorkspaceFilePreviewCard(
                 ) {
                     Icon(Icons.Default.Save, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Save")
+                    Text(ws("保存", "Save"))
                 }
             }
             item {
@@ -682,11 +684,11 @@ private fun WorkspaceFilePreviewCard(
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 8,
                 maxLines = 20,
-                label = { Text("File text") },
+                label = { Text(ws("文件文本", "File text")) },
                 singleLine = false,
             )
         } else if (file.text.isBlank()) {
-            MutedText("Text file is empty.")
+            MutedText(ws("文本文件为空。", "Text file is empty."))
         } else {
             CodeBlock(text = file.text.take(12000), maxLines = 120)
         }
@@ -705,12 +707,12 @@ private fun WorkspaceWorktreeForm(
     onCreate: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Create worktree", style = MaterialTheme.typography.labelMedium)
+        Text(ws("创建工作树", "Create worktree"), style = MaterialTheme.typography.labelMedium)
         OutlinedTextField(
             value = branchName,
             onValueChange = onBranchNameChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Branch") },
+            label = { Text(ws("分支", "Branch")) },
             singleLine = true,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -718,19 +720,19 @@ private fun WorkspaceWorktreeForm(
                 value = baseRef,
                 onValueChange = onBaseRefChange,
                 modifier = Modifier.weight(1f),
-                label = { Text("Base") },
+                label = { Text(ws("基准", "Base")) },
                 singleLine = true,
             )
             OutlinedButton(
                 onClick = onCreate,
                 enabled = enabled && branchName.trim().isNotBlank(),
-            ) { Text("Create") }
+            ) { Text(ws("创建", "Create")) }
         }
         OutlinedTextField(
             value = title,
             onValueChange = onTitleChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Title") },
+            label = { Text(ws("标题", "Title")) },
             singleLine = true,
         )
     }
@@ -751,12 +753,12 @@ private fun WorkspaceBranchStashForm(
     onStashPop: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Branch and stash", style = MaterialTheme.typography.labelMedium)
+        Text(ws("分支与暂存区", "Branch and stash"), style = MaterialTheme.typography.labelMedium)
         OutlinedTextField(
             value = branchName,
             onValueChange = onBranchNameChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Branch name") },
+            label = { Text(ws("分支名称", "Branch name")) },
             singleLine = true,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -764,31 +766,31 @@ private fun WorkspaceBranchStashForm(
                 value = baseRef,
                 onValueChange = onBaseRefChange,
                 modifier = Modifier.weight(1f),
-                label = { Text("Base") },
+                label = { Text(ws("基准", "Base")) },
                 singleLine = true,
             )
             OutlinedButton(
                 onClick = onCreateBranch,
                 enabled = enabled && branchName.trim().isNotBlank(),
-            ) { Text("Create") }
+            ) { Text(ws("创建", "Create")) }
             OutlinedButton(
                 onClick = onSwitchBranch,
                 enabled = enabled && branchName.trim().isNotBlank(),
-            ) { Text("Switch") }
+            ) { Text(ws("切换", "Switch")) }
         }
         OutlinedTextField(
             value = stashMessage,
             onValueChange = onStashMessageChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Stash message") },
+            label = { Text(ws("暂存说明", "Stash message")) },
             singleLine = true,
         )
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             item {
-                OutlinedButton(onClick = onStashPush, enabled = enabled) { Text("Stash") }
+                OutlinedButton(onClick = onStashPush, enabled = enabled) { Text(ws("暂存", "Stash")) }
             }
             item {
-                OutlinedButton(onClick = onStashPop, enabled = enabled) { Text("Pop stash") }
+                OutlinedButton(onClick = onStashPop, enabled = enabled) { Text(ws("恢复暂存", "Pop stash")) }
             }
         }
     }
@@ -833,8 +835,8 @@ private fun WorkspaceSummary(workspace: WorkspaceItem?, gitDiff: GitDiffResponse
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssistChip(onClick = {}, label = { Text(gitDiff?.branch?.ifBlank { "branch" } ?: "branch") })
-                AssistChip(onClick = {}, label = { Text("${gitDiff?.changedCount ?: 0} changed") })
-                AssistChip(onClick = {}, label = { Text("${gitDiff?.lineCount ?: 0} lines") })
+                AssistChip(onClick = {}, label = { Text(ws("${gitDiff?.changedCount ?: 0} 个变更", "${gitDiff?.changedCount ?: 0} changed")) })
+                AssistChip(onClick = {}, label = { Text(ws("${gitDiff?.lineCount ?: 0} 行", "${gitDiff?.lineCount ?: 0} lines")) })
             }
         }
     }
@@ -914,23 +916,23 @@ private fun GitFileRow(
         }
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             item {
-                OutlinedButton(onClick = onStage, enabled = !gitActionRunning) { Text("Stage") }
+                OutlinedButton(onClick = onStage, enabled = !gitActionRunning) { Text(ws("暂存", "Stage")) }
             }
             item {
-                OutlinedButton(onClick = onUnstage, enabled = !gitActionRunning) { Text("Unstage") }
+                OutlinedButton(onClick = onUnstage, enabled = !gitActionRunning) { Text(ws("取消暂存", "Unstage")) }
             }
             item {
-                OutlinedButton(onClick = onRestore, enabled = !gitActionRunning) { Text("Restore") }
+                OutlinedButton(onClick = onRestore, enabled = !gitActionRunning) { Text(ws("还原", "Restore")) }
             }
             if (conflict) {
                 item {
-                    OutlinedButton(onClick = onUseOurs, enabled = !gitActionRunning) { Text("Ours") }
+                    OutlinedButton(onClick = onUseOurs, enabled = !gitActionRunning) { Text(ws("使用本地版本", "Ours")) }
                 }
                 item {
-                    OutlinedButton(onClick = onUseTheirs, enabled = !gitActionRunning) { Text("Theirs") }
+                    OutlinedButton(onClick = onUseTheirs, enabled = !gitActionRunning) { Text(ws("使用远端版本", "Theirs")) }
                 }
                 item {
-                    OutlinedButton(onClick = onMarkResolved, enabled = !gitActionRunning) { Text("Resolved") }
+                    OutlinedButton(onClick = onMarkResolved, enabled = !gitActionRunning) { Text(ws("标记已解决", "Resolved")) }
                 }
             }
         }
@@ -944,7 +946,7 @@ private fun DiffHunkPanel(
     onStageHunk: (WorkspaceDiffHunk) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("Hunks", style = MaterialTheme.typography.labelMedium)
+        Text(ws("差异块", "Hunks"), style = MaterialTheme.typography.labelMedium)
         hunks.forEachIndexed { index, hunk ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -958,7 +960,7 @@ private fun DiffHunkPanel(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                OutlinedButton(onClick = { onStageHunk(hunk) }, enabled = enabled) { Text("Stage") }
+                OutlinedButton(onClick = { onStageHunk(hunk) }, enabled = enabled) { Text(ws("暂存", "Stage")) }
             }
         }
     }
@@ -982,7 +984,7 @@ private fun WorkspaceTerminalCard(
             value = shell,
             onValueChange = onShellChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Shell") },
+            label = { Text(ws("Shell", "Shell")) },
             singleLine = true,
         )
         Spacer(Modifier.height(8.dp))
@@ -994,7 +996,7 @@ private fun WorkspaceTerminalCard(
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Start")
+                    Text(ws("启动", "Start"))
                 }
             }
             item {
@@ -1007,7 +1009,7 @@ private fun WorkspaceTerminalCard(
                 OutlinedButton(
                     onClick = onStop,
                     enabled = terminal.sessionId.isNotBlank() && terminal.status in setOf("running", "starting", "pending"),
-                ) { Text("Stop") }
+                ) { Text(ws("停止", "Stop")) }
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -1027,14 +1029,14 @@ private fun WorkspaceTerminalCard(
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 1,
                 maxLines = 4,
-                label = { Text("Input") },
+                label = { Text(ws("输入", "Input")) },
                 singleLine = false,
             )
             Spacer(Modifier.height(8.dp))
             OutlinedButton(
                 onClick = onSendInput,
                 enabled = input.isNotBlank() && terminal.status in setOf("running", "starting", "pending"),
-            ) { Text("Send") }
+            ) { Text(ws("发送", "Send")) }
         }
     }
 }
@@ -1043,15 +1045,15 @@ private fun WorkspaceTerminalCard(
 private fun CommandResultView(result: CommandResult) {
     val output = listOf(result.stdout.trim(), result.stderr.trim()).filter { it.isNotBlank() }.joinToString("\n")
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AssistChip(onClick = {}, label = { Text("exit ${result.exitCode}") })
+        AssistChip(onClick = {}, label = { Text(ws("退出码 ${result.exitCode}", "exit ${result.exitCode}")) })
         result.test?.let { summary ->
-            AssistChip(onClick = {}, label = { Text("${summary.passed} passed / ${summary.failed} failed") })
+            AssistChip(onClick = {}, label = { Text(ws("${summary.passed} 项通过 / ${summary.failed} 项失败", "${summary.passed} passed / ${summary.failed} failed")) })
             if (summary.failures.isNotEmpty()) {
                 CodeBlock(text = summary.failures.joinToString("\n"), maxLines = 20)
             }
         }
         if (output.isBlank()) {
-            MutedText("Command finished without output.")
+            MutedText(ws("命令已完成，没有输出。", "Command finished without output."))
         } else {
             CodeBlock(text = output.take(8000), maxLines = 80)
         }
@@ -1067,8 +1069,8 @@ private fun ListLimitFooter(visible: Int, total: Int, onShowMore: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        MutedText("Showing $visible of $total")
-        if (visible < total) TextButton(onClick = onShowMore) { Text("Show more") }
+        MutedText(ws("显示 $visible / $total", "Showing $visible of $total"))
+        if (visible < total) TextButton(onClick = onShowMore) { Text(ws("显示更多", "Show more")) }
     }
 }
 
@@ -1106,9 +1108,9 @@ private fun ErrorCard(message: String, actionText: String = "", onAction: () -> 
 @Composable
 private fun EmptyWorkspaceState(modifier: Modifier = Modifier) {
     Column(modifier = modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("No workspaces", style = MaterialTheme.typography.titleMedium)
+        Text(ws("没有工作区", "No workspaces"), style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(6.dp))
-        MutedText("The bridge has not exposed a workspace yet.")
+        MutedText(ws("Bridge 尚未提供工作区。", "The bridge has not exposed a workspace yet."))
     }
 }
 
@@ -1120,6 +1122,10 @@ private fun MutedText(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
+
+@Composable
+private fun ws(chinese: String, english: String): String =
+    LocalAppStrings.current.text(chinese, english)
 
 @Composable
 private fun statusColor(status: String) = when {

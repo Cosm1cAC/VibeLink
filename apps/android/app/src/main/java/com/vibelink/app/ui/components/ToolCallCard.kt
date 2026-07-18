@@ -15,6 +15,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vibelink.app.network.ToolCallSummary
+import com.vibelink.app.ui.i18n.LocalAppStrings
 
 /**
  * Renders a list of tool call cards (matching Web ToolCallCards).
@@ -223,7 +224,7 @@ fun ToolCallCard(
 @Composable
 private fun PayloadToggle(onClick: () -> Unit) {
     TextButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)) {
-        Text("Show full payload")
+        Text(LocalAppStrings.current.showFullPayload)
     }
 }
 

@@ -1,6 +1,6 @@
 # VibeLink Android Capability Matrix / VibeLink Android 能力矩阵
 
-Status as audited on 2026-07-14.  审计日期：2026-07-14。
+Status updated on 2026-07-19.  更新日期：2026-07-19。
 
 | Capability | Implementation | Existing automation | Audit result |
 | --- | --- | --- | --- |
@@ -21,8 +21,8 @@ Status as audited on 2026-07-14.  审计日期：2026-07-14。
 | Tool events/SSE/recovery | Task/tool SSE, catch-up, polling policies | Reducer/resilience unit tests | Implemented; no long-running disconnect/reconnect instrumentation test. |
 | Live Call | Session restore, events, ASR selection/checkpoints, pause/resume, mic service, local PCM list/delete, QA cards | QA reducer/resilience unit tests plus visible real-bridge smoke | UI/client implemented; real ASR and long-duration PCM stability/quality validation remain incomplete. |
 | Notifications | Android 13+ permission policy and native token registration | JVM policy test | Implemented; no device-level permission regression. |
-| Localization | Chinese/English string provider and setting | JVM string-selection test | Partial: several operational/status strings remain hard-coded Chinese. |
-| Accessibility and UI automation | Compose semantics inherited from controls | Six Compose instrumentation regressions on API 36 | Critical auth/intent boundary is covered; broader keyboard, rotation, TalkBack, and screen-navigation coverage remains missing. |
+| Localization | Chinese/English string provider and setting; session search, Workspace, Review, pairing, and operational status copy use the provider | JVM source/string-selection gate | Implemented for runtime copy; protocol identifiers, user content, and fixed data formats remain untranslated by design. |
+| Accessibility and UI automation | Explicit login heading, pane, polite live-region, password, and IME traversal semantics; bounded adaptive login form | Existing auth/intent device suite plus phone/tablet, 200% font, TalkBack-tree, keyboard, and rotation regressions | Test sources compile. Device execution remains pending because no emulator/device was connected during the 2026-07-19 verification run. |
 | Browser control and test traces | None in Android | None | Missing product capability by design/status. |
 | Plugins/Hooks/Automations/Subagents/AGENTS/config UI | None | None | Missing product capability. |
 | Global command palette/full-text search/tags/favorites | Limited prompt command catalog and session search | Prompt catalog unit tests | Partial/missing product capability. |

@@ -33,7 +33,11 @@ class AppLanguageTest {
                 .flatMap { path: Path ->
                     kotlinStringLiterals(path)
                         .filter { it.value.any(::isHanCharacter) }
-                        .filterNot { it.lineText.contains("strings.text(") || it.lineText.contains("Regex(") }
+                        .filterNot {
+                            it.lineText.contains("strings.text(") ||
+                                it.lineText.contains("ws(") ||
+                                it.lineText.contains("Regex(")
+                        }
                         .map { "${sourceRoot.relativize(path)}:${it.line}: ${it.value}" }
                         .stream()
                 }

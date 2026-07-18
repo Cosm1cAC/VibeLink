@@ -28,7 +28,7 @@ fun LegacyLoginScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("VibeLink") })
+            TopAppBar(title = { Text(strings.brandName) })
         }
     ) { padding ->
         Column(
@@ -43,7 +43,7 @@ fun LegacyLoginScreen(
             OutlinedTextField(
                 value = bridgeUrl,
                 onValueChange = { bridgeUrl = it },
-                label = { Text("Bridge URL") },
+                label = { Text(strings.bridgeUrl) },
                 placeholder = { Text("http://192.168.1.10:8787") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),

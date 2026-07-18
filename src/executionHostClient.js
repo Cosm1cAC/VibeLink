@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import net from "node:net";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 
 import { dataDir } from "./config.js";
@@ -35,9 +35,28 @@ export function executionHostPipeName(directory = dataDir) {
   return `\\\\.\\pipe\\vibelink-execd-v1-${digest}`;
 }
 
+export function resolveExecutionHostCommand(environment = process.env, probe = spawnSync) {
+  const explicit = String(environment.VIBELINK_EXECUTION_HOST_COMMAND || "").trim();
+  if (explicit) return explicit;
+  const candidate = String(environment.VIBELINK_RUST_BIN || "").trim();
+  if (!candidate) return "";
+  try {
+    const result = probe(candidate, ["--help"], {
+      encoding: "utf8",
+      timeout: 2000,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const help = `${result?.stdout || ""}\n${result?.stderr || ""}`;
+    return /^\s*execd\b/im.test(help) ? candidate : "";
+  } catch {
+    return "";
+  }
+}
+
 export function createExecutionHostClient({
   pipeName = process.env.VIBELINK_EXECUTION_HOST_PIPE || executionHostPipeName(dataDir),
-  command = process.env.VIBELINK_EXECUTION_HOST_COMMAND || "",
+  command = resolveExecutionHostCommand(),
   hostDataDir = dataDir,
   requestTimeoutMs = 5000,
   startupTimeoutMs = 15000,
@@ -371,10 +390,11 @@ let defaultFacade = null;
 
 export function getExecutionHostFacade() {
   if (defaultFacade) return defaultFacade;
-  const hostConfigured = Boolean(process.env.VIBELINK_EXECUTION_HOST_PIPE || process.env.VIBELINK_EXECUTION_HOST_COMMAND);
+  const command = resolveExecutionHostCommand();
+  const hostConfigured = Boolean(process.env.VIBELINK_EXECUTION_HOST_PIPE || command);
   const hostEnabled = process.env.VIBELINK_EXECUTION_HOST !== "off" && hostConfigured;
   defaultFacade = hostEnabled
-    ? createExecutionHostFacade({ client: createExecutionHostClient() })
+    ? createExecutionHostFacade({ client: createExecutionHostClient({ command }) })
     : createLegacyExecutionFacade();
   return defaultFacade;
 }

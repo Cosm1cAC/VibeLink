@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import net from "node:net";
 import test from "node:test";
 
-import { createExecutionHostClient, createExecutionHostFacade } from "../src/executionHostClient.js";
+import { createExecutionHostClient, createExecutionHostFacade, resolveExecutionHostCommand } from "../src/executionHostClient.js";
 
 function listen(server, pipeName) {
   return new Promise((resolve, reject) => {
@@ -18,6 +18,18 @@ function listen(server, pipeName) {
 function close(server) {
   return new Promise((resolve) => server.close(resolve));
 }
+
+test("execution host activation requires an explicit command or an execd-capable Rust binary", () => {
+  assert.equal(resolveExecutionHostCommand({ VIBELINK_EXECUTION_HOST_COMMAND: "host.exe", VIBELINK_RUST_BIN: "old.exe" }), "host.exe");
+  assert.equal(resolveExecutionHostCommand(
+    { VIBELINK_RUST_BIN: "new.exe" },
+    () => ({ stdout: "Commands:\n  execd  Run execution host\n", stderr: "" })
+  ), "new.exe");
+  assert.equal(resolveExecutionHostCommand(
+    { VIBELINK_RUST_BIN: "old.exe" },
+    () => ({ stdout: "Commands:\n  bridge  Run bridge\n", stderr: "" })
+  ), "");
+});
 
 test("execution host client uses bounded v1 frames and maps protocol errors", async () => {
   const pipeName = `\\\\.\\pipe\\vibelink-execution-host-client-${process.pid}-${crypto.randomUUID()}`;

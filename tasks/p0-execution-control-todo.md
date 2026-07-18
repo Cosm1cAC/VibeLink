@@ -39,8 +39,8 @@
 - [x] 将 `terminalRuntime` 改为 execution host facade。
 - [x] 保持现有 Terminal HTTP endpoint 与 Android/Web contract。
 - [ ] 迁移 Workspace streaming command、cancel 和 timeout。
-- [ ] 迁移 Agent CLI spawn、stdout/stderr 和 exit status。
-- [ ] 将运行中 Agent 输入改成 queued resume turn。
+- [x] 迁移 Agent CLI spawn、stdout/stderr、exit status 和 stop。
+- [x] 将运行中 Agent 输入改成 queued resume turn。
 - [ ] 实现 startup reconciliation、event ingest 和 ack。
 - [ ] 实现 attached/reconnecting/unreachable/lost/external 状态收敛。
 
@@ -53,16 +53,17 @@
 
 ## Phase 3: Codex Provider And Approval
 
-- [ ] 实现 app-server version/schema capability gate。
-- [ ] Worker 持有 app-server process 和 JSON-RPC connection。
-- [ ] 归一化 thread/turn/item/tool/output/exit 事件。
-- [ ] 映射 command execution approval request/response。
-- [ ] 映射 file change approval request/response。
-- [ ] 映射 permission request/grant scope。
+- [x] 实现 app-server version/schema capability gate（已审查 Codex CLI 0.144.5）。
+- [x] Worker 持有 app-server process 和 WebSocket JSON-RPC connection。
+- [x] 归一化 thread/turn/item/tool/output/approval request 事件并增加 JSON-RPC mock tests。
+- [x] 在 worker 边界归一化 process/turn exit，并赋予 durable host sequence。
+- [x] 映射 command execution approval request/response。
+- [x] 映射 file change approval request/response。
+- [x] 映射 permission request/grant scope。
 - [x] 实现 approval decision transactional outbox。
-- [ ] 实现 continuationRef、available decisions 和 expected version 校验。
-- [ ] 实现 decision recorded/delivered/applied/stale 状态。
-- [ ] 验证 Bridge restart 后继续同一个上游 request 和 tool call。
+- [x] 实现 continuationRef、available decisions 和 expected version 校验。
+- [x] 实现 decision recorded/delivered/applied/stale 状态。
+- [x] 验证 Bridge restart 后继续同一个上游 request 和 tool call。
 
 ## Checkpoint 3
 

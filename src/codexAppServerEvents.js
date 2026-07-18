@@ -121,6 +121,12 @@ function approvalKind(method) {
   return "permissions";
 }
 
+function defaultApprovalDecisions(kind) {
+  return kind === "permissions"
+    ? ["grant", "decline"]
+    : ["accept", "acceptForSession", "decline", "cancel"];
+}
+
 function normalizeApproval(message, params, receivedAt) {
   if (!(typeof message.id === "string" || typeof message.id === "number")) {
     throw protocolError("Approval request id must be a string or number.", { method: message.method });
@@ -129,6 +135,7 @@ function normalizeApproval(message, params, receivedAt) {
   const turnId = requiredString(params.turnId, "params.turnId");
   const itemId = requiredString(params.itemId, "params.itemId");
   const requestId = message.id;
+  const continuationRef = String(params.continuationRef || `codex:${threadId}:${turnId}:${itemId}:${String(requestId)}`).slice(0, 2000);
   return [baseEvent("provider.approval.required", {
     threadId,
     turnId,
@@ -140,8 +147,12 @@ function normalizeApproval(message, params, receivedAt) {
       requestIdType: typeof requestId,
       connectionScoped: true,
       approvalId: params.approvalId ?? null,
+      continuationRef,
+      expectedDecisionVersion: Number.isSafeInteger(params.decisionVersion) ? params.decisionVersion : 0,
       reason: params.reason ?? null,
-      availableDecisions: params.availableDecisions ?? null,
+      availableDecisions: Array.isArray(params.availableDecisions)
+        ? params.availableDecisions
+        : defaultApprovalDecisions(approvalKind(message.method)),
       requestedPermissions: params.permissions ?? params.additionalPermissions ?? null,
       request: params
     }

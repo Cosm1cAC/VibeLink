@@ -24,6 +24,7 @@ pub struct BackendControl {
     process_started_at_ticks: u64,
     input: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     terminal: Option<Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>>,
+    approval: Option<codex_app_server::ApprovalControl>,
     job: Arc<Job>,
     activation: Arc<(Mutex<bool>, Condvar)>,
 }
@@ -53,6 +54,7 @@ impl BackendControl {
             process_started_at_ticks: launched.process_started_at_ticks,
             input: None,
             terminal: None,
+            approval: Some(launched.approval),
             job: launched.job,
             activation: launched.activation,
         }))
@@ -126,6 +128,7 @@ impl BackendControl {
             process_started_at_ticks,
             input: Some(Arc::new(Mutex::new(Box::new(stdin)))),
             terminal: None,
+            approval: None,
             job,
             activation,
         }))
@@ -210,6 +213,7 @@ impl BackendControl {
             process_started_at_ticks,
             input: Some(input),
             terminal: Some(terminal),
+            approval: None,
             job,
             activation,
         }))
@@ -268,6 +272,21 @@ impl BackendControl {
         }
     }
 
+    pub fn resolve_approval(
+        &self,
+        approval_id: String,
+        continuation_ref: String,
+        expected_version: u64,
+        decision: Value,
+    ) -> Result<Value> {
+        self.approval
+            .as_ref()
+            .context(
+                "CAPABILITY_UNSUPPORTED: this execution does not support approval continuation",
+            )?
+            .resolve(approval_id, continuation_ref, expected_version, decision)
+    }
+
     pub fn capabilities(&self) -> Value {
         json!({
             "input": self.kind != BackendKind::AppServer,
@@ -282,7 +301,7 @@ impl BackendControl {
             "structuredToolEvents": if self.kind == BackendKind::AppServer { "authoritative" } else { "unavailable" },
             "toolOutput": if self.kind == BackendKind::AppServer { "complete" } else { "unavailable" },
             "exitStatus": "authoritative",
-            "approvalContinuation": false,
+            "approvalContinuation": self.kind == BackendKind::AppServer,
             "liveInput": false,
             "protocol": if self.kind == BackendKind::AppServer { "codex-app-server" } else { "process" },
             "protocolVersion": if self.kind == BackendKind::AppServer { "probed" } else { "v1" }

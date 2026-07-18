@@ -19,6 +19,7 @@ import {
   denyPairingSession,
   getDbPath,
   getApprovalRequest,
+  recordApprovalDecisionWithOutbox,
   getCachedMcpTools,
   getPairingSession,
   getToolRun,
@@ -51,6 +52,7 @@ import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, s
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
 import { artifactMetadata, artifactPreview, readArtifactRange } from "./artifactRuntime.js";
+import { createApprovalDispatcher } from "./approvalDispatcher.js";
 import { getCompactServiceMetrics } from "./compactService.js";
 import { getContextBudgetMetrics } from "./contextBudget.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
@@ -58,6 +60,7 @@ import { commandApprovalRequired } from "./commandSafety.js";
 import { subscribeDesktopObserver } from "./desktopObserver.js";
 import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
 import { filterArchivedCodexTasks, getHistory, listHistories } from "./history.js";
+import { getExecutionHostFacade } from "./executionHostClient.js";
 import {
   createLiveCallSession,
   getLiveCallSession,
@@ -174,6 +177,18 @@ try {
   console.error(`[search-index] startup refresh failed: ${error.message}`);
 }
 restoreTasks();
+const approvalDispatcher = createApprovalDispatcher({
+  resolveApproval: (command) => getExecutionHostFacade().resolveProviderApproval(command)
+});
+let approvalDispatchRunning = false;
+const approvalDispatchTimer = setInterval(() => {
+  if (approvalDispatchRunning) return;
+  approvalDispatchRunning = true;
+  approvalDispatcher.dispatchOnce()
+    .catch((error) => console.error(`[approval-dispatch] ${error.stack || error.message}`))
+    .finally(() => { approvalDispatchRunning = false; });
+}, Math.max(50, Number(process.env.VIBELINK_APPROVAL_DISPATCH_MS || 250)));
+approvalDispatchTimer.unref?.();
 const restoredLiveCallSessions = restoreLiveCallSessions();
 for (const sessionId of restoredLiveCallSessions) {
   setLiveCallQuestionHook(sessionId, (question, sess, questionEvent, transcriptBody = {}) => {
@@ -1808,6 +1823,24 @@ async function routeApi(request, response, url) {
     const approvalBefore = getApprovalRequest(approvalDecisionMatch[1]);
     if (!approvalBefore) {
       sendError(response, 404, "Approval request not found.");
+      return;
+    }
+    if (approvalBefore.provider === "codex" || approvalBefore.continuationRef) {
+      try {
+        const recorded = recordApprovalDecisionWithOutbox({
+          approvalId: approvalBefore.id,
+          operationId: body.operationId || crypto.randomUUID(),
+          continuationRef: body.continuationRef || approvalBefore.continuationRef,
+          expectedDecisionVersion: body.expectedDecisionVersion ?? body.expectedVersion ?? approvalBefore.decisionVersion,
+          decision: body.decision === "approve" ? { decision: "accept" } : body.decision === "deny" ? { decision: "decline" } : body.decision,
+          reason: body.reason || "",
+          deviceId: body.deviceId || ""
+        });
+        sendJson(response, recorded.duplicate ? 200 : 202, { ok: true, approval: recorded.approval, outbox: recorded.outbox, duplicate: recorded.duplicate });
+      } catch (error) {
+        const status = error.code === "APPROVAL_NOT_FOUND" ? 404 : ["APPROVAL_STALE", "APPROVAL_ALREADY_DECIDED", "OPERATION_CONFLICT"].includes(error.code) ? 409 : 400;
+        sendJson(response, status, { ok: false, error: error.message, code: error.code, ...(error.details ? { details: error.details } : {}) });
+      }
       return;
     }
 
@@ -3804,7 +3837,7 @@ async function routeApi(request, response, url) {
 
   const taskStopMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/stop$/);
   if (taskStopMatch && request.method === "POST") {
-    const ok = stopTask(taskStopMatch[1]);
+    const ok = await stopTask(taskStopMatch[1]);
     sendJson(response, ok ? 200 : 409, { ok });
     return;
   }
@@ -3930,6 +3963,7 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(approvalDispatchTimer);
   console.log(`Received ${signal}; draining event store runtime...`);
   const forceExit = setTimeout(() => process.exit(1), 5000);
   forceExit.unref?.();

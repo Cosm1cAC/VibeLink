@@ -206,6 +206,10 @@ export function createExecutionHostClient({
     input: (executionId, data, encoding, operationId) => request("execution.input", { executionId, data, encoding, operationId }),
     resize: (executionId, cols, rows, operationId) => request("execution.resize", { executionId, cols, rows, operationId }),
     signal: (executionId, signal, operationId) => request("execution.signal", { executionId, signal, operationId }),
+    resolveApproval: (executionId, approvalId, continuationRef, expectedVersion, decision, operationId) => request(
+      "approval.resolve",
+      { executionId, approvalId, continuationRef, expectedVersion, decision, operationId }
+    ),
     pipeName
   };
 }
@@ -370,6 +374,77 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
 
   return {
     runCommand,
+    startProvider: ({ executionId = crypto.randomUUID(), command, args = [], cwd, env = {} } = {}) => client.start({
+      executionId,
+      kind: "provider.cli",
+      backend: "stdio",
+      command,
+      args,
+      cwd,
+      env,
+      operationId: operationId("provider-start", executionId)
+    }),
+    startAppServerProvider: ({
+      executionId = crypto.randomUUID(),
+      command,
+      args = [],
+      cwd,
+      env = {},
+      threadResumeParams,
+      turnStartParams,
+      connectTimeoutMs = 15000
+    } = {}) => client.start({
+      executionId,
+      kind: "provider.appServer",
+      backend: "app_server",
+      command,
+      args,
+      cwd,
+      env,
+      appServer: { threadResumeParams, turnStartParams, connectTimeoutMs },
+      operationId: operationId("app-server-start", executionId)
+    }),
+    getProvider: (executionId) => client.get(executionId),
+    providerEvents: (executionId, afterHostSeq = 0, limit = eventLimit) => client.events(executionId, afterHostSeq, limit),
+    acknowledgeProviderEvents: (executionId, hostSeq) => client.ack(
+      executionId,
+      hostSeq,
+      operationId("provider-ack", executionId, hostSeq)
+    ),
+    signalProvider: (executionId, signal = "stop", reason = "") => client.signal(
+      executionId,
+      signal,
+      operationId("provider-signal", executionId, crypto.createHash("sha256").update(reason || signal).digest("hex").slice(0, 16))
+    ),
+    resolveProviderApproval: async ({ executionId, approvalId, continuationRef, expectedVersion, decision, operationId: id, afterHostSeq = 0 }) => {
+      const delivered = await client.resolveApproval(
+        executionId,
+        approvalId,
+        continuationRef,
+        expectedVersion,
+        decision,
+        id
+      );
+      if (!afterHostSeq || typeof client.events !== "function") return delivered;
+      const deadline = Date.now() + 10_000;
+      let cursor = afterHostSeq;
+      while (Date.now() < deadline) {
+        const page = await client.events(executionId, cursor, eventLimit);
+        const events = Array.isArray(page?.events) ? page.events : [];
+        for (const event of events) {
+          cursor = Math.max(cursor, Number(event.hostSeq || 0));
+          if (event.payload?.continuationRef !== continuationRef) continue;
+          if (event.type === "provider.approval.applied") {
+            return { ...delivered, applied: true, appliedAt: event.at || new Date().toISOString() };
+          }
+          if (event.type === "provider.approval.stale") {
+            return { ...delivered, stale: true, reason: event.payload?.reason || "Provider turn completed." };
+          }
+        }
+        if (!events.length) await delay(pollIntervalMs);
+      }
+      return delivered;
+    },
     startTerminal,
     getTerminal: (executionId) => client.get(executionId),
     listTerminals: async () => {

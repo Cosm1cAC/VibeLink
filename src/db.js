@@ -1567,6 +1567,7 @@ function publicApprovalRequest(row) {
     itemId: row.item_id || "",
     continuationRef: row.continuation_ref || "",
     decisionVersion: Number(row.decision_version || 0),
+    expectedVersion: Number(row.decision_version || 0),
     deliveryStatus: row.delivery_status || "pending",
     requestedPermissions: fromJson(row.requested_permissions_json, null),
     availableDecisions: fromJson(row.available_decisions_json, []),
@@ -1675,12 +1676,32 @@ export function claimApprovalOutboxCommands(options = {}) {
   return approvalOutboxStore().claimApprovalOutbox(options);
 }
 
+export function listApprovalOutboxCommands(options = {}) {
+  return approvalOutboxStore().listApprovalOutbox(options);
+}
+
 export function retryApprovalOutboxCommand(id, options = {}) {
   return approvalOutboxStore().retryApprovalOutbox(id, options);
 }
 
 export function markApprovalOutboxCommandApplied(id, options = {}) {
   return approvalOutboxStore().markApprovalOutboxApplied(id, options);
+}
+
+export function markApprovalOutboxCommandDelivered(id, options = {}) {
+  return approvalOutboxStore().markApprovalOutboxDelivered(id, options);
+}
+
+export function markApprovalOutboxCommandStale(id, options = {}) {
+  return approvalOutboxStore().markApprovalOutboxStale(id, options);
+}
+
+export function markApprovalOutboxCommandOutcomeUnknown(id, options = {}) {
+  return approvalOutboxStore().markApprovalOutboxOutcomeUnknown(id, options);
+}
+
+export function settleApprovalContinuation(continuationRef, status, options = {}) {
+  return approvalOutboxStore().settleApprovalContinuation(continuationRef, status, options);
 }
 
 export function updateApprovalRequest(id, patch = {}) {

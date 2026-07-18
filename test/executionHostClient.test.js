@@ -174,3 +174,136 @@ test("execution host facade translates timeout and cancellation into stop signal
   assert.equal(cancelled.result.stderr, "Command stopped by user.");
   assert.equal(cancelled.signals[0].signal, "stop");
 });
+
+test("execution host facade starts and controls provider CLI workers", async () => {
+  const executionId = crypto.randomUUID();
+  const calls = [];
+  const client = {
+    async start(params) {
+      calls.push(["start", params]);
+      return { executionId, status: "running", lastAckedHostSeq: 0 };
+    },
+    async get(id) {
+      calls.push(["get", id]);
+      return { executionId: id, status: "running" };
+    },
+    async events(id, after, limit) {
+      calls.push(["events", id, after, limit]);
+      return { events: [] };
+    },
+    async ack(id, seq, operation) {
+      calls.push(["ack", id, seq, operation]);
+      return { ackedHostSeq: seq };
+    },
+    async signal(id, signal, operation) {
+      calls.push(["signal", id, signal, operation]);
+      return { accepted: true };
+    }
+  };
+  const facade = createExecutionHostFacade({ client });
+  await facade.startProvider({ executionId, command: "codex", args: ["exec", "--json"], cwd: "C:\\work", env: { KEY: "value" } });
+  await facade.getProvider(executionId);
+  await facade.providerEvents(executionId, 4, 32);
+  await facade.acknowledgeProviderEvents(executionId, 5);
+  await facade.signalProvider(executionId, "stop", "test");
+
+  assert.equal(calls[0][1].kind, "provider.cli");
+  assert.equal(calls[0][1].backend, "stdio");
+  assert.equal(calls[0][1].command, "codex");
+  assert.deepEqual(calls[0][1].args, ["exec", "--json"]);
+  assert.deepEqual(calls.slice(1, 4).map((call) => call[0]), ["get", "events", "ack"]);
+  assert.equal(calls[4][0], "signal");
+  assert.equal(calls[4][2], "stop");
+});
+
+test("execution host facade starts a strict app-server resume turn", async () => {
+  const executionId = crypto.randomUUID();
+  let started;
+  const facade = createExecutionHostFacade({
+    client: {
+      async start(params) {
+        started = params;
+        return { executionId, status: "running" };
+      }
+    }
+  });
+  await facade.startAppServerProvider({
+    executionId,
+    command: "codex",
+    cwd: "C:\\work",
+    threadResumeParams: { threadId: "thread-1", cwd: "C:\\work" },
+    turnStartParams: {
+      threadId: "thread-1",
+      input: [{ type: "text", text: "continue", text_elements: [] }]
+    }
+  });
+
+  assert.equal(started.kind, "provider.appServer");
+  assert.equal(started.backend, "app_server");
+  assert.equal(started.appServer.threadResumeParams.threadId, "thread-1");
+  assert.equal(started.appServer.turnStartParams.input[0].text, "continue");
+});
+
+test("a restarted Bridge reuses the worker operation for the same approval continuation", async () => {
+  const calls = [];
+  const results = new Map();
+  const client = {
+    async resolveApproval(executionId, approvalId, continuationRef, expectedVersion, decision, operationId) {
+      calls.push({ executionId, approvalId, continuationRef, expectedVersion, decision, operationId });
+      if (!results.has(operationId)) results.set(operationId, { delivered: true, continuationRef });
+      return results.get(operationId);
+    }
+  };
+  const command = {
+    executionId: crypto.randomUUID(),
+    approvalId: "approval-1",
+    continuationRef: "continuation-1",
+    expectedVersion: 0,
+    decision: { decision: "accept" },
+    operationId: "approval-operation-1"
+  };
+  const beforeRestart = createExecutionHostFacade({ client });
+  const afterRestart = createExecutionHostFacade({ client });
+
+  const first = await beforeRestart.resolveProviderApproval(command);
+  const duplicate = await afterRestart.resolveProviderApproval(command);
+  assert.deepEqual(duplicate, first);
+  assert.equal(calls.length, 2);
+  assert.equal(new Set(calls.map((call) => call.operationId)).size, 1);
+});
+
+test("a restarted Bridge follows the worker spool until the approval is applied", async () => {
+  const executionId = crypto.randomUUID();
+  let eventReads = 0;
+  const facade = createExecutionHostFacade({
+    client: {
+      async resolveApproval() {
+        return { delivered: true, deliveredAt: "2026-07-19T00:00:01.000Z" };
+      },
+      async events() {
+        eventReads += 1;
+        return {
+          events: [{
+            hostSeq: 12,
+            type: "provider.approval.applied",
+            at: "2026-07-19T00:00:02.000Z",
+            payload: { continuationRef: "continuation-1" }
+          }]
+        };
+      }
+    }
+  });
+  const result = await facade.resolveProviderApproval({
+    executionId,
+    approvalId: "approval-1",
+    continuationRef: "continuation-1",
+    expectedVersion: 0,
+    decision: { decision: "accept" },
+    operationId: "operation-1",
+    afterHostSeq: 10
+  });
+  assert.equal(result.delivered, true);
+  assert.equal(result.applied, true);
+  assert.equal(result.appliedAt, "2026-07-19T00:00:02.000Z");
+  assert.equal(eventReads, 1);
+});

@@ -298,6 +298,17 @@ pub struct SignalParams {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalResolveParams {
+    pub execution_id: String,
+    pub approval_id: String,
+    pub continuation_ref: String,
+    pub expected_version: u64,
+    pub decision: Value,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListParams {
     #[serde(default)]
     pub after_execution_id: String,

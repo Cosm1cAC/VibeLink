@@ -107,7 +107,7 @@ fn dispatch(state: &HostState, request: RequestEnvelope) -> ResponseEnvelope {
 
     if matches!(
         request.method.as_str(),
-        "execution.input" | "execution.resize" | "execution.signal"
+        "execution.input" | "execution.resize" | "execution.signal" | "approval.resolve"
     ) {
         return match execution_id_from_params(&request.params)
             .and_then(|execution_id| route_for(state, &execution_id))

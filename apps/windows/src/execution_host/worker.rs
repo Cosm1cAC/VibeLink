@@ -2,9 +2,10 @@ use super::{
     backend::BackendControl,
     protocol::{
         operation_fingerprint, parse_params, start_fingerprint, validate_operation_id,
-        validate_request, AckParams, AttachState, EventsParams, ExecutionManifest, ExecutionParams,
-        ExecutionSnapshot, ExecutionStatus, HostEvent, InputParams, RequestEnvelope, ResizeParams,
-        ResponseEnvelope, SignalParams, WorkerBootstrap, WorkerHelloParams, PROTOCOL_VERSION,
+        validate_request, AckParams, ApprovalResolveParams, AttachState, EventsParams,
+        ExecutionManifest, ExecutionParams, ExecutionSnapshot, ExecutionStatus, HostEvent,
+        InputParams, RequestEnvelope, ResizeParams, ResponseEnvelope, SignalParams,
+        WorkerBootstrap, WorkerHelloParams, PROTOCOL_VERSION,
     },
     spool::{write_json_atomic, EventSpool},
     windows,
@@ -504,6 +505,24 @@ fn dispatch_inner(state: &WorkerState, method: &str, raw_params: Value) -> Resul
                 Ok(json!({ "signal": params.signal, "accepted": true }))
             })
         }
+        "approval.resolve" => {
+            let params: ApprovalResolveParams = parse_params(raw_params.clone())?;
+            state.ensure_execution(&params.execution_id)?;
+            state.run_operation(&params.operation_id, method, &raw_params, || {
+                let backend = state
+                    .backend
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("backend lock poisoned"))?
+                    .clone()
+                    .context("EXECUTION_NOT_ATTACHED")?;
+                backend.resolve_approval(
+                    params.approval_id,
+                    params.continuation_ref,
+                    params.expected_version,
+                    params.decision,
+                )
+            })
+        }
         _ => bail!("unknown worker method {method}"),
     }
 }
@@ -515,6 +534,9 @@ fn classify_error(message: &str) -> (&'static str, bool) {
         "EXECUTION_STATE_CONFLICT",
         "OPERATION_CONFLICT",
         "CAPABILITY_UNSUPPORTED",
+        "APPROVAL_STALE",
+        "APPROVAL_DECISION_INVALID",
+        "OUTCOME_UNKNOWN",
     ] {
         if message.contains(code) {
             return (code, code == "EXECUTION_NOT_ATTACHED");

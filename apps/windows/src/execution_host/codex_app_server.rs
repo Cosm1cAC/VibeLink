@@ -2,9 +2,10 @@ use super::{backend::EventCallback, backend::ExitCallback, protocol::StartParams
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::{
+    collections::HashMap,
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
-    sync::{Arc, Condvar, Mutex},
+    sync::{mpsc, Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -21,6 +22,60 @@ pub struct LaunchedAppServer {
     pub process_started_at_ticks: u64,
     pub job: Arc<Job>,
     pub activation: Arc<(Mutex<bool>, Condvar)>,
+    pub approval: ApprovalControl,
+}
+
+#[derive(Clone)]
+pub struct ApprovalControl {
+    sender: mpsc::Sender<ApprovalCommand>,
+}
+
+struct ApprovalCommand {
+    approval_id: String,
+    continuation_ref: String,
+    expected_version: u64,
+    decision: Value,
+    result: mpsc::SyncSender<Result<Value, String>>,
+}
+
+#[derive(Clone)]
+struct PendingApproval {
+    request_id: Value,
+    method: String,
+    thread_id: String,
+    turn_id: String,
+    item_id: String,
+    continuation_ref: String,
+    version: u64,
+    available_decisions: Vec<Value>,
+    requested_permissions: Value,
+}
+
+impl ApprovalControl {
+    pub fn resolve(
+        &self,
+        approval_id: String,
+        continuation_ref: String,
+        expected_version: u64,
+        decision: Value,
+    ) -> Result<Value> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .send(ApprovalCommand {
+                approval_id,
+                continuation_ref,
+                expected_version,
+                decision,
+                result: sender,
+            })
+            .map_err(|_| anyhow::anyhow!("APPROVAL_STALE: app-server connection is closed"))?;
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| {
+                anyhow::anyhow!("EXECUTION_NOT_ATTACHED: app-server did not accept the decision")
+            })?
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 pub fn start(
@@ -92,6 +147,11 @@ pub fn start(
     }
     set_socket_timeout(&mut socket, None)?;
 
+    let (approval_sender, approval_receiver) = mpsc::channel();
+    let approval = ApprovalControl {
+        sender: approval_sender,
+    };
+
     on_event(
         "provider.event",
         provider_event(
@@ -108,7 +168,7 @@ pub fn start(
     thread::Builder::new()
         .name(format!("codex-app-server-{pid}-websocket"))
         .spawn(move || {
-            let reason = read_notifications(&mut socket, &on_event)
+            let reason = read_notifications(&mut socket, &on_event, approval_receiver)
                 .err()
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| "websocket_closed".to_string());
@@ -146,6 +206,7 @@ pub fn start(
         process_started_at_ticks,
         job,
         activation,
+        approval,
     })
 }
 
@@ -321,10 +382,277 @@ fn read_json(socket: &mut AppSocket) -> Result<Value> {
     }
 }
 
-fn read_notifications(socket: &mut AppSocket, on_event: &EventCallback) -> Result<()> {
+fn read_notifications(
+    socket: &mut AppSocket,
+    on_event: &EventCallback,
+    approvals: mpsc::Receiver<ApprovalCommand>,
+) -> Result<()> {
+    set_socket_timeout(socket, Some(Duration::from_millis(50)))?;
+    let mut pending = HashMap::<String, PendingApproval>::new();
+    let mut awaiting_applied = HashMap::<String, PendingApproval>::new();
     loop {
-        let message = read_json(socket)?;
-        emit_normalized(&message, on_event)?;
+        while let Ok(command) = approvals.try_recv() {
+            let result = deliver_approval(
+                socket,
+                on_event,
+                &mut pending,
+                &mut awaiting_applied,
+                &command,
+            )
+            .map_err(|error| error.to_string());
+            let _ = command.result.send(result);
+        }
+        match read_json(socket) {
+            Ok(message) => {
+                register_pending_approval(&message, &mut pending)?;
+                settle_approval_from_message(&message, on_event, &mut awaiting_applied);
+                emit_normalized(&message, on_event)?;
+            }
+            Err(error) if is_socket_timeout(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_socket_timeout(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        })
+    })
+}
+
+fn register_pending_approval(
+    message: &Value,
+    pending: &mut HashMap<String, PendingApproval>,
+) -> Result<()> {
+    let Some(object) = message.as_object() else {
+        return Ok(());
+    };
+    let Some(method) = object.get("method").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if !matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "item/permissions/requestApproval"
+    ) {
+        return Ok(());
+    }
+    let params = required_object(object, "params")?;
+    let request_id = object
+        .get("id")
+        .cloned()
+        .context("app-server approval request id is required")?;
+    let thread_id = required_string(params, "threadId")?.to_string();
+    let turn_id = required_string(params, "turnId")?.to_string();
+    let item_id = required_string(params, "itemId")?.to_string();
+    let continuation_ref = params
+        .get("continuationRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("codex:{thread_id}:{turn_id}:{item_id}:{request_id}"));
+    let available_decisions = params
+        .get("availableDecisions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| default_approval_decisions(method));
+    pending.insert(
+        continuation_ref.clone(),
+        PendingApproval {
+            request_id,
+            method: method.to_string(),
+            thread_id,
+            turn_id,
+            item_id,
+            continuation_ref,
+            version: params
+                .get("decisionVersion")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            available_decisions,
+            requested_permissions: params
+                .get("permissions")
+                .or_else(|| params.get("additionalPermissions"))
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        },
+    );
+    Ok(())
+}
+
+fn decision_name(decision: &Value) -> Option<&str> {
+    decision
+        .as_str()
+        .or_else(|| decision.get("decision").and_then(Value::as_str))
+        .or_else(|| decision.get("type").and_then(Value::as_str))
+}
+
+fn default_approval_decisions(method: &str) -> Vec<Value> {
+    if method == "item/permissions/requestApproval" {
+        vec![json!("grant"), json!("decline")]
+    } else {
+        vec![
+            json!("accept"),
+            json!("acceptForSession"),
+            json!("decline"),
+            json!("cancel"),
+        ]
+    }
+}
+
+fn normalized_decision(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn approval_response(approval: &PendingApproval, decision: &Value) -> Result<Value> {
+    if !approval.available_decisions.is_empty() {
+        let requested = decision_name(decision)
+            .context("APPROVAL_DECISION_INVALID: decision type is required")?;
+        let requested = normalized_decision(requested);
+        let available = approval.available_decisions.iter().filter_map(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("decision").and_then(Value::as_str))
+        });
+        if !available
+            .map(normalized_decision)
+            .any(|value| value == requested)
+        {
+            bail!("APPROVAL_DECISION_INVALID: decision is not available for this approval");
+        }
+    }
+    if approval.method == "item/permissions/requestApproval" {
+        let permissions = decision
+            .get("permissions")
+            .cloned()
+            .or_else(|| {
+                decision_name(decision)
+                    .filter(|name| {
+                        matches!(
+                            normalized_decision(name).as_str(),
+                            "accept" | "approved" | "grant" | "granted"
+                        )
+                    })
+                    .map(|_| approval.requested_permissions.clone())
+            })
+            .or_else(|| {
+                decision_name(decision)
+                    .filter(|name| {
+                        matches!(normalized_decision(name).as_str(), "decline" | "cancel")
+                    })
+                    .map(|_| json!({}))
+            })
+            .context("APPROVAL_DECISION_INVALID: permission decisions require permissions")?;
+        return Ok(json!({ "permissions": permissions }));
+    }
+    let name =
+        decision_name(decision).context("APPROVAL_DECISION_INVALID: decision type is required")?;
+    Ok(json!({ "decision": name }))
+}
+
+fn deliver_approval(
+    socket: &mut AppSocket,
+    on_event: &EventCallback,
+    pending: &mut HashMap<String, PendingApproval>,
+    awaiting_applied: &mut HashMap<String, PendingApproval>,
+    command: &ApprovalCommand,
+) -> Result<Value> {
+    let approval = pending
+        .get(&command.continuation_ref)
+        .cloned()
+        .context("APPROVAL_STALE: approval continuation is no longer pending")?;
+    if approval.version != command.expected_version {
+        bail!("APPROVAL_STALE: approval decision version changed");
+    }
+    let response = approval_response(&approval, &command.decision)?;
+    send_json(
+        socket,
+        &json!({ "id": approval.request_id, "result": response }),
+    )?;
+    pending.remove(&command.continuation_ref);
+    awaiting_applied.insert(command.continuation_ref.clone(), approval.clone());
+    on_event(
+        "provider.event",
+        provider_event(
+            "provider.approval.delivered",
+            Some(&approval.thread_id),
+            Some(&approval.turn_id),
+            Some(&approval.item_id),
+            None,
+            json!({
+                "approvalId": command.approval_id,
+                "continuationRef": approval.continuation_ref,
+                "expectedDecisionVersion": command.expected_version,
+                "decision": command.decision,
+                "response": response
+            }),
+        ),
+    );
+    Ok(json!({ "delivered": true, "continuationRef": command.continuation_ref }))
+}
+
+fn settle_approval_from_message(
+    message: &Value,
+    on_event: &EventCallback,
+    awaiting: &mut HashMap<String, PendingApproval>,
+) {
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(params) = message.get("params").and_then(Value::as_object) else {
+        return;
+    };
+    let turn_id = params.get("turnId").and_then(Value::as_str).or_else(|| {
+        params
+            .get("turn")
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+    });
+    let item_id = params.get("itemId").and_then(Value::as_str).or_else(|| {
+        params
+            .get("item")
+            .and_then(|item| item.get("id"))
+            .and_then(Value::as_str)
+    });
+    let refs = awaiting
+        .iter()
+        .filter_map(|(reference, approval)| {
+            if turn_id != Some(approval.turn_id.as_str()) {
+                return None;
+            }
+            let stale = method == "turn/completed";
+            let applied = item_id == Some(approval.item_id.as_str());
+            (stale || applied).then(|| (reference.clone(), stale))
+        })
+        .collect::<Vec<_>>();
+    for (reference, stale) in refs {
+        if let Some(approval) = awaiting.remove(&reference) {
+            on_event(
+                "provider.event",
+                provider_event(
+                    if stale {
+                        "provider.approval.stale"
+                    } else {
+                        "provider.approval.applied"
+                    },
+                    Some(&approval.thread_id),
+                    Some(&approval.turn_id),
+                    Some(&approval.item_id),
+                    None,
+                    json!({ "continuationRef": reference, "sourceMethod": method }),
+                ),
+            );
+        }
     }
 }
 
@@ -518,6 +846,12 @@ fn normalize_approval(
         "item/fileChange/requestApproval" => "fileChange",
         _ => "permissions",
     };
+    let continuation_ref = params
+        .get("continuationRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("codex:{thread_id}:{turn_id}:{item_id}:{}", request_id));
     Ok(vec![provider_event(
         "provider.approval.required",
         Some(thread_id),
@@ -530,8 +864,10 @@ fn normalize_approval(
             "requestIdType": if request_id.is_string() { "string" } else { "number" },
             "connectionScoped": true,
             "approvalId": params.get("approvalId").cloned().unwrap_or(Value::Null),
+            "continuationRef": continuation_ref,
+            "expectedDecisionVersion": params.get("decisionVersion").cloned().unwrap_or(json!(0)),
             "reason": params.get("reason").cloned().unwrap_or(Value::Null),
-            "availableDecisions": params.get("availableDecisions").cloned().unwrap_or(Value::Null),
+            "availableDecisions": params.get("availableDecisions").cloned().unwrap_or_else(|| Value::Array(default_approval_decisions(method))),
             "requestedPermissions": params.get("permissions").or_else(|| params.get("additionalPermissions")).cloned().unwrap_or(Value::Null),
             "request": params
         }),
@@ -656,6 +992,59 @@ mod tests {
         assert_eq!(events[0]["type"], "provider.approval.required");
         assert_eq!(events[0]["payload"]["requestId"], 42);
         assert_eq!(events[0]["payload"]["connectionScoped"], true);
+        assert_eq!(
+            events[0]["payload"]["availableDecisions"],
+            json!(["accept", "acceptForSession", "decline", "cancel"])
+        );
+    }
+
+    fn pending_approval(method: &str, available_decisions: Vec<Value>) -> PendingApproval {
+        PendingApproval {
+            request_id: json!(42),
+            method: method.to_string(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "item-1".to_string(),
+            continuation_ref: "continuation-1".to_string(),
+            version: 0,
+            available_decisions,
+            requested_permissions: json!({ "network": { "enabled": true } }),
+        }
+    }
+
+    #[test]
+    fn maps_command_file_and_permission_approval_responses() {
+        let command = pending_approval(
+            "item/commandExecution/requestApproval",
+            default_approval_decisions("item/commandExecution/requestApproval"),
+        );
+        assert_eq!(
+            approval_response(&command, &json!({ "decision": "acceptForSession" })).unwrap(),
+            json!({ "decision": "acceptForSession" })
+        );
+
+        let file = pending_approval(
+            "item/fileChange/requestApproval",
+            default_approval_decisions("item/fileChange/requestApproval"),
+        );
+        assert_eq!(
+            approval_response(&file, &json!({ "decision": "decline" })).unwrap(),
+            json!({ "decision": "decline" })
+        );
+
+        let permissions = pending_approval(
+            "item/permissions/requestApproval",
+            default_approval_decisions("item/permissions/requestApproval"),
+        );
+        assert_eq!(
+            approval_response(&permissions, &json!({ "decision": "grant" })).unwrap(),
+            json!({ "permissions": { "network": { "enabled": true } } })
+        );
+        assert_eq!(
+            approval_response(&permissions, &json!({ "decision": "decline" })).unwrap(),
+            json!({ "permissions": {} })
+        );
+        assert!(approval_response(&permissions, &json!({ "decision": "accept" })).is_err());
     }
 
     #[test]

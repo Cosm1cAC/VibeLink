@@ -101,6 +101,7 @@ test("approval decision and outbox command commit once for duplicate operations"
   assert.equal(first.approval.deliveryStatus, "decision_recorded");
   assert.equal(first.approval.decisionVersion, 1);
   assert.equal(first.outbox.status, "decision_recorded");
+  assert.equal(first.outbox.expectedVersion, 0);
   assert.equal(duplicate.duplicate, true);
   assert.equal(duplicate.outbox.id, first.outbox.id);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM approval_outbox").get().count, 1);
@@ -113,6 +114,10 @@ test("approval decision and outbox command commit once for duplicate operations"
       decision: { decision: "denied" }
     }),
     (error) => error.code === "APPROVAL_ALREADY_DECIDED"
+  );
+  assert.throws(
+    () => store.recordApprovalDecision({ ...command, expectedDecisionVersion: 1 }),
+    (error) => error.code === "OPERATION_CONFLICT"
   );
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM approval_outbox").get().count, 1);
 });

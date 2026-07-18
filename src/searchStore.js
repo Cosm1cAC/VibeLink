@@ -112,6 +112,42 @@ export function ensureSearchSchema(db) {
       tokenize = 'trigram'
     );
 
+    CREATE TABLE IF NOT EXISTS content_search_documents (
+      rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_key TEXT NOT NULL,
+      event_cursor INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      provider TEXT,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      turn_id TEXT,
+      updated_at TEXT,
+      UNIQUE(source_key, event_cursor)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_content_search_documents_source
+      ON content_search_documents(source_key, event_cursor);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS content_search_fts USING fts5(
+      title,
+      content,
+      tokenize = 'trigram'
+    );
+
+    CREATE TABLE IF NOT EXISTS content_search_sources (
+      source_key TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      source_kind TEXT NOT NULL,
+      file_path TEXT,
+      byte_offset INTEGER NOT NULL DEFAULT 0,
+      event_cursor INTEGER NOT NULL DEFAULT 0,
+      source_size INTEGER NOT NULL DEFAULT 0,
+      source_mtime_ms INTEGER NOT NULL DEFAULT 0,
+      indexed_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS saved_searches (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -304,6 +340,194 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
     }));
   }
 
+  function rebuildContentFts() {
+    const connection = db();
+    connection.exec("BEGIN");
+    try {
+      connection.exec("DROP TABLE IF EXISTS content_search_fts");
+      connection.exec("CREATE VIRTUAL TABLE content_search_fts USING fts5(title, content, tokenize = 'trigram')");
+      connection.exec(`
+        INSERT INTO content_search_fts(rowid, title, content)
+        SELECT rowid, title, content FROM content_search_documents
+      `);
+      connection.exec("COMMIT");
+    } catch (error) {
+      try { connection.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
+  function checkContentIndex() {
+    try {
+      db().prepare("INSERT INTO content_search_fts(content_search_fts) VALUES ('integrity-check')").run();
+      return true;
+    } catch {
+      rebuildContentFts();
+      return false;
+    }
+  }
+
+  function getContentSource(sourceKey) {
+    const row = db().prepare("SELECT * FROM content_search_sources WHERE source_key = ?").get(cleanString(sourceKey, 700));
+    if (!row) return null;
+    return {
+      sourceKey: row.source_key,
+      provider: row.provider,
+      sessionId: row.session_id,
+      sourceKind: row.source_kind,
+      filePath: row.file_path || "",
+      byteOffset: Number(row.byte_offset || 0),
+      eventCursor: Number(row.event_cursor || 0),
+      sourceSize: Number(row.source_size || 0),
+      sourceMtimeMs: Number(row.source_mtime_ms || 0),
+      indexedAt: row.indexed_at
+    };
+  }
+
+  function getContentDocument(sourceKey, eventCursor = 0) {
+    const row = db().prepare(`
+      SELECT kind, item_id, provider, title, content, turn_id, updated_at
+      FROM content_search_documents
+      WHERE source_key = ? AND event_cursor = ?
+    `).get(cleanString(sourceKey, 700), Number(eventCursor || 0));
+    if (!row) return null;
+    return {
+      kind: row.kind,
+      id: row.item_id,
+      provider: row.provider || "",
+      title: row.title,
+      content: row.content,
+      turnId: row.turn_id || "",
+      updatedAt: row.updated_at || ""
+    };
+  }
+
+  function applyContentChanges(source, { upserts = [], reset = false } = {}) {
+    const sourceKey = cleanString(source?.sourceKey, 700);
+    if (!sourceKey) throw new Error("Content source key is required for indexing.");
+    const connection = db();
+    const rowsForSource = connection.prepare("SELECT rowid FROM content_search_documents WHERE source_key = ?");
+    const selectDocument = connection.prepare("SELECT rowid FROM content_search_documents WHERE source_key = ? AND event_cursor = ?");
+    const deleteDocument = connection.prepare("DELETE FROM content_search_documents WHERE rowid = ?");
+    const deleteFts = connection.prepare("DELETE FROM content_search_fts WHERE rowid = ?");
+    const insertDocument = connection.prepare(`
+      INSERT INTO content_search_documents
+        (source_key, event_cursor, kind, item_id, provider, title, content, turn_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertFts = connection.prepare("INSERT INTO content_search_fts(rowid, title, content) VALUES (?, ?, ?)");
+    connection.exec("BEGIN");
+    try {
+      if (reset) {
+        for (const row of rowsForSource.all(sourceKey)) deleteFts.run(row.rowid);
+        connection.prepare("DELETE FROM content_search_documents WHERE source_key = ?").run(sourceKey);
+      }
+      for (const item of upserts) {
+        const cursor = Number(item.eventCursor || 0);
+        const existing = selectDocument.get(sourceKey, cursor);
+        if (existing) {
+          deleteFts.run(existing.rowid);
+          deleteDocument.run(existing.rowid);
+        }
+        const title = cleanString(item.title, 1000);
+        const content = String(item.content || "").slice(0, 1024 * 1024);
+        const inserted = insertDocument.run(
+          sourceKey, cursor, cleanString(item.kind, 40), cleanString(item.id, 500),
+          cleanString(item.provider, 80), title, content, cleanString(item.turnId, 500),
+          cleanString(item.updatedAt, 80)
+        );
+        insertFts.run(Number(inserted.lastInsertRowid), title, content);
+      }
+      connection.prepare(`
+        INSERT INTO content_search_sources
+          (source_key, provider, session_id, source_kind, file_path, byte_offset, event_cursor, source_size, source_mtime_ms, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_key) DO UPDATE SET
+          provider = excluded.provider, session_id = excluded.session_id, source_kind = excluded.source_kind,
+          file_path = excluded.file_path, byte_offset = excluded.byte_offset, event_cursor = excluded.event_cursor,
+          source_size = excluded.source_size, source_mtime_ms = excluded.source_mtime_ms, indexed_at = excluded.indexed_at
+      `).run(
+        sourceKey, cleanString(source.provider, 80), cleanString(source.sessionId, 500),
+        cleanString(source.sourceKind, 40), cleanString(source.filePath, 2000),
+        Number(source.byteOffset || 0), Number(source.eventCursor || 0), Number(source.sourceSize || 0),
+        Number(source.sourceMtimeMs || 0), source.indexedAt || now()
+      );
+      connection.exec("COMMIT");
+    } catch (error) {
+      try { connection.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+    return { upserted: upserts.length, reset };
+  }
+
+  function removeMissingContentSources(sourceKeys = []) {
+    const keep = new Set(sourceKeys.map((value) => cleanString(value, 700)).filter(Boolean));
+    const connection = db();
+    const indexed = connection.prepare("SELECT source_key FROM content_search_sources").all();
+    let removed = 0;
+    for (const { source_key: sourceKey } of indexed) {
+      if (keep.has(sourceKey)) continue;
+      const rows = connection.prepare("SELECT rowid FROM content_search_documents WHERE source_key = ?").all(sourceKey);
+      connection.exec("BEGIN");
+      try {
+        const deleteFts = connection.prepare("DELETE FROM content_search_fts WHERE rowid = ?");
+        for (const row of rows) deleteFts.run(row.rowid);
+        connection.prepare("DELETE FROM content_search_documents WHERE source_key = ?").run(sourceKey);
+        connection.prepare("DELETE FROM content_search_sources WHERE source_key = ?").run(sourceKey);
+        connection.exec("COMMIT");
+        removed += rows.length;
+      } catch (error) {
+        try { connection.exec("ROLLBACK"); } catch {}
+        throw error;
+      }
+    }
+    return removed;
+  }
+
+  function queryContent(query, { kinds = [], limit = 10000 } = {}) {
+    const normalizedQuery = cleanString(query, 500).normalize("NFKC");
+    if (!normalizedQuery) return [];
+    const boundedLimit = Math.min(Math.max(Number(limit) || 5000, 1), 10000);
+    const cleanKinds = kinds.map((value) => cleanString(value, 40)).filter(Boolean);
+    const kindClause = cleanKinds.length ? ` AND d.kind IN (${cleanKinds.map(() => "?").join(",")})` : "";
+    const expression = ftsExpression(normalizedQuery);
+    let rows;
+    const run = () => {
+      if (expression) {
+        return db().prepare(`
+          SELECT d.*, snippet(content_search_fts, 1, '', '', ' ... ', 32) AS match_snippet,
+                 bm25(content_search_fts, 4.0, 1.0) AS rank
+          FROM content_search_fts AS f
+          JOIN content_search_documents AS d ON d.rowid = f.rowid
+          WHERE content_search_fts MATCH ?${kindClause}
+          ORDER BY rank ASC, d.updated_at DESC
+          LIMIT ?
+        `).all(expression, ...cleanKinds, boundedLimit);
+      }
+      const like = `%${escapeLike(normalizedQuery)}%`;
+      return db().prepare(`
+        SELECT d.*, substr(d.content, max(1, instr(lower(d.content), lower(?)) - 80), 240) AS match_snippet,
+               0.0 AS rank
+        FROM content_search_documents AS d
+        WHERE (d.title LIKE ? ESCAPE '\\' OR d.content LIKE ? ESCAPE '\\')${kindClause}
+        ORDER BY d.updated_at DESC
+        LIMIT ?
+      `).all(normalizedQuery, like, like, ...cleanKinds, boundedLimit);
+    };
+    try { rows = run(); } catch { rebuildContentFts(); rows = run(); }
+    const lowerQuery = normalizedQuery.toLowerCase();
+    return rows.map((row) => ({
+      kind: row.kind,
+      id: row.item_id,
+      provider: row.provider || "",
+      title: row.title,
+      snippet: cleanString(row.match_snippet || row.content, 400).replace(/\s+/g, " "),
+      turnId: row.turn_id || "",
+      updatedAt: row.updated_at || "",
+      relevance: -Number(row.rank || 0) + (String(row.title).toLowerCase().includes(lowerQuery) ? 10 : 0)
+    }));
+  }
+
   function listSavedSearches() {
     return db().prepare("SELECT * FROM saved_searches ORDER BY updated_at DESC, name COLLATE NOCASE ASC").all().map(publicSavedSearch);
   }
@@ -424,8 +648,18 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
     return { files: Number(files), workspaces: Number(workspaces) };
   }
 
+  function contentStats() {
+    const connection = db();
+    const content = connection.prepare("SELECT kind, COUNT(*) AS count FROM content_search_documents GROUP BY kind").all();
+    const counts = Object.fromEntries(content.map((row) => [row.kind, Number(row.count)]));
+    return { sessions: counts.history || 0, tasks: counts.task || 0, messages: counts.message || 0 };
+  }
+
   return {
     applyWorkspaceChanges,
+    applyContentChanges,
+    checkContentIndex,
+    contentStats,
     clearSearchHistory,
     deleteSavedSearch,
     deleteSearchHistory,
@@ -433,11 +667,16 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
     listSavedSearches,
     listSearchHistory,
     listWorkspaceMetadata,
+    getContentSource,
+    getContentDocument,
     markSavedSearchUsed,
     queryWorkspaceFiles,
+    queryContent,
     recordSearch,
     removeMissingWorkspaces,
     removeWorkspace,
+    removeMissingContentSources,
+    rebuildContentFts,
     saveSearch,
     stats,
     updateSavedSearch

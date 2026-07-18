@@ -1,9 +1,13 @@
-import { initDb } from "./db.js";
+import { getTasks } from "./agents.js";
+import { createContentSearchIndexer } from "./contentSearchIndexer.js";
+import { initDb, listTaskEvents } from "./db.js";
+import { listHistories } from "./history.js";
 import { createWorkspaceSearchIndexer } from "./searchIndexer.js";
 import { createSearchStore, searchValues } from "./searchStore.js";
 
 const store = createSearchStore({ database: initDb });
 let indexer = null;
+let contentIndexer = null;
 
 function normalize(value) {
   return String(value || "").trim().toLowerCase();
@@ -61,6 +65,7 @@ export function searchContent({
   histories = [],
   tasks = [],
   fileResults = [],
+  contentResults = [],
   historyDetails = new Map(),
   threadState = { items: {} }
 }) {
@@ -79,6 +84,11 @@ export function searchContent({
 
   const matches = [];
   const allow = (name) => normalizedScope === "all" || normalizedScope === name;
+  matches.push(...contentResults.filter((item) => (
+    (item.kind === "history" && allow("sessions")) ||
+    (item.kind === "task" && allow("tasks")) ||
+    (item.kind === "message" && allow("messages"))
+  )));
   if (allow("sessions")) {
     for (const item of histories) {
       const haystack = JSON.stringify(item);
@@ -157,38 +167,45 @@ export function searchContent({
 
 export async function searchAll({ query, scope, limit, cursor, tag, favorite, sort, order, histories, tasks, workspaces, threadState }) {
   const normalizedScope = searchValues.normalizeScope(scope);
-  const historyDetails = new Map();
-  if (normalizedScope === "messages" || normalizedScope === "all") {
-    const { getHistory } = await import("./history.js");
-    for (const item of histories) {
-      const detail = getHistory(item.provider, item.id, { fresh: false });
-      if (detail) historyDetails.set(`${item.provider}:${item.id}`, detail);
-    }
-  }
+  const kinds = normalizedScope === "all" ? ["history", "task", "message"]
+    : normalizedScope === "sessions" ? ["history"]
+      : normalizedScope === "tasks" ? ["task"]
+        : normalizedScope === "messages" ? ["message"] : [];
+  const contentResults = kinds.length ? store.queryContent(query, { kinds }) : [];
   const fileResults = (normalizedScope === "files" || normalizedScope === "all") && workspaces.length
     ? store.queryWorkspaceFiles(query, { workspaceIds: workspaces.map((workspace) => workspace.id) })
     : [];
-  return searchContent({ query, scope: normalizedScope, limit, cursor, tag, favorite, sort, order, histories, tasks, fileResults, historyDetails, threadState });
+  return searchContent({ query, scope: normalizedScope, limit, cursor, tag, favorite, sort, order, histories: [], tasks: [], fileResults, contentResults, threadState });
 }
 
 export async function startSearchIndex({ getWorkspaces, refreshIntervalMs } = {}) {
   if (!indexer) indexer = createWorkspaceSearchIndexer({ store, getWorkspaces, refreshIntervalMs });
-  return indexer.start();
+  if (!contentIndexer) contentIndexer = createContentSearchIndexer({
+    store,
+    getHistories: () => listHistories({ fresh: true }),
+    getTasks,
+    listTaskEvents,
+    refreshIntervalMs: Math.min(Number(refreshIntervalMs) || 60_000, 15_000)
+  });
+  const [workspaceStatus] = await Promise.all([indexer.start(), contentIndexer.start()]);
+  return { ...workspaceStatus, ...contentIndexer.status() };
 }
 
 export async function stopSearchIndex() {
   if (!indexer) return;
-  await indexer.stop();
+  await Promise.all([indexer.stop(), contentIndexer?.stop()]);
   indexer = null;
+  contentIndexer = null;
 }
 
 export function getSearchIndexStatus() {
-  return indexer?.status() || { ...store.stats(), ready: false, running: false, started: false, watchers: 0, pendingWorkspaces: 0 };
+  return indexer ? { ...indexer.status(), ...store.contentStats(), contentRunning: contentIndexer?.status().running || false }
+    : { ...store.stats(), ...store.contentStats(), ready: false, running: false, started: false, watchers: 0, pendingWorkspaces: 0 };
 }
 
 export function refreshSearchIndex() {
   if (!indexer) throw new Error("Search index is not running.");
-  return indexer.refreshAll();
+  return Promise.all([indexer.refreshAll(), contentIndexer?.refresh()]).then(([workspaces]) => workspaces);
 }
 
 export function refreshWorkspaceSearchPaths(workspace, paths) {

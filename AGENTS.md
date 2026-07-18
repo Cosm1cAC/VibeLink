@@ -10,7 +10,7 @@ It describes the protocol conventions, key endpoints, and interaction patterns.
 - **Base URL**: `http://<bridge-ip>:<port>` (default port: `5177`)
 - **Content-Type**: All requests and responses use `application/json`
 - **Authorization**: `Authorization: Bearer <token>` header, or `?token=<token>` query parameter
-- **All responses are JSON** — no alternative formats
+- JSON is the default response format. The authenticated artifact range endpoint returns bounded `application/octet-stream` partial content.
 
 ## Discovery Endpoints
 

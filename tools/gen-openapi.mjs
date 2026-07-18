@@ -234,6 +234,47 @@ const schemas = {
       limit: { type: "integer", description: "Maximum items to return", minimum: 1, maximum: 5000 },
       fields: { type: "string", description: "Comma-separated field selector with dot notation" }
     }
+  },
+  ArtifactMetadata: {
+    type: "object",
+    required: ["version", "id", "name", "mimeType", "kind", "size", "modifiedAt", "digest", "capabilities"],
+    properties: {
+      version: { type: "integer", enum: [1] },
+      id: { type: "string" },
+      name: { type: "string" },
+      mimeType: { type: "string" },
+      kind: { type: "string", enum: ["pdf", "document", "workbook", "presentation", "table", "notebook", "text", "binary"] },
+      size: { type: "integer", format: "int64", minimum: 0 },
+      modifiedAt: { type: "string", format: "date-time" },
+      digest: { type: "string", pattern: "^sha256:[a-f0-9]{64}$" },
+      capabilities: {
+        type: "object",
+        required: ["rangeRead", "preview", "mutation"],
+        properties: {
+          rangeRead: { type: "boolean", enum: [true] },
+          preview: { type: "boolean" },
+          mutation: { type: "boolean", enum: [false] }
+        }
+      }
+    }
+  },
+  ArtifactPreview: {
+    type: "object",
+    required: ["version", "readonly", "mimeType", "kind", "document", "truncated", "redaction", "limits"],
+    properties: {
+      version: { type: "integer", enum: [1] },
+      readonly: { type: "boolean", enum: [true] },
+      mimeType: { type: "string" },
+      kind: { type: "string" },
+      document: { type: "object", additionalProperties: true },
+      truncated: { type: "object", additionalProperties: { type: "boolean" } },
+      redaction: {
+        type: "object",
+        required: ["applied", "count"],
+        properties: { applied: { type: "boolean" }, count: { type: "integer", minimum: 0 } }
+      },
+      limits: { type: "object", additionalProperties: { type: "integer" } }
+    }
   }
 };
 
@@ -999,6 +1040,41 @@ const paths = {
     { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }
   )),
 
+  // Read-only artifact runtime
+  ...path("/api/artifacts/{id}", get("Get artifact metadata",
+    "Returns authenticated, server-detected artifact metadata and read-only capability flags.",
+    { type: "object", properties: { artifact: { $ref: "#/components/schemas/ArtifactMetadata" } } },
+    [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+  )),
+  ...path("/api/artifacts/{id}/preview", get("Preview artifact structure",
+    "Returns a bounded, redacted, read-only structure for PDF, Office, table, or Notebook content.",
+    { type: "object", properties: { preview: { $ref: "#/components/schemas/ArtifactPreview" } } },
+    [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+  )),
+  ...path("/api/artifacts/{id}/content", {
+    get: {
+      summary: "Read artifact byte range",
+      description: "Returns exactly one authenticated byte range, bounded to 1 MiB per request.",
+      parameters: [
+        { name: "id", in: "path", required: true, schema: { type: "string" } },
+        { name: "Range", in: "header", required: true, schema: { type: "string", example: "bytes=0-1048575" } }
+      ],
+      responses: {
+        "206": {
+          description: "Partial content",
+          headers: {
+            "Accept-Ranges": { schema: { type: "string", enum: ["bytes"] } },
+            "Content-Range": { schema: { type: "string" } }
+          },
+          content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } }
+        },
+        "401": { description: "Unauthorized", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        "416": { description: "Missing, invalid, unsatisfiable, multipart, or over-limit range", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        "429": { description: "Rate limit exceeded", content: { "application/json": { schema: { $ref: "#/components/schemas/RateLimitError" } } } }
+      }
+    }
+  }),
+
   // Other
   ...path("/api/cloudflare/guide", get("Cloudflare tunnel guide",
     "Returns Cloudflare Tunnel setup guidance.",
@@ -1013,7 +1089,7 @@ const spec = {
   info: {
     title: "VibeLink HTTP API",
     version: "0.1.0",
-    description: "Local-first Agent Remote Console HTTP API.\n\nAll endpoints return JSON. Authentication via Bearer token.\n\nRate-limit headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.",
+    description: "Local-first Agent Remote Console HTTP API.\n\nEndpoints return JSON except for authenticated artifact byte ranges, which return bounded binary partial content. Authentication via Bearer token.\n\nRate-limit headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.",
     contact: { name: "VibeLink" }
   },
   servers: [

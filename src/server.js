@@ -50,6 +50,7 @@ import {
 import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
+import { artifactMetadata, artifactPreview, readArtifactRange } from "./artifactRuntime.js";
 import { getCompactServiceMetrics } from "./compactService.js";
 import { getContextBudgetMetrics } from "./contextBudget.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
@@ -1518,6 +1519,7 @@ async function saveAttachment(request, response) {
   const filePath = path.join(attachmentsDir, id);
   await fs.promises.writeFile(filePath, data);
   const isImage = imageExtensions.has(extension);
+  const detected = isImage ? null : await artifactMetadata(filePath, { id, name: originalName }).catch(() => null);
   sendJson(response, 201, {
     ok: true,
     id,
@@ -1527,10 +1529,65 @@ async function saveAttachment(request, response) {
     url: `/api/attachments/${encodeURIComponent(id)}`,
     kind: isImage ? "image" : "file",
     markdown: isImage ? `![${originalName}](${filePath})` : `[${originalName}](${filePath})`,
-    mimeType,
+    mimeType: detected?.mimeType || mimeType,
     size: data.length,
-    preview: textPreview(data, mimeType, extension)
+    preview: textPreview(data, detected?.mimeType || mimeType, extension),
+    artifact: detected ? { metadataUrl: `/api/artifacts/${encodeURIComponent(id)}`, previewUrl: `/api/artifacts/${encodeURIComponent(id)}/preview`, contentUrl: `/api/artifacts/${encodeURIComponent(id)}/content` } : undefined
   });
+}
+
+function artifactPathFromId(id) {
+  const filePath = attachmentPathFor(id);
+  if (!filePath || !filePath.startsWith(attachmentsDir)) {
+    throw Object.assign(new Error("Invalid artifact."), { status: 400, code: "ARTIFACT_INVALID" });
+  }
+  return filePath;
+}
+
+async function serveArtifactMetadata(request, response, url, auth, id) {
+  try {
+    const metadata = await artifactMetadata(artifactPathFromId(id), { id, name: id });
+    audit(request, url, auth, { type: "artifact.metadata", success: true, target: id, meta: { size: metadata.size, mimeType: metadata.mimeType } });
+    sendJson(response, 200, { artifact: metadata });
+  } catch (error) {
+    audit(request, url, auth, { type: "artifact.metadata", success: false, target: id, reason: error.message });
+    sendError(response, error.status || 500, error.message, { code: error.code || "ARTIFACT_ERROR" });
+  }
+}
+
+async function serveArtifactPreview(request, response, url, auth, id) {
+  try {
+    const preview = await artifactPreview(artifactPathFromId(id), { id, name: id });
+    audit(request, url, auth, { type: "artifact.preview", success: true, target: id, meta: { kind: preview.kind, redactions: preview.redaction.count } });
+    sendJson(response, 200, { preview });
+  } catch (error) {
+    audit(request, url, auth, { type: "artifact.preview", success: false, target: id, reason: error.message });
+    sendError(response, error.status || 500, error.message, { code: error.code || "ARTIFACT_ERROR" });
+  }
+}
+
+async function serveArtifactRange(request, response, url, auth, id) {
+  let result;
+  try {
+    result = await readArtifactRange(artifactPathFromId(id), request.headers.range);
+  } catch (error) {
+    let size = "*";
+    try { size = String((await fs.promises.stat(artifactPathFromId(id))).size); } catch {}
+    audit(request, url, auth, { type: "artifact.range", success: false, target: id, reason: error.message });
+    sendError(response, error.status || 500, error.message, { code: error.code || "ARTIFACT_ERROR" }, error.status === 416 ? { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" } : {});
+    return;
+  }
+  audit(request, url, auth, { type: "artifact.range", success: true, target: id, meta: { start: result.start, end: result.end, size: result.size } });
+  response.writeHead(206, {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": result.length,
+    "Content-Range": `bytes ${result.start}-${result.end}/${result.size}`,
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, no-store",
+    "Content-Disposition": `inline; filename="${path.basename(id).replaceAll('"', "")}"`,
+    "X-Content-Type-Options": "nosniff"
+  });
+  response.end(result.data);
 }
 
 function serveAttachment(request, response, url) {
@@ -1705,6 +1762,16 @@ async function routeApi(request, response, url) {
 
   if (url.pathname.startsWith("/api/attachments/") && request.method === "GET") {
     serveAttachment(request, response, url);
+    return;
+  }
+
+  const artifactMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)(?:\/(content|preview))?$/);
+  if (artifactMatch && request.method === "GET") {
+    if (!enforceRateLimit(request, response, url, "artifact.read", { limit: 120, windowMs: 60 * 1000 }, auth)) return;
+    const id = safeDecode(artifactMatch[1]);
+    if (artifactMatch[2] === "content") await serveArtifactRange(request, response, url, auth, id);
+    else if (artifactMatch[2] === "preview") await serveArtifactPreview(request, response, url, auth, id);
+    else await serveArtifactMetadata(request, response, url, auth, id);
     return;
   }
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Contract defined; implementation is feature-gated and incomplete until the P0 execution-host checkpoints pass.
+Rust host v1 implemented; product routing remains feature-gated until the remaining P0 execution-host checkpoints pass.
 
 ## Scope
 

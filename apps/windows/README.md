@@ -50,6 +50,7 @@ vibelink.exe workspace-tree --root C:\path\to\repo --dir src --depth 2
 vibelink.exe mcp-session-sidecar
 vibelink.exe event-store-sidecar C:\path\to\mobile-agent.sqlite
 vibelink.exe status-sidecar
+vibelink.exe execd --data-dir C:\path\to\VibeLinkData
 ```
 
 - `bridge`: hosts the existing Node bridge in phase 1.
@@ -60,6 +61,7 @@ vibelink.exe status-sidecar
 - `mcp-session-sidecar`: serves the MCP persistent session JSONL contract for Rust-side stdio session reuse experiments.
 - `event-store-sidecar`: serves the SQLite event-store JSONL contract for explicit Rust-side append/replay experiments.
 - `status-sidecar`: validates and assembles `/api/status` snapshots when `VIBELINK_RUST_STATUS=1`; the Node snapshot remains the automatic fallback.
+- `execd`: discovers and routes durable executions over a current-user/SYSTEM named pipe. It starts a detached worker per execution; the hidden `execution-worker` role owns the Job Object, ConPTY/stdio handles, manifest, and event spool.
 
 The user should not need to run internal modes directly.
 

@@ -19,18 +19,18 @@
 - [x] 添加 `execution_bindings` migration 和 repository API。
 - [x] 添加 approval continuation 字段和 `approval_outbox`。
 - [x] 添加 event ingest + host cursor 原子事务。
-- [ ] 实现 Rust `execd` mode 和 named-pipe handshake。
-- [ ] 实现 manifest discovery 与 worker identity 校验。
-- [ ] 实现 execution worker 与 Windows Job Object。
-- [ ] 实现 ConPTY terminal backend。
-- [ ] 实现 piped stdio command backend。
-- [ ] 实现分段 event spool、ack、replay 和 quota marker。
+- [x] 实现 Rust `execd` mode 和 named-pipe handshake。
+- [x] 实现 manifest discovery 与 worker identity 校验。
+- [x] 实现 execution worker 与 Windows Job Object。
+- [x] 实现 ConPTY terminal backend。
+- [x] 实现 piped stdio command backend。
+- [x] 实现分段 event spool、ack、replay 和 quota marker。
 
 ## Checkpoint 1
 
-- [ ] Parent/Bridge 停止时 worker 和 child 继续运行。
-- [ ] `execd` 重启后重新连接同一个 worker/child PID。
-- [ ] Worker crash 清理 child 并留下 `lost` 状态。
+- [x] Parent/Bridge 停止时 worker 和 child 继续运行。
+- [x] `execd` 重启后重新连接同一个 worker/child PID。
+- [x] Worker crash 清理 child 并留下 `lost` 状态。
 - [ ] Named-pipe ACL、forged manifest 和 PID reuse tests 通过。
 
 ## Phase 2: VibeLink-Owned Execution

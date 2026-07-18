@@ -22,7 +22,7 @@ apps/android/.idea/
 # Local Android configuration and generated wrapper files
 apps/android/local.properties
 apps/android/gradle/wrapper/gradle-wrapper.jar
-apps/android/gradlew.bat
+!apps/android/gradlew.bat
 *.apk
 *.idsig
 

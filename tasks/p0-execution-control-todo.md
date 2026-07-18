@@ -74,12 +74,12 @@
 
 ## Phase 4: Clients And Rollout
 
-- [ ] Provider registry 返回 execution ownership、capability 和 fidelity。
+- [x] Provider registry 返回 execution ownership、capability 和 fidelity。
 - [ ] Web 展示权限增量、scope、可选决定和 delivery 状态。
 - [ ] Android 展示权限增量、scope、可选决定和 delivery 状态。
 - [ ] Web/Android 展示 attach/recovery 状态并限制非法操作。
 - [ ] Desktop Remote 固定为 external/sample-only capability。
-- [ ] 更新 product status、architecture、OpenAPI 和 Doctor。
+- [x] 更新 product status、architecture、OpenAPI 和 Doctor。
 - [ ] 增加 `off|canary|on` rollout flags。
 - [ ] 执行 package、restart drill、rollback 和 public canary。
 

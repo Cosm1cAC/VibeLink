@@ -17,6 +17,7 @@ It describes the protocol conventions, key endpoints, and interaction patterns.
 | Purpose | Method | Path |
 |---------|--------|------|
 | List all tools with schemas | `GET` | `/api/tool-registry?fields=name,inputSchema,outputSchema` |
+| List Agent providers, models, health, and execution fidelity | `GET` | `/api/provider-registry` |
 | Get runtime configuration | `GET` | `/api/status` |
 | Full system diagnosis | `GET` | `/api/doctor` |
 | List built-in commands | `GET` | `/api/command-registry?fields=name,params` |

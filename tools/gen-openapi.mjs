@@ -62,6 +62,157 @@ const schemas = {
       risk: { type: "object" }
     }
   },
+  ProviderHealth: {
+    type: "object",
+    required: ["ok", "status", "cacheStatus", "source", "checkedAt", "expiresAt", "error"],
+    properties: {
+      ok: { type: "boolean", nullable: true },
+      status: { type: "string", enum: ["ready", "unavailable", "disabled", "missing_credentials", "unknown"] },
+      cacheStatus: { type: "string", enum: ["fresh", "cached", "stale", "refreshing", "builtin"] },
+      source: { type: "string" },
+      checkedAt: { type: "string", description: "ISO timestamp, or empty when no runtime loader exists." },
+      expiresAt: { type: "string", description: "ISO timestamp, or empty when no runtime loader exists." },
+      latencyMs: { type: "integer", nullable: true },
+      version: { type: "string" },
+      error: { type: "string" }
+    }
+  },
+  ProviderCatalog: {
+    type: "object",
+    required: ["status", "source", "fetchedAt", "expiresAt", "error"],
+    properties: {
+      status: { type: "string", enum: ["builtin", "fresh", "cached", "stale", "refreshing", "fallback"] },
+      source: { type: "string" },
+      fetchedAt: { type: "string", description: "ISO timestamp, or empty for a built-in catalog." },
+      expiresAt: { type: "string", description: "ISO timestamp, or empty for a built-in catalog." },
+      error: { type: "string" }
+    }
+  },
+  Provider: {
+    type: "object",
+    required: ["id", "label", "kind", "available", "status", "health", "executionOwnership", "models", "catalog", "capabilities", "fidelity"],
+    properties: {
+      id: { type: "string", enum: ["codex", "claude", "doubao", "zhipu"] },
+      label: { type: "string" },
+      kind: { type: "string", enum: ["cli", "web"] },
+      available: { type: "boolean" },
+      status: { type: "string" },
+      reason: { type: "string" },
+      health: { $ref: "#/components/schemas/ProviderHealth" },
+      executionOwnership: { type: "string", enum: ["vibelink-host", "legacy-node", "external"] },
+      defaultModel: { type: "string" },
+      models: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["id", "label"],
+          properties: {
+            id: { type: "string" },
+            label: { type: "string" },
+            default: { type: "boolean" }
+          }
+        }
+      },
+      catalog: { $ref: "#/components/schemas/ProviderCatalog" },
+      reasoningEfforts: { type: "array", items: { type: "string" } },
+      capabilities: {
+        type: "object",
+        properties: {
+          reattach: { type: "boolean" },
+          structuredToolEvents: { type: "string", enum: ["authoritative", "observed", "sampled", "unavailable"] },
+          toolOutput: { type: "string", enum: ["complete", "sampled", "unavailable"] },
+          exitStatus: { type: "string", enum: ["authoritative", "observed", "unavailable"] },
+          approvalContinuation: { type: "boolean" },
+          liveInput: { type: "boolean" },
+          protocol: { type: "string" },
+          protocolVersion: { type: "string" }
+        },
+        additionalProperties: true
+      },
+      fidelity: {
+        type: "object",
+        additionalProperties: {
+          type: "string",
+          enum: ["authoritative", "observed", "sampled", "unavailable"]
+        }
+      }
+    }
+  },
+  ProviderRegistry: {
+    type: "object",
+    required: ["version", "catalogVersion", "defaultProvider", "providers", "generatedAt"],
+    properties: {
+      version: { type: "integer", enum: [2] },
+      catalogVersion: { type: "integer" },
+      defaultProvider: { type: "string" },
+      providers: { type: "array", items: { $ref: "#/components/schemas/Provider" } },
+      generatedAt: { type: "string", format: "date-time" }
+    }
+  },
+  SearchResult: {
+    type: "object",
+    required: ["kind", "id", "title", "snippet"],
+    properties: {
+      kind: { type: "string", enum: ["history", "task", "message", "file"] },
+      id: { type: "string" },
+      provider: { type: "string" },
+      title: { type: "string" },
+      snippet: { type: "string" },
+      updatedAt: { type: "string" },
+      workspaceId: { type: "string" },
+      path: { type: "string" },
+      turnId: { type: "string" }
+    }
+  },
+  SearchResponse: {
+    type: "object",
+    required: ["items", "query", "scope", "sort", "order", "total", "nextCursor"],
+    properties: {
+      items: { type: "array", items: { $ref: "#/components/schemas/SearchResult" } },
+      query: { type: "string" },
+      scope: { type: "string", enum: ["all", "sessions", "tasks", "messages", "files"] },
+      sort: { type: "string", enum: ["relevance", "updatedAt", "title", "kind"] },
+      order: { type: "string", enum: ["asc", "desc"] },
+      total: { type: "integer" },
+      limit: { type: "integer" },
+      cursor: { type: "string" },
+      nextCursor: { type: "string" },
+      savedSearchId: { type: "string" },
+      index: { type: "object" }
+    }
+  },
+  SavedSearch: {
+    type: "object",
+    required: ["id", "name", "query", "scope", "sort", "order"],
+    properties: {
+      id: { type: "string" },
+      name: { type: "string" },
+      query: { type: "string" },
+      scope: { type: "string" },
+      tag: { type: "string" },
+      favorite: { type: "boolean" },
+      sort: { type: "string" },
+      order: { type: "string" },
+      createdAt: { type: "string" },
+      updatedAt: { type: "string" },
+      lastUsedAt: { type: "string" }
+    }
+  },
+  SearchHistoryItem: {
+    type: "object",
+    properties: {
+      id: { type: "string" },
+      query: { type: "string" },
+      scope: { type: "string" },
+      tag: { type: "string" },
+      favorite: { type: "boolean" },
+      sort: { type: "string" },
+      order: { type: "string" },
+      resultCount: { type: "integer" },
+      useCount: { type: "integer" },
+      searchedAt: { type: "string" }
+    }
+  },
   PaginationParams: {
     type: "object",
     properties: {
@@ -121,6 +272,27 @@ function post(summary, description, requestBody, responses, extra = {}) {
   return postDef;
 }
 
+function mutation(method, summary, description, responseSchema, requestBody = null, params = []) {
+  return {
+    [method]: {
+      summary,
+      description,
+      parameters: params,
+      requestBody: requestBody ? {
+        required: true,
+        content: { "application/json": { schema: requestBody } }
+      } : undefined,
+      responses: {
+        "200": { description: "Success", content: { "application/json": { schema: responseSchema } } },
+        "400": { description: "Validation error", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        "401": { description: "Unauthorized", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        "404": { description: "Not found", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        "429": { description: "Rate limit exceeded", content: { "application/json": { schema: { $ref: "#/components/schemas/RateLimitError" } } } }
+      }
+    }
+  };
+}
+
 // ── Build paths ──
 
 const paths = {
@@ -128,6 +300,11 @@ const paths = {
   ...path("/api/tool-registry", get("List tool registry",
     "Returns all registered tool definitions with input/output schemas.",
     { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }
+  )),
+  ...path("/api/provider-registry", get("Provider registry",
+    "Returns runtime health, dynamic model catalogs, execution ownership, capability, and fidelity for every Agent provider.",
+    { $ref: "#/components/schemas/ProviderRegistry" },
+    [{ name: "fresh", in: "query", schema: { type: "string", enum: ["0", "1"] }, description: "Set to 1 to force catalog and health refresh." }]
   )),
   ...path("/api/status", get("Server status",
     "Returns runtime configuration, security settings, devices, workspaces, and tasks.",
@@ -326,6 +503,57 @@ const paths = {
       { name: "id", in: "path", required: true, schema: { type: "string" } }
     ]
   )),
+  ...path("/api/search", get("Search all content",
+    "Queries sessions, tasks, messages, and the persistent incremental Workspace full-text index.",
+    { $ref: "#/components/schemas/SearchResponse" },
+    [
+      { name: "q", in: "query", schema: { type: "string" } },
+      { name: "scope", in: "query", schema: { type: "string", enum: ["all", "sessions", "tasks", "messages", "files"] } },
+      { name: "sort", in: "query", schema: { type: "string", enum: ["relevance", "updatedAt", "title", "kind"] } },
+      { name: "order", in: "query", schema: { type: "string", enum: ["asc", "desc"] } },
+      { name: "cursor", in: "query", schema: { type: "string" } },
+      { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
+      { name: "tag", in: "query", schema: { type: "string" } },
+      { name: "favorite", in: "query", schema: { type: "boolean" } },
+      { name: "savedSearchId", in: "query", schema: { type: "string" } },
+      { name: "record", in: "query", schema: { type: "string", enum: ["0", "1"] } }
+    ]
+  )),
+  ...path("/api/search/saved", {
+    ...get("List saved searches", "Returns saved search definitions ordered by last update.", {
+      type: "object", properties: { items: { type: "array", items: { $ref: "#/components/schemas/SavedSearch" } } }
+    }),
+    ...post("Save search", "Persists a reusable search definition.", {
+      type: "object",
+      required: ["name", "query"],
+      properties: {
+        name: { type: "string" }, query: { type: "string" }, scope: { type: "string" }, tag: { type: "string" },
+        favorite: { type: "boolean" }, sort: { type: "string" }, order: { type: "string" }
+      }
+    }, { $ref: "#/components/schemas/SavedSearch" })
+  }),
+  ...path("/api/search/saved/{id}", {
+    ...get("Get saved search", "Returns one saved search definition.", { $ref: "#/components/schemas/SavedSearch" }, [
+      { name: "id", in: "path", required: true, schema: { type: "string" } }
+    ]),
+    ...mutation("patch", "Update saved search", "Updates a saved search definition.", { $ref: "#/components/schemas/SavedSearch" }, { type: "object" }, [
+      { name: "id", in: "path", required: true, schema: { type: "string" } }
+    ]),
+    ...mutation("delete", "Delete saved search", "Deletes a saved search definition.", { type: "object" }, null, [
+      { name: "id", in: "path", required: true, schema: { type: "string" } }
+    ])
+  }),
+  ...path("/api/search/history", {
+    ...get("List search history", "Returns deduplicated recent searches with use and result counts.", {
+      type: "object", properties: { items: { type: "array", items: { $ref: "#/components/schemas/SearchHistoryItem" } } }
+    }, [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } }]),
+    ...mutation("delete", "Clear search history", "Deletes all search history entries.", { type: "object" })
+  }),
+  ...path("/api/search/history/{id}", mutation("delete", "Delete search history item", "Deletes one search history entry.", { type: "object" }, null, [
+    { name: "id", in: "path", required: true, schema: { type: "string" } }
+  ])),
+  ...path("/api/search/index", get("Search index status", "Returns Workspace index lifecycle and document counts.", { type: "object" })),
+  ...path("/api/search/index/refresh", post("Refresh search index", "Runs an incremental refresh across registered Workspaces.", null, { type: "object" })),
   ...path("/api/tasks", get("List tasks",
     "Returns all agent tasks sorted by recency.",
     { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }

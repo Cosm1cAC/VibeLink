@@ -17,7 +17,21 @@ const PROVIDERS = [
       modelOverride: true,
       reasoningEffort: true,
       resume: true,
-      liveCallAssistant: true
+      liveCallAssistant: true,
+      reattach: false,
+      structuredToolEvents: "observed",
+      toolOutput: "complete",
+      exitStatus: "authoritative",
+      approvalContinuation: false,
+      liveInput: false,
+      protocol: "codex-cli-jsonl"
+    },
+    executionOwnership: "legacy-node",
+    fidelity: {
+      executionState: "authoritative",
+      structuredToolEvents: "observed",
+      toolOutput: "authoritative",
+      exitStatus: "authoritative"
     }
   },
   {
@@ -38,7 +52,21 @@ const PROVIDERS = [
       modelOverride: true,
       reasoningEffort: true,
       resume: true,
-      liveCallAssistant: true
+      liveCallAssistant: true,
+      reattach: false,
+      structuredToolEvents: "observed",
+      toolOutput: "complete",
+      exitStatus: "authoritative",
+      approvalContinuation: false,
+      liveInput: false,
+      protocol: "claude-cli-stream-json"
+    },
+    executionOwnership: "legacy-node",
+    fidelity: {
+      executionState: "authoritative",
+      structuredToolEvents: "observed",
+      toolOutput: "authoritative",
+      exitStatus: "authoritative"
     }
   },
   {
@@ -56,7 +84,21 @@ const PROVIDERS = [
       reasoningEffort: false,
       resume: false,
       liveCallAssistant: true,
-      browserBridge: true
+      browserBridge: true,
+      reattach: false,
+      structuredToolEvents: "unavailable",
+      toolOutput: "sampled",
+      exitStatus: "observed",
+      approvalContinuation: false,
+      liveInput: false,
+      protocol: "doubao-browser-bridge"
+    },
+    executionOwnership: "external",
+    fidelity: {
+      executionState: "observed",
+      structuredToolEvents: "unavailable",
+      toolOutput: "sampled",
+      exitStatus: "observed"
     }
   },
   {
@@ -78,7 +120,21 @@ const PROVIDERS = [
       modelOverride: true,
       reasoningEffort: true,
       resume: false,
-      liveCallAssistant: true
+      liveCallAssistant: true,
+      reattach: false,
+      structuredToolEvents: "unavailable",
+      toolOutput: "complete",
+      exitStatus: "authoritative",
+      approvalContinuation: false,
+      liveInput: false,
+      protocol: "zhipu-http-cli"
+    },
+    executionOwnership: "legacy-node",
+    fidelity: {
+      executionState: "authoritative",
+      structuredToolEvents: "unavailable",
+      toolOutput: "authoritative",
+      exitStatus: "authoritative"
     }
   }
 ];
@@ -88,6 +144,13 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
 
 function cleanCatalogText(value, maxLength) {
   return String(value || "").replace(CONTROL_CHARACTERS, "").trim().slice(0, maxLength);
+}
+
+function cloneCatalog(result, status = result.catalog.status) {
+  return {
+    models: result.models.map((model) => ({ ...model })),
+    catalog: { ...result.catalog, status }
+  };
 }
 
 function builtinCatalog(provider, status = "builtin", error = "") {
@@ -108,6 +171,7 @@ function normalizeCatalogModels(provider, value) {
 
   const models = [];
   const seen = new Set();
+  let validExternalModels = 0;
   for (const model of provider.models.filter((item) => item.default)) {
     models.push({ ...model });
     seen.add(model.id);
@@ -117,6 +181,7 @@ function normalizeCatalogModels(provider, value) {
     const rawId = item.id.trim();
     if (!rawId || CONTROL_CHARACTER_PATTERN.test(rawId)) continue;
     const id = rawId.slice(0, 160);
+    validExternalModels += 1;
     if (seen.has(id)) continue;
     seen.add(id);
     const label = cleanCatalogText(item.label, 160);
@@ -126,7 +191,7 @@ function normalizeCatalogModels(provider, value) {
       ...(id === provider.defaultModel ? { default: true } : {})
     });
   }
-  if (models.length === provider.models.filter((item) => item.default).length) {
+  if (validExternalModels === 0) {
     throw new Error("Provider model catalog did not contain a valid model.");
   }
   return models;
@@ -134,46 +199,148 @@ function normalizeCatalogModels(provider, value) {
 
 export function createProviderCatalogResolver({ loaders = {}, ttlMs = 5 * 60 * 1000, now = Date.now } = {}) {
   const cache = new Map();
+  const pending = new Map();
 
   return {
-    async resolve(provider, { fresh = false } = {}) {
+    async resolve(provider, { fresh = false, background = false } = {}) {
       const loader = loaders[provider.id];
       if (typeof loader !== "function") return builtinCatalog(provider);
 
       const current = Number(now());
       const cached = cache.get(provider.id);
       if (!fresh && cached && cached.expiresAtMs > current) {
-        return {
-          models: cached.models.map((model) => ({ ...model })),
-          catalog: { ...cached.catalog, status: "cached" }
-        };
+        return cloneCatalog(cached, "cached");
       }
 
-      try {
-        const loaded = await loader({ providerId: provider.id });
-        const models = normalizeCatalogModels(provider, loaded?.models);
-        const fetchedAt = new Date(current).toISOString();
-        const expiresAtMs = current + Math.max(1000, Number(ttlMs) || 0);
-        const result = {
-          models,
-          catalog: {
-            status: "fresh",
-            source: cleanCatalogText(loaded?.source, 120) || provider.id,
-            fetchedAt,
-            expiresAt: new Date(expiresAtMs).toISOString(),
-            error: ""
-          }
-        };
-        cache.set(provider.id, { ...result, expiresAtMs });
-        return result;
-      } catch (error) {
-        const message = cleanCatalogText(error?.message || error || "Provider model catalog refresh failed.", 500);
-        if (!cached) return builtinCatalog(provider, "fallback", message);
-        return {
-          models: cached.models.map((model) => ({ ...model })),
-          catalog: { ...cached.catalog, status: "stale", error: message }
-        };
+      if (pending.has(provider.id)) {
+        if (background && !fresh) return cached ? cloneCatalog(cached, "stale") : builtinCatalog(provider, "refreshing");
+        return cloneCatalog(await pending.get(provider.id));
       }
+
+      const refresh = (async () => {
+        try {
+          const loaded = await loader({ providerId: provider.id });
+          const models = normalizeCatalogModels(provider, loaded?.models);
+          const fetchedAt = new Date(current).toISOString();
+          const expiresAtMs = current + Math.max(1000, Number(ttlMs) || 0);
+          const result = {
+            models,
+            catalog: {
+              status: "fresh",
+              source: cleanCatalogText(loaded?.source, 120) || provider.id,
+              fetchedAt,
+              expiresAt: new Date(expiresAtMs).toISOString(),
+              error: ""
+            }
+          };
+          cache.set(provider.id, { ...result, expiresAtMs });
+          return result;
+        } catch (error) {
+          const message = cleanCatalogText(error?.message || error || "Provider model catalog refresh failed.", 500);
+          if (!cached) return builtinCatalog(provider, "fallback", message);
+          return {
+            models: cached.models.map((model) => ({ ...model })),
+            catalog: { ...cached.catalog, status: "stale", error: message }
+          };
+        } finally {
+          pending.delete(provider.id);
+        }
+      })();
+      pending.set(provider.id, refresh);
+      if (background && !fresh) return cached ? cloneCatalog(cached, "stale") : builtinCatalog(provider, "refreshing");
+      return cloneCatalog(await refresh);
+    }
+  };
+}
+
+function unknownHealth() {
+  return {
+    ok: null,
+    status: "unknown",
+    cacheStatus: "builtin",
+    source: "builtin",
+    checkedAt: "",
+    expiresAt: "",
+    latencyMs: null,
+    version: "",
+    error: ""
+  };
+}
+
+function disabledHealth(provider) {
+  return {
+    ...unknownHealth(),
+    ok: false,
+    status: "disabled",
+    source: "settings",
+    error: `${provider.label} is disabled in settings.`
+  };
+}
+
+function normalizeHealth(value, providerId, current, ttlMs) {
+  if (typeof value?.ok !== "boolean") throw new Error("Provider health loader must return an ok boolean.");
+  const expiresAtMs = current + Math.max(1000, Number(ttlMs) || 0);
+  const error = value.ok ? "" : cleanCatalogText(value.error || value.reason || "Provider is not ready.", 500);
+  return {
+    ok: value.ok,
+    status: cleanCatalogText(value.status, 80) || (value.ok ? "ready" : "unavailable"),
+    cacheStatus: "fresh",
+    source: cleanCatalogText(value.source, 120) || providerId,
+    checkedAt: new Date(current).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    latencyMs: Number.isFinite(Number(value.latencyMs)) ? Math.max(0, Math.round(Number(value.latencyMs))) : null,
+    version: cleanCatalogText(value.version, 240),
+    error,
+    expiresAtMs
+  };
+}
+
+function publicHealth(value, cacheStatus = value.cacheStatus) {
+  const { expiresAtMs, ...health } = value;
+  return { ...health, cacheStatus };
+}
+
+export function createProviderHealthResolver({ loaders = {}, ttlMs = 30 * 1000, now = Date.now } = {}) {
+  const cache = new Map();
+  const pending = new Map();
+
+  return {
+    async resolve(provider, { fresh = false, background = false } = {}) {
+      const loader = loaders[provider.id];
+      if (typeof loader !== "function") return unknownHealth();
+
+      const current = Number(now());
+      const cached = cache.get(provider.id);
+      if (!fresh && cached && cached.expiresAtMs > current) return publicHealth(cached, "cached");
+      if (pending.has(provider.id)) {
+        if (background && !fresh) return cached
+          ? publicHealth(cached, "stale")
+          : { ...unknownHealth(), cacheStatus: "refreshing" };
+        return publicHealth(await pending.get(provider.id));
+      }
+
+      const refresh = (async () => {
+        let result;
+        try {
+          result = normalizeHealth(await loader({ providerId: provider.id }), provider.id, current, ttlMs);
+        } catch (error) {
+          result = normalizeHealth({
+            ok: false,
+            status: "unavailable",
+            source: provider.id,
+            error: error?.message || error || "Provider health check failed."
+          }, provider.id, current, ttlMs);
+        } finally {
+          pending.delete(provider.id);
+        }
+        cache.set(provider.id, result);
+        return result;
+      })();
+      pending.set(provider.id, refresh);
+      if (background && !fresh) return cached
+        ? publicHealth(cached, "stale")
+        : { ...unknownHealth(), cacheStatus: "refreshing" };
+      return publicHealth(await refresh);
     }
   };
 }
@@ -189,7 +356,7 @@ function keyConfigured(settings = {}, provider) {
   return Boolean(settings.apiKeys?.[provider.keyName]);
 }
 
-function readinessFor(provider, settings = {}, probes = {}) {
+function readinessFor(provider, settings = {}, health = null) {
   if (!commandConfigured(settings, provider)) {
     return {
       available: false,
@@ -198,16 +365,15 @@ function readinessFor(provider, settings = {}, probes = {}) {
     };
   }
 
-  const probe = probes[provider.id];
-  if (probe && probe.ok === false) {
+  if (health && health.ok === false) {
     return {
       available: false,
-      status: "unavailable",
-      reason: probe.error || probe.reason || `${provider.label} is not ready.`
+      status: health.status,
+      reason: health.error || health.reason || `${provider.label} is not ready.`
     };
   }
 
-  if (probe && probe.ok === true) {
+  if (health && health.ok === true) {
     return {
       available: true,
       status: "ready",
@@ -230,12 +396,36 @@ function readinessFor(provider, settings = {}, probes = {}) {
   };
 }
 
-export async function buildProviderRegistry({ settings = {}, probes = {}, catalogResolver = null, freshCatalogs = false } = {}) {
+export async function buildProviderRegistry({
+  settings = {},
+  probes = {},
+  catalogResolver = null,
+  healthResolver = null,
+  freshCatalogs = false,
+  freshHealth = false,
+  backgroundRefresh = false
+} = {}) {
   const providers = await Promise.all(PROVIDERS.map(async (provider) => {
-    const readiness = readinessFor(provider, settings, probes);
-    const catalog = catalogResolver
-      ? await catalogResolver.resolve(provider, { fresh: freshCatalogs })
-      : builtinCatalog(provider);
+    const enabled = commandConfigured(settings, provider);
+    const [catalog, health] = await Promise.all([
+      catalogResolver && enabled
+        ? catalogResolver.resolve(provider, { fresh: freshCatalogs, background: backgroundRefresh })
+        : builtinCatalog(provider),
+      !enabled
+        ? Promise.resolve(disabledHealth(provider))
+        : healthResolver
+        ? healthResolver.resolve(provider, { fresh: freshHealth, background: backgroundRefresh })
+        : Promise.resolve(probes[provider.id]
+          ? {
+              ...unknownHealth(),
+              ...probes[provider.id],
+              status: probes[provider.id].status || (probes[provider.id].ok ? "ready" : "unavailable"),
+              source: probes[provider.id].source || "probe",
+              error: probes[provider.id].error || probes[provider.id].reason || ""
+            }
+          : unknownHealth())
+    ]);
+    const readiness = readinessFor(provider, settings, health);
     return {
       id: provider.id,
       label: provider.label,
@@ -243,11 +433,17 @@ export async function buildProviderRegistry({ settings = {}, probes = {}, catalo
       available: readiness.available,
       status: readiness.status,
       reason: readiness.reason,
+      health,
+      executionOwnership: provider.executionOwnership,
       defaultModel: provider.defaultModel,
       models: catalog.models,
       catalog: catalog.catalog,
       reasoningEfforts: provider.reasoningEfforts,
-      capabilities: provider.capabilities
+      capabilities: {
+        ...provider.capabilities,
+        protocolVersion: health.version || "unavailable"
+      },
+      fidelity: { ...provider.fidelity }
     };
   }));
 
@@ -257,7 +453,7 @@ export async function buildProviderRegistry({ settings = {}, probes = {}, catalo
     "codex";
 
   return {
-    version: 1,
+    version: 2,
     catalogVersion: 1,
     defaultProvider,
     providers,

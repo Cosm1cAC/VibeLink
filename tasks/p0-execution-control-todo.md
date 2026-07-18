@@ -35,9 +35,9 @@
 
 ## Phase 2: VibeLink-Owned Execution
 
-- [ ] 新增 Node execution host client。
-- [ ] 将 `terminalRuntime` 改为 execution host facade。
-- [ ] 保持现有 Terminal HTTP endpoint 与 Android/Web contract。
+- [x] 新增 Node execution host client。
+- [x] 将 `terminalRuntime` 改为 execution host facade。
+- [x] 保持现有 Terminal HTTP endpoint 与 Android/Web contract。
 - [ ] 迁移 Workspace streaming command、cancel 和 timeout。
 - [ ] 迁移 Agent CLI spawn、stdout/stderr 和 exit status。
 - [ ] 将运行中 Agent 输入改成 queued resume turn。
@@ -46,7 +46,7 @@
 
 ## Checkpoint 2
 
-- [ ] Terminal 在 Bridge/execd restart 后 input/resize/stop 正常。
+- [x] Terminal 在 Bridge/execd restart 后 input/resize/stop 正常。
 - [ ] Workspace command 在 restart 后输出、取消和 exit code 正常。
 - [ ] Agent CLI 在 restart 后事件无丢失无重复。
 - [ ] Legacy 与 execution-host owner 混合运行和 rollback 正常。

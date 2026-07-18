@@ -93,7 +93,7 @@ Thread 标签、收藏和批量编辑写入 SQLite。每次变更增加 revision
 - `approval_requests` 增加 continuation、available decisions、decision version 和 delivery status。
 - `approval_outbox` 用 operation id 去重，在一个 SQLite 事务中记录 decision、审批状态、审计 decision 和待投递命令，并支持 claim/retry/applied 状态流转。
 
-这些 repository 目前只由数据库层和测试使用，尚未连接 Server route、Provider runtime 或 execution host。当前不存在 Rust `execd`、per-execution worker、named-pipe server、Job Object、ConPTY/stdio backend、事件 spool 或启动 reconciliation。Bridge 重启仍会丢失 Node 所持有的运行中子进程句柄。
+Rust execution host 已实现 `execd`、per-execution worker、named-pipe v1、Job Object、ConPTY/stdio backend、分段事件 spool 和启动身份校验。Terminal、Workspace command 与 Agent CLI spawn 已接入 host facade；Terminal 保持原 session/tool run ID 和 HTTP endpoint，并在 Bridge/execd 重启后从 durable ack cursor 恢复输出与控制。SQLite execution binding 的统一 startup reconciliation、所有 owner 的 ingest/ack 收敛和 approval continuation 仍未完成。
 
 ADR-0010 规定的目标边界保持有效：只有 VibeLink 从启动时拥有的 execution 才能承诺重连；worker crash 必须收敛为 `lost`；外部进程和 Desktop 永远不能伪装为 attachable；外部副作用结果不明确时返回 `OUTCOME_UNKNOWN`，不得自动重放。
 

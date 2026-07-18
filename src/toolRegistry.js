@@ -86,7 +86,7 @@ const TOOL_DEFINITIONS = [
     label: "Terminal session",
     permission: "workspace.terminal",
     risk: "high",
-    description: "Start an interactive workspace terminal session using node-pty when available, with spawn fallback.",
+    description: "Start an interactive workspace terminal session on the durable execution host with ConPTY control and output replay.",
     inputSchema: {
       type: "object",
       properties: {

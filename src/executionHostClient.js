@@ -200,8 +200,11 @@ export function createExecutionHostClient({
     health: () => request("host.health", {}),
     start: (params) => request("execution.start", params, { timeoutMs: startupTimeoutMs }),
     get: (executionId) => request("execution.get", { executionId }),
+    list: (afterExecutionId = "", limit = 500) => request("execution.list", { afterExecutionId, limit }),
     events: (executionId, afterHostSeq = 0, limit = 64) => request("execution.events", { executionId, afterHostSeq, limit }),
     ack: (executionId, hostSeq, operationId) => request("execution.ack", { executionId, hostSeq, operationId }),
+    input: (executionId, data, encoding, operationId) => request("execution.input", { executionId, data, encoding, operationId }),
+    resize: (executionId, cols, rows, operationId) => request("execution.resize", { executionId, cols, rows, operationId }),
     signal: (executionId, signal, operationId) => request("execution.signal", { executionId, signal, operationId }),
     pipeName
   };
@@ -337,7 +340,66 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
     };
   }
 
-  return { runCommand };
+  async function startTerminal({
+    executionId = crypto.randomUUID(),
+    shell,
+    args = [],
+    cwd,
+    env = {},
+    cols = 100,
+    rows = 30,
+    mode = "auto"
+  } = {}) {
+    return client.start({
+      executionId,
+      kind: "terminal",
+      backend: mode === "spawn" ? "stdio" : "conpty",
+      command: shell,
+      args,
+      cwd,
+      env,
+      cols,
+      rows,
+      operationId: operationId("terminal-start", executionId)
+    });
+  }
+
+  function uniqueOperation(prefix, executionId) {
+    return operationId(prefix, executionId, crypto.randomUUID());
+  }
+
+  return {
+    runCommand,
+    startTerminal,
+    getTerminal: (executionId) => client.get(executionId),
+    listTerminals: async () => {
+      const page = await client.list("", 500);
+      return (Array.isArray(page?.executions) ? page.executions : []).filter((item) => item.kind === "terminal");
+    },
+    terminalEvents: (executionId, afterHostSeq = 0, limit = eventLimit) => client.events(executionId, afterHostSeq, limit),
+    acknowledgeTerminalEvents: (executionId, hostSeq) => client.ack(
+      executionId,
+      hostSeq,
+      operationId("terminal-ack", executionId, hostSeq)
+    ),
+    inputTerminal: (executionId, text) => client.input(
+      executionId,
+      String(text ?? ""),
+      "utf8",
+      uniqueOperation("terminal-input", executionId)
+    ),
+    resizeTerminal: (executionId, cols, rows) => client.resize(
+      executionId,
+      cols,
+      rows,
+      operationId("terminal-resize", executionId, `${cols}x${rows}`)
+    ),
+    signalTerminal: (executionId, signal = "stop", reason = "") => client.signal(
+      executionId,
+      signal,
+      operationId("terminal-signal", executionId, crypto.createHash("sha256").update(reason || signal).digest("hex").slice(0, 16))
+    )
+  };
 }
 
 function createLegacyExecutionFacade() {

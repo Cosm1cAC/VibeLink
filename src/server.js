@@ -119,7 +119,7 @@ import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "
 import { startSupervisorMonitor } from "./supervisorMonitor.js";
 import { buildSettingsExport, importSettingsSnapshot, loadSettings, prepareSettingsMutation, publicSettings, sanitizeSettingsPatch, saveSettings, settingsEtag, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
-import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
+import { configureTerminalSessionRecovery, getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, threadStateEtag, updateThreadState, updateThreadStateBatch } from "./threadState.js";
 import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
@@ -693,6 +693,77 @@ function terminalSessionApprovalRisk(workspacePath = "", policy = {}) {
   };
 }
 
+function terminalSessionMetadata(toolRunId) {
+  const run = getToolRun(toolRunId);
+  const input = run?.input || {};
+  let cwd = "";
+  try {
+    if (input.workspaceId) cwd = resolveWorkspacePath(input.workspaceId, settings);
+  } catch {}
+  return {
+    cwd,
+    shell: input.shell || "",
+    mode: input.mode === "spawn" ? "spawn" : "pty",
+    backend: input.mode === "spawn" ? "stdio" : "conpty"
+  };
+}
+
+function projectTerminalOutput(toolRunId, chunk) {
+  const metadata = terminalSessionMetadata(toolRunId);
+  const payload = {
+    sessionId: toolRunId,
+    stream: chunk.stream,
+    text: chunk.text,
+    mode: chunk.mode,
+    bytes: Buffer.byteLength(chunk.text || "", "utf8"),
+    cwd: metadata.cwd
+  };
+  const event = emitToolEvent(toolRunId, {
+    id: chunk.eventId || undefined,
+    type: "tool.output",
+    text: chunk.text,
+    payload
+  });
+  mirrorWorkspaceCommandTaskEvent(
+    toolRunId,
+    chunk.stream === "stderr" ? "stderr" : "stdout",
+    chunk.text,
+    payload,
+    event?.id || "",
+    "workspace.terminal_session"
+  );
+}
+
+function projectTerminalExit(toolRunId, sessionResult, hostEvent = null) {
+  const ok = Number(sessionResult.exitCode || 0) === 0;
+  updateToolRun(toolRunId, {
+    status: ok ? "completed" : "failed",
+    result: sessionResult,
+    error: ok ? "" : `Terminal exited with code ${sessionResult.exitCode}`,
+    completedAt: new Date().toISOString()
+  });
+  emitToolEvent(toolRunId, {
+    id: hostEvent?.eventId || `${toolRunId}:terminal-exited`,
+    type: ok ? "tool.completed" : "tool.failed",
+    text: sessionResult.signal ? `Terminal exited with signal ${sessionResult.signal}` : `Terminal exited with code ${sessionResult.exitCode}`,
+    payload: { session: sessionResult, ok }
+  });
+  mirrorWorkspaceCommandTaskEvent(
+    toolRunId,
+    "system",
+    ok ? "Terminal session completed." : `Terminal session failed with code ${sessionResult.exitCode}`,
+    { session: sessionResult, ok },
+    "terminal-exited",
+    "workspace.terminal_session"
+  );
+}
+
+configureTerminalSessionRecovery({
+  metadata: terminalSessionMetadata,
+  onOutput: projectTerminalOutput,
+  onExit: projectTerminalExit
+});
+
 async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
   const run = getToolRun(toolRunId);
   if (!run) {
@@ -719,51 +790,8 @@ async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
       cols: input.cols || 100,
       rows: input.rows || 30,
       mode: input.mode || "auto",
-      onOutput: (chunk) => {
-        const payload = {
-          sessionId: toolRunId,
-          stream: chunk.stream,
-          text: chunk.text,
-          mode: chunk.mode,
-          bytes: Buffer.byteLength(chunk.text || "", "utf8"),
-          cwd
-        };
-        const event = emitToolEventBatched(toolRunId, {
-          type: "tool.output",
-          text: chunk.text,
-          payload
-        });
-        mirrorWorkspaceCommandTaskEvent(
-          toolRunId,
-          chunk.stream === "stderr" ? "stderr" : "stdout",
-          chunk.text,
-          payload,
-          event?.id || "",
-          "workspace.terminal_session"
-        );
-      },
-      onExit: (sessionResult) => {
-        const ok = Number(sessionResult.exitCode || 0) === 0;
-        updateToolRun(toolRunId, {
-          status: ok ? "completed" : "failed",
-          result: sessionResult,
-          error: ok ? "" : `Terminal exited with code ${sessionResult.exitCode}`,
-          completedAt: new Date().toISOString()
-        });
-        emitToolEvent(toolRunId, {
-          type: ok ? "tool.completed" : "tool.failed",
-          text: sessionResult.signal ? `Terminal exited with signal ${sessionResult.signal}` : `Terminal exited with code ${sessionResult.exitCode}`,
-          payload: { session: sessionResult, ok }
-        });
-        mirrorWorkspaceCommandTaskEvent(
-          toolRunId,
-          "system",
-          ok ? "Terminal session completed." : `Terminal session failed with code ${sessionResult.exitCode}`,
-          { session: sessionResult, ok },
-          "terminal-exited",
-          "workspace.terminal_session"
-        );
-      }
+      onOutput: (chunk) => projectTerminalOutput(toolRunId, chunk),
+      onExit: (sessionResult, hostEvent) => projectTerminalExit(toolRunId, sessionResult, hostEvent)
     });
     emitToolEventBatched(toolRunId, {
       type: "tool.output",
@@ -1787,7 +1815,7 @@ async function routeApi(request, response, url) {
     const toolRunId = toolRunStopMatch[1];
     let result = stopWorkspaceToolRun(toolRunId, body.reason || "Stopped from VibeLink.");
     if (!result.ok) {
-      const terminalResult = stopTerminalSession(toolRunId, body.reason || "Stopped from VibeLink.");
+      const terminalResult = await stopTerminalSession(toolRunId, body.reason || "Stopped from VibeLink.");
       if (terminalResult.ok) {
         emitToolEvent(toolRunId, {
           type: "tool.cancel_requested",
@@ -3176,13 +3204,13 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/terminal-sessions" && request.method === "GET") {
-    sendJson(response, 200, { items: applyFields(listTerminalSessions(), url) });
+    sendJson(response, 200, { items: applyFields(await listTerminalSessions(), url) });
     return;
   }
 
   const terminalSessionMatch = url.pathname.match(/^\/api\/terminal-sessions\/([^/]+)$/);
   if (terminalSessionMatch && request.method === "GET") {
-    const session = getTerminalSession(terminalSessionMatch[1]);
+    const session = await getTerminalSession(terminalSessionMatch[1]);
     if (!session) {
       sendError(response, 404, "Terminal session not found.");
       return;
@@ -3196,7 +3224,7 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     const toolRunId = terminalSessionInputMatch[1];
     const text = String(body.text || "");
-    const result = writeTerminalSession(toolRunId, text);
+    const result = await writeTerminalSession(toolRunId, text);
     if (result.ok) {
       emitToolEvent(toolRunId, { type: "tool.input", text, payload: { session: result.session, bytes: Buffer.byteLength(text, "utf8") } });
       mirrorWorkspaceCommandTaskEvent(toolRunId, "stdin", text, { session: result.session }, `input:${Date.now()}`, "workspace.terminal_session");
@@ -3216,7 +3244,7 @@ async function routeApi(request, response, url) {
   if (terminalSessionResizeMatch && request.method === "POST") {
     const body = await readBody(request);
     const toolRunId = terminalSessionResizeMatch[1];
-    const result = resizeTerminalSession(toolRunId, body.cols, body.rows);
+    const result = await resizeTerminalSession(toolRunId, body.cols, body.rows);
     if (result.ok) emitToolEvent(toolRunId, { type: "tool.resize", text: `${result.cols}x${result.rows}`, payload: result });
     audit(request, url, auth, {
       type: "workspace.terminal_session.resize",
@@ -3890,6 +3918,10 @@ server.on("upgrade", async (request, socket, head) => {
 });
 
 scheduleToolEventsPrune();
+
+listTerminalSessions().catch((error) => {
+  console.error(`[terminal] recovery failed: ${error.stack || error.message}`);
+});
 
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;

@@ -17,7 +17,7 @@ function parseArgs(argv) {
     intervalSeconds: 30,
     title: "Live Call 10 minute QA stress",
     source: "qa-stress",
-    asrProvider: "mock",
+    asrProvider: process.env.VIBELINK_ASR || "whisper-cpp",
     agent: "claude",
     model: "",
     workspaceId: "",
@@ -58,7 +58,7 @@ Options:
   --token TOKEN             Device token. Or set VIBELINK_TOKEN.
   --seconds N               Duration. Default: 600.
   --interval-seconds N      Transcript/level push interval. Default: 30.
-  --asr-provider ID         ASR provider for the created session. Default: mock.
+  --asr-provider ID         ASR provider for the created session. Default: whisper-cpp.
   --agent ID                Assistant provider. Default: claude.
   --model ID                Optional assistant model.
   --workspace-id ID         Optional workspace id.

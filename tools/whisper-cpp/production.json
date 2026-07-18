@@ -1,0 +1,10 @@
+{
+  "binary": "whisper-cli.exe",
+  "model": "ggml-base.bin",
+  "language": "zh",
+  "sampleRate": 16000,
+  "channels": 1,
+  "encoding": "pcm16le",
+  "retentionDays": 7,
+  "maxPcmBytes": 536870912
+}

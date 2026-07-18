@@ -43,7 +43,8 @@ const providers = new Map();
 const sessionChannels = new Map(); // sessionId -> Map(channel -> { buffer, sampleRate, channels, encoding, provider })
 const LIVE_CALL_AUDIO_DIR = path.join(rootDir, ".agent-mobile-terminal", "live-call-audio");
 
-let activeProviderId = "mock";
+const IS_PRODUCTION = process.env.NODE_ENV === "production" || process.env.VIBELINK_ENV === "production";
+let activeProviderId = process.env.VIBELINK_ASR || (IS_PRODUCTION ? "whisper-cpp" : "mock");
 
 function createAsrMetrics() {
   return {
@@ -224,21 +225,17 @@ export function listAsrProviders() {
 // pipes PCM to stdin, parses JSONL from stdout.
 // Works with prebuilt binary at tools/whisper-cpp/bin/.
 //
-// The provider is registered automatically on module load if the binary exists.
-// Falls back silently to mock if the binary cannot be found.
+// The provider is registered automatically on module load if the fixed binary
+// and model exist. Production never falls back silently to the demo provider.
 
-const WHISPER_CPP_BIN = path.join(rootDir, "tools", "whisper-cpp", "bin");
-const WHISPER_MODELS = path.join(rootDir, "tools", "whisper-cpp", "models");
+const WHISPER_CPP_BIN = path.resolve(process.env.VIBELINK_WHISPER_CPP_BIN || path.join(rootDir, "tools", "whisper-cpp", "bin"));
+const WHISPER_MODELS = path.resolve(process.env.VIBELINK_WHISPER_CPP_MODELS || path.join(rootDir, "tools", "whisper-cpp", "models"));
+const WHISPER_BINARY_NAME = process.env.VIBELINK_WHISPER_CPP_BINARY || "whisper-cli.exe";
+const WHISPER_MODEL_NAME = process.env.VIBELINK_WHISPER_CPP_MODEL || "ggml-base.bin";
 
 function findWhisperBinary() {
-  const candidates = ["whisper-stream.exe", "whisper-cli.exe", "main.exe"];
-  for (const name of candidates) {
-    const full = path.join(WHISPER_CPP_BIN, name);
-    try {
-      const stat = fs.statSync(full);
-      if (stat.isFile() && stat.size > 0) return full;
-    } catch {}
-  }
+  const full = path.join(WHISPER_CPP_BIN, WHISPER_BINARY_NAME);
+  try { if (fs.statSync(full).isFile() && fs.statSync(full).size > 0) return full; } catch {}
   return "";
 }
 
@@ -248,12 +245,8 @@ function findModel(basename = "") {
     try { if (fs.statSync(full).isFile()) return full; } catch {}
     return "";
   }
-  // Auto-detect best available model
-  const preferred = ["ggml-small.bin", "ggml-base.bin", "ggml-tiny.bin"];
-  for (const name of preferred) {
-    const full = path.join(WHISPER_MODELS, name);
-    try { if (fs.statSync(full).isFile()) return full; } catch {}
-  }
+  const full = path.join(WHISPER_MODELS, WHISPER_MODEL_NAME);
+  try { if (fs.statSync(full).isFile()) return full; } catch {}
   return "";
 }
 
@@ -434,8 +427,12 @@ if (whisperProvider.check()) {
     console.log("[liveCallAsr] whisper.cpp provider ready:", whisperProvider.binaryPath);
   }
 } else {
-  console.log("[liveCallAsr] whisper.cpp binary/model not found, using mock provider");
+  console.warn(`[liveCallAsr] whisper.cpp unavailable (binary=${WHISPER_BINARY_NAME}, model=${WHISPER_MODEL_NAME})${IS_PRODUCTION ? "; production mock fallback disabled" : "; development may use mock"}`);
 }
+
+// Keep long-running recordings bounded even when sessions are abandoned.
+const pcmPruneTimer = setInterval(() => pruneLiveCallAudio(), 60 * 60 * 1000);
+pcmPruneTimer.unref?.();
 
 // ───────── Mock provider ─────────
 //
@@ -473,12 +470,12 @@ class MockAsrProvider {
   }
 
   check() {
-    return true;
+    return !IS_PRODUCTION;
   }
 
   diagnose() {
     return {
-      ready: true,
+      ready: !IS_PRODUCTION,
       mode: "deterministic-mock",
       activeSessions: this.sessions.size
     };
@@ -627,6 +624,11 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
     if (!channelState.provider) {
       const requestedProvider = session.asrProvider || session.asr_provider || activeProviderId;
       const provider = resolveAsrProvider(requestedProvider);
+      if (!provider) {
+        recordAsrError(sessionId);
+        emitLiveCallEvent(sessionId, "live_call.asr.error", { channel, requestedProvider, error: "no_production_asr_provider" });
+        throw new Error("No production ASR provider is available; configure whisper.cpp binary and model.");
+      }
       channelState.provider = provider.id;
       channelState.requestedProvider = requestedProvider || provider.id;
       channelState.fallbackFromProvider = provider.id !== requestedProvider ? requestedProvider : "";
@@ -668,7 +670,8 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
     }
 
     if (payload.buffer) {
-      const provider = providers.get(channelState.provider) || mockProvider;
+      const provider = providers.get(channelState.provider);
+      if (!provider) return;
       recordAsrInput(sessionId, payload.buffer.length);
       const normalized = normalizePcm16To16kMono(payload.buffer, {
         sampleRate: payload.sampleRate || channelState.sampleRate,
@@ -685,7 +688,8 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
     }
     if (payload.flush) {
       recordAsrFlush(sessionId);
-      const provider = providers.get(channelState.provider) || mockProvider;
+      const provider = providers.get(channelState.provider);
+      if (!provider) return;
       for (const segment of channelState.vad.flush()) {
         feedSegment(sessionId, channel, channelState, provider, segment);
       }
@@ -701,7 +705,8 @@ function resolveAsrProvider(requestedProvider = "") {
   if (requested && providerAvailable(requested)) return requested;
   const active = providers.get(activeProviderId);
   if (active && providerAvailable(active)) return active;
-  return mockProvider;
+  if (!IS_PRODUCTION && providerAvailable(mockProvider)) return mockProvider;
+  return null;
 }
 
 function providerAvailable(provider) {
@@ -717,11 +722,32 @@ function liveCallCheckpointPath(sessionId, channel) {
 function appendCheckpoint(channelState, buffer) {
   try {
     fs.mkdirSync(path.dirname(channelState.checkpointPath), { recursive: true });
+    const maxBytes = Math.max(1024 * 1024, Number(process.env.VIBELINK_LIVE_CALL_PCM_MAX_BYTES || 512 * 1024 * 1024));
+    if (channelState.checkpointBytes + buffer.length > maxBytes) {
+      const rotated = `${channelState.checkpointPath}.${Date.now()}`;
+      fs.renameSync(channelState.checkpointPath, rotated);
+      channelState.checkpointBytes = 0;
+    }
     fs.appendFileSync(channelState.checkpointPath, buffer);
     channelState.checkpointBytes += buffer.length;
   } catch (error) {
     channelState.lastCheckpointError = error.message;
   }
+}
+
+export function pruneLiveCallAudio(now = Date.now()) {
+  const retentionDays = Math.max(1, Number(process.env.VIBELINK_LIVE_CALL_PCM_RETENTION_DAYS || 7));
+  const cutoff = now - retentionDays * 86400000;
+  let removed = 0;
+  try {
+    if (!fs.existsSync(LIVE_CALL_AUDIO_DIR)) return { removed, retentionDays };
+    for (const name of fs.readdirSync(LIVE_CALL_AUDIO_DIR)) {
+      const file = path.join(LIVE_CALL_AUDIO_DIR, name);
+      const stat = fs.statSync(file);
+      if (stat.isFile() && stat.mtimeMs < cutoff) { fs.rmSync(file); removed += 1; }
+    }
+  } catch {}
+  return { removed, retentionDays };
 }
 
 function feedSegment(sessionId, channel, channelState, provider, segment) {

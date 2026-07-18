@@ -4,6 +4,8 @@ pub mod spool;
 #[cfg(windows)]
 mod backend;
 #[cfg(windows)]
+mod codex_app_server;
+#[cfg(windows)]
 mod daemon;
 #[cfg(windows)]
 mod windows;

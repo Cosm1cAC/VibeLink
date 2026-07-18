@@ -207,7 +207,7 @@ pub fn run(bootstrap_path: &Path) -> Result<()> {
         last_host_seq: 0,
         last_acked_host_seq: 0,
         capabilities: json!({
-            "input": true,
+            "input": bootstrap.start.backend != super::protocol::BackendKind::AppServer,
             "resize": bootstrap.start.backend == super::protocol::BackendKind::ConPty,
             "interrupt": bootstrap.start.backend == super::protocol::BackendKind::ConPty,
             "terminate": true,

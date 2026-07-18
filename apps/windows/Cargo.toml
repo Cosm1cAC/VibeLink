@@ -26,6 +26,7 @@ sha2 = "0.10"
 base64 = "0.22"
 portable-pty = "0.9"
 uuid = { version = "1.11", features = ["v4"] }
+tungstenite = "0.24"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

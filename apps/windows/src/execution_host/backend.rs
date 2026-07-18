@@ -1,4 +1,4 @@
-use super::{protocol::BackendKind, windows::Job};
+use super::{codex_app_server, protocol::BackendKind, windows::Job};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -15,14 +15,14 @@ use std::os::windows::process::CommandExt;
 
 use super::protocol::StartParams;
 
-type EventCallback = Arc<dyn Fn(&str, Value) + Send + Sync + 'static>;
-type ExitCallback = Arc<dyn Fn(u32) + Send + Sync + 'static>;
+pub(super) type EventCallback = Arc<dyn Fn(&str, Value) + Send + Sync + 'static>;
+pub(super) type ExitCallback = Arc<dyn Fn(u32) + Send + Sync + 'static>;
 
 pub struct BackendControl {
     kind: BackendKind,
     pid: u32,
     process_started_at_ticks: u64,
-    input: Arc<Mutex<Box<dyn Write + Send>>>,
+    input: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     terminal: Option<Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>>,
     job: Arc<Job>,
     activation: Arc<(Mutex<bool>, Condvar)>,
@@ -37,7 +37,25 @@ impl BackendControl {
         match start.backend {
             BackendKind::Stdio => Self::start_stdio(start, on_event, on_exit),
             BackendKind::ConPty => Self::start_conpty(start, on_event, on_exit),
+            BackendKind::AppServer => Self::start_app_server(start, on_event, on_exit),
         }
+    }
+
+    fn start_app_server(
+        start: &StartParams,
+        on_event: EventCallback,
+        on_exit: ExitCallback,
+    ) -> Result<Arc<Self>> {
+        let launched = codex_app_server::start(start, on_event, on_exit)?;
+        Ok(Arc::new(Self {
+            kind: BackendKind::AppServer,
+            pid: launched.pid,
+            process_started_at_ticks: launched.process_started_at_ticks,
+            input: None,
+            terminal: None,
+            job: launched.job,
+            activation: launched.activation,
+        }))
     }
 
     fn start_stdio(
@@ -106,7 +124,7 @@ impl BackendControl {
             kind: BackendKind::Stdio,
             pid,
             process_started_at_ticks,
-            input: Arc::new(Mutex::new(Box::new(stdin))),
+            input: Some(Arc::new(Mutex::new(Box::new(stdin)))),
             terminal: None,
             job,
             activation,
@@ -190,7 +208,7 @@ impl BackendControl {
             kind: BackendKind::ConPty,
             pid,
             process_started_at_ticks,
-            input,
+            input: Some(input),
             terminal: Some(terminal),
             job,
             activation,
@@ -208,6 +226,8 @@ impl BackendControl {
     pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
         let mut input = self
             .input
+            .as_ref()
+            .context("CAPABILITY_UNSUPPORTED: this execution does not support live input")?
             .lock()
             .map_err(|_| anyhow::anyhow!("input lock poisoned"))?;
         input
@@ -250,14 +270,22 @@ impl BackendControl {
 
     pub fn capabilities(&self) -> Value {
         json!({
-            "input": true,
+            "input": self.kind != BackendKind::AppServer,
             "resize": self.kind == BackendKind::ConPty,
             "interrupt": self.kind == BackendKind::ConPty,
             "terminate": true,
             "eventReplay": true,
             "reattach": true,
             "terminalReadyHandshake": self.kind == BackendKind::ConPty,
-            "backend": self.kind
+            "backend": self.kind,
+            "executionOwnership": "vibelink-host",
+            "structuredToolEvents": if self.kind == BackendKind::AppServer { "authoritative" } else { "unavailable" },
+            "toolOutput": if self.kind == BackendKind::AppServer { "complete" } else { "unavailable" },
+            "exitStatus": "authoritative",
+            "approvalContinuation": false,
+            "liveInput": false,
+            "protocol": if self.kind == BackendKind::AppServer { "codex-app-server" } else { "process" },
+            "protocolVersion": if self.kind == BackendKind::AppServer { "probed" } else { "v1" }
         })
     }
 

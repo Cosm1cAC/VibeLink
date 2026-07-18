@@ -112,6 +112,21 @@ pub enum BackendKind {
     ConPty,
     #[serde(rename = "stdio")]
     Stdio,
+    #[serde(rename = "app_server")]
+    AppServer,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppServerParams {
+    pub thread_resume_params: Value,
+    pub turn_start_params: Value,
+    #[serde(default = "default_app_server_connect_timeout")]
+    pub connect_timeout_ms: u64,
+}
+
+fn default_app_server_connect_timeout() -> u64 {
+    15_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -128,6 +143,8 @@ pub struct StartParams {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub app_server: Option<AppServerParams>,
     #[serde(default = "default_cols")]
     pub cols: u16,
     #[serde(default = "default_rows")]
@@ -169,11 +186,55 @@ impl StartParams {
         if self.cols == 0 || self.rows == 0 {
             bail!("terminal size must be positive");
         }
+        match (self.backend, self.kind.as_str(), self.app_server.as_ref()) {
+            (BackendKind::AppServer, "provider.appServer", Some(app_server)) => {
+                validate_app_server_params(app_server)?;
+            }
+            (BackendKind::AppServer, _, _) => {
+                bail!("app_server backend requires kind provider.appServer and appServer params");
+            }
+            (_, "provider.appServer", _) => {
+                bail!("provider.appServer requires the app_server backend");
+            }
+            (_, _, Some(_)) => bail!("appServer params require the app_server backend"),
+            _ => {}
+        }
         if self.spool_quota_bytes < 4096 || self.segment_bytes < 1024 {
             bail!("spool quota and segment size are too small");
         }
         validate_operation_id(&self.operation_id)
     }
+}
+
+fn validate_app_server_params(params: &AppServerParams) -> Result<()> {
+    let resume = params
+        .thread_resume_params
+        .as_object()
+        .context("appServer.threadResumeParams must be an object")?;
+    let turn = params
+        .turn_start_params
+        .as_object()
+        .context("appServer.turnStartParams must be an object")?;
+    let resume_thread = resume
+        .get("threadId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("appServer.threadResumeParams.threadId is required")?;
+    let turn_thread = turn
+        .get("threadId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("appServer.turnStartParams.threadId is required")?;
+    if resume_thread != turn_thread {
+        bail!("appServer resume and turn threadId must match");
+    }
+    if !turn.get("input").is_some_and(Value::is_array) {
+        bail!("appServer.turnStartParams.input must be an array");
+    }
+    if !(100..=60_000).contains(&params.connect_timeout_ms) {
+        bail!("appServer.connectTimeoutMs must be between 100 and 60000");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -473,5 +534,38 @@ mod tests {
         }))
         .unwrap_err();
         assert!(error.to_string().contains("strict v1 schema"));
+    }
+
+    #[test]
+    fn app_server_start_requires_matching_resume_and_turn_thread() {
+        let valid = StartParams {
+            execution_id: None,
+            kind: "provider.appServer".to_string(),
+            backend: BackendKind::AppServer,
+            command: "codex".to_string(),
+            args: Vec::new(),
+            cwd: Some("C:\\repo".to_string()),
+            env: BTreeMap::new(),
+            app_server: Some(AppServerParams {
+                thread_resume_params: json!({ "threadId": "thread-1" }),
+                turn_start_params: json!({ "threadId": "thread-1", "input": [] }),
+                connect_timeout_ms: 15_000,
+            }),
+            cols: 120,
+            rows: 30,
+            spool_quota_bytes: DEFAULT_SPOOL_QUOTA_BYTES,
+            segment_bytes: DEFAULT_SEGMENT_BYTES,
+            operation_id: "start-1".to_string(),
+        };
+        valid.validate().unwrap();
+
+        let mut mismatched = valid.clone();
+        mismatched.app_server.as_mut().unwrap().turn_start_params["threadId"] =
+            Value::String("thread-2".to_string());
+        assert!(mismatched
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must match"));
     }
 }

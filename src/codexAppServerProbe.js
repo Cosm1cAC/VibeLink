@@ -65,14 +65,17 @@ function splitCommandLine(input) {
   let quote = "";
   let escape = false;
 
-  for (const char of String(input || "")) {
+  const value = String(input || "");
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    const next = value[index + 1];
     if (escape) {
       current += char;
       escape = false;
       continue;
     }
 
-    if (char === "\\" && quote) {
+    if (char === "\\" && quote && (next === quote || next === "\\")) {
       escape = true;
       continue;
     }
@@ -114,11 +117,17 @@ function resolveCodexCommand(settings) {
   if (shouldAuto) {
     const bundled = findBundledCodexExe();
     if (bundled) return { command: bundled, args: [] };
+    if (process.platform === "win32" && process.env.APPDATA) {
+      const npmCli = path.join(process.env.APPDATA, "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
+      if (pathExists(npmCli)) return { command: process.execPath, args: [npmCli] };
+    }
   }
 
-  const parts = splitCommandLine(configured || "codex");
+  const parts = splitCommandLine(configured === "auto" ? "codex" : configured || "codex");
   return { command: parts[0] || "codex", args: parts.slice(1) };
 }
+
+export const __testInternals = { resolveCodexCommand, splitCommandLine };
 
 function getFreePort() {
   return new Promise((resolve, reject) => {

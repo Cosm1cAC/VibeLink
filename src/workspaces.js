@@ -4,6 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { withAgentReachPath } from "./agentReachRuntime.js";
+import { parseTestOutput } from "./testAdapters.js";
 import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
 import { getExecutionHostFacade } from "./executionHostClient.js";
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
@@ -1651,24 +1652,6 @@ export async function applyWorkspaceGitAction(id, settings, body = {}) {
   };
 }
 
-function parseTestOutput(stdout = "", stderr = "", exitCode = 0) {
-  const text = [stdout, stderr].filter(Boolean).join("\n");
-  const lines = text.split(/\r?\n/);
-  const failed = [];
-  for (const line of lines) {
-    if (/\b(fail|failed|error|exception)\b/i.test(line)) failed.push(line.trim());
-  }
-  const passedMatch = text.match(/(\d+)\s+(?:passing|passed|tests?\s+passed)/i);
-  const failedMatch = text.match(/(\d+)\s+(?:failing|failed|tests?\s+failed|failures?)/i);
-  return {
-    ok: exitCode === 0,
-    passed: passedMatch ? Number(passedMatch[1]) || 0 : exitCode === 0 ? 1 : 0,
-    failed: failedMatch ? Number(failedMatch[1]) || failed.length : exitCode === 0 ? 0 : Math.max(1, failed.length),
-    failures: failed.slice(0, 30),
-    log: text
-  };
-}
-
 export async function runWorkspaceCommand(id, settings, body = {}) {
   const workspace = workspaceOrThrow(id);
   const cwd = resolveAllowedPath(workspace.path, settings);
@@ -1704,7 +1687,12 @@ export async function runWorkspaceCommand(id, settings, body = {}) {
     workspace,
     cwd,
     command,
-    test: body.kind === "test" ? parseTestOutput(result.stdout, result.stderr, result.exitCode || 0) : null
+    test: body.kind === "test" ? parseTestOutput({
+      command,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode || 0
+    }) : null
   };
 }
 

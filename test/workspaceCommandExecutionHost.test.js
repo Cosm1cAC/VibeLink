@@ -48,7 +48,18 @@ test("workspace command delegates foreground and streaming contracts to the exec
     assert.equal(result.executionId, executionId);
     assert.equal(result.workspace.id, workspace.id);
     assert.equal(result.command, "npm test");
-    assert.deepEqual(result.test, { ok: true, passed: 2, failed: 0, failures: [], log: "2 passed\n" });
+    assert.deepEqual(
+      {
+        ok: result.test.ok,
+        passed: result.test.passed,
+        failed: result.test.failed,
+        failures: result.test.failures,
+        log: result.test.log
+      },
+      { ok: true, passed: 2, failed: 0, failures: [], log: "2 passed\n" }
+    );
+    assert.deepEqual(result.test.suites, []);
+    assert.deepEqual(result.test.cases, []);
     assert.equal(chunks[0].command, "npm test");
     assert.equal(chunks[0].cwd, repo);
   } finally {

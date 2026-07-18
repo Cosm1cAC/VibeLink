@@ -117,10 +117,10 @@ import { internalControlAuthorized, originalHostRequest } from "./internalContro
 import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
 import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
 import { startSupervisorMonitor } from "./supervisorMonitor.js";
-import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
+import { buildSettingsExport, importSettingsSnapshot, loadSettings, prepareSettingsMutation, publicSettings, sanitizeSettingsPatch, saveSettings, settingsEtag, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
-import { createThreadFork, getThreadState, updateThreadState, updateThreadStateBatch } from "./threadState.js";
+import { createThreadFork, getThreadState, threadStateEtag, updateThreadState, updateThreadStateBatch } from "./threadState.js";
 import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
@@ -306,30 +306,60 @@ const uploadMimeToExt = new Map([
   ["application/zip", ".zip"]
 ]);
 
-function sendJson(response, status, value) {
+function sendJson(response, status, value, headers = {}) {
   if (response.headersSent || response.writableEnded || response.destroyed) return;
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-store",
+    ...headers
   });
   response.end(JSON.stringify(value));
 }
 
-function sendError(response, status, message, extra = {}) {
+function sendError(response, status, message, extra = {}, headers = {}) {
   if (response.headersSent || response.writableEnded || response.destroyed) {
     console.error(message);
     return;
   }
-  sendJson(response, status, { error: message, ...extra });
+  sendJson(response, status, { error: message, ...extra }, headers);
+}
+
+function revisionFromIfMatch(request, scope) {
+  const value = String(request.headers["if-match"] || "").trim();
+  if (!value) return undefined;
+  const match = value.match(new RegExp(`^(?:W\\/)?"vibelink:${scope}:(\\d+)"$`));
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+function workspaceRevisionFromIfMatch(request) {
+  const value = String(request.headers["if-match"] || "").trim();
+  if (!value) return undefined;
+  const match = value.match(/^(?:W\/)?"vibelink:workspace-file:([a-f0-9]{64})"$/i);
+  return match ? match[1].toLowerCase() : "invalid-etag";
+}
+
+let settingsMutationQueue = Promise.resolve();
+
+async function withSettingsMutation(work) {
+  const previous = settingsMutationQueue;
+  let release;
+  settingsMutationQueue = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+  }
 }
 
 function sendKnownThreadStateError(response, error) {
   if (error?.status === 409 && error?.code === "THREAD_STATE_CONFLICT") {
+    const state = getThreadState();
     sendError(response, 409, error.message || "Thread state conflict.", {
       code: error.code,
       conflicts: error.conflicts || [],
-      state: getThreadState()
-    });
+      state
+    }, { ETag: threadStateEtag(state) });
     return true;
   }
   if (error?.status === 400) {
@@ -2438,41 +2468,56 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/settings" && request.method === "GET") {
+    const current = await publicSettings(settings);
+    sendJson(response, 200, { settings: current }, { ETag: settingsEtag(settings) });
+    return;
+  }
+
   if (url.pathname === "/api/settings" && request.method === "POST") {
     const body = await readBody(request);
-    const validation = validate(SettingsPatchSchema, body);
-    if (!validation.ok) {
-      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
-      return;
-    }
-    const patch = sanitizeSettingsPatch(body);
-    if (isDryRun(url)) {
-      const currentPublic = await publicSettings(settings);
-      const diff = {};
-      for (const key of Object.keys(patch)) {
-        diff[key] = { from: currentPublic[key], to: patch[key] };
+    await withSettingsMutation(async () => {
+      const validation = validate(SettingsPatchSchema, body);
+      if (!validation.ok) {
+        sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+        return;
       }
-      sendJson(response, 200, { dryRun: true, diff, wouldChange: Object.keys(diff).length > 0 });
-      return;
-    }
-    const credentialResult = patch.apiKeys ? await writeApiKeys(patch.apiKeys) : {};
-    if (typeof body.nativePush?.fcmServiceAccountJson === "string" && body.nativePush.fcmServiceAccountJson.trim()) {
-      credentialResult.fcmServiceAccount = await writeSecret("fcmServiceAccount", body.nativePush.fcmServiceAccountJson.trim());
-    }
-    settings = {
-      ...settings,
-      ...patch,
-      mcp: patch.mcp ? mergeMcpSettings(settings.mcp || {}, patch.mcp) : settings.mcp,
-      apiKeys: {
-        ...settings.apiKeys
+      const patch = sanitizeSettingsPatch(body);
+      const expectedRevision = body.expectedRevision ?? revisionFromIfMatch(request, "settings");
+      let prepared;
+      try {
+        prepared = prepareSettingsMutation(settings, patch, { expectedRevision });
+      } catch (error) {
+        if (error?.status !== 409 || error?.code !== "SETTINGS_CONFLICT") throw error;
+        sendError(response, 409, error.message, {
+          code: error.code,
+          expectedRevision: error.expectedRevision,
+          actualRevision: error.actualRevision,
+          conflictingFields: error.conflictingFields,
+          current: { settings: await publicSettings(settings) }
+        }, { ETag: settingsEtag(settings) });
+        return;
       }
-    };
-    settings = ensureNotificationSettings(settings);
-    await saveSettings(settings);
-    ensureDefaultWorkspaces(settings);
-    scheduleToolEventsPrune();
-    audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch), credentials: credentialResult } });
-    sendJson(response, 200, { ok: true, settings: await publicSettings(settings) });
+      if (isDryRun(url)) {
+        const currentPublic = await publicSettings(settings);
+        const diff = {};
+        for (const key of Object.keys(patch)) {
+          diff[key] = { from: currentPublic[key], to: patch[key] };
+        }
+        sendJson(response, 200, { dryRun: true, diff, wouldChange: Object.keys(diff).length > 0 }, { ETag: settingsEtag(settings) });
+        return;
+      }
+      const credentialResult = patch.apiKeys ? await writeApiKeys(patch.apiKeys) : {};
+      if (typeof body.nativePush?.fcmServiceAccountJson === "string" && body.nativePush.fcmServiceAccountJson.trim()) {
+        credentialResult.fcmServiceAccount = await writeSecret("fcmServiceAccount", body.nativePush.fcmServiceAccountJson.trim());
+      }
+      settings = ensureNotificationSettings(prepared.settings);
+      await saveSettings(settings);
+      ensureDefaultWorkspaces(settings);
+      scheduleToolEventsPrune();
+      audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch), credentials: credentialResult } });
+      sendJson(response, 200, { ok: true, settings: await publicSettings(settings) }, { ETag: settingsEtag(settings) });
+    });
     return;
   }
 
@@ -2484,28 +2529,48 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/settings/import" && request.method === "POST") {
     const body = await readBody(request);
-    let nextSettings;
-    try {
-      nextSettings = importSettingsSnapshot(settings, body);
-    } catch (error) {
-      sendError(response, error.status || 400, error.message || "Invalid settings import.");
-      return;
-    }
-    const summary = summarizeSettingsImport(settings, nextSettings);
-    if (isDryRun(url) || body.dryRun === true) {
-      sendJson(response, 200, {
-        dryRun: true,
-        ...summary,
-        settings: await publicSettings(nextSettings)
-      });
-      return;
-    }
-    settings = ensureNotificationSettings(nextSettings);
-    await saveSettings(settings);
-    ensureDefaultWorkspaces(settings);
-    scheduleToolEventsPrune();
-    audit(request, url, auth, { type: "settings.import", success: true, meta: summary });
-    sendJson(response, 200, { ok: true, ...summary, settings: await publicSettings(settings) });
+    await withSettingsMutation(async () => {
+      let nextSettings;
+      try {
+        nextSettings = importSettingsSnapshot(settings, body);
+      } catch (error) {
+        sendError(response, error.status || 400, error.message || "Invalid settings import.");
+        return;
+      }
+      const patch = sanitizeSettingsPatch(body.settings && typeof body.settings === "object" ? body.settings : body);
+      const expectedRevision = body.expectedRevision ?? revisionFromIfMatch(request, "settings");
+      let prepared;
+      try {
+        prepared = prepareSettingsMutation(settings, patch, { expectedRevision });
+      } catch (error) {
+        if (error?.status !== 409 || error?.code !== "SETTINGS_CONFLICT") throw error;
+        sendError(response, 409, error.message, {
+          code: error.code,
+          expectedRevision: error.expectedRevision,
+          actualRevision: error.actualRevision,
+          conflictingFields: error.conflictingFields,
+          current: { settings: await publicSettings(settings) }
+        }, { ETag: settingsEtag(settings) });
+        return;
+      }
+      const summary = summarizeSettingsImport(settings, nextSettings);
+      if (isDryRun(url) || body.dryRun === true) {
+        sendJson(response, 200, {
+          dryRun: true,
+          ...summary,
+          settings: await publicSettings(nextSettings)
+        }, { ETag: settingsEtag(settings) });
+        return;
+      }
+      nextSettings.revision = prepared.revision;
+      nextSettings._fieldRevisions = prepared.settings._fieldRevisions || settings._fieldRevisions || {};
+      settings = ensureNotificationSettings(nextSettings);
+      await saveSettings(settings);
+      ensureDefaultWorkspaces(settings);
+      scheduleToolEventsPrune();
+      audit(request, url, auth, { type: "settings.import", success: true, meta: summary });
+      sendJson(response, 200, { ok: true, ...summary, settings: await publicSettings(settings) }, { ETag: settingsEtag(settings) });
+    });
     return;
   }
 
@@ -2684,7 +2749,8 @@ async function routeApi(request, response, url) {
 
   const workspaceFileMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file$/);
   if (workspaceFileMatch && request.method === "GET") {
-    sendJson(response, 200, await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || ""));
+    const result = await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || "");
+    sendJson(response, 200, result, { ETag: result.etag });
     return;
   }
 
@@ -2704,6 +2770,8 @@ async function routeApi(request, response, url) {
       return;
     }
     try {
+      if (body.expectedRevision === undefined) body.expectedRevision = workspaceRevisionFromIfMatch(request);
+      body.requireAbsent = body.requireAbsent === true || String(request.headers["if-none-match"] || "").trim() === "*";
       const result = await mutateWorkspaceFile(workspaceFileMatch[1], settings, body);
       audit(request, url, auth, {
         type: "workspace.file",
@@ -2711,7 +2779,7 @@ async function routeApi(request, response, url) {
         target: result.path || body.path || "",
         meta: { action: result.action || body.action || "write", previousPath: result.previousPath || "" }
       });
-      sendJson(response, result.action === "write" ? 200 : 200, result);
+      sendJson(response, 200, result, result.etag ? { ETag: result.etag } : {});
     } catch (error) {
       audit(request, url, auth, {
         type: "workspace.file",
@@ -2720,7 +2788,17 @@ async function routeApi(request, response, url) {
         reason: error.message,
         meta: { action: body.action || "write" }
       });
-      sendError(response, error.status || 500, error.message);
+      if (error?.status === 409 && error?.code === "WORKSPACE_FILE_CONFLICT") {
+        sendError(response, 409, error.message, {
+          code: error.code,
+          path: body.path || "",
+          expectedRevision: error.expectedRevision,
+          actualRevision: error.actualRevision,
+          current: error.current
+        }, error.current?.etag ? { ETag: error.current.etag } : {});
+      } else {
+        sendError(response, error.status || 500, error.message);
+      }
     }
     return;
   }
@@ -3403,7 +3481,7 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     try {
       const state = updateThreadState(body.key, body.patch || {}, { expectedRevision: body.expectedRevision });
-      sendJson(response, 200, state);
+      sendJson(response, 200, state, { ETag: threadStateEtag(state) });
     } catch (error) {
       if (!sendKnownThreadStateError(response, error)) throw error;
     }
@@ -3443,7 +3521,8 @@ async function routeApi(request, response, url) {
   if (url.pathname === "/api/thread-state/batch" && request.method === "POST") {
     const body = await readBody(request);
     try {
-      sendJson(response, 200, updateThreadStateBatch(body.updates));
+      const state = updateThreadStateBatch(body.updates);
+      sendJson(response, 200, state, { ETag: threadStateEtag(state) });
     } catch (error) {
       if (!sendKnownThreadStateError(response, error)) throw error;
     }
@@ -3453,7 +3532,7 @@ async function routeApi(request, response, url) {
   if (url.pathname === "/api/thread-state/forks" && request.method === "POST") {
     const body = await readBody(request);
     const result = createThreadFork(body);
-    sendJson(response, 201, result);
+    sendJson(response, 201, result, { ETag: threadStateEtag(result.state) });
     return;
   }
 

@@ -255,6 +255,7 @@ class WorkspaceViewModel : ViewModel() {
     fun mutateFile(apiClient: ApiClient, action: String, path: String, text: String = "", nextPath: String = "") {
         val workspaceId = _selectedWorkspaceId.value
         if (workspaceId.isBlank() || path.trim().isBlank()) return
+        val baseFile = _selectedFile.value?.takeIf { it.path == path.trim() }
         viewModelScope.launch {
             _refreshing.value = true
             _error.value = ""
@@ -265,12 +266,28 @@ class WorkspaceViewModel : ViewModel() {
                     path = path.trim(),
                     text = text,
                     nextPath = nextPath.trim(),
+                    expectedRevision = baseFile?.revision?.takeIf { it.isNotBlank() },
+                    requireAbsent = action == "write" && baseFile == null,
                 )
                 _selectedFile.value = when (result.action) {
                     "delete" -> null
                     else -> apiClient.getWorkspaceFile(workspaceId, result.path)
                 }
                 loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
+            } catch (error: ApiException) {
+                if (error.statusCode == 409) {
+                    val latest = runCatching { apiClient.getWorkspaceFile(workspaceId, path.trim()) }.getOrNull()
+                    _selectedFile.value = if (action == "write" && baseFile != null && latest != null) {
+                        val merged = RevisionConflictPolicy.mergeWorkspaceText(baseFile.text, text, latest.text)
+                        latest.copy(text = merged.text)
+                    } else {
+                        latest
+                    }
+                    runCatching { loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value) }
+                    _error.value = "File changed on another device. Latest content was refreshed and local edits were preserved for review."
+                } else {
+                    _error.value = error.message ?: "Workspace file action failed"
+                }
             } catch (error: Exception) {
                 _error.value = error.message ?: "Workspace file action failed"
             } finally {

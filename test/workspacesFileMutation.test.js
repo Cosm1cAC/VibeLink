@@ -68,3 +68,78 @@ test("mutateWorkspaceFile rejects path escapes and overwrite renames", async () 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("workspace file revisions reject a stale second-device write", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-workspace-file-conflict-"));
+  const repo = path.join(tempRoot, "repo");
+  fs.mkdirSync(repo, { recursive: true });
+  fs.writeFileSync(path.join(repo, "notes.md"), "base\n", "utf8");
+  const workspace = upsertWorkspace({ path: repo, allowedRoot: repo, title: "files" });
+  const settings = { allowedRoots: [tempRoot] };
+
+  try {
+    const deviceA = await getWorkspaceFile(workspace.id, settings, "notes.md");
+    const deviceB = await getWorkspaceFile(workspace.id, settings, "notes.md");
+
+    assert.equal(typeof deviceA.revision, "string");
+    assert.equal(deviceA.revision, deviceB.revision);
+    assert.match(deviceA.etag, /^"vibelink:workspace-file:/);
+
+    const written = await mutateWorkspaceFile(workspace.id, settings, {
+      action: "write",
+      path: "notes.md",
+      text: "from device A\n",
+      expectedRevision: deviceA.revision
+    });
+    assert.notEqual(written.revision, deviceA.revision);
+
+    await assert.rejects(
+      () => mutateWorkspaceFile(workspace.id, settings, {
+        action: "write",
+        path: "notes.md",
+        text: "from device B\n",
+        expectedRevision: deviceB.revision
+      }),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.equal(error.code, "WORKSPACE_FILE_CONFLICT");
+        assert.equal(error.expectedRevision, deviceB.revision);
+        assert.equal(error.actualRevision, written.revision);
+        assert.equal(error.current.text, "from device A\n");
+        return true;
+      }
+    );
+    assert.equal(fs.readFileSync(path.join(repo, "notes.md"), "utf8"), "from device A\n");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("workspace create-only mutations do not overwrite a file created by another device", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-workspace-file-create-conflict-"));
+  const repo = path.join(tempRoot, "repo");
+  fs.mkdirSync(repo, { recursive: true });
+  const workspace = upsertWorkspace({ path: repo, allowedRoot: repo, title: "files" });
+  const settings = { allowedRoots: [tempRoot] };
+
+  try {
+    await mutateWorkspaceFile(workspace.id, settings, {
+      action: "write",
+      path: "new.md",
+      text: "from device A\n",
+      requireAbsent: true
+    });
+    await assert.rejects(
+      () => mutateWorkspaceFile(workspace.id, settings, {
+        action: "write",
+        path: "new.md",
+        text: "from device B\n",
+        requireAbsent: true
+      }),
+      (error) => error.status === 409 && error.code === "WORKSPACE_FILE_CONFLICT"
+    );
+    assert.equal(fs.readFileSync(path.join(repo, "new.md"), "utf8"), "from device A\n");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

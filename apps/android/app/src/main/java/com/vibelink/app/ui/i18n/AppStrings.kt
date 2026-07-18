@@ -232,6 +232,7 @@ class AppStrings(private val appLanguage: AppLanguage) {
 
     val loadSettingsFailed: String = select("加载设置失败", "Failed to load settings")
     val settingsSaved: String = select("设置已保存。", "Settings saved.")
+    val settingsChangedElsewhere: String = select("设置已在其他设备修改；已刷新并保留本机更改，请检查后重试。", "Settings changed on another device; refreshed with local edits preserved. Review and retry.")
     val saveSettingsFailed: String = select("保存设置失败", "Failed to save settings")
     val androidApprovalApprovedReason: String = select("已在 Android 端批准。", "Approved on Android.")
     val androidApprovalDeniedReason: String = select("已在 Android 端拒绝。", "Denied on Android.")

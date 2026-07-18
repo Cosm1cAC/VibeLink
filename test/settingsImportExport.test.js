@@ -3,8 +3,10 @@ import test from "node:test";
 
 import { defaultSettings } from "../src/config.js";
 import {
+  prepareSettingsMutation,
   buildSettingsExport,
   importSettingsSnapshot,
+  publicSettings,
   sanitizeSettingsPatch
 } from "../src/store.js";
 
@@ -101,4 +103,43 @@ test("sanitizeSettingsPatch accepts importable retention and mcp settings", () =
     autoPruneIntervalMinutes: 30
   });
   assert.equal(patch.mcp.probeTimeoutMs, 5000);
+});
+
+test("settings revisions merge disjoint device patches and reject stale same-field writes", () => {
+  const base = {
+    ...defaultSettings,
+    revision: 0,
+    _fieldRevisions: {}
+  };
+
+  const deviceA = prepareSettingsMutation(base, { defaultCwd: "C:/device-a" }, { expectedRevision: 0 });
+  assert.equal(deviceA.settings.revision, 1);
+
+  assert.throws(
+    () => prepareSettingsMutation(deviceA.settings, { defaultCwd: "C:/device-b" }, { expectedRevision: 0 }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.equal(error.code, "SETTINGS_CONFLICT");
+      assert.equal(error.expectedRevision, 0);
+      assert.equal(error.actualRevision, 1);
+      assert.deepEqual(error.conflictingFields, ["defaultCwd"]);
+      return true;
+    }
+  );
+
+  const deviceB = prepareSettingsMutation(deviceA.settings, { permissionMode: "plan" }, { expectedRevision: 0 });
+  assert.equal(deviceB.settings.defaultCwd, "C:/device-a");
+  assert.equal(deviceB.settings.permissionMode, "plan");
+  assert.equal(deviceB.settings.revision, 2);
+});
+
+test("public settings expose the current revision without field revision metadata", async () => {
+  const settings = await publicSettings({
+    ...defaultSettings,
+    revision: 7,
+    _fieldRevisions: { defaultCwd: 7 }
+  });
+
+  assert.equal(settings.revision, 7);
+  assert.equal(settings._fieldRevisions, undefined);
 });

@@ -62,6 +62,20 @@ const schemas = {
       risk: { type: "object" }
     }
   },
+  RevisionConflict: {
+    type: "object",
+    required: ["error", "code", "actualRevision", "current"],
+    properties: {
+      error: { type: "string" },
+      code: { type: "string", enum: ["THREAD_STATE_CONFLICT", "SETTINGS_CONFLICT", "WORKSPACE_FILE_CONFLICT"] },
+      expectedRevision: { oneOf: [{ type: "integer" }, { type: "string" }], nullable: true },
+      actualRevision: { oneOf: [{ type: "integer" }, { type: "string" }], nullable: true },
+      conflictingFields: { type: "array", items: { type: "string" } },
+      conflicts: { type: "array", items: { type: "object" } },
+      current: { type: "object" },
+      state: { type: "object" }
+    }
+  },
   ProviderHealth: {
     type: "object",
     required: ["ok", "status", "cacheStatus", "source", "checkedAt", "expiresAt", "error"],
@@ -270,6 +284,20 @@ function post(summary, description, requestBody, responses, extra = {}) {
     }
   };
   return postDef;
+}
+
+function withEtag(methods, { ifMatch = false, ifNoneMatch = false } = {}) {
+  const operation = methods.get || methods.post;
+  operation.responses["200"].headers = {
+    ETag: { description: "Current resource revision tag.", schema: { type: "string" } }
+  };
+  if (ifMatch) {
+    operation.parameters.push({ name: "If-Match", in: "header", schema: { type: "string" }, description: "ETag from the last successful read." });
+  }
+  if (ifNoneMatch) {
+    operation.parameters.push({ name: "If-None-Match", in: "header", schema: { type: "string", enum: ["*"] }, description: "Use * when creating a file that must not already exist." });
+  }
+  return methods;
 }
 
 function mutation(method, summary, description, responseSchema, requestBody = null, params = []) {
@@ -664,6 +692,32 @@ const paths = {
     { type: "object", properties: { workspace: { type: "object" } } },
     { "201": { description: "Created" } }
   )),
+  ...path("/api/workspaces/{id}/file", {
+    ...withEtag(get("Read workspace file",
+      "Returns a text preview, SHA-256 revision, and ETag for a workspace file.",
+      { type: "object", properties: { path: { type: "string" }, text: { type: "string" }, revision: { type: "string" }, etag: { type: "string" } } },
+      [
+        { name: "id", in: "path", required: true, schema: { type: "string" } },
+        { name: "path", in: "query", required: true, schema: { type: "string" } }
+      ]
+    )),
+    ...withEtag(post("Mutate workspace file",
+      "Write, rename, or delete a file. Stale revisions return 409 with the latest file snapshot.",
+      {
+        type: "object",
+        required: ["action", "path"],
+        properties: {
+          action: { type: "string", enum: ["write", "rename", "delete"] },
+          path: { type: "string" },
+          nextPath: { type: "string" },
+          text: { type: "string" },
+          expectedRevision: { type: "string" }
+        }
+      },
+      { type: "object" },
+      { "409": { description: "Revision conflict", content: { "application/json": { schema: { $ref: "#/components/schemas/RevisionConflict" } } } } }
+    ), { ifMatch: true, ifNoneMatch: true })
+  }),
   ...path("/api/workspaces/{id}/command", post("Execute workspace command",
     "Run a non-interactive command in a workspace. Returns approval request for high-risk commands.",
     {
@@ -876,11 +930,56 @@ const paths = {
   )),
 
   // Settings
-  ...path("/api/settings", post("Update settings",
-    "Patch server settings. Use ?dryRun=1 to preview changes.",
+  ...path("/api/settings", {
+    ...withEtag(get("Read settings",
+      "Returns public settings and their current revision.",
+      { type: "object", properties: { settings: { type: "object", properties: { revision: { type: "integer" } } } } }
+    )),
+    ...withEtag(post("Update settings",
+      "Patch server settings. Stale same-field writes return 409; disjoint patches merge. Use ?dryRun=1 to preview changes.",
+      { type: "object", properties: { expectedRevision: { type: "integer" } } },
+      { type: "object", properties: { ok: { type: "boolean" }, settings: { type: "object" } } },
+      { "409": { description: "Revision conflict", content: { "application/json": { schema: { $ref: "#/components/schemas/RevisionConflict" } } } } }
+    ), { ifMatch: true })
+  }),
+
+  // Thread metadata
+  ...path("/api/thread-state", {
+    ...withEtag(get("Read thread state",
+      "Returns thread metadata with per-thread revisions.",
+      { type: "object" }
+    )),
+    ...withEtag(post("Update thread state",
+      "Conditionally update one thread. Stale same-field writes return 409 while tag add/remove operations merge.",
+      {
+        type: "object",
+        required: ["key", "patch"],
+        properties: { key: { type: "string" }, patch: { type: "object" }, expectedRevision: { type: "integer" } }
+      },
+      { type: "object" },
+      { "409": { description: "Revision conflict", content: { "application/json": { schema: { $ref: "#/components/schemas/RevisionConflict" } } } } }
+    ))
+  }),
+  ...path("/api/thread-state/batch", withEtag(post("Batch update thread state",
+    "Atomically updates up to 200 threads. Any stale conflicting item rolls back the entire batch.",
+    {
+      type: "object",
+      required: ["updates"],
+      properties: {
+        updates: {
+          type: "array",
+          maxItems: 200,
+          items: {
+            type: "object",
+            required: ["key", "patch", "expectedRevision"],
+            properties: { key: { type: "string" }, patch: { type: "object" }, expectedRevision: { type: "integer" } }
+          }
+        }
+      }
+    },
     { type: "object" },
-    { type: "object", properties: { ok: { type: "boolean" }, settings: { type: "object" } } }
-  )),
+    { "409": { description: "Atomic batch conflict", content: { "application/json": { schema: { $ref: "#/components/schemas/RevisionConflict" } } } } }
+  ))),
 
   // Audit
   ...path("/api/audit-log", get("Audit log",

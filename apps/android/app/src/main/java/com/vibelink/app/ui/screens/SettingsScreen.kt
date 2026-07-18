@@ -151,13 +151,27 @@ class SettingsViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(saving = true, error = "", notice = "") }
             try {
-                val result = apiClient.saveSettings(patch)
+                val guardedPatch = patch.copy(expectedRevision = _uiState.value.settings?.revision)
+                val result = apiClient.saveSettings(guardedPatch)
                 _uiState.update {
                     it.copy(
                         settings = result.settings ?: it.settings,
                         saving = false,
                         notice = strings.settingsSaved,
                     )
+                }
+            } catch (error: com.vibelink.app.network.ApiException) {
+                if (error.statusCode == 409) {
+                    val fresh = runCatching { apiClient.checkStatus().settings }.getOrNull()
+                    _uiState.update {
+                        it.copy(
+                            settings = fresh?.let { value -> RevisionConflictPolicy.mergeSettingsForRetry(value, patch) } ?: it.settings,
+                            saving = false,
+                            error = strings.settingsChangedElsewhere,
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(saving = false, error = strings.saveSettingsFailed.withFallback(error.message)) }
                 }
             } catch (error: Exception) {
                 _uiState.update { it.copy(saving = false, error = strings.saveSettingsFailed.withFallback(error.message)) }
@@ -292,7 +306,7 @@ class SettingsViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(adminBusy = "settings-import-preview", error = "", notice = "") }
             try {
-                val preview = apiClient.importSettings(rawJson, dryRun = true)
+                val preview = apiClient.importSettings(rawJson, dryRun = true, expectedRevision = _uiState.value.settings?.revision)
                 _uiState.update {
                     it.copy(
                         settingsImportPreview = preview.changedKeys,
@@ -311,7 +325,7 @@ class SettingsViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(adminBusy = "settings-import", error = "", notice = "") }
             try {
-                val imported = apiClient.importSettings(rawJson, dryRun = false)
+                val imported = apiClient.importSettings(rawJson, dryRun = false, expectedRevision = _uiState.value.settings?.revision)
                 _uiState.update {
                     it.copy(
                         settings = imported.settings ?: it.settings,
@@ -321,6 +335,19 @@ class SettingsViewModel : ViewModel() {
                     )
                 }
                 load(apiClient)
+            } catch (error: com.vibelink.app.network.ApiException) {
+                if (error.statusCode == 409) {
+                    val fresh = runCatching { apiClient.checkStatus().settings }.getOrNull()
+                    _uiState.update {
+                        it.copy(
+                            settings = fresh ?: it.settings,
+                            adminBusy = "",
+                            error = strings.settingsChangedElsewhere,
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(adminBusy = "", error = strings.settingsImportFailed.withFallback(error.message)) }
+                }
             } catch (error: Exception) {
                 _uiState.update { it.copy(adminBusy = "", error = strings.settingsImportFailed.withFallback(error.message)) }
             }

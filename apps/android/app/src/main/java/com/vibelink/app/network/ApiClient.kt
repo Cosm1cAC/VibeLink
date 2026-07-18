@@ -66,13 +66,13 @@ class ApiClient(
     private suspend fun post(
         path: String,
         body: Any? = null,
-        headers: Map<String, String> = emptyMap(),
+        extraHeaders: Map<String, String> = emptyMap(),
     ): String = withContext(Dispatchers.IO) {
         val jsonBody = if (body != null) gson.toJson(body) else ""
         val req = Request.Builder()
             .url("$baseUrl$path")
             .apply { authHeaders().forEach { (k, v) -> addHeader(k, v) } }
-            .apply { headers.forEach { (k, v) -> addHeader(k, v) } }
+            .apply { extraHeaders.forEach { (k, v) -> addHeader(k, v) } }
             .post(jsonBody.toRequestBody(jsonType))
             .build()
         httpClient.newCall(req).execute().use { response ->
@@ -140,10 +140,16 @@ class ApiClient(
         return gson.fromJson(json, SettingsExportResponse::class.java)
     }
 
-    suspend fun importSettings(rawJson: String, dryRun: Boolean = false): SettingsImportResponse {
+    suspend fun importSettings(
+        rawJson: String,
+        dryRun: Boolean = false,
+        expectedRevision: Int? = null,
+    ): SettingsImportResponse {
         val payload = JsonParser.parseString(rawJson).asJsonObject
         if (dryRun) payload.addProperty("dryRun", true)
-        val json = post("/api/settings/import${if (dryRun) "?dryRun=1" else ""}", payload)
+        expectedRevision?.let { payload.addProperty("expectedRevision", it) }
+        val headers = expectedRevision?.let { mapOf("If-Match" to "\"vibelink:settings:$it\"") }.orEmpty()
+        val json = post("/api/settings/import${if (dryRun) "?dryRun=1" else ""}", payload, headers)
         return gson.fromJson(json, SettingsImportResponse::class.java)
     }
 

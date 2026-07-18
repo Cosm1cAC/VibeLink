@@ -71,7 +71,9 @@ pub fn route_settings_request(
     peer_ip: &str,
     config: &SettingsRouteConfig,
 ) -> Result<Option<HttpRouteResponse>> {
-    if request.method != "GET" || request.path() != "/api/settings/export" {
+    if request.method != "GET"
+        || !matches!(request.path(), "/api/settings" | "/api/settings/export")
+    {
         return Ok(None);
     }
 
@@ -123,20 +125,39 @@ pub fn route_settings_request(
     };
 
     let settings = load_settings(&config.data_dir, &config.root_dir)?;
-    let body = build_settings_export(&settings)?;
+    let (body, event_type, headers) = if request.path() == "/api/settings" {
+        let public = fetch_public_settings(config)
+            .unwrap_or_else(|_| project_public_settings(&settings, &config.data_dir));
+        (
+            json!({ "settings": public }),
+            "settings.read",
+            vec![(
+                "ETag".to_string(),
+                revision_etag(settings_revision(&settings)),
+            )],
+        )
+    } else {
+        (
+            build_settings_export(&settings)?,
+            "settings.export",
+            Vec::new(),
+        )
+    };
     audit_only(
         &config.data_dir,
         request,
         request_ip,
         &device_id,
-        "settings.export",
+        event_type,
         true,
         "",
         "",
         &json!({}),
     )?;
     config.metrics.record_response();
-    Ok(Some(HttpRouteResponse::json(200, body)))
+    Ok(Some(
+        HttpRouteResponse::json(200, body).with_headers(headers),
+    ))
 }
 
 pub fn route_settings_request_with_body(
@@ -218,6 +239,136 @@ pub fn route_settings_request_with_body(
     Ok(Some(response))
 }
 
+fn settings_revision(settings: &Value) -> u64 {
+    settings
+        .get("revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn revision_etag(revision: u64) -> String {
+    format!("\"vibelink:settings:{revision}\"")
+}
+
+fn expected_revision(request: &ParsedRequest, body: &Value) -> Option<u64> {
+    if let Some(revision) = body.get("expectedRevision").and_then(Value::as_u64) {
+        return Some(revision);
+    }
+    let value = request.header("if-match")?.trim();
+    let value = value.strip_prefix("W/").unwrap_or(value);
+    value
+        .strip_prefix("\"vibelink:settings:")
+        .and_then(|value| value.strip_suffix('"'))
+        .and_then(|value| value.parse::<u64>().ok())
+        .or(Some(u64::MAX))
+}
+
+fn settings_patch_fields(patch: &Value) -> Vec<String> {
+    fn collect(value: &Value, prefix: &str, fields: &mut Vec<String>) {
+        let Some(object) = value.as_object() else {
+            if !prefix.is_empty() {
+                fields.push(prefix.to_string());
+            }
+            return;
+        };
+        for (key, child) in object {
+            if matches!(
+                key.as_str(),
+                "expectedRevision" | "revision" | "_fieldRevisions"
+            ) {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            if child.is_object() {
+                collect(child, &path, fields);
+            } else {
+                fields.push(path);
+            }
+        }
+    }
+
+    let mut fields = Vec::new();
+    collect(patch, "", &mut fields);
+    fields.sort();
+    fields.dedup();
+    fields
+}
+
+fn settings_conflict_response(
+    request: &ParsedRequest,
+    body: &Value,
+    current: &Value,
+    fields: &[String],
+    config: &SettingsRouteConfig,
+) -> Option<HttpRouteResponse> {
+    let expected = expected_revision(request, body)?;
+    let actual = settings_revision(current);
+    if expected == actual {
+        return None;
+    }
+    let field_revisions = current.get("_fieldRevisions").and_then(Value::as_object);
+    let conflicting = if expected > actual {
+        fields.to_vec()
+    } else {
+        fields
+            .iter()
+            .filter(|field| {
+                field_revisions
+                    .and_then(|revisions| revisions.get(field.as_str()))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > expected
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if conflicting.is_empty() {
+        return None;
+    }
+    let public = project_public_settings(current, &config.data_dir);
+    Some(
+        HttpRouteResponse::json(
+            409,
+            json!({
+                "error": "Settings changed on another device.",
+                "code": "SETTINGS_CONFLICT",
+                "expectedRevision": expected,
+                "actualRevision": actual,
+                "conflictingFields": conflicting,
+                "current": { "settings": public }
+            }),
+        )
+        .with_headers(vec![("ETag".to_string(), revision_etag(actual))]),
+    )
+}
+
+fn bump_settings_revision(mut next: Value, current: &Value, fields: &[String]) -> Value {
+    if fields.is_empty() {
+        return next;
+    }
+    let revision = settings_revision(current) + 1;
+    let mut field_revisions = current
+        .get("_fieldRevisions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for field in fields {
+        field_revisions.insert(field.clone(), json!(revision));
+    }
+    if let Some(settings) = next.as_object_mut() {
+        settings.insert("revision".to_string(), json!(revision));
+        settings.insert(
+            "_fieldRevisions".to_string(),
+            Value::Object(field_revisions),
+        );
+    }
+    next
+}
+
 fn update_settings(
     request: &ParsedRequest,
     request_ip: &str,
@@ -234,6 +385,10 @@ fn update_settings(
     }
     let current = load_settings(&config.data_dir, &config.root_dir)?;
     let patch = sanitize_settings_patch(body)?;
+    let fields = settings_patch_fields(&patch);
+    if let Some(response) = settings_conflict_response(request, body, &current, &fields, config) {
+        return Ok(response);
+    }
     if is_dry_run(request) {
         let current_public = fetch_public_settings(config)
             .unwrap_or_else(|_| project_public_settings(&current, &config.data_dir));
@@ -253,10 +408,14 @@ fn update_settings(
                 "wouldChange": !diff.is_empty(),
                 "diff": diff
             }),
-        ));
+        )
+        .with_headers(vec![(
+            "ETag".to_string(),
+            revision_etag(settings_revision(&current)),
+        )]));
     }
 
-    let next = apply_update_patch(&current, &patch);
+    let next = bump_settings_revision(apply_update_patch(&current, &patch), &current, &fields);
     let (credential_results, credential_snapshots) =
         write_requested_secrets(&config.data_dir, &patch, body)?;
     let keys = patch
@@ -295,8 +454,12 @@ fn import_settings(
     config: &SettingsRouteConfig,
 ) -> Result<HttpRouteResponse> {
     let current = load_settings(&config.data_dir, &config.root_dir)?;
-    let next = import_settings_snapshot(&default_settings(&config.root_dir), &current, body)?;
-    let summary = summarize_settings_import(&current, &next);
+    let imported = import_settings_snapshot(&default_settings(&config.root_dir), &current, body)?;
+    let fields = settings_patch_fields(body.get("settings").unwrap_or(body));
+    if let Some(response) = settings_conflict_response(request, body, &current, &fields, config) {
+        return Ok(response);
+    }
+    let summary = summarize_settings_import(&current, &imported);
     let dry_run =
         is_dry_run(request) || body.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
     if dry_run {
@@ -304,10 +467,11 @@ fn import_settings(
         response.insert("dryRun".to_string(), Value::Bool(true));
         response.insert(
             "settings".to_string(),
-            project_public_settings(&next, &config.data_dir),
+            project_public_settings(&imported, &config.data_dir),
         );
         return Ok(HttpRouteResponse::json(200, Value::Object(response)));
     }
+    let next = bump_settings_revision(imported, &current, &fields);
     persist_and_reload(
         request,
         request_ip,
@@ -366,14 +530,26 @@ fn persist_and_reload(
     let mut response = metadata.response.as_object().cloned().unwrap_or_default();
     response.insert("ok".to_string(), Value::Bool(true));
     response.insert("settings".to_string(), public);
-    Ok(HttpRouteResponse::json(200, Value::Object(response)))
+    Ok(
+        HttpRouteResponse::json(200, Value::Object(response)).with_headers(vec![(
+            "ETag".to_string(),
+            revision_etag(settings_revision(next)),
+        )]),
+    )
 }
 
 fn apply_update_patch(current: &Value, patch: &Value) -> Value {
     let mut next = current.as_object().cloned().unwrap_or_default();
     if let Some(patch) = patch.as_object() {
         for (key, value) in patch {
-            next.insert(key.clone(), value.clone());
+            if matches!(
+                key.as_str(),
+                "security" | "toolEvents" | "codebaseMemory" | "webPush" | "nativePush"
+            ) {
+                next.insert(key.clone(), merge_objects(current.get(key), Some(value)));
+            } else {
+                next.insert(key.clone(), value.clone());
+            }
         }
         if let Some(mcp) = patch.get("mcp") {
             next.insert(
@@ -556,6 +732,7 @@ fn project_public_settings(settings: &Value, data_dir: &Path) -> Value {
         .collect::<Vec<_>>();
     let credential_state = public_credential_state(data_dir);
     json!({
+        "revision": settings_revision(settings),
         "host": value("host"),
         "port": value("port"),
         "pairingTokenConfigured": settings.get("pairingToken").and_then(Value::as_str).is_some_and(|value| !value.is_empty()),
@@ -1252,6 +1429,53 @@ mod tests {
             .unwrap();
         assert_eq!(audits, 2);
         drop(database);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_stale_second_device_settings_mutation() {
+        let data_dir = ready_data_dir();
+        let (upstream, server) = internal_settings_server(
+            200,
+            r#"{"revision":1,"defaultCwd":"C:/first","pairingTokenConfigured":true}"#,
+        );
+        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"))
+            .with_internal_settings(upstream, "internal-secret".to_string());
+        let first_request = parse_request(
+            b"POST /api/settings HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer admin-token\r\nIf-Match: \"vibelink:settings:0\"\r\nContent-Length: 56\r\n\r\n",
+        )
+        .unwrap();
+        let first = route_settings_request_with_body(
+            &first_request,
+            "127.0.0.1",
+            Some(br#"{"defaultCwd":"C:/first","expectedRevision":0}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.status, 200);
+        assert_eq!(first.header("etag"), Some("\"vibelink:settings:1\""));
+
+        let stale = route_settings_request_with_body(
+            &first_request,
+            "127.0.0.1",
+            Some(br#"{"defaultCwd":"C:/second","expectedRevision":0}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stale.status, 409);
+        assert_eq!(stale.body["code"], "SETTINGS_CONFLICT");
+        assert_eq!(stale.body["actualRevision"], 1);
+        assert_eq!(
+            server
+                .join()
+                .unwrap()
+                .to_ascii_lowercase()
+                .matches("post /internal/reload-settings")
+                .count(),
+            1
+        );
         fs::remove_dir_all(data_dir).unwrap();
     }
 

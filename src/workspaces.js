@@ -1043,6 +1043,37 @@ export async function getWorkspaceContext(id, settings, body = {}) {
   };
 }
 
+async function workspaceFileRevision(target) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const input = fs.createReadStream(target);
+    input.on("error", reject);
+    input.on("data", (chunk) => hash.update(chunk));
+    input.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+function workspaceFileEtag(revision) {
+  return `"vibelink:workspace-file:${revision}"`;
+}
+
+async function assertWorkspaceFileRevision(id, settings, filePath, target, expectedRevision, requireAbsent = false) {
+  if (!requireAbsent && (expectedRevision === undefined || expectedRevision === null || expectedRevision === "")) return;
+  const exists = fs.existsSync(target) && fs.statSync(target).isFile();
+  const current = exists ? await getWorkspaceFile(id, settings, filePath) : null;
+  const actualRevision = current?.revision || null;
+  if (requireAbsent && !exists) return;
+  if (String(expectedRevision) === String(actualRevision || "")) return;
+
+  const error = new Error("Workspace file changed on another device.");
+  error.status = 409;
+  error.code = "WORKSPACE_FILE_CONFLICT";
+  error.expectedRevision = expectedRevision === undefined || expectedRevision === null ? null : String(expectedRevision);
+  error.actualRevision = actualRevision;
+  error.current = current;
+  throw error;
+}
+
 export async function getWorkspaceFile(id, settings, filePath = "") {
   const workspace = workspaceOrThrow(id);
   const root = resolveAllowedPath(workspace.path, settings);
@@ -1056,6 +1087,7 @@ export async function getWorkspaceFile(id, settings, filePath = "") {
   touchWorkspace(workspace.id);
   const rel = path.relative(root, target).replaceAll("\\", "/");
   const text = readTextSample(target, stat);
+  const revision = await workspaceFileRevision(target);
   return {
     ok: true,
     workspace,
@@ -1063,6 +1095,8 @@ export async function getWorkspaceFile(id, settings, filePath = "") {
     absolutePath: target,
     size: stat.size,
     updatedAt: stat.mtime.toISOString(),
+    revision,
+    etag: workspaceFileEtag(revision),
     text,
     binary: !text
   };
@@ -1074,6 +1108,8 @@ export async function mutateWorkspaceFile(id, settings, body = {}) {
   const action = String(body.action || "write").trim().toLowerCase();
   const target = workspaceMutationPath(root, body.path || "", "path");
   touchWorkspace(workspace.id);
+
+  await assertWorkspaceFileRevision(id, settings, body.path || "", target, body.expectedRevision, body.requireAbsent === true);
 
   if (action === "write") {
     const text = typeof body.text === "string" ? body.text : "";

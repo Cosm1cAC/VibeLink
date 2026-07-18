@@ -4183,8 +4183,11 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
   const [browserFetchBusy, setBrowserFetchBusy] = useState(false);
   const [browserFetchError, setBrowserFetchError] = useState("");
   const [browserFetchResult, setBrowserFetchResult] = useState(null);
+  const [settingsRevision, setSettingsRevision] = useState(Number(settings?.revision || 0));
+  const [settingsSaveError, setSettingsSaveError] = useState("");
 
   useEffect(() => {
+    setSettingsRevision(Number(settings?.revision || 0));
     setDefaultCwd(settings?.defaultCwd || "");
     setClaudeCommand(settings?.claudeCommand || "claude");
     setCodexCommand(settings?.codexCommand || "auto");
@@ -4513,6 +4516,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
 
   async function submit(event) {
     event.preventDefault();
+    setSettingsSaveError("");
     const apiKeys = {};
     if (openai.trim()) apiKeys.openai = openai.trim();
     if (anthropic.trim()) apiKeys.anthropic = anthropic.trim();
@@ -4550,15 +4554,26 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
       },
       apiKeys
     };
+    settingsPatch.expectedRevision = settingsRevision;
     if (notificationEmail.trim()) settingsPatch.notificationEmail = notificationEmail.trim();
-    await request(
-      "/api/settings",
-      {
-        method: "POST",
-        body: JSON.stringify(settingsPatch)
-      },
-      token
-    );
+    try {
+      await request(
+        "/api/settings",
+        {
+          method: "POST",
+          headers: { "If-Match": `"vibelink:settings:${settingsRevision}"` },
+          body: JSON.stringify(settingsPatch)
+        },
+        token
+      );
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      const current = error.data?.current?.settings
+        || (await request("/api/settings", {}, token)).settings;
+      setSettingsRevision(Number(current?.revision || 0));
+      setSettingsSaveError("Settings changed on another device. Latest values were refreshed while this draft was preserved; review and save again.");
+      return;
+    }
     setOpenai("");
     setAnthropic("");
     setZhipu("");
@@ -4597,6 +4612,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
         </div>
       </div>
       <form className="panel" onSubmit={submit}>
+        {settingsSaveError ? <p className="form-error" role="alert">{settingsSaveError}</p> : null}
         <label>
           <span>OpenAI API Key</span>
           <input value={openai} onChange={(event) => setOpenai(event.target.value)} type="password" placeholder={settings?.hasOpenAIKey ? "Saved; leave blank to keep" : "Not set"} />
@@ -6032,14 +6048,24 @@ function App() {
   }
 
   async function patchThread(item, patch) {
-    const state = await request(
-      "/api/thread-state",
-      {
-        method: "POST",
-        body: JSON.stringify({ key: item.key, patch })
-      },
-      token
-    );
+    let state;
+    try {
+      state = await request(
+        "/api/thread-state",
+        {
+          method: "POST",
+          body: JSON.stringify({ key: item.key, patch, expectedRevision: Number(item.revision || 0) })
+        },
+        token
+      );
+    } catch (error) {
+      if (error.status === 409 && error.data?.state) {
+        setThreadState(error.data.state);
+        const current = error.data.state.items?.[item.key];
+        if (current) setSelected((selectedItem) => selectedItem?.key === item.key ? { ...selectedItem, ...current } : selectedItem);
+      }
+      throw error;
+    }
     setThreadState(state);
     setSelected((current) => (current?.key === item.key ? { ...current, ...patch, title: patch.title || current.title } : current));
     return state;
@@ -6109,19 +6135,27 @@ function App() {
   async function patchProjectThreads(project, patch) {
     const children = project.children || [];
     if (!children.length) return null;
-    let nextState = null;
-    for (const child of children) {
-      nextState = await request(
-        "/api/thread-state",
+    try {
+      const nextState = await request(
+        "/api/thread-state/batch",
         {
           method: "POST",
-          body: JSON.stringify({ key: child.key, patch })
+          body: JSON.stringify({
+            updates: children.map((child) => ({
+              key: child.key,
+              patch,
+              expectedRevision: Number(child.revision || 0)
+            }))
+          })
         },
         token
       );
+      setThreadState(nextState);
+      return nextState;
+    } catch (error) {
+      if (error.status === 409 && error.data?.state) setThreadState(error.data.state);
+      throw error;
     }
-    if (nextState) setThreadState(nextState);
-    return nextState;
   }
 
   async function forkThread(item) {
@@ -6585,10 +6619,17 @@ function App() {
       "/api/settings",
       {
         method: "POST",
-        body: JSON.stringify({ permissionMode: value })
+        headers: { "If-Match": `"vibelink:settings:${Number(settings?.revision || 0)}"` },
+        body: JSON.stringify({ permissionMode: value, expectedRevision: Number(settings?.revision || 0) })
       },
       token
-    ).catch((err) => setError(err.message));
+    ).then((result) => setSettings(result.settings || settings)).catch((err) => {
+      if (err.status === 409 && err.data?.current?.settings) {
+        setSettings(err.data.current.settings);
+        setPermissionMode(err.data.current.settings.permissionMode || "default");
+      }
+      setError(err.message);
+    });
   }
 
   if (!token) {

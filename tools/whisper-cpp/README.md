@@ -61,21 +61,23 @@ npm run whisper:model -- small
 .\tools\whisper-cpp\bin\whisper-cli.exe --model tools\whisper-cpp\models\ggml-base.bin --language zh --file test.wav
 ```
 
-stdin 模式示例：
-
-```bash
-cat remote.raw | ./tools/whisper-cpp/bin/whisper-cli --model tools/whisper-cpp/models/ggml-base.bin --language zh --stdin --output-json
-```
+Live Call 会把 VAD 段封装成临时 WAV 后逐段调用 CLI；`whisper-cli --stdin` 会等待 EOF，不用于长驻实时流。
 
 ## 生产配置
 
 生产配置固定在 `production.json`：`whisper-cli.exe` + `ggml-base.bin`、16 kHz mono PCM。启动时缺少任一文件会让 Live Call ASR 报错，生产环境不会静默使用 deterministic mock。可用 `VIBELINK_WHISPER_CPP_BIN`、`VIBELINK_WHISPER_CPP_MODELS` 指向打包目录；如需换 binary/model，必须显式设置对应环境变量并在发布物中一起校验。
 
-PCM checkpoint 默认保留 7 天、单文件 512 MiB，超出后自动轮转；通过 `VIBELINK_LIVE_CALL_PCM_RETENTION_DAYS` 和 `VIBELINK_LIVE_CALL_PCM_MAX_BYTES` 调整。
+PCM checkpoint 默认保留 7 天、单文件 512 MiB、总量 2 GiB。单文件超限自动轮转，过期文件和超总量的最旧非活动文件自动删除。通过 `VIBELINK_LIVE_CALL_PCM_RETENTION_DAYS`、`VIBELINK_LIVE_CALL_PCM_MAX_BYTES` 和 `VIBELINK_LIVE_CALL_PCM_MAX_TOTAL_BYTES` 调整。
 
 ## 与 VibeLink 集成
 
-VibeLink 会在启动时检测固定 binary/model。开发环境可显式选择 `VIBELINK_ASR=mock`；生产环境缺少真实依赖时请求会收到 `no_production_asr_provider`，不会回退到 mock。
+VibeLink 会读取 `production.json` 并在启动时检测固定 binary/model。开发环境可显式选择 `VIBELINK_ASR=mock`；其他 provider 缺失时请求会收到 `no_production_asr_provider`，任何环境都不会隐式回退到 mock。Windows portable 会带上配置，并在本地已有 `bin/`、`models/` 时一并打包。
+
+真实音频与弱网 QA：
+
+```powershell
+npm run live-call:qa-stress -- --pcm-file .\fixtures\interview-16k-mono.pcm --seconds 3600 --weak-network
+```
 
 ## 性能参考
 

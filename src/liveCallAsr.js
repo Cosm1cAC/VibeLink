@@ -20,17 +20,15 @@
 //
 // The provider should emit at most one final transcript per call to flush().
 //
-// The default provider is `mockAsrProvider` — it doesn't do real ASR but
-// it produces fake partial/final transcripts on a timer so the rest of
-// the pipeline (event flow, question detection, agent hookup) can be
-// exercised end-to-end. Real providers (OpenAI Whisper streaming,
-// Azure Speech, Aliyun, etc.) plug in here.
+// The default provider comes from the checked-in production configuration.
+// The deterministic mock is available only when explicitly selected for
+// development or tests; an unavailable real provider is always an error.
 
 import { emitLiveCallEvent, recordLiveCallTranscript, getInMemorySession } from "./liveCall.js";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { rootDir } from "./config.js";
+import { dataDir, rootDir } from "./config.js";
 import {
   TARGET_CHANNELS,
   TARGET_ENCODING,
@@ -41,10 +39,28 @@ import {
 
 const providers = new Map();
 const sessionChannels = new Map(); // sessionId -> Map(channel -> { buffer, sampleRate, channels, encoding, provider })
-const LIVE_CALL_AUDIO_DIR = path.join(rootDir, ".agent-mobile-terminal", "live-call-audio");
+const LIVE_CALL_AUDIO_DIR = path.join(dataDir, "live-call-audio");
+const ASR_CONFIG_PATH = path.resolve(process.env.VIBELINK_ASR_CONFIG || path.join(rootDir, "tools", "whisper-cpp", "production.json"));
+
+function readAsrConfig() {
+  try {
+    const value = JSON.parse(fs.readFileSync(ASR_CONFIG_PATH, "utf8"));
+    return value && typeof value === "object" ? value : {};
+  } catch (error) {
+    console.warn(`[liveCallAsr] unable to load ASR config ${ASR_CONFIG_PATH}: ${error.message}`);
+    return {};
+  }
+}
+
+const asrConfig = readAsrConfig();
+const pcmPolicy = {
+  retentionDays: Math.max(1, Number(process.env.VIBELINK_LIVE_CALL_PCM_RETENTION_DAYS || asrConfig.retentionDays || 7)),
+  maxFileBytes: Math.max(1024 * 1024, Number(process.env.VIBELINK_LIVE_CALL_PCM_MAX_BYTES || asrConfig.maxPcmBytes || 512 * 1024 * 1024)),
+  maxTotalBytes: Math.max(1024 * 1024, Number(process.env.VIBELINK_LIVE_CALL_PCM_MAX_TOTAL_BYTES || asrConfig.maxTotalPcmBytes || 2 * 1024 * 1024 * 1024))
+};
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production" || process.env.VIBELINK_ENV === "production";
-let activeProviderId = process.env.VIBELINK_ASR || (IS_PRODUCTION ? "whisper-cpp" : "mock");
+let activeProviderId = process.env.VIBELINK_ASR || asrConfig.provider || "whisper-cpp";
 
 function createAsrMetrics() {
   return {
@@ -204,6 +220,18 @@ export function getActiveAsrProviderId() {
   return activeProviderId;
 }
 
+export function getLiveCallAsrReadiness(requestedProvider = "") {
+  const providerId = requestedProvider || activeProviderId;
+  const provider = providers.get(providerId);
+  const available = Boolean(provider && providerAvailable(provider));
+  return {
+    ready: available,
+    provider: providerId,
+    code: available ? "ready" : "no_production_asr_provider",
+    diagnostics: provider && typeof provider.diagnose === "function" ? provider.diagnose() : {}
+  };
+}
+
 export function registerAsrProvider(provider) {
   if (!provider?.id) throw new Error("ASR provider must have an id");
   providers.set(provider.id, provider);
@@ -215,7 +243,11 @@ export function listAsrProviders() {
     label: p.label || p.id,
     available: typeof p.check === "function" ? Boolean(p.check()) : true,
     active: p.id === activeProviderId,
-    diagnostics: typeof p.diagnose === "function" ? p.diagnose() : {}
+    diagnostics: {
+      ...(typeof p.diagnose === "function" ? p.diagnose() : {}),
+      configuredDefault: p.id === (asrConfig.provider || "whisper-cpp"),
+      configPath: ASR_CONFIG_PATH
+    }
   }));
 }
 
@@ -230,8 +262,10 @@ export function listAsrProviders() {
 
 const WHISPER_CPP_BIN = path.resolve(process.env.VIBELINK_WHISPER_CPP_BIN || path.join(rootDir, "tools", "whisper-cpp", "bin"));
 const WHISPER_MODELS = path.resolve(process.env.VIBELINK_WHISPER_CPP_MODELS || path.join(rootDir, "tools", "whisper-cpp", "models"));
-const WHISPER_BINARY_NAME = process.env.VIBELINK_WHISPER_CPP_BINARY || "whisper-cli.exe";
-const WHISPER_MODEL_NAME = process.env.VIBELINK_WHISPER_CPP_MODEL || "ggml-base.bin";
+const WHISPER_BINARY_NAME = process.env.VIBELINK_WHISPER_CPP_BINARY || asrConfig.binary || "whisper-cli.exe";
+const WHISPER_MODEL_NAME = process.env.VIBELINK_WHISPER_CPP_MODEL || asrConfig.model || "ggml-base.bin";
+const WHISPER_LANGUAGE = process.env.VIBELINK_WHISPER_CPP_LANGUAGE || asrConfig.language || "zh";
+const WHISPER_TEMP_DIR = path.join(dataDir, "live-call-asr-tmp");
 
 function findWhisperBinary() {
   const full = path.join(WHISPER_CPP_BIN, WHISPER_BINARY_NAME);
@@ -253,22 +287,17 @@ function findModel(basename = "") {
 /**
  * Whisper.cpp ASR provider.
  *
- * Uses whisper-cli --stdin for reliable segment output. The binary is
- * spawned on first `start()` and kept alive for the session. PCM is fed
- * by appending to its stdin; when enough audio accumulates (>2s) an
- * inference is triggered and JSON results are parsed from stdout.
- *
- * Advanced use: if whisper-stream.exe is available (requires a custom
- * build of whisper.cpp with streaming support), the provider will use
- * `--step N` mode for partial transcripts.
+ * Runs one bounded whisper-cli process per VAD segment. whisper-cli's stdin
+ * mode waits for EOF and is not a streaming protocol, so keeping one stdin
+ * process alive can silently buffer an entire call. Segment WAV files keep
+ * inference deterministic and let us serialize work per session/channel.
  */
-class WhisperCppProvider {
+export class WhisperCppProvider {
   constructor() {
     this.id = "whisper-cpp";
     this.label = "Whisper.cpp (local ASR)";
     this.binaryPath = "";
-    this._sessions = new Map(); // sessionKey -> { child, model, buffer, transcripting, timer }
-    this._ready = false;
+    this._sessions = new Map();
   }
 
   /** Check availability. Returns true if binary + model found. */
@@ -289,149 +318,155 @@ class WhisperCppProvider {
     };
   }
 
-  async start({ sessionId, channel, sampleRate, channels, encoding }) {
+  async start({ sessionId, channel, sampleRate, channels, encoding, onFinal, onError }) {
     const key = `${sessionId}:${channel}`;
     const modelPath = findModel();
     if (!this.binaryPath || !modelPath) {
       throw new Error(`Whisper.cpp not available. Binary: ${!!this.binaryPath}, Model: ${!!modelPath}`);
     }
 
-    // Kill any existing child for this channel
-    const existing = this._sessions.get(key);
-    if (existing) {
-      try { existing.child.kill(); } catch {}
-    }
-
-    const child = spawn(this.binaryPath, [
-      "--model", modelPath,
-      "--language", "zh",
-      "--stdin",
-      "--output-json",
-      "--step-ms", "1000",
-      "--length-ms", "4000",
-      "--keep-context", "1",
-      "--max-len", "80",
-      "--no-timestamps"
-    ], {
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
-    });
-
-    const state = {
+    this._sessions.set(key, {
       key,
-      child,
+      sessionId,
+      channel,
       model: modelPath,
-      buffer: [],
-      totalSamples: 0,
+      sampleRate: sampleRate || 16000,
+      channels: channels || 1,
+      encoding: encoding || "pcm16le",
+      queue: [],
+      draining: null,
+      stopped: false,
+      segmentIndex: 0,
       lastFinalText: "",
-      runningInference: false,
-      closed: false,
-      sampleRate: sampleRate || 16000
-    };
-
-    child.stdout.on("data", (data) => this._onStdout(key, state, data));
-    child.stderr.on("data", () => {}); // whisper emits progress on stderr
-    child.on("close", () => { state.closed = true; });
-
-    child.on("error", (error) => {
-      this.onError?.(`whisper process failed: ${error.message}`);
+      onFinal,
+      onError
     });
-
-    this._sessions.set(key, state);
   }
 
   feed(channel, buffer, ctx) {
     const key = `${ctx.sessionId}:${channel}`;
     const state = this._sessions.get(key);
-    if (!state || state.closed) return;
-
-    state.buffer.push(buffer);
-    state.totalSamples += buffer.length / 2; // s16le
-
-    // Write immediately to child stdin — the child accumulates internally.
-    try {
-      state.child.stdin.write(buffer);
-    } catch {
-      // process may have exited
-    }
-
-    // After every 2s of accumulated audio, flush the child's stdin to trigger inference
-    // (whisper-cli --stdin flushes on read end close; we don't close, but the
-    // model's internal segment detection will emit whenever it has enough context.)
-    // We gently nudge by sending a small dummy write.
-    if (state.totalSamples > ctx.sampleRate * 4 && !state.runningInference) {
-      state.runningInference = true;
-      setTimeout(() => { state.runningInference = false; }, 2000);
-    }
+    if (!state || state.stopped || !buffer?.length) return;
+    state.queue.push(Buffer.from(buffer));
+    this._drain(state);
   }
 
-  async flush() {
-    for (const state of this._sessions.values()) {
-      if (state.child?.stdin?.writable && !state.closed) {
-        // whisper-cli processes stdin continuously; no explicit flush needed.
-        // We send a small dummy to encourage it to process pending audio.
-        try { state.child.stdin.write(Buffer.alloc(2)); } catch {}
-      }
-    }
+  async flush(ctx = {}) {
+    const state = this._sessions.get(`${ctx.sessionId}:${ctx.channel}`);
+    if (state) await this._drain(state);
   }
 
-  async stop() {
-    for (const state of this._sessions.values()) {
-      try {
-        if (!state.closed) {
-          state.child.stdin.end();
-          setTimeout(() => { state.child.kill(); }, 1000);
+  async stop(ctx = {}) {
+    const key = `${ctx.sessionId}:${ctx.channel}`;
+    const state = this._sessions.get(key);
+    if (!state) return;
+    state.stopped = true;
+    await this._drain(state);
+    this._sessions.delete(key);
+  }
+
+  _drain(state) {
+    if (state.draining) return state.draining;
+    state.draining = (async () => {
+      while (state.queue.length) {
+        const pcm = state.queue.shift();
+        try {
+          const text = await this._transcribe(state, pcm);
+          if (text && text !== state.lastFinalText) {
+            state.lastFinalText = text;
+            state.onFinal?.(state.channel, text);
+          }
+        } catch (error) {
+          state.onError?.(error);
         }
-      } catch {}
-    }
-    this._sessions.clear();
+      }
+    })().finally(() => { state.draining = null; });
+    return state.draining;
   }
 
-  _onStdout(key, state, data) {
-    const text = data.toString("utf8");
-    const lines = text.split(/\r?\n/).filter(Boolean);
-
-    for (const line of lines) {
-      let parsed;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        // whisper-cli --output-json outputs one JSON object per segment.
-        // Non-JSON lines (progress, logs) are ignored.
-        continue;
+  async _transcribe(state, pcm) {
+    fs.mkdirSync(WHISPER_TEMP_DIR, { recursive: true });
+    state.segmentIndex += 1;
+    const prefix = path.join(WHISPER_TEMP_DIR, `${safeFilePart(state.sessionId)}-${safeFilePart(state.channel)}-${state.segmentIndex}-${Date.now()}`);
+    const wavPath = `${prefix}.wav`;
+    const jsonPath = `${prefix}.json`;
+    fs.writeFileSync(wavPath, pcm16ToWav(pcm, state.sampleRate, state.channels));
+    try {
+      const result = await spawnAndCollect(this.binaryPath, [
+        "--model", state.model,
+        "--file", wavPath,
+        "--language", WHISPER_LANGUAGE,
+        "--output-json",
+        "--output-file", prefix,
+        "--no-timestamps",
+        "--no-prints"
+      ]);
+      if (result.code !== 0) {
+        throw new Error(`whisper-cli exited ${result.code}: ${result.stderr.trim().slice(-500)}`);
       }
-
-      // whisper-cli JSON format:
-      // { "t_start": N, "t_end": N, "text": "...", "tokens": [...] }
-
-      const segmentText = (parsed.text || "").trim();
-      if (!segmentText) continue;
-
-      const isDuplicate = segmentText === state.lastFinalText ||
-        segmentText.split(" ").filter(Boolean).length <= 1;
-
-      if (!isDuplicate) {
-        state.lastFinalText = segmentText;
-        this.onFinal?.(key.split(":")[1] || "remote", segmentText);
+      const raw = fs.existsSync(jsonPath) ? fs.readFileSync(jsonPath, "utf8") : result.stdout;
+      return transcriptFromWhisperJson(raw);
+    } finally {
+      for (const file of [wavPath, jsonPath]) {
+        try { fs.rmSync(file, { force: true }); } catch {}
       }
     }
   }
+}
+
+function spawnAndCollect(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (value) => { stdout += value.toString("utf8"); });
+    child.stderr.on("data", (value) => { stderr += value.toString("utf8"); });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code: Number(code ?? -1), stdout, stderr }));
+  });
+}
+
+function safeFilePart(value) {
+  return String(value || "unknown").replace(/[^\w.-]+/g, "_").slice(0, 80);
+}
+
+export function pcm16ToWav(pcm, sampleRate = 16000, channels = 1) {
+  const data = Buffer.from(pcm || []);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVEfmt ", 8, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channels * 2, 28);
+  header.writeUInt16LE(channels * 2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+export function transcriptFromWhisperJson(raw) {
+  let parsed;
+  try { parsed = JSON.parse(String(raw || "")); } catch { return ""; }
+  if (typeof parsed.text === "string") return parsed.text.trim();
+  const segments = Array.isArray(parsed.transcription) ? parsed.transcription : Array.isArray(parsed) ? parsed : [];
+  return segments.map((segment) => String(segment?.text || "").trim()).filter(Boolean).join(" ").trim();
 }
 
 // Register whisper-cpp provider if binary is available.
 const whisperProvider = new WhisperCppProvider();
 registerAsrProvider(whisperProvider);
 if (whisperProvider.check()) {
-  if (process.env.VIBELINK_ASR !== "mock") {
-    setActiveAsrProvider("whisper-cpp");
-    console.log("[liveCallAsr] whisper.cpp provider ready:", whisperProvider.binaryPath);
-  }
+  console.log("[liveCallAsr] whisper.cpp provider ready:", whisperProvider.binaryPath);
 } else {
-  console.warn(`[liveCallAsr] whisper.cpp unavailable (binary=${WHISPER_BINARY_NAME}, model=${WHISPER_MODEL_NAME})${IS_PRODUCTION ? "; production mock fallback disabled" : "; development may use mock"}`);
+  console.warn(`[liveCallAsr] whisper.cpp unavailable (binary=${WHISPER_BINARY_NAME}, model=${WHISPER_MODEL_NAME}); deterministic mock requires explicit development selection`);
 }
 
 // Keep long-running recordings bounded even when sessions are abandoned.
-const pcmPruneTimer = setInterval(() => pruneLiveCallAudio(), 60 * 60 * 1000);
+const pcmPruneTimer = setInterval(() => pruneLiveCallAudio(), Math.max(60_000, Number(asrConfig.pruneIntervalMinutes || 60) * 60_000));
 pcmPruneTimer.unref?.();
 
 // ───────── Mock provider ─────────
@@ -449,7 +484,7 @@ class MockAsrProvider {
     this.sessions = new Map();
   }
 
-  async start({ sessionId, channel, sampleRate, channels, encoding }) {
+  async start({ sessionId, channel, sampleRate, channels, encoding, onPartial, onFinal, onError }) {
     const key = `${sessionId}:${channel}`;
     this.sessions.set(key, {
       sessionId,
@@ -465,7 +500,10 @@ class MockAsrProvider {
       lastEmit: 0,
       partial: "",
       finalPending: false,
-      mockCounter: 0
+      mockCounter: 0,
+      onPartial,
+      onFinal,
+      onError
     });
   }
 
@@ -503,7 +541,7 @@ class MockAsrProvider {
       state.mockCounter += 1;
       const partial = mockPartialTranscript(state.mockCounter, state.partial);
       state.partial = partial;
-      this.onPartial?.(state.channel, partial, 0.6);
+      state.onPartial?.(state.channel, partial, 0.6);
     }
     if (state.speechActive && !speaking && state.silenceStart && now - state.silenceStart > 1200 && !state.finalPending) {
       state.finalPending = true;
@@ -511,7 +549,7 @@ class MockAsrProvider {
       state.partial = "";
       state.speechActive = false;
       state.silenceStart = 0;
-      this.onFinal?.(state.channel, final);
+      state.onFinal?.(state.channel, final);
       // Allow another segment.
       setTimeout(() => {
         if (state) state.finalPending = false;
@@ -519,19 +557,18 @@ class MockAsrProvider {
     }
   }
 
-  async flush() {
-    for (const state of this.sessions.values()) {
-      if (state.partial && !state.finalPending) {
-        const final = mockFinalTranscript(state.partial);
-        state.partial = "";
-        this.onFinal?.(state.channel, final);
-      }
+  async flush(ctx = {}) {
+    const state = this.sessions.get(`${ctx.sessionId}:${ctx.channel}`);
+    if (state?.partial && !state.finalPending) {
+      const final = mockFinalTranscript(state.partial);
+      state.partial = "";
+      state.onFinal?.(state.channel, final);
     }
   }
 
-  async stop() {
-    await this.flush();
-    this.sessions.clear();
+  async stop(ctx = {}) {
+    await this.flush(ctx);
+    this.sessions.delete(`${ctx.sessionId}:${ctx.channel}`);
   }
 }
 
@@ -595,9 +632,9 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
   try {
     if (payload.stop) {
       recordAsrStop(sessionId);
-      for (const state of channelsKey.values()) {
+      for (const [stateChannel, state] of channelsKey.entries()) {
         const provider = providers.get(state.provider);
-        if (provider?.stop) provider.stop().catch(() => {});
+        if (provider?.stop) provider.stop({ sessionId, channel: stateChannel }).catch(() => {});
       }
       channelsKey.clear();
       return;
@@ -617,6 +654,7 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
         checkpointBytes: 0,
         checkpointPath: liveCallCheckpointPath(sessionId, channel)
       };
+      try { channelState.checkpointBytes = fs.statSync(channelState.checkpointPath).size; } catch {}
       channelsKey.set(channel, channelState);
     }
 
@@ -644,9 +682,6 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
           console.error(`[liveCallAsr:${provider.id}]`, error?.message || error);
         }
       };
-      provider.onPartial = handlers.onPartial;
-      provider.onFinal = handlers.onFinal;
-      provider.onError = handlers.onError;
       recordProviderStart(sessionId, Boolean(channelState.fallbackFromProvider));
       provider
         .start({
@@ -654,10 +689,18 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
           channel,
           sampleRate: TARGET_SAMPLE_RATE,
           channels: TARGET_CHANNELS,
-          encoding: TARGET_ENCODING
+          encoding: TARGET_ENCODING,
+          ...handlers
         })
         .catch((error) => {
           recordAsrError(sessionId);
+          channelState.provider = null;
+          emitLiveCallEvent(sessionId, "live_call.asr.error", {
+            channel,
+            requestedProvider,
+            provider: provider.id,
+            error: error.message
+          });
           console.error(`[liveCallAsr:start]`, error.message);
         });
       emitLiveCallEvent(sessionId, "live_call.asr.provider", {
@@ -693,7 +736,10 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
       for (const segment of channelState.vad.flush()) {
         feedSegment(sessionId, channel, channelState, provider, segment);
       }
-      if (provider.flush) provider.flush().catch(() => {});
+      if (provider.flush) provider.flush({ sessionId, channel }).catch((error) => {
+        recordAsrError(sessionId);
+        emitLiveCallEvent(sessionId, "live_call.asr.error", { channel, provider: provider.id, error: error.message });
+      });
     }
   } finally {
     recordAsrIngestDuration(sessionId, Date.now() - ingestStartedAt);
@@ -701,12 +747,11 @@ export function ingestLiveCallAudio(sessionId, payload = {}) {
 }
 
 function resolveAsrProvider(requestedProvider = "") {
-  const requested = providers.get(requestedProvider);
-  if (requested && providerAvailable(requested)) return requested;
-  const active = providers.get(activeProviderId);
-  if (active && providerAvailable(active)) return active;
-  if (!IS_PRODUCTION && providerAvailable(mockProvider)) return mockProvider;
-  return null;
+  const selectedId = requestedProvider || activeProviderId;
+  const selected = providers.get(selectedId);
+  if (!selected || !providerAvailable(selected)) return null;
+  if (selected.id === "mock" && selectedId !== "mock") return null;
+  return selected;
 }
 
 function providerAvailable(provider) {
@@ -722,9 +767,9 @@ function liveCallCheckpointPath(sessionId, channel) {
 function appendCheckpoint(channelState, buffer) {
   try {
     fs.mkdirSync(path.dirname(channelState.checkpointPath), { recursive: true });
-    const maxBytes = Math.max(1024 * 1024, Number(process.env.VIBELINK_LIVE_CALL_PCM_MAX_BYTES || 512 * 1024 * 1024));
-    if (channelState.checkpointBytes + buffer.length > maxBytes) {
-      const rotated = `${channelState.checkpointPath}.${Date.now()}`;
+    if (channelState.checkpointBytes + buffer.length > pcmPolicy.maxFileBytes && fs.existsSync(channelState.checkpointPath)) {
+      const parsed = path.parse(channelState.checkpointPath);
+      const rotated = path.join(parsed.dir, `${parsed.name}.${Date.now()}${parsed.ext}`);
       fs.renameSync(channelState.checkpointPath, rotated);
       channelState.checkpointBytes = 0;
     }
@@ -736,18 +781,68 @@ function appendCheckpoint(channelState, buffer) {
 }
 
 export function pruneLiveCallAudio(now = Date.now()) {
-  const retentionDays = Math.max(1, Number(process.env.VIBELINK_LIVE_CALL_PCM_RETENTION_DAYS || 7));
-  const cutoff = now - retentionDays * 86400000;
+  const cutoff = now - pcmPolicy.retentionDays * 86400000;
   let removed = 0;
+  let removedBytes = 0;
   try {
-    if (!fs.existsSync(LIVE_CALL_AUDIO_DIR)) return { removed, retentionDays };
-    for (const name of fs.readdirSync(LIVE_CALL_AUDIO_DIR)) {
-      const file = path.join(LIVE_CALL_AUDIO_DIR, name);
-      const stat = fs.statSync(file);
-      if (stat.isFile() && stat.mtimeMs < cutoff) { fs.rmSync(file); removed += 1; }
+    if (!fs.existsSync(LIVE_CALL_AUDIO_DIR)) return { removed, removedBytes, ...pcmPolicy, totalBytes: 0 };
+    const activePaths = new Set([...sessionChannels.values()].flatMap((channels) => [...channels.values()].map((state) => state.checkpointPath)));
+    const files = fs.readdirSync(LIVE_CALL_AUDIO_DIR)
+      .map((name) => {
+        const filePath = path.join(LIVE_CALL_AUDIO_DIR, name);
+        try { return { name, path: filePath, stat: fs.statSync(filePath) }; } catch { return null; }
+      })
+      .filter((item) => item?.stat.isFile() && item.name.endsWith(".pcm"));
+    for (const item of files) {
+      if (!activePaths.has(item.path) && item.stat.mtimeMs < cutoff) {
+        fs.rmSync(item.path);
+        removed += 1;
+        removedBytes += item.stat.size;
+        item.removed = true;
+      }
     }
-  } catch {}
-  return { removed, retentionDays };
+    let retained = files.filter((item) => !item.removed);
+    let totalBytes = retained.reduce((sum, item) => sum + item.stat.size, 0);
+    for (const item of retained.sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs)) {
+      if (totalBytes <= pcmPolicy.maxTotalBytes) break;
+      if (activePaths.has(item.path)) continue;
+      fs.rmSync(item.path);
+      removed += 1;
+      removedBytes += item.stat.size;
+      totalBytes -= item.stat.size;
+    }
+    return { removed, removedBytes, ...pcmPolicy, totalBytes };
+  } catch (error) {
+    return { removed, removedBytes, ...pcmPolicy, error: error.message };
+  }
+}
+
+export function getLiveCallAudioPolicy() {
+  return { directory: LIVE_CALL_AUDIO_DIR, ...pcmPolicy };
+}
+
+export function listLiveCallAudioFiles() {
+  if (!fs.existsSync(LIVE_CALL_AUDIO_DIR)) return [];
+  const activePaths = new Set([...sessionChannels.values()].flatMap((channels) => [...channels.values()].map((state) => state.checkpointPath)));
+  return fs.readdirSync(LIVE_CALL_AUDIO_DIR)
+    .filter((name) => name.endsWith(".pcm"))
+    .map((name) => {
+      const filePath = path.join(LIVE_CALL_AUDIO_DIR, name);
+      const stat = fs.statSync(filePath);
+      return { name, bytes: stat.size, modifiedAt: stat.mtime.toISOString(), active: activePaths.has(filePath) };
+    })
+    .sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+}
+
+export function deleteLiveCallAudioFile(name) {
+  const safeName = path.basename(String(name || ""));
+  if (!safeName || safeName !== name || !safeName.endsWith(".pcm")) return { ok: false, reason: "invalid_name" };
+  const filePath = path.join(LIVE_CALL_AUDIO_DIR, safeName);
+  const active = [...sessionChannels.values()].some((channels) => [...channels.values()].some((state) => state.checkpointPath === filePath));
+  if (active) return { ok: false, reason: "recording_active" };
+  if (!fs.existsSync(filePath)) return { ok: false, reason: "not_found" };
+  fs.rmSync(filePath);
+  return { ok: true, name: safeName };
 }
 
 function feedSegment(sessionId, channel, channelState, provider, segment) {

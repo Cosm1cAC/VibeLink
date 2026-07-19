@@ -1,4 +1,5 @@
 {
+  "provider": "whisper-cpp",
   "binary": "whisper-cli.exe",
   "model": "ggml-base.bin",
   "language": "zh",
@@ -6,5 +7,7 @@
   "channels": 1,
   "encoding": "pcm16le",
   "retentionDays": 7,
-  "maxPcmBytes": 536870912
+  "maxPcmBytes": 536870912,
+  "maxTotalPcmBytes": 2147483648,
+  "pruneIntervalMinutes": 60
 }

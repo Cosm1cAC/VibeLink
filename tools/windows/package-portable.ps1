@@ -78,6 +78,14 @@ New-Item -ItemType Directory -Path (Join-Path $stageRoot "packages") -Force | Ou
 Copy-Item -LiteralPath (Join-Path $root "packages\doubao-cli") -Destination (Join-Path $stageRoot "packages\doubao-cli") -Recurse
 New-Item -ItemType Directory -Path (Join-Path $stageRoot "tools") -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "tools\doubao-cli.mjs") -Destination (Join-Path $stageRoot "tools\doubao-cli.mjs")
+New-Item -ItemType Directory -Path (Join-Path $stageRoot "tools\whisper-cpp") -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $root "tools\whisper-cpp\production.json") -Destination (Join-Path $stageRoot "tools\whisper-cpp\production.json")
+foreach ($whisperDir in @("bin", "models")) {
+  $whisperSource = Join-Path $root "tools\whisper-cpp\$whisperDir"
+  if (Test-Path -LiteralPath $whisperSource) {
+    Copy-Item -LiteralPath $whisperSource -Destination (Join-Path $stageRoot "tools\whisper-cpp\$whisperDir") -Recurse
+  }
+}
 Copy-Item -LiteralPath (Join-Path $root "tools\windows\start-public-tunnel.ps1") -Destination (Join-Path $stageRoot "start-public-tunnel.ps1")
 New-Item -ItemType Directory -Path (Join-Path $stageRoot "docs") -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "docs\openapi.json") -Destination (Join-Path $stageRoot "docs\openapi.json")

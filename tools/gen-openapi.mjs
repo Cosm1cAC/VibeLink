@@ -982,11 +982,18 @@ const paths = {
       type: "object",
       properties: {
         title: { type: "string" },
-        mode: { type: "string", enum: ["audio", "text"] }
+        mode: { type: "string", enum: ["audio", "text"] },
+        source: { type: "string" },
+        workspaceId: { type: "string" },
+        asrProvider: { type: "string", description: "Explicit provider id. Mock must be selected explicitly and is unavailable in production." }
       }
     },
     { type: "object", properties: { ok: { type: "boolean" }, session: { type: "object" } } },
     { "201": { description: "Created" } }
+  )),
+  ...path("/api/live-calls/asr-providers", get("List Live Call ASR providers",
+    "Returns provider availability, the configured default, and binary/model diagnostics.",
+    { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }
   )),
   ...path("/api/live-calls/audio-metrics", get("Live call audio metrics",
     "Returns WebSocket audio stream counters including frames, drops, drop rate, backpressure, acknowledgements, and per-session totals.",
@@ -1020,6 +1027,17 @@ const paths = {
         }
       }
     }
+  )),
+  ...path("/api/live-calls/audio-files", get("List Live Call PCM files",
+    "Lists retained PCM checkpoints and the active retention, per-file, and total quota policy.",
+    { type: "object", properties: { items: { type: "array", items: { type: "object" } }, policy: { type: "object" } } }
+  )),
+  ...path("/api/live-calls/audio-files/{name}", mutation("delete", "Delete Live Call PCM file",
+    "Deletes an inactive PCM checkpoint. Active recordings return 409.",
+    { type: "object", properties: { ok: { type: "boolean" }, name: { type: "string" } } },
+    null,
+    [{ name: "name", in: "path", required: true, schema: { type: "string" } }],
+    { "409": { description: "Recording is active", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } } }
   )),
 
   // Settings

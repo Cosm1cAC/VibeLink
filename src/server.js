@@ -86,7 +86,7 @@ import {
   stopLiveCallSession,
   subscribeLiveCallEvents
 } from "./liveCall.js";
-import { getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
+import { deleteLiveCallAudioFile, getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, getLiveCallAsrReadiness, getLiveCallAudioPolicy, listAsrProviders, listLiveCallAudioFiles, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
 import {
   clearSearchHistory,
@@ -2622,9 +2622,38 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/live-calls/audio-files" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listLiveCallAudioFiles(), url), policy: getLiveCallAudioPolicy() });
+    return;
+  }
+
+  const liveCallAudioFileMatch = url.pathname.match(/^\/api\/live-calls\/audio-files\/([^/]+)$/);
+  if (liveCallAudioFileMatch && request.method === "DELETE") {
+    const name = decodeURIComponent(liveCallAudioFileMatch[1]);
+    const result = deleteLiveCallAudioFile(name);
+    if (!result.ok) {
+      const status = result.reason === "not_found" ? 404 : result.reason === "recording_active" ? 409 : 400;
+      sendError(response, status, result.reason);
+      return;
+    }
+    audit(request, url, auth, { type: "live_call.audio_file.delete", success: true, target: name });
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (url.pathname === "/api/live-calls" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "live_call.create", { limit: 20, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
+    const asrReadiness = getLiveCallAsrReadiness(body.asrProvider);
+    if (!asrReadiness.ready) {
+      sendJson(response, 503, {
+        error: "No production ASR provider is available.",
+        code: asrReadiness.code,
+        provider: asrReadiness.provider,
+        diagnostics: asrReadiness.diagnostics
+      });
+      return;
+    } // ASR readiness preflight
     const session = createLiveCallSession({
       title: body.title,
       source: body.source,

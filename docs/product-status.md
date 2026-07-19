@@ -27,21 +27,16 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - Windows Rust 前门已覆盖 Status、Doctor、Devices、设备写操作、Pairing、Audit、Settings、Tool Events REST/SSE 和 Workspace 文件写入；其余 HTTP/SSE/WebSocket 仍透明转发 Node，并保留逐 slice 回退。
 - Android 补齐了凭据加密、鉴权附件流、原生 push 注册、前后台实时流挂起/恢复、音频流有界重试、中英文运行文案，以及搜索、标签/收藏、命令发现和 PR review 入口。
 
-## 仍然存在的核心边界
+## 仍然存在的优先问题
 
-### P0
+### P0 阻塞项
 
-- 无法事后接管电脑上任意已运行进程的 stdin/stdout/PTY。只有从启动时即由 VibeLink execution worker 持有的 execution 才承诺可靠重连；外部进程永久属于 `external`。
-- Agent、Workspace command 和 PTY 子进程已由 execution worker 持有；Bridge startup reconciliation 已接入 task/tool/terminal 状态和订阅。只有 VibeLink 启动且 binding owner 为 `execution-host` 的 execution 承诺重连，外部执行仍固定为 `external`。
-- Codex Desktop 未公开稳定的完整 tool 输出、退出码、所有权和审批 continuation。Remote 只能按需采样、实时近似并在完成后校准。
-- Desktop UI 遥控依赖 Windows UIA、前台窗口、控件文案和 Electron UI 结构，必须 fail-closed，不能视为稳定第一方协议。
 - tool-call 级审批 continuation 尚未闭环。当前高风险 VibeLink 工具可在批准后重跑受支持动作，transactional outbox 到 execution host 的通用投递链已接入，但现有 CLI adapter 没有可恢复的 upstream request connection；真正的 Codex request/tool-call continuation 仍需 app-server adapter。
-- durable execution host 数据面与产品侧 startup reconciliation、SQLite ingest/ack 已接入；剩余 P0 工作是 Bridge/execd/worker crash canary、长时 spool/ack 验证和真实 Provider approval continuation rollout。
+- durable execution host 已进入产品运行链，但尚缺 Bridge/execd/worker crash canary、长时 spool/ack 和故障告警证据。在这些验证完成前，不能把跨重启恢复视为已达到生产可靠性门槛。
 
-### P1
+### P1 产品缺口
 
-- VibeLink Agent 已有 CLI durable execution owner 和运行中输入的内存 queued resume，但仍缺少持久统一队列、并发上限、失败重试和后台调度面板。
-- Provider catalog/health 已有 SQLite last-known-good 跨 Bridge 重启缓存；Provider 任务仍缺统一持久队列、并发上限、失败重试和后台调度。
+- VibeLink Agent 已有 CLI durable execution owner、运行中输入的内存 queued resume，以及 Provider catalog/health 的 SQLite 跨重启缓存；任务执行仍缺统一持久队列、并发上限、失败重试和后台调度面板。
 - Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
 - Workspace 全文搜索已不再在请求内扫描文件；索引器最多跟踪每个 Workspace 100,000 个文件，单文件正文索引上限 1 MiB，超限或二进制文件仍索引路径。session/task/message 仍在请求内聚合原生 history 与运行状态，尚未进入同一持久全文索引。
 - Workspace 仍缺大文件分页、富二进制预览、更完整的批量操作和成熟冲突处理。
@@ -49,15 +44,21 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - 测试视图仍是通用文本解析，缺少 Jest/Pytest/Vitest 结构化适配和单测重跑。
 - Live Call 已支持 pause/resume、本地 PCM 文件列表/删除、ASR provider 诊断和可选 whisper.cpp；缺少可默认交付的生产 ASR 配置、长时间真实 PCM/弱网 QA 和录音生命周期策略。没有可用 whisper.cpp binary/model 时仍回退 deterministic mock。
 - 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；仍缺客户端 ack API、实际 retention/compaction 执行、spool quota marker 和多设备冲突策略。
-- 公网入口已有配对、设备 token、撤销/轮换、Host allowlist、审计、限流和 Cloudflare 向导，但不是完整账号系统。
 - 尚无 iOS 客户端。
 
-### P2
+### P2 后续能力
 
 - 缺少插件、Hooks、Automations、Subagents 和 AGENTS/config 可视化管理。
 - 缺少内置浏览器视图、浏览器测试轨迹和手机端浏览器遥控。
 - Workspace 已有增量全文索引、保存搜索和搜索历史；仍缺 session/task/message 的持久增量索引，以及更完整的命令历史体验。
 - Office、表格、PDF、Notebook 等 artifact 仍缺专门预览和编辑体验。
+
+## 已知且不计划消除的边界
+
+- VibeLink 无法事后接管电脑上任意已运行进程的 stdin/stdout/PTY。只有从启动时即由 VibeLink execution worker 持有、且 binding owner 为 `execution-host` 的 execution 才承诺重连；外部进程永久属于 `external`。
+- Codex Desktop 未公开稳定的完整 tool 输出、退出码、所有权和审批 continuation。Desktop Remote 只能按需采样、实时近似并在完成后校准，不能获得 VibeLink Agent 等级的权威执行状态。
+- Desktop UI 遥控依赖 Windows UIA、前台窗口、控件文案和 Electron UI 结构，必须 fail-closed，不能视为稳定第一方协议。
+- 公网入口采用配对、设备 token、撤销/轮换、Host allowlist、审计、限流和 Cloudflare 向导；当前产品范围不建设完整云账号系统。
 
 ## Android 收口状态
 

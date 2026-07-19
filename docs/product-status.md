@@ -23,8 +23,9 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - Provider registry 已接入真实动态 catalog/health loader：Codex 走 app-server `model/list`，Claude/GLM 走模型 API，豆包走 browser bridge doctor；catalog/health 具备 TTL、single-flight、失败回退和 SQLite last-known-good 跨重启缓存，并发布当前 execution ownership、capability、protocol/version 和逐字段 fidelity。Status 与 Doctor 共用这份 readiness。
 - Codex app-server contract gate 已审查 CLI 0.144.5，并覆盖 thread/turn/item/tool 生命周期、agent/command output、MCP progress 和 approval schema；execution worker 现在同时支持 `thread/start` 与 `thread/resume`，并在同一条存活 WebSocket 上把 command/file/permission 审批决定写回原始 JSON-RPC request。未知版本仍会 fail-closed。
 - SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox；Rust `execd`、独立 worker、Job Object、ConPTY/stdio/app-server、分段 spool/replay/ack 和启动身份校验已实现。Bridge 启动会统一读取 binding、查询 execd、补 ingest/ack，并恢复 Terminal、Workspace command 与 Agent task/tool 订阅。通用 approval dispatcher 已轮询 transactional outbox 并向 execution host 投递，worker 事件可回写 delivered/applied/stale；Codex 新任务和恢复任务均走 durable app-server adapter。
+- Agent 任务统一进入 SQLite `task_queue`；后台调度器提供可配置并发上限、优先级认领、指数退避失败重试、重启恢复，以及 Settings 内的运行/等待/失败队列面板和手动重试、取消操作。
 - Event Store 已增加单调 device/stream ack、ack-aware retention plan 和 compaction marker repository，并同步覆盖 SQLite、Worker client 与 Rust sidecar contract；客户端 ack API、实际 compaction 执行和 spool quota 仍未接入。
-- Workspace 测试命令已接入 Jest、Vitest 和 Pytest 结构化 adapter，能够返回 suite/case、位置、耗时和失败用例 rerun command；Web/Android 当前主要消费汇总、failure 和原始输出，尚未完整展示结果树或触发单测重跑。
+- Workspace 测试命令已接入 Jest、Vitest 和 Pytest 结构化 adapter；Web 与 Android 均展示 suite/case 结果树、状态、耗时、文件位置和失败文本，并可从失败 case 直接执行后端生成的 rerun command。重跑仍经过 Workspace test 风险评估与审批链，Android 可在批准后回填结果。
 - 只读 artifact runtime 已支持鉴权 metadata、bounded range，以及 PDF、CSV/TSV、XLSX、Notebook 和 OpenXML 文档的有界 best-effort preview；Web 目前只有 PDF/Text 基础内联，Android 主要提供附件识别与打开，尚未消费完整结构化 preview。
 - Windows Rust 前门已覆盖 Status、Doctor、Devices、设备写操作、Pairing、Audit、Settings、Tool Events REST/SSE 和 Workspace 文件写入；其余 HTTP/SSE/WebSocket 仍透明转发 Node，并保留逐 slice 回退。
 - Android 补齐了凭据加密、鉴权附件流、原生 push 注册、前后台实时流挂起/恢复、音频流有界重试、中英文运行文案，以及搜索、标签/收藏、命令发现和 PR review 入口。
@@ -39,12 +40,10 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ### P1 产品缺口
 
-- VibeLink Agent 已有 CLI durable execution owner、运行中输入的内存 queued resume，以及 Provider catalog/health 的 SQLite 跨重启缓存；任务执行仍缺统一持久队列、并发上限、失败重试和后台调度面板。
 - Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
 - Workspace 全文搜索已不再在请求内扫描文件；索引器最多跟踪每个 Workspace 100,000 个文件，单文件正文索引上限 1 MiB，超限或二进制文件仍索引路径。session/task/message 仍在请求内聚合原生 history 与运行状态，尚未进入同一持久全文索引。
 - Workspace 仍缺大文件分页、富二进制预览、更完整的批量操作和成熟冲突处理。
 - Git 已支持常用状态、diff、stage、commit、push、pull、PR 创建、branch、stash、worktree 创建、per-hunk 和冲突动作；PR review 工作台已接入 GitHub 远端同步、冲突检测和 review 提交，仍缺 GitLab runtime，以及 worktree 列表、删除、prune/lock 等完整生命周期管理。
-- Jest/Pytest/Vitest 结构化测试 adapter 和失败用例 rerun command 已由 Workspace 后端返回；Web/Android 仍缺 suite/case 结果树、耗时/位置的完整展示，以及执行 rerun command 的单测重跑动作。
 - Live Call 已支持 pause/resume、本地 PCM 文件列表/删除、ASR provider 诊断和可选 whisper.cpp；缺少可默认交付的生产 ASR 配置、长时间真实 PCM/弱网 QA 和录音生命周期策略。没有可用 whisper.cpp binary/model 时仍回退 deterministic mock。
 - 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；仍缺客户端 ack API、实际 retention/compaction 执行、spool quota marker 和多设备冲突策略。
 
@@ -89,6 +88,5 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 
 1. 用发布二进制执行一小时 `execution-host:soak` 并归档 JSON 报告，签发 durable execution host 生产可靠性门槛。
 2. 在 Web/Android 完整展示 approval delivery/attach/fidelity 状态。
-3. 补齐 Provider 任务持久队列、并发上限、失败重试和后台调度。
 4. 完成 Live Call 生产 ASR 配置与长时间真实音频/弱网 QA。
 5. 将 session/task/message 纳入持久搜索索引，并完成客户端事件 ack、实际 retention/compaction、Workspace 结构化结果和多设备冲突处理。

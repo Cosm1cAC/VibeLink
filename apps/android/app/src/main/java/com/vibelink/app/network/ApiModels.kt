@@ -765,10 +765,40 @@ data class TestSummary(
     val ok: Boolean = false,
     val passed: Int = 0,
     val failed: Int = 0,
+    val skipped: Int = 0,
     val failures: List<String> = emptyList(),
     val log: String = "",
+    val runner: String = "",
+    @SerializedName("durationMs") val durationMs: Double? = null,
+    val suites: List<TestSuiteResult> = emptyList(),
+    val cases: List<TestCaseResult> = emptyList(),
 )
 
+data class TestLocation(
+    val path: String = "",
+    val line: Int? = null,
+    val column: Int? = null,
+)
+
+data class TestCaseResult(
+    val id: String = "",
+    val name: String = "",
+    @SerializedName("fullName") val fullName: String = "",
+    val suite: String = "",
+    val status: String = "skip",
+    @SerializedName("durationMs") val durationMs: Double? = null,
+    val location: TestLocation = TestLocation(),
+    val failure: String = "",
+    @SerializedName("rerunCommand") val rerunCommand: String? = null,
+)
+
+data class TestSuiteResult(
+    val name: String = "",
+    val status: String = "skip",
+    @SerializedName("durationMs") val durationMs: Double? = null,
+    val location: TestLocation = TestLocation(),
+    val cases: List<TestCaseResult> = emptyList(),
+)
 
 data class GitFileActionRequest(
     val action: String,
@@ -1199,6 +1229,13 @@ data class ApprovalTaskExecutionResult(
     @SerializedName("toolRunId") val toolRunId: String = "",
     val session: TerminalSessionInfo? = null,
     val task: ApprovalTaskResult? = null,
+    val workspace: WorkspaceItem? = null,
+    val cwd: String = "",
+    val command: String = "",
+    val stdout: String = "",
+    val stderr: String = "",
+    @SerializedName("exitCode") val exitCode: Int = 0,
+    val test: TestSummary? = null,
 )
 
 data class ApprovalDecisionResponse(

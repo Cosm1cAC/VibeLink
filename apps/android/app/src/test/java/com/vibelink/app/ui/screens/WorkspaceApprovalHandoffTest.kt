@@ -62,6 +62,22 @@ class WorkspaceApprovalHandoffTest {
     }
 
     @Test
+    fun extractsWorkspaceTestApprovalFromHttp428Body() {
+        val error = ApiException(
+            428,
+            """{"error":"Test requires explicit approval","approvalId":"ap-test","toolRunId":"run-test","approval":{"kind":"workspace.test"}}""",
+        )
+
+        val notice = WorkspaceApprovalHandoff.commandNoticeFromException(error)
+
+        assertNotNull(notice)
+        assertEquals("ap-test", notice.approvalId)
+        assertEquals("run-test", notice.toolRunId)
+        assertEquals("workspace.test", notice.kind)
+        assertContains(notice.message, "result will return here")
+    }
+
+    @Test
     fun ignoresNonTerminalApprovalDecisions() {
         val handoff = WorkspaceApprovalHandoff.approvedTerminalFrom(
             ApprovalDecisionResponse(

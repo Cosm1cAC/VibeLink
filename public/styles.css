@@ -2986,6 +2986,217 @@ textarea:focus {
   width: 100%;
 }
 
+.test-result-tree,
+.test-case-list {
+  display: grid;
+  gap: 7px;
+}
+
+.test-suite {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  overflow: hidden;
+}
+
+.test-suite > summary {
+  display: grid;
+  grid-template-columns: 10px minmax(120px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 12px;
+  padding: 9px 10px;
+}
+
+.test-suite > summary strong,
+.test-case-body strong {
+  min-width: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.test-suite > summary time,
+.test-case-meta time {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.test-status-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8a8f8e;
+}
+
+.status-pass > .test-status-mark,
+.status-pass > summary .test-status-mark { background: var(--teal); }
+.status-fail > .test-status-mark,
+.status-fail > summary .test-status-mark { background: var(--coral); }
+
+.test-location,
+.test-case-meta button {
+  border: 0;
+  background: transparent;
+  color: var(--teal-dark);
+  font: 11px/1.4 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.test-suite > .test-location {
+  margin: 0 10px 8px 28px;
+}
+
+.test-case-list {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  padding: 8px;
+}
+
+.test-case {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  border-bottom: 1px solid rgba(226, 223, 216, 0.7);
+  padding: 8px 2px;
+}
+
+.test-case:last-child { border-bottom: 0; }
+.test-case-body { display: grid; gap: 4px; min-width: 0; }
+.test-case-body small { color: var(--ink-soft); overflow-wrap: anywhere; }
+.test-case-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.test-case-body pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 2px 0 0;
+  border-left: 2px solid var(--coral);
+  background: #fff0ed;
+  color: #702720;
+  font: 11px/1.45 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  padding: 7px 8px;
+  white-space: pre-wrap;
+}
+
+.test-rerun {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 750;
+  padding: 0 7px;
+}
+
+@media (max-width: 620px) {
+  .test-suite > summary { grid-template-columns: 10px minmax(90px, 1fr) auto; }
+  .test-suite > summary span:nth-of-type(n+3) { display: none; }
+  .test-case { grid-template-columns: 10px minmax(0, 1fr); }
+  .test-rerun { grid-column: 2; justify-self: start; }
+}
+
+.scheduler-panel-head,
+.scheduler-row,
+.scheduler-row-actions {
+  display: flex;
+  align-items: center;
+}
+
+.scheduler-panel-head,
+.scheduler-row {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.scheduler-panel-head h3,
+.scheduler-panel-head p {
+  margin: 0;
+}
+
+.scheduler-panel-head p {
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.scheduler-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.scheduler-metrics span {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 7px 5px;
+  color: var(--ink-soft);
+  text-align: center;
+  font-size: 11px;
+}
+
+.scheduler-metrics strong {
+  display: block;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.scheduler-list {
+  display: grid;
+  gap: 6px;
+}
+
+.scheduler-row {
+  min-height: 54px;
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+}
+
+.scheduler-row > div:first-child {
+  min-width: 0;
+}
+
+.scheduler-row strong,
+.scheduler-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduler-row strong {
+  font-size: 13px;
+}
+
+.scheduler-row small,
+.scheduler-empty {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.scheduler-row .scheduler-error {
+  color: var(--danger, #c23b2e);
+}
+
+.scheduler-row-actions {
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.scheduler-empty {
+  margin: 4px 0;
+  text-align: center;
+}
+
 .secondary-button {
   min-height: 40px;
   border: 1px solid var(--line);

@@ -39,6 +39,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -63,6 +64,7 @@ import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.CommandResult
 import com.vibelink.app.network.GitDiffResponse
 import com.vibelink.app.network.GitStatusItem
+import com.vibelink.app.network.TestLocation
 import com.vibelink.app.network.WorkspaceFileItem
 import com.vibelink.app.network.WorkspaceFileResponse
 import com.vibelink.app.network.WorkspaceItem
@@ -85,6 +87,7 @@ fun WorkspaceScreen(
     val gitStatus by viewModel.gitStatus.collectAsState()
     val gitDiff by viewModel.gitDiff.collectAsState()
     val commandResult by viewModel.commandResult.collectAsState()
+    val testResult by viewModel.testResult.collectAsState()
     val loading by viewModel.loading.collectAsState()
     val refreshing by viewModel.refreshing.collectAsState()
     val commandRunning by viewModel.commandRunning.collectAsState()
@@ -148,6 +151,7 @@ fun WorkspaceScreen(
                     commandRunning = commandRunning,
                     gitActionRunning = gitActionRunning,
                     commandResult = commandResult,
+                    testResult = testResult,
                     error = error,
                     pendingApproval = pendingApproval,
                     onOpenApprovals = onOpenApprovals,
@@ -184,6 +188,7 @@ private fun WorkspaceContent(
     commandRunning: Boolean,
     gitActionRunning: Boolean,
     commandResult: CommandResult?,
+    testResult: CommandResult?,
     error: String,
     pendingApproval: WorkspaceApprovalNotice?,
     onOpenApprovals: () -> Unit,
@@ -494,6 +499,17 @@ private fun WorkspaceContent(
                     }
                     Spacer(Modifier.size(8.dp))
                     Text(if (commandRunning) "Running" else "Run tests")
+                }
+                testResult?.let { result ->
+                    Spacer(Modifier.height(10.dp))
+                    TestResultView(
+                        result = result,
+                        enabled = !commandRunning,
+                        onOpenLocation = { location ->
+                            if (location.path.isNotBlank()) viewModel.openFileReference(apiClient, location.path)
+                        },
+                        onRerun = { rerun -> viewModel.runCommand(apiClient, rerun, kind = "test") },
+                    )
                 }
             }
         }
@@ -1121,6 +1137,106 @@ private fun MutedText(text: String) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+@Composable
+private fun TestResultView(
+    result: CommandResult,
+    enabled: Boolean,
+    onOpenLocation: (TestLocation) -> Unit,
+    onRerun: (String) -> Unit,
+) {
+    val summary = result.test
+    val output = listOf(result.stdout.trim(), result.stderr.trim()).filter { it.isNotBlank() }.joinToString("\n")
+    if (summary == null) {
+        CommandResultView(result)
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            item { AssistChip(onClick = {}, label = { Text(if (summary.ok) ws("通过", "Passed") else ws("失败", "Failed")) }) }
+            if (summary.runner.isNotBlank() && summary.runner != "unknown") item { AssistChip(onClick = {}, label = { Text(summary.runner) }) }
+            item { AssistChip(onClick = {}, label = { Text("${summary.passed} passed") }) }
+            item { AssistChip(onClick = {}, label = { Text("${summary.failed} failed") }) }
+            item { AssistChip(onClick = {}, label = { Text("${summary.skipped} skipped") }) }
+            durationLabel(summary.durationMs)?.let { duration -> item { AssistChip(onClick = {}, label = { Text(duration) }) } }
+        }
+        summary.suites.forEach { suite ->
+            var expanded by remember(suite.name, suite.status) { mutableStateOf(suite.status == "fail") }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp)),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TestStatusDot(suite.status)
+                    Text(suite.name.ifBlank { "Test suite" }, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                    durationLabel(suite.durationMs)?.let { MutedText(it) }
+                    Text(if (expanded) "−" else "+", style = MaterialTheme.typography.titleMedium)
+                }
+                if (expanded) {
+                    if (suite.location.path.isNotBlank()) {
+                        TextButton(onClick = { onOpenLocation(suite.location) }) { Text(locationLabel(suite.location)) }
+                    }
+                    suite.cases.forEachIndexed { index, testCase ->
+                        if (index > 0) HorizontalDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(10.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            TestStatusDot(testCase.status)
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(testCase.name.ifBlank { testCase.fullName }, style = MaterialTheme.typography.bodyMedium)
+                                if (testCase.suite.isNotBlank()) MutedText(testCase.suite)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    if (testCase.location.path.isNotBlank()) {
+                                        TextButton(onClick = { onOpenLocation(testCase.location) }, contentPadding = PaddingValues(0.dp)) {
+                                            Text(locationLabel(testCase.location), style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                    durationLabel(testCase.durationMs)?.let { MutedText(it) }
+                                }
+                                if (testCase.failure.isNotBlank()) CodeBlock(testCase.failure, maxLines = 30)
+                            }
+                            testCase.rerunCommand?.takeIf { it.isNotBlank() }?.let { rerun ->
+                                IconButton(onClick = { onRerun(rerun) }, enabled = enabled) {
+                                    Icon(Icons.Default.Refresh, contentDescription = ws("重跑失败用例", "Rerun failed test"))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (summary.suites.isEmpty() && summary.failures.isNotEmpty()) CodeBlock(summary.failures.joinToString("\n"), maxLines = 30)
+        if (output.isNotBlank()) CodeBlock(output.take(8000), maxLines = 80)
+    }
+}
+
+@Composable
+private fun TestStatusDot(status: String) {
+    val color = when (status) {
+        "pass" -> MaterialTheme.colorScheme.primary
+        "fail" -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Box(modifier = Modifier.size(8.dp).background(color, RoundedCornerShape(4.dp)))
+}
+
+private fun durationLabel(value: Double?): String? {
+    val duration = value?.takeIf { it.isFinite() && it >= 0 } ?: return null
+    return if (duration < 1000) "${(duration * 10).toInt() / 10.0} ms" else "${(duration / 100).toInt() / 10.0} s"
+}
+
+private fun locationLabel(location: TestLocation): String = buildString {
+    append(location.path)
+    location.line?.let { append(":$it") }
+    location.column?.let { append(":$it") }
 }
 
 @Composable

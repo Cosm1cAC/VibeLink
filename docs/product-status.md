@@ -24,6 +24,8 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - Codex app-server contract gate 已审查 CLI 0.144.5，并覆盖 thread/turn/item/tool 生命周期、agent/command output、MCP progress 和 approval schema；纯 normalizer、JSON-RPC mock 和 approval bridge 单元已落地，但 app-server JSON-RPC connection 尚未由 execution worker 持有，未知版本仍会 fail-closed。
 - SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox；Rust `execd`、独立 worker、Job Object、ConPTY/stdio、分段 spool/replay/ack 和启动身份校验已实现。Bridge 启动会统一读取 binding、查询 execd、补 ingest/ack，并恢复 Terminal、Workspace command 与 Agent task/tool 订阅。通用 approval dispatcher 已轮询 transactional outbox 并向 execution host 投递，worker 事件可回写 delivered/applied/stale；当前 CLI Provider 仍发布 `approvalContinuation=false`，Codex app-server adapter 尚未接入。
 - Event Store 已增加单调 device/stream ack、ack-aware retention plan 和 compaction marker repository，并同步覆盖 SQLite、Worker client 与 Rust sidecar contract；客户端 ack API、实际 compaction 执行和 spool quota 仍未接入。
+- Workspace 测试命令已接入 Jest、Vitest 和 Pytest 结构化 adapter，能够返回 suite/case、位置、耗时和失败用例 rerun command；Web/Android 当前主要消费汇总、failure 和原始输出，尚未完整展示结果树或触发单测重跑。
+- 只读 artifact runtime 已支持鉴权 metadata、bounded range，以及 PDF、CSV/TSV、XLSX、Notebook 和 OpenXML 文档的有界 best-effort preview；Web 目前只有 PDF/Text 基础内联，Android 主要提供附件识别与打开，尚未消费完整结构化 preview。
 - Windows Rust 前门已覆盖 Status、Doctor、Devices、设备写操作、Pairing、Audit、Settings、Tool Events REST/SSE 和 Workspace 文件写入；其余 HTTP/SSE/WebSocket 仍透明转发 Node，并保留逐 slice 回退。
 - Android 补齐了凭据加密、鉴权附件流、原生 push 注册、前后台实时流挂起/恢复、音频流有界重试、中英文运行文案，以及搜索、标签/收藏、命令发现和 PR review 入口。
 
@@ -42,25 +44,24 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
 - Workspace 全文搜索已不再在请求内扫描文件；索引器最多跟踪每个 Workspace 100,000 个文件，单文件正文索引上限 1 MiB，超限或二进制文件仍索引路径。session/task/message 仍在请求内聚合原生 history 与运行状态，尚未进入同一持久全文索引。
 - Workspace 仍缺大文件分页、富二进制预览、更完整的批量操作和成熟冲突处理。
-- Git 已支持常用状态、diff、stage、commit、push、pull、PR 创建、branch、stash、worktree、per-hunk 和冲突动作；PR review 工作台已接入 GitHub 远端同步、冲突检测和 review 提交，仍缺 GitLab runtime 和完整 worktree 生命周期管理。
-- 测试视图仍是通用文本解析，缺少 Jest/Pytest/Vitest 结构化适配和单测重跑。
+- Git 已支持常用状态、diff、stage、commit、push、pull、PR 创建、branch、stash、worktree 创建、per-hunk 和冲突动作；PR review 工作台已接入 GitHub 远端同步、冲突检测和 review 提交，仍缺 GitLab runtime，以及 worktree 列表、删除、prune/lock 等完整生命周期管理。
+- Jest/Pytest/Vitest 结构化测试 adapter 和失败用例 rerun command 已由 Workspace 后端返回；Web/Android 仍缺 suite/case 结果树、耗时/位置的完整展示，以及执行 rerun command 的单测重跑动作。
 - Live Call 已支持 pause/resume、本地 PCM 文件列表/删除、ASR provider 诊断和可选 whisper.cpp；缺少可默认交付的生产 ASR 配置、长时间真实 PCM/弱网 QA 和录音生命周期策略。没有可用 whisper.cpp binary/model 时仍回退 deterministic mock。
 - 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；仍缺客户端 ack API、实际 retention/compaction 执行、spool quota marker 和多设备冲突策略。
-- 尚无 iOS 客户端。
 
 ### P2 后续能力
 
-- 缺少插件、Hooks、Automations、Subagents 和 AGENTS/config 可视化管理。
-- 缺少内置浏览器视图、浏览器测试轨迹和手机端浏览器遥控。
-- Workspace 已有增量全文索引、保存搜索和搜索历史；仍缺 session/task/message 的持久增量索引，以及更完整的命令历史体验。
-- Office、表格、PDF、Notebook 等 artifact 仍缺专门预览和编辑体验。
+- 已有 Skills 扫描/刷新、Agent Reach skill 管理和 MCP tool registry，但仍缺通用插件生命周期、Hooks、Automations、Subagents，以及 AGENTS/config 可视化管理。
+- Playwright browser session runtime 已实现有界 session/page、导航、截图和脱敏 trace，但尚未接入生产 HTTP 契约、内置 Web/Android 浏览器视图或手机端浏览器遥控。
+- artifact 后端已有 PDF、表格、Notebook 和 OpenXML 文档的只读结构化 preview；仍缺 Web/Android 专门 renderer、交互式表格/Notebook 体验和编辑能力。
 
-## 已知且不计划消除的边界
+## 已知边界与当前非目标
 
 - VibeLink 无法事后接管电脑上任意已运行进程的 stdin/stdout/PTY。只有从启动时即由 VibeLink execution worker 持有、且 binding owner 为 `execution-host` 的 execution 才承诺重连；外部进程永久属于 `external`。
 - Codex Desktop 未公开稳定的完整 tool 输出、退出码、所有权和审批 continuation。Desktop Remote 只能按需采样、实时近似并在完成后校准，不能获得 VibeLink Agent 等级的权威执行状态。
 - Desktop UI 遥控依赖 Windows UIA、前台窗口、控件文案和 Electron UI 结构，必须 fail-closed，不能视为稳定第一方协议。
 - 公网入口采用配对、设备 token、撤销/轮换、Host allowlist、审计、限流和 Cloudflare 向导；当前产品范围不建设完整云账号系统。
+- iOS 客户端是当前非目标，暂不开发，也不计入 P0/P1/P2 产品缺口。
 
 ## Android 收口状态
 

@@ -141,6 +141,6 @@ Windows 手工启动 `codex app-server --listen ws://127.0.0.1:<port>` 可工作
 | C. Event ack/retention | OpenAPI 契约、HTTP ack、Web/Android ack、retention executor、compaction marker 展示 | `eventStore*`、客户端 API、OpenAPI | 契约冻结后，服务端 executor 与 Web/Android 客户端可并行；`db.js`/`server.js` 集成集中由一个 owner 合并 |
 | D. Persistent search expansion | session/task/message 增量索引、规模基准、查询迁移 | `search*`、search tests | 可与 A、B、F 并行；与 C 都会触碰 SQLite/schema/server，迁移和路由提交需错开 |
 | E. Provider scheduler | 持久任务队列、并发配额、retry/backoff、调度状态 API | `agents.js`、scheduler、Provider runtime | 设计与测试可并行；execution spawn、`server.js` 和 `db.js` 接线与 B/D/C 有共享热点，需单 owner 集成 |
-| F. Product-side isolated work | Live Call 生产 ASR/弱网 QA、GitLab review runtime、结构化 test adapters | 各自 runtime、tools 和客户端页面 | 三项彼此及与 A-E 基本独立，适合作为并行吞吐泳道 |
+| F. Product-side isolated work | Live Call 生产 ASR/弱网 QA、GitLab review runtime、结构化测试结果树与单测重跑客户端接入 | 各自 runtime、tools 和客户端页面 | 三项彼此及与 A-E 基本独立，适合作为并行吞吐泳道 |
 
 推荐第一波同时推进 A、B 的纯 adapter/mock、C 的契约设计，以及 F 中的一项；这一波不需要共享生产路由。第二波在契约冻结后并行实现 C 的服务端与客户端，同时让 B 接入 execution worker。D 和 E 都会集中修改 SQLite 与 Node control plane，若团队规模有限，应各自保持单 owner，并与 C/B 的集成提交错峰。最终端到端故障演练、OpenAPI 生成、全量 build 和 Windows portable 验证必须串行收口。

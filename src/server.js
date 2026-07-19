@@ -67,7 +67,7 @@ import { applyTaskQueueTransition, appendExternalTaskEvent, configureTaskSchedul
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, createBrowserSessionRuntime, fetchBrowserPage } from "./browserRuntime.js";
 import { routeBrowserSessionRequest } from "./browserSessionHttp.js";
-import { artifactMetadata, artifactPreview, readArtifactRange } from "./artifactRuntime.js";
+import { artifactMetadata, artifactPreview, mutateArtifact, readArtifactRange } from "./artifactRuntime.js";
 import { createApprovalDispatcher } from "./approvalDispatcher.js";
 import { getCompactServiceMetrics } from "./compactService.js";
 import { getContextBudgetMetrics } from "./contextBudget.js";
@@ -1829,6 +1829,18 @@ async function serveArtifactPreview(request, response, url, auth, id) {
   }
 }
 
+async function serveArtifactMutation(request, response, url, auth, id) {
+  try {
+    const body = await readBody(request);
+    const result = await mutateArtifact(artifactPathFromId(id), body, { id, name: id });
+    audit(request, url, auth, { type: "artifact.mutate", success: true, target: id, meta: { kind: result.metadata.kind, digest: result.metadata.digest } });
+    sendJson(response, 200, result);
+  } catch (error) {
+    audit(request, url, auth, { type: "artifact.mutate", success: false, target: id, reason: error.message });
+    sendError(response, error.status || 500, error.message, { code: error.code || "ARTIFACT_ERROR" });
+  }
+}
+
 async function serveArtifactRange(request, response, url, auth, id) {
   let result;
   try {
@@ -2046,6 +2058,11 @@ async function routeApi(request, response, url) {
     if (artifactMatch[2] === "content") await serveArtifactRange(request, response, url, auth, id);
     else if (artifactMatch[2] === "preview") await serveArtifactPreview(request, response, url, auth, id);
     else await serveArtifactMetadata(request, response, url, auth, id);
+    return;
+  }
+  if (artifactMatch && request.method === "PATCH" && !artifactMatch[2]) {
+    if (!enforceRateLimit(request, response, url, "artifact.mutate", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    await serveArtifactMutation(request, response, url, auth, safeDecode(artifactMatch[1]));
     return;
   }
 

@@ -162,6 +162,32 @@ class ApiClient(
         BrowserSessionResponse::class.java,
     ).session
 
+    suspend fun previewArtifact(artifactId: String): ArtifactStructuredPreview = gson.fromJson(
+        get("/api/artifacts/${encode(artifactId)}/preview"),
+        ArtifactPreviewResponse::class.java,
+    ).preview
+
+    suspend fun saveTableArtifact(
+        artifactId: String,
+        expectedDigest: String,
+        document: ArtifactDocument,
+    ): ArtifactStructuredPreview = gson.fromJson(
+        patch("/api/artifacts/${encode(artifactId)}", mapOf("expectedDigest" to expectedDigest, "document" to document)),
+        ArtifactMutationResponse::class.java,
+    ).preview
+
+    suspend fun saveNotebookArtifact(
+        artifactId: String,
+        expectedDigest: String,
+        cells: List<ArtifactCell>,
+    ): ArtifactStructuredPreview = gson.fromJson(
+        patch(
+            "/api/artifacts/${encode(artifactId)}",
+            mapOf("expectedDigest" to expectedDigest, "cellPatches" to cells.map { ArtifactCellPatch(it.index, it.source) }),
+        ),
+        ArtifactMutationResponse::class.java,
+    ).preview
+
     suspend fun probeMcp(timeoutMs: Int = 10000): McpProbeResponse {
         val json = post("/api/mcp/probe", mapOf("timeoutMs" to timeoutMs))
         return gson.fromJson(json, McpProbeResponse::class.java)

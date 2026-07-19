@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   artifactMetadata,
   artifactPreview,
+  mutateArtifact,
   parseArtifactRange,
   redactArtifactText
 } from "../src/artifactRuntime.js";
@@ -116,6 +117,37 @@ test("CSV preview returns bounded table structure", async (t) => {
   assert.deepEqual(preview.document.rows[0], ["Ada", "line one, line two"]);
   assert.equal(preview.document.rows[1][1].includes("secret"), false);
   assert.equal(preview.truncated.rows, false);
+});
+
+test("artifact mutation updates tables and notebook sources with digest conflicts", async (t) => {
+  const csvPath = temporaryFile(t, "editable.csv", "name,count\nalpha,1\n");
+  const csvMetadata = await artifactMetadata(csvPath, { name: "editable.csv" });
+  const csvResult = await mutateArtifact(csvPath, {
+    expectedDigest: csvMetadata.digest,
+    document: { type: "table", columns: ["name", "count"], rows: [["a,b", "2"]] }
+  }, { name: "editable.csv" });
+  assert.equal(csvResult.metadata.capabilities.mutation, true);
+  assert.equal(await fs.promises.readFile(csvPath, "utf8"), "name,count\n\"a,b\",2\n");
+  await assert.rejects(
+    mutateArtifact(csvPath, { expectedDigest: csvMetadata.digest, document: { type: "table", columns: [], rows: [] } }, { name: "editable.csv" }),
+    (error) => error.status === 409 && error.code === "ARTIFACT_CONFLICT"
+  );
+
+  const notebookPath = temporaryFile(t, "editable.ipynb", JSON.stringify({
+    nbformat: 4,
+    nbformat_minor: 5,
+    metadata: { kernelspec: { name: "python3" } },
+    cells: [{ cell_type: "code", source: ["print('old')\n"], execution_count: 7, outputs: [{ output_type: "stream", text: ["old\n"] }], metadata: { tag: "keep" } }]
+  }));
+  const notebookMetadata = await artifactMetadata(notebookPath, { name: "editable.ipynb" });
+  await mutateArtifact(notebookPath, {
+    expectedDigest: notebookMetadata.digest,
+    cellPatches: [{ index: 0, source: "print('new')\n" }]
+  }, { name: "editable.ipynb" });
+  const saved = JSON.parse(await fs.promises.readFile(notebookPath, "utf8"));
+  assert.deepEqual(saved.cells[0].source, ["print('new')\n"]);
+  assert.equal(saved.cells[0].outputs[0].text[0], "old\n");
+  assert.equal(saved.cells[0].metadata.tag, "keep");
 });
 
 test("OOXML preview dispatches DOCX paragraphs and XLSX sheet cells", async (t) => {

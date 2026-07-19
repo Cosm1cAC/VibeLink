@@ -626,6 +626,8 @@ private fun MessageBubble(
     var menuOpen by remember { mutableStateOf(false) }
     var editing by remember(message.role, message.text, message.turnId, message.id) { mutableStateOf(false) }
     var editDraft by remember(message.role, message.text, message.turnId, message.id) { mutableStateOf(message.text) }
+    var artifactPreview by remember(message.role, message.text) { mutableStateOf<MessageContentUtils.ContentLink?>(null) }
+    val artifactApiClient = remember(apiBaseUrl, authToken) { ApiClient(baseUrl = apiBaseUrl, token = authToken) }
     val isUser = message.role == "user"
     val isSystem = message.role == "system"
     val isError = message.role == "error"
@@ -804,11 +806,14 @@ private fun MessageBubble(
                     Spacer(Modifier.height(8.dp))
                     ArtifactChips(
                         links = artifactLinks,
-                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url, authToken)) },
+                        onOpen = { link -> artifactPreview = link },
                     )
                 }
             }
         }
+    }
+    artifactPreview?.let { link ->
+        ArtifactWorkbenchDialog(link = link, apiClient = artifactApiClient, onDismiss = { artifactPreview = null })
     }
 }
 

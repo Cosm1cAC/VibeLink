@@ -59,6 +59,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
+import { ArtifactWorkbench } from "./ArtifactWorkbench.jsx";
 import { selectionStartState } from "./chatSelection.js";
 import { remoteTranscriptItems } from "./remoteTranscript.js";
 import {
@@ -1561,43 +1562,7 @@ function MarkdownCode({ inline, className, children, node, ...props }) {
   return <CodeBlock code={code} language={match?.[1] || ""} />;
 }
 
-function ArtifactPreview({ artifact, onClose }) {
-  if (!artifact) return null;
-  const canInline = ["PDF", "Text"].includes(artifact.kind);
-  return (
-    <div className="artifact-preview-backdrop" role="dialog" aria-modal="true" onClick={onClose}>
-      <section className="artifact-preview" onClick={(event) => event.stopPropagation()}>
-        <div className="artifact-preview-head">
-          <FileText size={17} />
-          <span>
-            <strong>{artifact.label}</strong>
-            <small>{artifact.kind}</small>
-          </span>
-          <a href={artifact.href} target="_blank" rel="noreferrer" title="新窗口打开">
-            <ExternalLink size={17} />
-          </a>
-          <a href={artifact.href} download={pathBaseName(artifact.raw)} title="下载文件">
-            <Download size={17} />
-          </a>
-          <button type="button" onClick={onClose} title="关闭">
-            <X size={18} />
-          </button>
-        </div>
-        {canInline ? (
-          <iframe title={artifact.label} src={artifact.href} />
-        ) : (
-          <div className="artifact-preview-empty">
-            <File size={34} />
-            <strong>{artifact.kind} preview</strong>
-            <p>浏览器不能直接预览时，可下载或在新窗口打开。</p>
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function ArtifactList({ artifacts = [] }) {
+function ArtifactList({ artifacts = [], token = "" }) {
   const [preview, setPreview] = useState(null);
   if (!artifacts.length) return null;
   return (
@@ -1619,7 +1584,7 @@ function ArtifactList({ artifacts = [] }) {
           </div>
         ))}
       </div>
-      <ArtifactPreview artifact={preview} onClose={() => setPreview(null)} />
+      <ArtifactWorkbench artifact={preview} onClose={() => setPreview(null)} request={request} token={token} />
     </>
   );
 }
@@ -1986,7 +1951,7 @@ function Message({
             <MessageContent text={displayText} typing={typing && !live} typingKey={typingKey || messageKey} token={token} onOpenFilePath={onOpenFilePath} />
             {live && streaming ? <span className="typing-caret live-stream-caret" aria-hidden="true" /> : null}
             <ImageGallery images={galleryImages} />
-            <ArtifactList artifacts={artifacts} />
+            <ArtifactList artifacts={artifacts} token={token} />
           </>
         )}
       </div>

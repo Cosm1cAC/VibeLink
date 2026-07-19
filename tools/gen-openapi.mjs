@@ -321,17 +321,19 @@ const schemas = {
         properties: {
           rangeRead: { type: "boolean", enum: [true] },
           preview: { type: "boolean" },
-          mutation: { type: "boolean", enum: [false] }
+          mutation: { type: "boolean" }
         }
       }
     }
   },
   ArtifactPreview: {
     type: "object",
-    required: ["version", "readonly", "mimeType", "kind", "document", "truncated", "redaction", "limits"],
+    required: ["version", "readonly", "digest", "capabilities", "mimeType", "kind", "document", "truncated", "redaction", "limits"],
     properties: {
       version: { type: "integer", enum: [1] },
-      readonly: { type: "boolean", enum: [true] },
+      readonly: { type: "boolean" },
+      digest: { type: "string", pattern: "^sha256:[a-f0-9]{64}$" },
+      capabilities: { type: "object", properties: { rangeRead: { type: "boolean" }, preview: { type: "boolean" }, mutation: { type: "boolean" } } },
       mimeType: { type: "string" },
       kind: { type: "string" },
       document: { type: "object", additionalProperties: true },
@@ -1299,12 +1301,20 @@ const paths = {
     { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }
   )),
 
-  // Read-only artifact runtime
-  ...path("/api/artifacts/{id}", get("Get artifact metadata",
-    "Returns authenticated, server-detected artifact metadata and read-only capability flags.",
+  // Artifact runtime
+  ...path("/api/artifacts/{id}", {
+    ...get("Get artifact metadata",
+    "Returns authenticated, server-detected artifact metadata and capability flags.",
     { type: "object", properties: { artifact: { $ref: "#/components/schemas/ArtifactMetadata" } } },
     [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
-  )),
+    ),
+    ...mutation("patch", "Mutate editable artifact", "Revision-checked CSV/TSV table or Notebook cell-source mutation.",
+      { type: "object", properties: { metadata: { $ref: "#/components/schemas/ArtifactMetadata" }, preview: { $ref: "#/components/schemas/ArtifactPreview" } } },
+      { type: "object", required: ["expectedDigest"], properties: { expectedDigest: { type: "string" }, document: { type: "object" }, cellPatches: { type: "array", maxItems: 1000, items: { type: "object", required: ["index", "source"], properties: { index: { type: "integer", minimum: 0 }, source: { type: "string" } } } } } },
+      [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+      { "409": { description: "Artifact digest conflict", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } }, "405": { description: "Artifact type is read-only", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } } }
+    )
+  }),
   ...path("/api/artifacts/{id}/preview", get("Preview artifact structure",
     "Returns a bounded, redacted, read-only structure for PDF, Office, table, or Notebook content.",
     { type: "object", properties: { preview: { $ref: "#/components/schemas/ArtifactPreview" } } },
@@ -1333,6 +1343,21 @@ const paths = {
       }
     }
   }),
+
+  // Managed browser sessions
+  ...path("/api/browser-sessions", {
+    ...get("List managed browser sessions", "Returns active bridge-owned Chromium sessions and pages.", { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }),
+    ...post("Create managed browser session", "Creates a headless bridge-owned Chromium session.", { type: "object", properties: { timeoutMs: { type: "integer", minimum: 1, maximum: 300000 }, maxTraceEvents: { type: "integer", minimum: 1, maximum: 100000 } } }, { type: "object", properties: { session: { type: "object" } } }, { "201": { description: "Created" } })
+  }),
+  ...path("/api/browser-sessions/{id}", {
+    ...get("Get managed browser session", "Returns one managed session.", { type: "object", properties: { session: { type: "object" } } }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }]),
+    ...mutation("delete", "Close managed browser session", "Closes Chromium resources owned by the session.", { type: "object", properties: { session: { type: "object" } } }, null, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])
+  }),
+  ...path("/api/browser-sessions/{id}/pages", post("Create browser page", "Creates a page in a managed session.", { type: "object" }, { type: "object", properties: { page: { type: "object" } } }, { "201": { description: "Created" } }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/browser-sessions/{id}/pages/{pageId}", mutation("delete", "Close browser page", "Closes one managed page.", { type: "object", properties: { page: { type: "object" } } }, null, [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "pageId", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/browser-sessions/{id}/navigate", post("Navigate browser page", "Navigates a managed page after URL validation.", { type: "object", required: ["url"], properties: { pageId: { type: "string" }, url: { type: "string" }, waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle", "commit"] }, timeoutMs: { type: "integer" } } }, { type: "object", properties: { navigation: { type: "object" } } }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/browser-sessions/{id}/screenshot", post("Capture browser screenshot", "Returns a bounded PNG or JPEG screenshot as base64 JSON.", { type: "object", properties: { pageId: { type: "string" }, type: { type: "string", enum: ["png", "jpeg"] }, fullPage: { type: "boolean", enum: [false] } } }, { type: "object", properties: { screenshot: { type: "object" } } }, { "413": { description: "Screenshot too large" } }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/browser-sessions/{id}/trace", get("Read browser trace", "Returns bounded redacted trace events with cursor pagination.", { type: "object", properties: { items: { type: "array", items: { type: "object" } }, nextCursor: { type: "integer" }, hasMore: { type: "boolean" }, droppedBefore: { type: "integer" } } }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 1000 } }, { name: "types", in: "query", schema: { type: "string" } }])),
 
   // Other
   ...path("/api/cloudflare/guide", get("Cloudflare tunnel guide",

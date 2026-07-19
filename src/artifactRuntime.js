@@ -228,8 +228,81 @@ export async function artifactMetadata(filePath, options = {}) {
     capabilities: {
       rangeRead: true,
       preview: kind !== "binary",
-      mutation: false
+      mutation: kind === "table" || kind === "notebook"
     }
+  };
+}
+
+function delimitedCell(value, delimiter) {
+  const text = String(value ?? "");
+  return text.includes(delimiter) || /["\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function serializeTable(document, delimiter) {
+  if (document?.type !== "table" || !Array.isArray(document.columns) || !Array.isArray(document.rows)) {
+    throw artifactError("Table document is invalid.", 422, "ARTIFACT_INVALID");
+  }
+  if (document.columns.length > 500 || document.rows.length > 10_000) {
+    throw artifactError("Table mutation exceeds the supported limits.", 413, "ARTIFACT_TOO_LARGE");
+  }
+  const width = document.columns.length;
+  const lines = [document.columns.map((cell) => delimitedCell(cell, delimiter)).join(delimiter)];
+  for (const row of document.rows) {
+    if (!Array.isArray(row) || row.length !== width) throw artifactError("Table rows must match the column count.", 422, "ARTIFACT_INVALID");
+    lines.push(row.map((cell) => delimitedCell(cell, delimiter)).join(delimiter));
+  }
+  const output = `${lines.join("\n")}\n`;
+  if (Buffer.byteLength(output) > 8 * 1024 * 1024) throw artifactError("Table mutation is too large.", 413, "ARTIFACT_TOO_LARGE");
+  return output;
+}
+
+async function serializeNotebook(filePath, cellPatches) {
+  if (!Array.isArray(cellPatches) || cellPatches.length === 0 || cellPatches.length > 1_000) {
+    throw artifactError("Notebook cell patches are invalid.", 422, "ARTIFACT_INVALID");
+  }
+  const source = await readBoundedFile(filePath, 8 * 1024 * 1024);
+  let notebook;
+  try { notebook = JSON.parse(source.toString("utf8").replace(/^\uFEFF/, "")); } catch {
+    throw artifactError("Notebook JSON is invalid.", 422, "ARTIFACT_CORRUPT");
+  }
+  if (!Array.isArray(notebook.cells)) throw artifactError("Notebook cells are missing.", 422, "ARTIFACT_CORRUPT");
+  const seen = new Set();
+  for (const patch of cellPatches) {
+    const index = Number(patch?.index);
+    const cellSource = String(patch?.source ?? "");
+    if (!Number.isInteger(index) || index < 0 || index >= notebook.cells.length || seen.has(index) || Buffer.byteLength(cellSource) > 1024 * 1024) {
+      throw artifactError("Notebook cell patch is invalid.", 422, "ARTIFACT_INVALID");
+    }
+    seen.add(index);
+    notebook.cells[index].source = [cellSource];
+  }
+  return `${JSON.stringify(notebook, null, 2)}\n`;
+}
+
+async function replaceFile(filePath, content) {
+  const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.promises.writeFile(temporary, content, { encoding: "utf8", flag: "wx" });
+    await fs.promises.rename(temporary, filePath);
+  } catch (error) {
+    await fs.promises.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+export async function mutateArtifact(filePath, mutation = {}, options = {}) {
+  const metadata = await artifactMetadata(filePath, options);
+  if (!metadata.capabilities.mutation) throw artifactError("Artifact type is read-only.", 405, "ARTIFACT_READ_ONLY");
+  if (!mutation.expectedDigest || mutation.expectedDigest !== metadata.digest) {
+    throw artifactError("Artifact changed since it was loaded.", 409, "ARTIFACT_CONFLICT");
+  }
+  const content = metadata.kind === "table"
+    ? serializeTable(mutation.document, metadata.mimeType === "text/tab-separated-values" ? "\t" : ",")
+    : await serializeNotebook(filePath, mutation.cellPatches);
+  await replaceFile(filePath, content);
+  return {
+    metadata: await artifactMetadata(filePath, options),
+    preview: await artifactPreview(filePath, options)
   };
 }
 
@@ -481,7 +554,9 @@ function pdfPreview(buffer, limits, state) {
 function previewEnvelope(metadata, result, limits, state) {
   return {
     version: 1,
-    readonly: true,
+    readonly: !metadata.capabilities.mutation,
+    digest: metadata.digest,
+    capabilities: metadata.capabilities,
     mimeType: metadata.mimeType,
     kind: metadata.kind,
     document: result.document,

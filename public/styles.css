@@ -2041,6 +2041,118 @@ body {
   margin: 0;
 }
 
+.artifact-workbench > :last-child:not(.artifact-preview-head) {
+  min-height: 0;
+  overflow: auto;
+}
+
+.artifact-error {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.artifact-table-wrap {
+  width: 100%;
+  overflow: auto;
+}
+
+.artifact-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.artifact-table th,
+.artifact-table td {
+  min-width: 120px;
+  padding: 8px 10px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.artifact-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-soft);
+}
+
+.artifact-table input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 7px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.artifact-table input:focus {
+  outline: 2px solid var(--teal);
+  border-color: var(--teal);
+}
+
+.artifact-notebook,
+.artifact-pages,
+.artifact-sheets {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.artifact-cell,
+.artifact-pages section,
+.artifact-sheets section {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.artifact-cell header {
+  display: flex;
+  justify-content: space-between;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.artifact-cell textarea,
+.artifact-cell pre,
+.artifact-output,
+.artifact-pages pre,
+.artifact-text {
+  width: 100%;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: 12px/1.5 "Cascadia Mono", "JetBrains Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.artifact-cell textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.artifact-output {
+  color: var(--ink-soft);
+  background: var(--paper);
+}
+
+.artifact-pages p {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .tool-call-list {
   display: grid;
   gap: 8px;

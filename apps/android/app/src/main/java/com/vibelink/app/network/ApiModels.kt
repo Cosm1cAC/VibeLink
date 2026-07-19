@@ -1332,3 +1332,38 @@ data class BrowserTraceResponse(
     @SerializedName("hasMore") val hasMore: Boolean = false,
     @SerializedName("droppedBefore") val droppedBefore: Long = 0,
 )
+
+data class ArtifactCapabilities(
+    @SerializedName("rangeRead") val rangeRead: Boolean = true,
+    val preview: Boolean = true,
+    val mutation: Boolean = false,
+)
+
+data class ArtifactOutput(val type: String = "", val name: String = "", val text: String = "")
+data class ArtifactCell(val index: Int = 0, val type: String = "", val source: String = "", val outputs: List<ArtifactOutput> = emptyList())
+data class ArtifactSheet(val name: String = "", val rows: List<List<String>> = emptyList())
+data class ArtifactSlide(val paragraphs: List<String> = emptyList())
+
+data class ArtifactDocument(
+    val type: String = "",
+    val columns: List<String> = emptyList(),
+    val rows: List<List<String>> = emptyList(),
+    val cells: List<ArtifactCell> = emptyList(),
+    val sheets: List<ArtifactSheet> = emptyList(),
+    val paragraphs: List<String> = emptyList(),
+    val slides: List<ArtifactSlide> = emptyList(),
+    val text: String = "",
+    val reason: String = "",
+)
+
+data class ArtifactStructuredPreview(
+    val kind: String = "",
+    val digest: String = "",
+    val readonly: Boolean = true,
+    val capabilities: ArtifactCapabilities = ArtifactCapabilities(),
+    val document: ArtifactDocument = ArtifactDocument(),
+)
+
+data class ArtifactPreviewResponse(val preview: ArtifactStructuredPreview = ArtifactStructuredPreview())
+data class ArtifactMutationResponse(val preview: ArtifactStructuredPreview = ArtifactStructuredPreview())
+data class ArtifactCellPatch(val index: Int, val source: String)

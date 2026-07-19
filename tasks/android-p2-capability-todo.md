@@ -23,10 +23,10 @@
 
 ## Phase 4: Artifact Workbench
 
-- [ ] P2.13 Specify authenticated metadata/range/revision-save contracts.
-- [ ] P2.14 Add Web table/workbook, Office/PDF, and Notebook viewers.
-- [ ] P2.15 Add Android table/workbook, Office/PDF, and Notebook viewers.
-- [ ] P2.16 Add revision-safe CSV/TSV and Notebook editing with round-trip tests.
+- [x] P2.13 Specify authenticated metadata/range/revision-save contracts.
+- [x] P2.14 Add Web table/workbook, Office/PDF, and Notebook viewers.
+- [x] P2.15 Add Android table/workbook, Office/PDF, and Notebook viewers.
+- [x] P2.16 Add revision-safe CSV/TSV and Notebook editing with round-trip tests.
 
 ## Final Gate
 

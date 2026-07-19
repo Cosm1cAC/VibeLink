@@ -1,27 +1,27 @@
 :root {
-  color-scheme: light dark;
-  --primary: #202124;
-  --secondary: #147F78;
-  --secondary-hover: #0F665F;
-  --tertiary: #365F9D;
-  --accent: #FF5A1F;
-  --danger: #C23B2E;
-  --success: #147F78;
-  --ink: #202124;
-  --ink-soft: #5F6668;
-  --ink-faint: #8B9497;
-  --paper: #FBFBFA;
-  --side: #EAF8FA;
-  --surface: #FFFFFF;
-  --surface-soft: #F4F5F3;
-  --line: #DCE3E1;
-  --line-strong: #C9D2D0;
-  --teal: #147F78;
-  --teal-dark: #0F665F;
+  color-scheme: light;
+  --primary: #173f3f;
+  --secondary: #176b68;
+  --secondary-hover: #115552;
+  --tertiary: #2f6073;
+  --accent: #c76b32;
+  --danger: #b4493e;
+  --success: #176b68;
+  --ink: #1c2929;
+  --ink-soft: #647272;
+  --ink-faint: #879393;
+  --paper: #f7faf9;
+  --side: #e5f0ef;
+  --surface: #ffffff;
+  --surface-soft: #eef4f2;
+  --line: #d4e1df;
+  --line-strong: #bdcfcc;
+  --teal: #176b68;
+  --teal-dark: #115552;
   --blue: #365F9D;
   --amber: #A86F1B;
   --coral: #C23B2E;
-  --shadow: 0 22px 64px rgba(31, 35, 34, 0.10);
+  --shadow: 0 12px 32px rgba(25, 51, 49, 0.08);
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -329,6 +329,49 @@ textarea:focus {
 .sidebar-tools input {
   min-width: 0;
   background: var(--surface);
+}
+
+.session-origin-switch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  border: 1px solid #c7dad7;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.36);
+  padding: 3px;
+}
+
+.session-origin-switch button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  min-height: 34px;
+  border-radius: 7px;
+  background: transparent;
+  padding: 0 4px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.session-origin-switch button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-origin-switch button.active {
+  background: #ffffff;
+  color: #174f4e;
+  box-shadow: 0 1px 2px rgba(24, 66, 64, 0.12);
+}
+
+.session-origin-switch button:focus-visible {
+  outline: 2px solid rgba(20, 127, 120, 0.5);
+  outline-offset: 1px;
 }
 
 .conversation-list {
@@ -643,6 +686,21 @@ textarea:focus {
 .badge.codex {
   background: #e8eef7;
   color: var(--blue);
+}
+
+.badge.origin.codex-desktop {
+  background: #e4f1ee;
+  color: var(--teal-dark);
+}
+
+.badge.origin.vibelink-cli {
+  background: #fff1de;
+  color: #7a4c0d;
+}
+
+.badge.origin.unknown {
+  background: #ece9e1;
+  color: var(--ink-soft);
 }
 
 .badge.running {
@@ -1227,6 +1285,148 @@ textarea:focus {
     monospace;
   padding: 4px 0 4px 12px;
   white-space: pre-wrap;
+}
+
+/* Operator-console visual pass */
+body {
+  background: #f4f8f7;
+  letter-spacing: 0;
+}
+
+.chat-layout {
+  grid-template-columns: 276px minmax(0, 1fr);
+  background: #f4f8f7;
+}
+
+.sidebar {
+  border-right: 1px solid #cbdcda;
+  background: #e5f0ef;
+}
+
+.sidebar-top {
+  gap: 10px;
+  padding: 14px 12px 12px;
+  border-bottom: 1px solid rgba(182, 205, 201, 0.7);
+}
+
+.brand-mark,
+.sidebar .brand-mark {
+  color: #174f4e;
+}
+
+.sidebar-tools input,
+.composer,
+.composer textarea,
+.remote-transcript-message.user {
+  border-radius: 6px;
+}
+
+.conversation-list {
+  padding: 10px 8px 12px;
+  background: #e5f0ef;
+}
+
+.conversation-item:hover,
+.conversation-item.active {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.conversation-item.active {
+  background: #cfe4e2;
+  box-shadow: inset 3px 0 0 #176b68;
+}
+
+.conversation-title,
+.project-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.main-panel {
+  background: #f8fbfa;
+}
+
+.main-header {
+  min-height: 58px;
+  border-bottom: 1px solid #d7e3e1;
+  background: rgba(248, 251, 250, 0.94);
+}
+
+.main-header h1 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.main-header .status,
+.main-header .meta,
+.subtle {
+  color: #6e7d7b;
+}
+
+.main-content {
+  background: #f8fbfa;
+}
+
+.remote-transcript {
+  width: min(100%, 1080px);
+  padding-top: 8px;
+}
+
+.remote-transcript-message {
+  font-size: 15px;
+  line-height: 1.62;
+}
+
+.remote-transcript-message.user {
+  background: #dcebe9;
+  border: 1px solid #c6ddda;
+}
+
+.remote-transcript-message.assistant,
+.remote-transcript-message.error {
+  padding-right: 42px;
+}
+
+.composer-shell {
+  border-top: 1px solid #d7e3e1;
+  background: #f8fbfa;
+}
+
+.composer {
+  border: 1px solid #c6d8d5;
+  background: #ffffff;
+  box-shadow: 0 3px 12px rgba(24, 65, 62, 0.07);
+}
+
+.composer:focus-within {
+  border-color: #75aaa4;
+  box-shadow: 0 0 0 3px rgba(23, 107, 104, 0.1);
+}
+
+.composer textarea {
+  min-height: 42px;
+  font-size: 14px;
+}
+
+.btn-primary,
+.send-button {
+  border-radius: 5px;
+  background: #176b68;
+}
+
+.btn-primary:hover,
+.send-button:hover {
+  background: #115552;
+}
+
+.remote-message-actions button {
+  border-radius: 5px;
+}
+
+@media (max-width: 860px) {
+  .chat-layout { grid-template-columns: 232px minmax(0, 1fr); }
+  .sidebar-top { padding-inline: 10px; }
 }
 
 .remote-transcript-status {

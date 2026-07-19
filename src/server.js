@@ -476,9 +476,9 @@ function applyFields(items, url) {
   return items.map((item) => pickFields(item, fields));
 }
 
-function sessionOriginForRequest(response, url) {
+function sessionOriginForRequest(response, url, fallback = "all") {
   try {
-    return resolveSessionOriginFilter(url.searchParams.get("sessionOrigin"));
+    return resolveSessionOriginFilter(url.searchParams.has("sessionOrigin") ? url.searchParams.get("sessionOrigin") : fallback);
   } catch (error) {
     sendError(response, 400, error.message);
     return null;
@@ -3957,11 +3957,11 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/search" && request.method === "GET") {
-    const sessionOrigin = sessionOriginForRequest(response, url);
-    if (!sessionOrigin) return;
     const savedSearchId = url.searchParams.get("savedSearchId") || "";
     const saved = savedSearchId ? getSavedSearch(savedSearchId) : null;
     if (savedSearchId && !saved) { sendError(response, 404, "Saved search not found."); return; }
+    const sessionOrigin = sessionOriginForRequest(response, url, saved?.sessionOrigin);
+    if (!sessionOrigin) return;
     const parameter = (name, fallback = "") => url.searchParams.has(name) ? url.searchParams.get(name) : fallback;
     const result = await searchAll({
       query: parameter("q", saved?.query || ""),
@@ -3985,6 +3985,7 @@ async function routeApi(request, response, url) {
         favorite: url.searchParams.has("favorite")
           ? url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true"
           : Boolean(saved?.favorite),
+        sessionOrigin,
         resultCount: result.total,
         deviceId: auth.device?.id || ""
       });

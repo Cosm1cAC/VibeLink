@@ -16,7 +16,7 @@ Use the explicit canary profile to enable the currently promoted Rust Status, Wo
 vibelink.exe --rust-canary
 ```
 
-Portable packages also include `start-vibelink-canary.cmd`. The normal `vibelink.exe` and `start-vibelink.cmd` entry points remain conservative and do not enable canary routes.
+Portable packages also include `start-vibelink-canary.cmd`. The normal `vibelink.exe` and `start-vibelink.cmd` entry points apply the default Rust front-door profile; the canary launcher is useful when making that profile explicit in scripts.
 
 Use the separate HTTP front-door canary only when validating control-plane migration:
 
@@ -36,7 +36,7 @@ Use `--rust-settings-http` with the front-door flag, or run `start-vibelink-sett
 
 Use `--rust-workspace-http` with the front-door flag to let Rust own authenticated `POST /api/workspaces/:id/file` write, delete, and rename operations. The route enforces SQLite workspace roots, bounded JSON bodies, path traversal checks, and audit records; unsupported workspace and tool routes continue to fall back to Node.
 
-The normal `vibelink.exe` user entry now enables the Rust front door and all currently migrated route flags by default. Run `vibelink.exe bridge` to use the direct Node bridge as an emergency rollback path.
+The normal `vibelink.exe` user entry enables the Rust front door and all currently migrated route flags by default. Run `vibelink.exe bridge` to use the direct Node bridge as an emergency rollback path.
 
 ## Internal modes
 

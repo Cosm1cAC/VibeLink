@@ -102,9 +102,9 @@ Live Call Assistant
 
 ## Rust 化性能架构
 
-VibeLink 正从 Node control plane + Rust data plane 的混合架构迁移为 Rust 桌面服务。Workspace、MCP 和 Event Store 已进入 `canary`；Status、Doctor、Devices、设备令牌写操作、完整配对生命周期和 Audit Log 已有独立 Rust HTTP 开关。迁移期间保留 Node/Worker 回退，只有全部产品职责完成 Rust 所有权和观察窗口后才移除捆绑 Node。Audio/Compression 的旧性能 sidecar 因没有测得收益保持 `contract`，但实时通话等产品职责仍在全量迁移范围内。
+VibeLink 当前运行在 Rust HTTP 前门 + Node loopback backend 的混合架构上，并持续向 Rust 桌面服务迁移。默认 Windows 启动会开启 Rust 前门和当前已迁移的路由；Node 仍负责尚未迁移的产品职责，并作为失败、超时和无效响应时的回退。Workspace、MCP 和 Event Store 已进入 `canary`；Status、Doctor、Devices、设备令牌写操作、完整配对生命周期和 Audit Log 已有 Rust HTTP 路由。只有全部产品职责完成 Rust 所有权并通过观察窗口后才移除捆绑 Node。Audio/Compression 的旧性能 sidecar 因没有测得收益保持 `contract`，但实时通话等产品职责仍在全量迁移范围内。
 
-Windows portable 包可用 `vibelink.exe --rust-canary`（或 `start-vibelink-canary.cmd`）显式启用当前 Status、Workspace、MCP 和 Event Store canary。普通 `vibelink.exe` 保持保守默认值，不会自动开启实验路径。
+Windows portable 包可用 `vibelink.exe --rust-canary`（或 `start-vibelink-canary.cmd`）显式复现当前 Rust canary profile；普通 `vibelink.exe` 也会应用默认 Rust 前门 profile。需要紧急回退时运行 `vibelink.exe bridge`，直接启动 Node bridge。
 
 服务端 HTTP 前门使用独立的 `--rust-http-canary` 逐步迁入 Rust；设备写操作另由 `--rust-device-mutations-http` 控制，写事务一旦由 Rust 接管就不会回放到 Node。管理界面规划为原生 Win32 `windows-rs` 托盘/窗口，不新增 Web 管理后台，也不嵌入 WebView。
 
@@ -140,7 +140,7 @@ npm run dev
 
 ## 核心能力
 
-- 会话列表：按 workspace / 项目组织 Codex、Claude 和 VibeLink Agent 任务历史。
+- 会话列表：按 workspace / 项目组织 Codex、Claude 和 VibeLink Agent 任务历史，并可在 Codex Desktop、VibeLink CLI 和全部来源之间切换。
 - VibeLink Agent：通过 provider adapter 接入 Codex CLI、Claude、豆包 Web CLI、GLM，并统一工具事件、审批和审计。
 - 历史恢复：解析 Codex / Claude JSONL，并把消息、附件和命令摘要尽量还原成聊天时间线。
 - 实时任务：通过 SSE 同步 VibeLink Agent 任务日志、状态和 tool events。

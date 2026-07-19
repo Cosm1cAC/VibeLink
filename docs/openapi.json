@@ -1554,6 +1554,20 @@
             }
           },
           {
+            "name": "sessionOrigin",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "codex-desktop",
+                "vibelink-cli",
+                "unknown"
+              ]
+            },
+            "description": "Filter indexed sessions, tasks, and messages by creation origin; file results are unaffected"
+          },
+          {
             "name": "savedSearchId",
             "in": "query",
             "schema": {
@@ -1697,6 +1711,15 @@
                   },
                   "scope": {
                     "type": "string"
+                  },
+                  "sessionOrigin": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "codex-desktop",
+                      "vibelink-cli",
+                      "unknown"
+                    ]
                   },
                   "tag": {
                     "type": "string"
@@ -7500,6 +7523,14 @@
           "provider": {
             "type": "string"
           },
+          "sessionOrigin": {
+            "type": "string",
+            "enum": [
+              "codex-desktop",
+              "vibelink-cli",
+              "unknown"
+            ]
+          },
           "title": {
             "type": "string"
           },
@@ -7610,6 +7641,15 @@
           "scope": {
             "type": "string"
           },
+          "sessionOrigin": {
+            "type": "string",
+            "enum": [
+              "all",
+              "codex-desktop",
+              "vibelink-cli",
+              "unknown"
+            ]
+          },
           "tag": {
             "type": "string"
           },
@@ -7644,6 +7684,15 @@
           },
           "scope": {
             "type": "string"
+          },
+          "sessionOrigin": {
+            "type": "string",
+            "enum": [
+              "all",
+              "codex-desktop",
+              "vibelink-cli",
+              "unknown"
+            ]
           },
           "tag": {
             "type": "string"

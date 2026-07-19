@@ -42,25 +42,30 @@ test("saved searches round-trip sort options and search history deduplicates", (
     name: "Recent files",
     query: "alpha",
     scope: "files",
+    sessionOrigin: "vibelink-cli",
     sort: "updatedAt",
     order: "desc"
   });
   assert.equal(saved.id, "saved-1");
   assert.equal(store.listSavedSearches()[0].sort, "updatedAt");
+  assert.equal(store.listSavedSearches()[0].sessionOrigin, "vibelink-cli");
 
-  const updated = store.updateSavedSearch(saved.id, { name: "Named search", order: "asc" });
+  const updated = store.updateSavedSearch(saved.id, { name: "Named search", sessionOrigin: "codex-desktop", order: "asc" });
   assert.equal(updated.name, "Named search");
+  assert.equal(updated.sessionOrigin, "codex-desktop");
   assert.equal(updated.order, "asc");
 
-  store.recordSearch({ query: "alpha", scope: "files", sort: "updatedAt", order: "desc", resultCount: 2, deviceId: "d1" });
-  store.recordSearch({ query: "alpha", scope: "files", sort: "updatedAt", order: "desc", resultCount: 3, deviceId: "d1" });
+  store.recordSearch({ query: "alpha", scope: "files", sessionOrigin: "vibelink-cli", sort: "updatedAt", order: "desc", resultCount: 2, deviceId: "d1" });
+  store.recordSearch({ query: "alpha", scope: "files", sessionOrigin: "vibelink-cli", sort: "updatedAt", order: "desc", resultCount: 3, deviceId: "d1" });
+  store.recordSearch({ query: "alpha", scope: "files", sessionOrigin: "codex-desktop", sort: "updatedAt", order: "desc", resultCount: 1, deviceId: "d1" });
   const history = store.listSearchHistory();
-  assert.equal(history.length, 1);
-  assert.equal(history[0].useCount, 2);
-  assert.equal(history[0].resultCount, 3);
+  assert.equal(history.length, 2);
+  const cliHistory = history.find((item) => item.sessionOrigin === "vibelink-cli");
+  assert.equal(cliHistory.useCount, 2);
+  assert.equal(cliHistory.resultCount, 3);
 
   assert.equal(store.deleteSavedSearch(saved.id), true);
-  assert.equal(store.clearSearchHistory(), 1);
+  assert.equal(store.clearSearchHistory(), 2);
 });
 
 test("content search filters indexed sessions by creation origin", () => {

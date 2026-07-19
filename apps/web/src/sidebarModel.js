@@ -149,3 +149,8 @@ export function filterConversationNodes(nodes, query) {
     return item.kind === "project" && visibleProjects.has(item.key);
   });
 }
+
+export function filterConversationsByOrigin(items, sessionOrigin) {
+  if (!sessionOrigin || sessionOrigin === "all") return items;
+  return items.filter((item) => item.sessionOrigin === sessionOrigin);
+}

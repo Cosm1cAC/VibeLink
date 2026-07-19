@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { resolveSessionOriginFilter } from "./sessionOrigins.js";
 
 const SEARCH_SCOPES = new Set(["all", "sessions", "tasks", "messages", "files"]);
 const SEARCH_SORTS = new Set(["relevance", "updatedAt", "title", "kind"]);
@@ -48,6 +49,7 @@ function historySignature(input) {
   return crypto.createHash("sha256").update(JSON.stringify([
     input.query,
     input.scope,
+    input.sessionOrigin,
     input.tag,
     input.favorite,
     input.sort,
@@ -62,6 +64,7 @@ function publicSavedSearch(row) {
     name: row.name,
     query: row.query,
     scope: row.scope,
+    sessionOrigin: row.session_origin || "all",
     tag: row.tag || "",
     favorite: Boolean(row.favorite),
     sort: row.sort,
@@ -78,6 +81,7 @@ function publicSearchHistory(row) {
     id: row.id,
     query: row.query,
     scope: row.scope,
+    sessionOrigin: row.session_origin || "all",
     tag: row.tag || "",
     favorite: Boolean(row.favorite),
     sort: row.sort,
@@ -154,6 +158,7 @@ export function ensureSearchSchema(db) {
       name TEXT NOT NULL,
       query TEXT NOT NULL,
       scope TEXT NOT NULL,
+      session_origin TEXT NOT NULL DEFAULT 'all',
       tag TEXT,
       favorite INTEGER NOT NULL DEFAULT 0,
       sort TEXT NOT NULL DEFAULT 'relevance',
@@ -170,6 +175,7 @@ export function ensureSearchSchema(db) {
       signature TEXT NOT NULL UNIQUE,
       query TEXT NOT NULL,
       scope TEXT NOT NULL,
+      session_origin TEXT NOT NULL DEFAULT 'all',
       tag TEXT,
       favorite INTEGER NOT NULL DEFAULT 0,
       sort TEXT NOT NULL DEFAULT 'relevance',
@@ -183,11 +189,15 @@ export function ensureSearchSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_search_history_searched ON search_history(searched_at DESC);
   `);
 
-  const contentSourceColumns = new Set(
-    db.prepare("PRAGMA table_info(content_search_sources)").all().map((column) => column.name)
-  );
-  if (!contentSourceColumns.has("session_origin")) {
-    db.exec("ALTER TABLE content_search_sources ADD COLUMN session_origin TEXT NOT NULL DEFAULT 'unknown'");
+  for (const [table, fallback] of [
+    ["content_search_sources", "unknown"],
+    ["saved_searches", "all"],
+    ["search_history", "all"]
+  ]) {
+    const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+    if (!columns.has("session_origin")) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN session_origin TEXT NOT NULL DEFAULT '${fallback}'`);
+    }
   }
 }
 
@@ -566,14 +576,15 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
     if (!query) throw new Error("Saved search query is required.");
     const name = cleanString(input.name, 160) || query;
     const scope = normalizeScope(input.scope);
+    const sessionOrigin = resolveSessionOriginFilter(input.sessionOrigin);
     const sort = normalizeSort(input.sort);
     const order = normalizeOrder(input.order, sort);
     const current = now();
     const id = cleanString(input.id, 160) || uuid();
     db().prepare(`
-      INSERT INTO saved_searches (id, name, query, scope, tag, favorite, sort, sort_order, created_at, updated_at, last_used_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-    `).run(id, name, query, scope, cleanString(input.tag, 160), input.favorite ? 1 : 0, sort, order, current, current);
+      INSERT INTO saved_searches (id, name, query, scope, session_origin, tag, favorite, sort, sort_order, created_at, updated_at, last_used_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    `).run(id, name, query, scope, sessionOrigin, cleanString(input.tag, 160), input.favorite ? 1 : 0, sort, order, current, current);
     return getSavedSearch(id);
   }
 
@@ -586,12 +597,13 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
     const sort = normalizeSort(next.sort);
     db().prepare(`
       UPDATE saved_searches
-      SET name = ?, query = ?, scope = ?, tag = ?, favorite = ?, sort = ?, sort_order = ?, updated_at = ?
+      SET name = ?, query = ?, scope = ?, session_origin = ?, tag = ?, favorite = ?, sort = ?, sort_order = ?, updated_at = ?
       WHERE id = ?
     `).run(
       cleanString(next.name, 160) || query,
       query,
       normalizeScope(next.scope),
+      resolveSessionOriginFilter(next.sessionOrigin),
       cleanString(next.tag, 160),
       next.favorite ? 1 : 0,
       sort,
@@ -620,6 +632,7 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
     const normalized = {
       query,
       scope,
+      sessionOrigin: resolveSessionOriginFilter(input.sessionOrigin),
       tag: cleanString(input.tag, 160),
       favorite: Boolean(input.favorite),
       sort,
@@ -629,9 +642,9 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
     const id = signature.slice(0, 32);
     db().prepare(`
       INSERT INTO search_history (
-        id, signature, query, scope, tag, favorite, sort, sort_order,
+        id, signature, query, scope, session_origin, tag, favorite, sort, sort_order,
         result_count, use_count, searched_at, device_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
       ON CONFLICT(signature) DO UPDATE SET
         result_count = excluded.result_count,
         use_count = search_history.use_count + 1,
@@ -642,6 +655,7 @@ export function createSearchStore({ database, now = nowIso, uuid = crypto.random
       signature,
       normalized.query,
       normalized.scope,
+      normalized.sessionOrigin,
       normalized.tag,
       normalized.favorite ? 1 : 0,
       normalized.sort,

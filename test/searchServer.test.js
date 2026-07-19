@@ -128,20 +128,22 @@ test("search HTTP routes use the persistent index, saved searches, and history",
   assert.equal(index?.ready, true, `Search index did not become ready.\n${logs}`);
   assert.ok(index.indexedFiles >= 1);
 
-  const search = await call(`${baseUrl}/api/search?q=${encodeURIComponent(alphaToken)}&scope=files&sort=title&order=asc`, { token: login.token });
+  const search = await call(`${baseUrl}/api/search?q=${encodeURIComponent(alphaToken)}&scope=files&sessionOrigin=vibelink-cli&sort=title&order=asc`, { token: login.token });
   assert.equal(search.total, 1);
   assert.equal(search.items[0].path, "initial.txt");
 
   const saved = await call(`${baseUrl}/api/search/saved`, {
     method: "POST",
     token: login.token,
-    body: { name: "Alpha files", query: alphaToken, scope: "files", sort: "title", order: "asc" }
+    body: { name: "Alpha files", query: alphaToken, scope: "files", sessionOrigin: "vibelink-cli", sort: "title", order: "asc" }
   });
+  assert.equal(saved.sessionOrigin, "vibelink-cli");
   const savedRun = await call(`${baseUrl}/api/search?savedSearchId=${saved.id}`, { token: login.token });
   assert.equal(savedRun.total, 1);
   assert.equal(savedRun.savedSearchId, saved.id);
   const history = await call(`${baseUrl}/api/search/history`, { token: login.token });
   assert.equal(history.items.length, 1);
+  assert.equal(history.items[0].sessionOrigin, "vibelink-cli");
   assert.equal(history.items[0].useCount, 2);
 
   const workspaces = await call(`${baseUrl}/api/workspaces`, { token: login.token });

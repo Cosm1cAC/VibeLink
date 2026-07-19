@@ -68,10 +68,26 @@ import {
   paletteCommandArgumentHint,
   resolvePaletteCommandPlan
 } from "./commandPaletteModel.js";
-import { buildConversationTree, filterConversationNodes, projectNameFromPath } from "./sidebarModel.js";
+import { buildConversationTree, filterConversationNodes, filterConversationsByOrigin, projectNameFromPath } from "./sidebarModel.js";
 
 const savedToken = localStorage.getItem("mat.token") || "";
 const typedTextAnimationKeys = new Set();
+const SESSION_ORIGIN_OPTIONS = [
+  { value: "codex-desktop", label: "Desktop", title: "Codex Desktop", icon: Monitor },
+  { value: "vibelink-cli", label: "CLI", title: "Codex CLI", icon: Terminal },
+  { value: "all", label: "All", title: "All sessions", icon: MessagesSquare }
+];
+
+function savedSessionOrigin() {
+  const value = localStorage.getItem("mat.sessionOrigin") || "vibelink-cli";
+  return SESSION_ORIGIN_OPTIONS.some((option) => option.value === value) ? value : "vibelink-cli";
+}
+
+function sessionOriginLabel(value) {
+  if (value === "codex-desktop") return "Desktop";
+  if (value === "vibelink-cli") return "CLI";
+  return "Unknown";
+}
 
 function cx(...parts) {
   return parts.filter(Boolean).join(" ");
@@ -3137,7 +3153,7 @@ function LoginView({ onLogin, initialError = "" }) {
   );
 }
 
-function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, onRefresh, networkLine, open, loading, manageMenu, onOpenManage, onCloseManage, onManageAction, showArchived, setShowArchived, onToggleProject }) {
+function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, onRefresh, networkLine, open, loading, manageMenu, onOpenManage, onCloseManage, onManageAction, showArchived, setShowArchived, onToggleProject, sessionOrigin, onSessionOriginChange }) {
   return (
     <aside id="sidebar" className={cx("sidebar", open && "open")}>
       <div className="sidebar-top">
@@ -3151,6 +3167,25 @@ function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, on
         <button className="new-chat-button" type="button" onClick={onNew}>
           New chat
         </button>
+        <div className="session-origin-switch" role="tablist" aria-label="Session source">
+          {SESSION_ORIGIN_OPTIONS.map((option) => {
+            const Icon = option.icon;
+            return (
+              <button
+                key={option.value}
+                className={cx(sessionOrigin === option.value && "active")}
+                type="button"
+                role="tab"
+                aria-selected={sessionOrigin === option.value}
+                title={option.title}
+                onClick={() => onSessionOriginChange(option.value)}
+              >
+                <Icon size={14} />
+                <span>{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
         <div className="sidebar-tools">
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search chats" />
           <button className={cx("icon-button", showArchived && "active")} title={showArchived ? "Show active chats" : "Show archived"} aria-label={showArchived ? "Show active chats" : "Show archived"} type="button" onClick={() => setShowArchived(!showArchived)}>
@@ -3251,6 +3286,7 @@ function Sidebar({ conversations, selected, query, setQuery, onSelect, onNew, on
                   <span className="conversation-title-text">{item.title}</span>
                   <span className="conversation-badges">
                     <span className={cx("badge", item.provider)}>{item.provider}</span>
+                    {sessionOrigin === "all" ? <span className={cx("badge", "origin", item.sessionOrigin)}>{sessionOriginLabel(item.sessionOrigin)}</span> : null}
                     {item.status && item.status !== "history" && item.status !== "fork" ? <span className={cx("badge", item.status)}>{item.status}</span> : null}
                     {item.pinned ? <span className="badge pinned">Pinned</span> : null}
                     {item.group ? <span className="badge group">{item.group}</span> : null}
@@ -5548,6 +5584,7 @@ function App() {
   const [toolRegistry, setToolRegistry] = useState({});
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [sessionOrigin, setSessionOrigin] = useState(savedSessionOrigin);
   const [expandedProjects, setExpandedProjects] = useState({});
   const [manageMenu, setManageMenu] = useState(null);
   const [activeAgent, setActiveAgent] = useState("codex");
@@ -5620,7 +5657,8 @@ function App() {
         sessionId: task.sessionId || "",
         historyId: history?.id || "",
         sourceId: staleCompletedTask ? history.id : "",
-        preview: history?.preview || ""
+        preview: history?.preview || "",
+        sessionOrigin: task.sessionOrigin || "vibelink-cli"
       };
     });
     const historyItems = histories
@@ -5635,7 +5673,8 @@ function App() {
         status: "history",
         updatedAt: item.updatedAt,
         sessionId: item.id,
-        preview: item.preview || ""
+        preview: item.preview || "",
+        sessionOrigin: item.sessionOrigin || "unknown"
       }));
     const forkItems = (threadState.forks || [])
       .map((item) => ({
@@ -5653,7 +5692,8 @@ function App() {
         group: item.group || "",
         pinned: Boolean(item.pinned),
         archived: Boolean(item.archived),
-        preview: ""
+        preview: "",
+        sessionOrigin: "vibelink-cli"
       }));
     const localContextItems = sortManagedConversations([...taskItems, ...historyItems].map((item) => applyThreadMeta(item, threadState)));
     const desktopMatches = new Map();
@@ -5678,13 +5718,15 @@ function App() {
     }
 
     const localItems = sortManagedConversations(
-      [...taskItems, ...historyItems, ...forkItems]
+      filterConversationsByOrigin(
+        [...taskItems, ...historyItems, ...forkItems]
         .map((item) => applyThreadMeta(item, threadState))
         .map((item) => {
           const desktopMatch = desktopMatches.get(item.key);
           if (!desktopMatch) return item;
           return {
             ...item,
+            sessionOrigin: "codex-desktop",
             status: desktopMatch.desktopRunning ? "running" : item.status,
             desktopIndex: desktopMatch.desktopIndex,
             desktopProjectIndex: desktopMatch.desktopProjectIndex,
@@ -5694,13 +5736,16 @@ function App() {
             displayTime: desktopMatch.displayTime || item.displayTime
           };
         })
-    ).filter((item) => (showArchived ? item.archived : !item.archived));
+        .filter((item) => (showArchived ? item.archived : !item.archived)),
+        sessionOrigin
+      )
+    );
     const projectNodes = buildConversationTree(localItems, expandedProjects, {
       knownProjects: workspaces,
       projectItemLimit: query.trim() ? Infinity : undefined
     });
     return filterConversationNodes(projectNodes, query);
-  }, [tasks, histories, query, desktopRemote, threadState, showArchived, expandedProjects, workspaces]);
+  }, [tasks, histories, query, desktopRemote, threadState, showArchived, expandedProjects, workspaces, sessionOrigin]);
 
   useEffect(() => {
     if (!selected || selected.kind === "desktop" || query.trim()) return;
@@ -5763,6 +5808,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem("mat.reasoningEffort", reasoningEffort || "");
   }, [reasoningEffort]);
+
+  useEffect(() => {
+    localStorage.setItem("mat.sessionOrigin", sessionOrigin);
+  }, [sessionOrigin]);
 
   useEffect(() => {
     if (!initialScrollSequence) return undefined;
@@ -5835,8 +5884,12 @@ function App() {
 
   useEffect(() => {
     if (!token) return;
-    refresh({ syncDesktopRemote: true }).catch(() => {
-      handleAuthExpired();
+    refresh({ syncDesktopRemote: true }).catch((err) => {
+      if (err?.status === 401) {
+        handleAuthExpired();
+        return;
+      }
+      setError(err?.message || "Unable to refresh session");
     });
   }, [token]);
 
@@ -6801,6 +6854,12 @@ function App() {
       ? "Enter a task. The agent continues running on this computer."
       : "Add an API key in Settings first.";
 
+  function changeSessionOrigin(value) {
+    setSessionOrigin(value);
+    if (value === "codex-desktop") setControlMode("desktop");
+    if (value === "vibelink-cli") setControlMode("agent");
+  }
+
   return (
     <section className="chat-layout">
       <Sidebar
@@ -6815,6 +6874,8 @@ function App() {
         onManageAction={(item, action) => manageConversation(item, action).catch((err) => setError(err.message))}
         showArchived={showArchived}
         setShowArchived={setShowArchived}
+        sessionOrigin={sessionOrigin}
+        onSessionOriginChange={changeSessionOrigin}
         onToggleProject={(key) => setExpandedProjects((current) => ({ ...current, [key]: true }))}
         onNew={() => selectConversation(null)}
         onRefresh={() => refresh({ keepSelection: true, syncDesktopRemote: true }).catch((err) => setError(err.message))}

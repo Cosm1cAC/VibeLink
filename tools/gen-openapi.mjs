@@ -170,6 +170,7 @@ const schemas = {
       kind: { type: "string", enum: ["history", "task", "message", "file"] },
       id: { type: "string" },
       provider: { type: "string" },
+      sessionOrigin: { type: "string", enum: ["codex-desktop", "vibelink-cli", "unknown"] },
       title: { type: "string" },
       snippet: { type: "string" },
       updatedAt: { type: "string" },
@@ -203,6 +204,7 @@ const schemas = {
       name: { type: "string" },
       query: { type: "string" },
       scope: { type: "string" },
+      sessionOrigin: { type: "string", enum: ["all", "codex-desktop", "vibelink-cli", "unknown"] },
       tag: { type: "string" },
       favorite: { type: "boolean" },
       sort: { type: "string" },
@@ -218,6 +220,7 @@ const schemas = {
       id: { type: "string" },
       query: { type: "string" },
       scope: { type: "string" },
+      sessionOrigin: { type: "string", enum: ["all", "codex-desktop", "vibelink-cli", "unknown"] },
       tag: { type: "string" },
       favorite: { type: "boolean" },
       sort: { type: "string" },
@@ -659,6 +662,12 @@ const paths = {
       { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
       { name: "tag", in: "query", schema: { type: "string" } },
       { name: "favorite", in: "query", schema: { type: "boolean" } },
+      {
+        name: "sessionOrigin",
+        in: "query",
+        schema: { type: "string", enum: ["all", "codex-desktop", "vibelink-cli", "unknown"] },
+        description: "Filter indexed sessions, tasks, and messages by creation origin; file results are unaffected"
+      },
       { name: "savedSearchId", in: "query", schema: { type: "string" } },
       { name: "record", in: "query", schema: { type: "string", enum: ["0", "1"] } }
     ]
@@ -671,7 +680,8 @@ const paths = {
       type: "object",
       required: ["name", "query"],
       properties: {
-        name: { type: "string" }, query: { type: "string" }, scope: { type: "string" }, tag: { type: "string" },
+        name: { type: "string" }, query: { type: "string" }, scope: { type: "string" },
+        sessionOrigin: { type: "string", enum: ["all", "codex-desktop", "vibelink-cli", "unknown"] }, tag: { type: "string" },
         favorite: { type: "boolean" }, sort: { type: "string" }, order: { type: "string" }
       }
     }, { $ref: "#/components/schemas/SavedSearch" })

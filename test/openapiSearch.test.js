@@ -5,6 +5,11 @@ import test from "node:test";
 test("OpenAPI documents indexed search, saved searches, and history", () => {
   const spec = JSON.parse(fs.readFileSync(new URL("../docs/openapi.json", import.meta.url), "utf8"));
   assert.equal(spec.paths["/api/search"].get.parameters.find((item) => item.name === "sort").schema.enum.includes("updatedAt"), true);
+  assert.deepEqual(
+    spec.paths["/api/search"].get.parameters.find((item) => item.name === "sessionOrigin").schema.enum,
+    ["all", "codex-desktop", "vibelink-cli", "unknown"]
+  );
+  assert.ok(spec.paths["/api/search/saved"].post.requestBody.content["application/json"].schema.properties.sessionOrigin);
   assert.ok(spec.paths["/api/search/saved"].post);
   assert.ok(spec.paths["/api/search/saved/{id}"].delete);
   assert.ok(spec.paths["/api/search/history"].delete);

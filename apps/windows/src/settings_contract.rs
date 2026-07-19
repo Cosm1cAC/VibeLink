@@ -29,6 +29,8 @@ pub(crate) const SETTINGS_EXPORT_KEYS: [&str; 18] = [
 
 pub(crate) fn default_settings(root: &Path) -> Value {
     json!({
+        "revision": 0,
+        "_fieldRevisions": {},
         "host": std::env::var("MOBILE_AGENT_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
         "port": std::env::var("MOBILE_AGENT_PORT")
             .ok()
@@ -601,7 +603,7 @@ pub(crate) fn merge_settings(base: &Value, next: &Value) -> Value {
     Value::Object(merged)
 }
 
-fn merge_objects(existing: Option<&Value>, next: Option<&Value>) -> Value {
+pub(crate) fn merge_objects(existing: Option<&Value>, next: Option<&Value>) -> Value {
     let mut merged = existing
         .and_then(Value::as_object)
         .cloned()

@@ -1,4 +1,4 @@
-export const EXECUTION_PERSISTENCE_SCHEMA_VERSION = 2026071701;
+export const EXECUTION_PERSISTENCE_SCHEMA_VERSION = 2026071901;
 
 function ensureColumn(db, table, name, definition) {
   const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
@@ -60,6 +60,7 @@ export function ensureExecutionPersistenceSchema(db) {
         approval_id TEXT NOT NULL UNIQUE,
         operation_id TEXT NOT NULL UNIQUE,
         continuation_ref TEXT NOT NULL,
+        expected_version INTEGER NOT NULL DEFAULT 0,
         decision_json TEXT NOT NULL,
         status TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
@@ -89,6 +90,7 @@ export function ensureExecutionPersistenceSchema(db) {
     for (const [name, definition] of approvalColumns) {
       ensureColumn(db, "approval_requests", name, definition);
     }
+    ensureColumn(db, "approval_outbox", "expected_version", "INTEGER NOT NULL DEFAULT 0");
     db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)")
       .run(EXECUTION_PERSISTENCE_SCHEMA_VERSION, new Date().toISOString());
     db.exec("COMMIT");

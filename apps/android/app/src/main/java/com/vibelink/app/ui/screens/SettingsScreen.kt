@@ -151,13 +151,27 @@ class SettingsViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(saving = true, error = "", notice = "") }
             try {
-                val result = apiClient.saveSettings(patch)
+                val guardedPatch = patch.copy(expectedRevision = _uiState.value.settings?.revision)
+                val result = apiClient.saveSettings(guardedPatch)
                 _uiState.update {
                     it.copy(
                         settings = result.settings ?: it.settings,
                         saving = false,
                         notice = strings.settingsSaved,
                     )
+                }
+            } catch (error: com.vibelink.app.network.ApiException) {
+                if (error.statusCode == 409) {
+                    val fresh = runCatching { apiClient.checkStatus().settings }.getOrNull()
+                    _uiState.update {
+                        it.copy(
+                            settings = fresh?.let { value -> RevisionConflictPolicy.mergeSettingsForRetry(value, patch) } ?: it.settings,
+                            saving = false,
+                            error = strings.settingsChangedElsewhere,
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(saving = false, error = strings.saveSettingsFailed.withFallback(error.message)) }
                 }
             } catch (error: Exception) {
                 _uiState.update { it.copy(saving = false, error = strings.saveSettingsFailed.withFallback(error.message)) }
@@ -292,7 +306,7 @@ class SettingsViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(adminBusy = "settings-import-preview", error = "", notice = "") }
             try {
-                val preview = apiClient.importSettings(rawJson, dryRun = true)
+                val preview = apiClient.importSettings(rawJson, dryRun = true, expectedRevision = _uiState.value.settings?.revision)
                 _uiState.update {
                     it.copy(
                         settingsImportPreview = preview.changedKeys,
@@ -311,7 +325,7 @@ class SettingsViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(adminBusy = "settings-import", error = "", notice = "") }
             try {
-                val imported = apiClient.importSettings(rawJson, dryRun = false)
+                val imported = apiClient.importSettings(rawJson, dryRun = false, expectedRevision = _uiState.value.settings?.revision)
                 _uiState.update {
                     it.copy(
                         settings = imported.settings ?: it.settings,
@@ -321,6 +335,19 @@ class SettingsViewModel : ViewModel() {
                     )
                 }
                 load(apiClient)
+            } catch (error: com.vibelink.app.network.ApiException) {
+                if (error.statusCode == 409) {
+                    val fresh = runCatching { apiClient.checkStatus().settings }.getOrNull()
+                    _uiState.update {
+                        it.copy(
+                            settings = fresh ?: it.settings,
+                            adminBusy = "",
+                            error = strings.settingsChangedElsewhere,
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(adminBusy = "", error = strings.settingsImportFailed.withFallback(error.message)) }
+                }
             } catch (error: Exception) {
                 _uiState.update { it.copy(adminBusy = "", error = strings.settingsImportFailed.withFallback(error.message)) }
             }
@@ -1170,6 +1197,7 @@ private fun NativePushCard(
     onTokenChange: (String) -> Unit,
     onRegister: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     val nativeCount = subscriptions.count { it.kind == "native" }
     val webCount = subscriptions.count { it.kind == "web" }
     Card(
@@ -1177,8 +1205,8 @@ private fun NativePushCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Push delivery", style = MaterialTheme.typography.bodyMedium)
-            MutedText("$webCount Web Push / $nativeCount native token(s)")
+            Text(strings.pushDelivery, style = MaterialTheme.typography.bodyMedium)
+            MutedText(strings.text("$webCount 个 Web Push / $nativeCount 个原生 token", "$webCount Web Push / $nativeCount native token(s)"))
             subscriptions.filter { it.kind == "native" }.take(3).forEach { item ->
                 MutedText("${item.provider.ifBlank { "native" }} ${item.platform.ifBlank { "android" }} ${item.tokenPreview.ifBlank { item.updatedAt }}")
             }
@@ -1187,14 +1215,14 @@ private fun NativePushCard(
                     value = provider,
                     onValueChange = onProviderChange,
                     modifier = Modifier.weight(0.42f),
-                    label = { Text("Provider") },
+                    label = { Text(strings.provider) },
                     singleLine = true,
                 )
                 OutlinedTextField(
                     value = token,
                     onValueChange = onTokenChange,
                     modifier = Modifier.weight(0.58f),
-                    label = { Text("Token") },
+                    label = { Text(strings.token) },
                     singleLine = true,
                 )
             }
@@ -1202,20 +1230,21 @@ private fun NativePushCard(
                 onClick = onRegister,
                 enabled = !busy && token.trim().isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (busy) "Registering" else "Register native token") }
+            ) { Text(if (busy) strings.text("正在注册", "Registering") else strings.text("注册原生 token", "Register native token")) }
         }
     }
 }
 
 @Composable
 private fun McpProbeSummary(probe: McpProbeResponse) {
+    val strings = LocalAppStrings.current
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
-            text = if (probe.ok) "MCP probe ready" else "MCP probe needs attention",
+            text = if (probe.ok) strings.text("MCP 探测已就绪", "MCP probe ready") else strings.text("MCP 探测需要处理", "MCP probe needs attention"),
             style = MaterialTheme.typography.bodySmall,
             color = if (probe.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
         )
-        MutedText("${probe.enabled}/${probe.configured} enabled / ${probe.tools.size} tools")
+        MutedText(strings.text("${probe.enabled}/${probe.configured} 已启用 / ${probe.tools.size} 个工具", "${probe.enabled}/${probe.configured} enabled / ${probe.tools.size} tools"))
         probe.results.take(5).forEach { result ->
             val server = result.server?.name?.ifBlank { result.server.id }.orEmpty().ifBlank { "MCP server" }
             val status = result.status.ifBlank { if (result.ok) "ok" else "failed" }
@@ -1226,11 +1255,12 @@ private fun McpProbeSummary(probe: McpProbeResponse) {
 
 @Composable
 private fun ToolEventStatsCard(stats: ToolEventStatsResponse, prune: ToolEventsPruneResponse?) {
+    val strings = LocalAppStrings.current
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        MutedText("${stats.count} events / cursor ${stats.minCursor}-${stats.maxCursor}")
-        MutedText("${stats.retention.retentionDays}d retention / keep ${stats.retention.keepLatest} / next ${stats.autoPrune.nextRunAt.ifBlank { "manual" }}")
+        MutedText(strings.text("${stats.count} 个事件 / 游标 ${stats.minCursor}-${stats.maxCursor}", "${stats.count} events / cursor ${stats.minCursor}-${stats.maxCursor}"))
+        MutedText(strings.text("保留 ${stats.retention.retentionDays} 天 / 保留最新 ${stats.retention.keepLatest} 条 / 下次 ${stats.autoPrune.nextRunAt.ifBlank { "manual" }}", "${stats.retention.retentionDays}d retention / keep ${stats.retention.keepLatest} / next ${stats.autoPrune.nextRunAt.ifBlank { "manual" }}"))
         prune?.let {
-            MutedText("${if (it.dryRun) "Preview" else "Applied"}: ${it.prunable} prunable / ${it.deleted} deleted")
+            MutedText(strings.text("${if (it.dryRun) "预览" else "已应用"}：${it.prunable} 条可清理 / ${it.deleted} 条已删除", "${if (it.dryRun) "Preview" else "Applied"}: ${it.prunable} prunable / ${it.deleted} deleted"))
         }
     }
 }

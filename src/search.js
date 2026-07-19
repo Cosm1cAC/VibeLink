@@ -1,9 +1,13 @@
-import fs from "node:fs";
-import path from "node:path";
+import { getTasks } from "./agents.js";
+import { createContentSearchIndexer } from "./contentSearchIndexer.js";
+import { initDb, listTaskEvents } from "./db.js";
+import { listHistories } from "./history.js";
+import { createWorkspaceSearchIndexer } from "./searchIndexer.js";
+import { createSearchStore, searchValues } from "./searchStore.js";
 
-const MAX_FILE_BYTES = 256 * 1024;
-const MAX_FILES_PER_WORKSPACE = 1200;
-const SKIP_DIRS = new Set([".git", "node_modules", "build", "dist", ".gradle", "target"]);
+const store = createSearchStore({ database: initDb });
+let indexer = null;
+let contentIndexer = null;
 
 function normalize(value) {
   return String(value || "").trim().toLowerCase();
@@ -18,92 +22,123 @@ function snippet(text, query) {
   return `${start > 0 ? "..." : ""}${value.slice(start, index + Math.max(query.length, 160))}${index + 160 < value.length ? "..." : ""}`;
 }
 
-function walkTextFiles(root) {
-  const files = [];
-  const stack = [root];
-  while (stack.length && files.length < MAX_FILES_PER_WORKSPACE) {
-    const current = stack.pop();
-    let entries = [];
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      if (entry.name.startsWith(".") && entry.name !== ".env.example") continue;
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) stack.push(fullPath);
-        continue;
-      }
-      try {
-        const stat = fs.statSync(fullPath);
-        if (stat.size <= MAX_FILE_BYTES) files.push({ fullPath, stat });
-      } catch { /* file may disappear during a search */ }
-      if (files.length >= MAX_FILES_PER_WORKSPACE) break;
-    }
+function textRelevance(title, text, query) {
+  const normalizedTitle = normalize(title);
+  const normalizedText = normalize(text);
+  let score = normalizedTitle === query ? 100 : normalizedTitle.includes(query) ? 25 : 0;
+  let index = normalizedText.indexOf(query);
+  while (index >= 0 && score < 100) {
+    score += 1;
+    index = normalizedText.indexOf(query, index + Math.max(query.length, 1));
   }
-  return files;
+  return score;
 }
 
-function fileMatch(file, workspace, query) {
-  const relativePath = path.relative(workspace.path, file.fullPath).replaceAll("\\", "/");
-  let text = "";
-  try {
-    text = fs.readFileSync(file.fullPath, "utf8");
-  } catch {
-    return null;
-  }
-  if (text.includes("\u0000")) return null;
-  const haystack = `${relativePath}\n${text}`.toLowerCase();
-  if (!haystack.includes(query)) return null;
-  return {
-    kind: "file",
-    id: `${workspace.id}:${relativePath}`,
-    workspaceId: workspace.id || "",
-    title: relativePath,
-    path: relativePath,
-    provider: "workspace",
-    snippet: snippet(text, query),
-    updatedAt: file.stat.mtime.toISOString()
+function compareText(left, right) {
+  return String(left || "").localeCompare(String(right || ""), undefined, { sensitivity: "base", numeric: true });
+}
+
+function resultComparator(sort, order) {
+  const direction = order === "asc" ? 1 : -1;
+  return (left, right) => {
+    let compared = 0;
+    if (sort === "title") compared = compareText(left.title, right.title);
+    else if (sort === "kind") compared = compareText(left.kind, right.kind);
+    else if (sort === "updatedAt") compared = (Date.parse(left.updatedAt || "") || 0) - (Date.parse(right.updatedAt || "") || 0);
+    else compared = Number(left.relevance || 0) - Number(right.relevance || 0);
+    if (compared) return compared * direction;
+    const updated = (Date.parse(right.updatedAt || "") || 0) - (Date.parse(left.updatedAt || "") || 0);
+    if (updated) return updated;
+    return compareText(`${left.kind}:${left.id}:${left.turnId || ""}:${left.path || ""}`, `${right.kind}:${right.id}:${right.turnId || ""}:${right.path || ""}`);
   };
 }
 
-export function searchContent({ query, scope = "all", limit = 50, cursor = "0", tag = "", favorite = false, histories = [], tasks = [], workspaces = [], historyDetails = new Map(), threadState = { items: {} } }) {
+export function searchContent({
+  query,
+  scope = "all",
+  limit = 50,
+  cursor = "0",
+  tag = "",
+  favorite = false,
+  sort = "relevance",
+  order = "",
+  histories = [],
+  tasks = [],
+  fileResults = [],
+  contentResults = [],
+  historyDetails = new Map(),
+  threadState = { items: {} }
+}) {
   const normalizedQuery = normalize(query);
-  const scopeAliases = { session: "sessions", history: "sessions", message: "messages", workspace: "files", file: "files", task: "tasks" };
-  const normalizedScope = scopeAliases[normalize(scope)] || normalize(scope) || "all";
+  const normalizedScope = searchValues.normalizeScope(scope);
+  const normalizedSort = searchValues.normalizeSort(sort);
+  const normalizedOrder = searchValues.normalizeOrder(order, normalizedSort);
   const pageSize = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const offset = Math.max(Number.parseInt(cursor, 10) || 0, 0);
-  if (!normalizedQuery) return { items: [], query: "", scope: normalizedScope, limit: pageSize, cursor: String(offset), nextCursor: "" };
+  if (!normalizedQuery) {
+    return {
+      items: [], query: "", scope: normalizedScope, sort: normalizedSort, order: normalizedOrder,
+      total: 0, limit: pageSize, cursor: String(offset), nextCursor: ""
+    };
+  }
 
   const matches = [];
   const allow = (name) => normalizedScope === "all" || normalizedScope === name;
+  matches.push(...contentResults.filter((item) => (
+    (item.kind === "history" && allow("sessions")) ||
+    (item.kind === "task" && allow("tasks")) ||
+    (item.kind === "message" && allow("messages"))
+  )));
   if (allow("sessions")) {
     for (const item of histories) {
-      const haystack = JSON.stringify(item).toLowerCase();
-      if (haystack.includes(normalizedQuery)) matches.push({ kind: "history", id: item.id || "", provider: item.provider || "", title: item.title || item.id || "History", snippet: snippet(item.preview || item.lastMessage, normalizedQuery), updatedAt: item.updatedAt || "" });
+      const haystack = JSON.stringify(item);
+      if (!normalize(haystack).includes(normalizedQuery)) continue;
+      matches.push({
+        kind: "history",
+        id: item.id || "",
+        provider: item.provider || "",
+        title: item.title || item.id || "History",
+        snippet: snippet(item.preview || item.lastMessage, normalizedQuery),
+        updatedAt: item.updatedAt || "",
+        relevance: textRelevance(item.title, haystack, normalizedQuery)
+      });
     }
   }
   if (allow("tasks")) {
     for (const item of tasks) {
-      const haystack = JSON.stringify(item).toLowerCase();
-      if (haystack.includes(normalizedQuery)) matches.push({ kind: "task", id: item.id || "", provider: item.agent || "", title: item.title || item.id || "Task", snippet: snippet(item.preview || item.status, normalizedQuery), updatedAt: item.updatedAt || "" });
+      const haystack = JSON.stringify(item);
+      if (!normalize(haystack).includes(normalizedQuery)) continue;
+      matches.push({
+        kind: "task",
+        id: item.id || "",
+        provider: item.agent || "",
+        title: item.title || item.id || "Task",
+        snippet: snippet(item.preview || item.status, normalizedQuery),
+        updatedAt: item.updatedAt || "",
+        relevance: textRelevance(item.title, haystack, normalizedQuery)
+      });
     }
   }
   if (allow("messages")) {
     for (const item of histories) {
       const detail = historyDetails.get(`${item.provider}:${item.id}`);
       for (const message of detail?.transcript || []) {
-        if (!JSON.stringify(message).toLowerCase().includes(normalizedQuery)) continue;
-        matches.push({ kind: "message", id: item.id || "", provider: item.provider || "", title: item.title || item.id || "History", snippet: snippet(message.text, normalizedQuery), turnId: message.turnId || "", updatedAt: item.updatedAt || "" });
+        const haystack = JSON.stringify(message);
+        if (!normalize(haystack).includes(normalizedQuery)) continue;
+        matches.push({
+          kind: "message",
+          id: item.id || "",
+          provider: item.provider || "",
+          title: item.title || item.id || "History",
+          snippet: snippet(message.text, normalizedQuery),
+          turnId: message.turnId || "",
+          updatedAt: item.updatedAt || "",
+          relevance: textRelevance(item.title, haystack, normalizedQuery)
+        });
       }
     }
   }
-  if (allow("files") || normalizedScope === "workspace") {
-    for (const workspace of workspaces) {
-      for (const file of walkTextFiles(workspace.path || "")) {
-        const result = fileMatch(file, workspace, normalizedQuery);
-        if (result) matches.push(result);
-      }
-    }
-  }
+  if (allow("files")) matches.push(...fileResults);
 
   const requestedTag = normalize(tag);
   const filteredMatches = matches.filter((item) => {
@@ -114,26 +149,77 @@ export function searchContent({ query, scope = "all", limit = 50, cursor = "0", 
     const meta = threadState.items?.[key] || {};
     return (!favorite || meta.favorite === true) && (!requestedTag || (meta.tags || []).some((value) => normalize(value) === requestedTag));
   });
-  const items = filteredMatches.slice(offset, offset + pageSize);
+  filteredMatches.sort(resultComparator(normalizedSort, normalizedOrder));
+  const items = filteredMatches.slice(offset, offset + pageSize).map(({ relevance: _relevance, ...item }) => item);
   const nextOffset = offset + items.length;
   return {
     items,
     query: normalizedQuery,
     scope: normalizedScope,
+    sort: normalizedSort,
+    order: normalizedOrder,
+    total: filteredMatches.length,
     limit: pageSize,
     cursor: String(offset),
     nextCursor: nextOffset < filteredMatches.length ? String(nextOffset) : ""
   };
 }
 
-export async function searchAll({ query, scope, limit, cursor, tag, favorite, histories, tasks, workspaces, threadState }) {
-  const historyDetails = new Map();
-  if (normalize(scope) === "messages" || !scope || normalize(scope) === "all") {
-    const { getHistory } = await import("./history.js");
-    for (const item of histories) {
-      const detail = getHistory(item.provider, item.id, { fresh: false });
-      if (detail) historyDetails.set(`${item.provider}:${item.id}`, detail);
-    }
-  }
-  return searchContent({ query, scope, limit, cursor, tag, favorite, histories, tasks, workspaces, historyDetails, threadState });
+export async function searchAll({ query, scope, limit, cursor, tag, favorite, sort, order, sessionOrigin = "all", workspaces, threadState }) {
+  const normalizedScope = searchValues.normalizeScope(scope);
+  const kinds = normalizedScope === "all" ? ["history", "task", "message"]
+    : normalizedScope === "sessions" ? ["history"]
+      : normalizedScope === "tasks" ? ["task"]
+        : normalizedScope === "messages" ? ["message"] : [];
+  const contentResults = kinds.length ? store.queryContent(query, { kinds, sessionOrigin }) : [];
+  const fileResults = (normalizedScope === "files" || normalizedScope === "all") && workspaces.length
+    ? store.queryWorkspaceFiles(query, { workspaceIds: workspaces.map((workspace) => workspace.id) })
+    : [];
+  return searchContent({ query, scope: normalizedScope, limit, cursor, tag, favorite, sort, order, histories: [], tasks: [], fileResults, contentResults, threadState });
 }
+
+export async function startSearchIndex({ getWorkspaces, refreshIntervalMs } = {}) {
+  if (!indexer) indexer = createWorkspaceSearchIndexer({ store, getWorkspaces, refreshIntervalMs });
+  if (!contentIndexer) contentIndexer = createContentSearchIndexer({
+    store,
+    getHistories: () => listHistories({ fresh: true }),
+    getTasks,
+    listTaskEvents,
+    refreshIntervalMs: Math.min(Number(refreshIntervalMs) || 60_000, 15_000)
+  });
+  const [workspaceStatus] = await Promise.all([indexer.start(), contentIndexer.start()]);
+  return { ...workspaceStatus, ...contentIndexer.status() };
+}
+
+export async function stopSearchIndex() {
+  if (!indexer) return;
+  await Promise.all([indexer.stop(), contentIndexer?.stop()]);
+  indexer = null;
+  contentIndexer = null;
+}
+
+export function getSearchIndexStatus() {
+  return indexer ? { ...indexer.status(), ...store.contentStats(), contentRunning: contentIndexer?.status().running || false }
+    : { ...store.stats(), ...store.contentStats(), ready: false, running: false, started: false, watchers: 0, pendingWorkspaces: 0 };
+}
+
+export function refreshSearchIndex() {
+  if (!indexer) throw new Error("Search index is not running.");
+  return Promise.all([indexer.refreshAll(), contentIndexer?.refresh()]).then(([workspaces]) => workspaces);
+}
+
+export function refreshWorkspaceSearchPaths(workspace, paths) {
+  if (!indexer) return Promise.resolve(null);
+  return indexer.refreshPaths(workspace, paths);
+}
+
+export const listSavedSearches = () => store.listSavedSearches();
+export const getSavedSearch = (id) => store.getSavedSearch(id);
+export const saveSearch = (input) => store.saveSearch(input);
+export const updateSavedSearch = (id, patch) => store.updateSavedSearch(id, patch);
+export const deleteSavedSearch = (id) => store.deleteSavedSearch(id);
+export const markSavedSearchUsed = (id) => store.markSavedSearchUsed(id);
+export const recordSearchHistory = (input) => store.recordSearch(input);
+export const listSearchHistory = (options) => store.listSearchHistory(options);
+export const deleteSearchHistory = (id) => store.deleteSearchHistory(id);
+export const clearSearchHistory = () => store.clearSearchHistory();

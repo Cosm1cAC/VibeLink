@@ -2378,6 +2378,71 @@ function ChangeCard({ summary, token, onUpdated, onError }) {
   );
 }
 
+function testDurationLabel(value) {
+  const duration = Number(value);
+  if (!Number.isFinite(duration) || duration < 0) return "";
+  if (duration < 1000) return `${Math.round(duration * 10) / 10} ms`;
+  return `${Math.round(duration / 100) / 10} s`;
+}
+
+function testLocationLabel(location = {}) {
+  const path = String(location.path || "");
+  if (!path) return "";
+  return `${path}${location.line ? `:${location.line}` : ""}${location.column ? `:${location.column}` : ""}`;
+}
+
+function TestResultTree({ test, busy = false, onOpenLocation, onRerun }) {
+  const suites = Array.isArray(test?.suites) ? test.suites : [];
+  if (!suites.length) return null;
+  return (
+    <div className="test-result-tree">
+      {suites.map((suite, suiteIndex) => {
+        const cases = Array.isArray(suite.cases) ? suite.cases : [];
+        const suiteLocation = testLocationLabel(suite.location);
+        return (
+          <details className={cx("test-suite", `status-${suite.status || "skip"}`)} key={`${suite.name}-${suiteIndex}`} open={suite.status === "fail"}>
+            <summary>
+              <span className="test-status-mark" aria-hidden="true"></span>
+              <strong>{suite.name || "Test suite"}</strong>
+              <span>{cases.filter((item) => item.status === "pass").length} passed</span>
+              <span>{cases.filter((item) => item.status === "fail").length} failed</span>
+              {testDurationLabel(suite.durationMs) ? <time>{testDurationLabel(suite.durationMs)}</time> : null}
+            </summary>
+            {suiteLocation ? (
+              <button type="button" className="test-location" onClick={() => onOpenLocation?.(suite.location)}>{suiteLocation}</button>
+            ) : null}
+            <div className="test-case-list">
+              {cases.map((testCase, caseIndex) => {
+                const location = testLocationLabel(testCase.location);
+                return (
+                  <div className={cx("test-case", `status-${testCase.status || "skip"}`)} key={testCase.id || `${testCase.name}-${caseIndex}`}>
+                    <span className="test-status-mark" aria-hidden="true"></span>
+                    <div className="test-case-body">
+                      <strong>{testCase.name || testCase.fullName || "Test case"}</strong>
+                      {testCase.suite ? <small>{testCase.suite}</small> : null}
+                      <div className="test-case-meta">
+                        {location ? <button type="button" onClick={() => onOpenLocation?.(testCase.location)}>{location}</button> : null}
+                        {testDurationLabel(testCase.durationMs) ? <time>{testDurationLabel(testCase.durationMs)}</time> : null}
+                      </div>
+                      {testCase.failure ? <pre>{testCase.failure}</pre> : null}
+                    </div>
+                    {testCase.rerunCommand ? (
+                      <button type="button" className="test-rerun" disabled={busy} onClick={() => onRerun?.(testCase.rerunCommand)} title="Rerun this failed test">
+                        <RotateCcw size={13} />
+                        重跑
+                      </button>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 function WorkspaceWorkbench({
   workspaces = [],
   selected,
@@ -2866,11 +2931,23 @@ function WorkspaceWorkbench({
           {testResult?.test ? (
             <div className={cx("test-summary", testResult.test.ok ? "ok" : "failed")}>
               <span>{testResult.test.ok ? "通过" : "失败"}</span>
+              {testResult.test.runner && testResult.test.runner !== "unknown" ? <span>{testResult.test.runner}</span> : null}
               <span>{testResult.test.passed || 0} passed</span>
               <span>{testResult.test.failed || 0} failed</span>
+              <span>{testResult.test.skipped || 0} skipped</span>
+              {testDurationLabel(testResult.test.durationMs) ? <span>{testDurationLabel(testResult.test.durationMs)}</span> : null}
             </div>
           ) : null}
-          {testResult?.test?.failures?.length ? (
+          <TestResultTree
+            test={testResult?.test}
+            busy={busy === "test" || runningCommand?.kind === "test"}
+            onOpenLocation={(location) => location?.path ? openWorkspacePath(location.path, location.line || 0).catch((err) => onError?.(err.message)) : null}
+            onRerun={(command) => {
+              setTestCommand(command);
+              runTerminal("test", { command }).catch((err) => onError?.(err.message));
+            }}
+          />
+          {!testResult?.test?.suites?.length && testResult?.test?.failures?.length ? (
             <details className="test-failures" open>
               <summary>失败定位</summary>
               {testResult.test.failures.map((item, index) => {
@@ -4183,8 +4260,14 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
   const [browserFetchBusy, setBrowserFetchBusy] = useState(false);
   const [browserFetchError, setBrowserFetchError] = useState("");
   const [browserFetchResult, setBrowserFetchResult] = useState(null);
+  const [settingsRevision, setSettingsRevision] = useState(Number(settings?.revision || 0));
+  const [settingsSaveError, setSettingsSaveError] = useState("");
+  const [schedulerState, setSchedulerState] = useState(null);
+  const [schedulerError, setSchedulerError] = useState("");
+  const [schedulerBusy, setSchedulerBusy] = useState("");
 
   useEffect(() => {
+    setSettingsRevision(Number(settings?.revision || 0));
     setDefaultCwd(settings?.defaultCwd || "");
     setClaudeCommand(settings?.claudeCommand || "claude");
     setCodexCommand(settings?.codexCommand || "auto");
@@ -4244,6 +4327,33 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
     refreshSecurity().catch((err) => setSecurityError(err.message));
     refreshToolEventsStats().catch((err) => setToolEventError(err.message));
   }, [token]);
+
+  async function refreshScheduler() {
+    try {
+      setSchedulerState(await request("/api/task-scheduler", {}, token));
+      setSchedulerError("");
+    } catch (err) {
+      setSchedulerError(err.message);
+    }
+  }
+
+  useEffect(() => {
+    refreshScheduler();
+    const timer = setInterval(refreshScheduler, 2000);
+    return () => clearInterval(timer);
+  }, [token]);
+
+  async function schedulerAction(job, action) {
+    setSchedulerBusy(`${job.id}:${action}`);
+    try {
+      await request(`/api/task-scheduler/${encodeURIComponent(job.id)}/${action}`, { method: "POST", body: "{}" }, token);
+      await refreshScheduler();
+    } catch (err) {
+      setSchedulerError(err.message);
+    } finally {
+      setSchedulerBusy("");
+    }
+  }
 
   async function approvePairing(id) {
     setSecurityBusy(id);
@@ -4513,6 +4623,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
 
   async function submit(event) {
     event.preventDefault();
+    setSettingsSaveError("");
     const apiKeys = {};
     if (openai.trim()) apiKeys.openai = openai.trim();
     if (anthropic.trim()) apiKeys.anthropic = anthropic.trim();
@@ -4550,15 +4661,26 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
       },
       apiKeys
     };
+    settingsPatch.expectedRevision = settingsRevision;
     if (notificationEmail.trim()) settingsPatch.notificationEmail = notificationEmail.trim();
-    await request(
-      "/api/settings",
-      {
-        method: "POST",
-        body: JSON.stringify(settingsPatch)
-      },
-      token
-    );
+    try {
+      await request(
+        "/api/settings",
+        {
+          method: "POST",
+          headers: { "If-Match": `"vibelink:settings:${settingsRevision}"` },
+          body: JSON.stringify(settingsPatch)
+        },
+        token
+      );
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      const current = error.data?.current?.settings
+        || (await request("/api/settings", {}, token)).settings;
+      setSettingsRevision(Number(current?.revision || 0));
+      setSettingsSaveError("Settings changed on another device. Latest values were refreshed while this draft was preserved; review and save again.");
+      return;
+    }
     setOpenai("");
     setAnthropic("");
     setZhipu("");
@@ -4597,6 +4719,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
         </div>
       </div>
       <form className="panel" onSubmit={submit}>
+        {settingsSaveError ? <p className="form-error" role="alert">{settingsSaveError}</p> : null}
         <label>
           <span>OpenAI API Key</span>
           <input value={openai} onChange={(event) => setOpenai(event.target.value)} type="password" placeholder={settings?.hasOpenAIKey ? "Saved; leave blank to keep" : "Not set"} />
@@ -4709,6 +4832,52 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
           Save
         </button>
       </form>
+      <section className="probe-panel scheduler-panel">
+        <div className="scheduler-panel-head">
+          <div>
+            <h3>Background scheduler</h3>
+            <p>Persistent Agent queue with bounded concurrency and automatic retries.</p>
+          </div>
+          <button className="icon-button" type="button" title="Refresh queue" aria-label="Refresh queue" onClick={refreshScheduler}>
+            <RefreshCw size={17} />
+          </button>
+        </div>
+        {schedulerError ? <p className="form-error">{schedulerError}</p> : null}
+        {schedulerState ? (
+          <>
+            <div className="scheduler-metrics">
+              <span><strong>{schedulerState.active}</strong> running</span>
+              <span><strong>{schedulerState.counts?.queued || 0}</strong> queued</span>
+              <span><strong>{schedulerState.counts?.failed || 0}</strong> failed</span>
+              <span>limit {schedulerState.concurrency}</span>
+            </div>
+            <div className="scheduler-list">
+              {(schedulerState.items || []).filter((job) => ["running", "queued", "failed"].includes(job.status)).slice(0, 20).map((job) => (
+                <div className="scheduler-row" key={job.id}>
+                  <div>
+                    <strong>{compact(job.payload?.title || job.payload?.prompt || job.taskId, "Agent task")}</strong>
+                    <small>{providerLabel(job.payload?.agent || "agent")} · {job.status} · attempt {job.attempts}/{job.maxAttempts}</small>
+                    {job.lastError ? <small className="scheduler-error">{job.lastError}</small> : null}
+                  </div>
+                  <div className="scheduler-row-actions">
+                    {job.status === "failed" ? (
+                      <button className="icon-button" type="button" title="Retry task" aria-label="Retry task" disabled={Boolean(schedulerBusy)} onClick={() => schedulerAction(job, "retry")}>
+                        <RotateCcw size={16} />
+                      </button>
+                    ) : null}
+                    {job.status === "queued" ? (
+                      <button className="icon-button" type="button" title="Cancel queued task" aria-label="Cancel queued task" disabled={Boolean(schedulerBusy)} onClick={() => schedulerAction(job, "cancel")}>
+                        <X size={17} />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+              {!schedulerState.items?.some((job) => ["running", "queued", "failed"].includes(job.status)) ? <p className="scheduler-empty">No active or failed jobs.</p> : null}
+            </div>
+          </>
+        ) : null}
+      </section>
       <section className="security-panel">
         <div className="security-panel-head">
           <div>
@@ -6032,14 +6201,24 @@ function App() {
   }
 
   async function patchThread(item, patch) {
-    const state = await request(
-      "/api/thread-state",
-      {
-        method: "POST",
-        body: JSON.stringify({ key: item.key, patch })
-      },
-      token
-    );
+    let state;
+    try {
+      state = await request(
+        "/api/thread-state",
+        {
+          method: "POST",
+          body: JSON.stringify({ key: item.key, patch, expectedRevision: Number(item.revision || 0) })
+        },
+        token
+      );
+    } catch (error) {
+      if (error.status === 409 && error.data?.state) {
+        setThreadState(error.data.state);
+        const current = error.data.state.items?.[item.key];
+        if (current) setSelected((selectedItem) => selectedItem?.key === item.key ? { ...selectedItem, ...current } : selectedItem);
+      }
+      throw error;
+    }
     setThreadState(state);
     setSelected((current) => (current?.key === item.key ? { ...current, ...patch, title: patch.title || current.title } : current));
     return state;
@@ -6109,19 +6288,27 @@ function App() {
   async function patchProjectThreads(project, patch) {
     const children = project.children || [];
     if (!children.length) return null;
-    let nextState = null;
-    for (const child of children) {
-      nextState = await request(
-        "/api/thread-state",
+    try {
+      const nextState = await request(
+        "/api/thread-state/batch",
         {
           method: "POST",
-          body: JSON.stringify({ key: child.key, patch })
+          body: JSON.stringify({
+            updates: children.map((child) => ({
+              key: child.key,
+              patch,
+              expectedRevision: Number(child.revision || 0)
+            }))
+          })
         },
         token
       );
+      setThreadState(nextState);
+      return nextState;
+    } catch (error) {
+      if (error.status === 409 && error.data?.state) setThreadState(error.data.state);
+      throw error;
     }
-    if (nextState) setThreadState(nextState);
-    return nextState;
   }
 
   async function forkThread(item) {
@@ -6585,10 +6772,17 @@ function App() {
       "/api/settings",
       {
         method: "POST",
-        body: JSON.stringify({ permissionMode: value })
+        headers: { "If-Match": `"vibelink:settings:${Number(settings?.revision || 0)}"` },
+        body: JSON.stringify({ permissionMode: value, expectedRevision: Number(settings?.revision || 0) })
       },
       token
-    ).catch((err) => setError(err.message));
+    ).then((result) => setSettings(result.settings || settings)).catch((err) => {
+      if (err.status === 409 && err.data?.current?.settings) {
+        setSettings(err.data.current.settings);
+        setPermissionMode(err.data.current.settings.permissionMode || "default");
+      }
+      setError(err.message);
+    });
   }
 
   if (!token) {

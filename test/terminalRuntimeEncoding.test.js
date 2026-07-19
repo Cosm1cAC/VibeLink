@@ -25,7 +25,7 @@ test("Windows spawn terminal emits a UTF-8 prompt for non-ASCII workspaces", { s
       onExit: resolveExit,
     });
 
-    writeTerminalSession(session.id, "Get-Location; exit\r\n");
+    await writeTerminalSession(session.id, "Get-Location; exit\r\n");
     await Promise.race([
       exited,
       new Promise((_, reject) => setTimeout(() => reject(new Error("terminal did not exit")), 3_000)),
@@ -33,7 +33,7 @@ test("Windows spawn terminal emits a UTF-8 prompt for non-ASCII workspaces", { s
     assert.match(output, /vibelink-移动终端-/);
     assert.doesNotMatch(output, /�/);
   } finally {
-    if (session) stopTerminalSession(session.id, "encoding test cleanup");
+    if (session) await stopTerminalSession(session.id, "encoding test cleanup");
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });

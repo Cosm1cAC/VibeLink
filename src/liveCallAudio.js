@@ -308,7 +308,10 @@ export function handleLiveCallAudioConnection(sessionId, ws, ctx = {}) {
       frames: frameCount,
       durationMs
     });
-    ingestLiveCallAudio(sessionId, { stop: true });
+    // A socket loss is recoverable: keep the ASR/checkpoint channel alive so a
+    // new socket can resume without dropping buffered PCM. Explicit client
+    // stop still tears it down.
+    ingestLiveCallAudio(sessionId, { channel: header?.device || "remote", flush: true });
   });
 
   ws.on("error", (error) => {

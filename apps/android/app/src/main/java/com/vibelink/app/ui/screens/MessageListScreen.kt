@@ -496,7 +496,7 @@ private fun ComposerBar(
                 val efforts = provider?.reasoningEfforts.orEmpty().ifEmpty { listOf("", "low", "medium", "high", "xhigh") }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (provider?.capabilities?.modelOverride == false) {
-                        AssistChip(onClick = {}, label = { Text("Model: ${models.firstOrNull()?.label ?: strings.providerDefault}") })
+                        AssistChip(onClick = {}, label = { Text(strings.model(models.firstOrNull()?.label ?: strings.providerDefault)) })
                     } else {
                         if (models.isNotEmpty()) {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -876,6 +876,7 @@ private fun FileReferenceChips(
     onCopy: (String) -> Unit,
     onOpen: (String) -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         items(fileReferences.take(6), key = { it }) { reference ->
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -889,7 +890,7 @@ private fun FileReferenceChips(
                 ) {
                     Icon(
                         Icons.Default.ContentCopy,
-                        contentDescription = "Copy file reference",
+                        contentDescription = strings.copyFileReference,
                         modifier = Modifier.size(18.dp),
                     )
                 }
@@ -1011,9 +1012,10 @@ private suspend fun uploadAttachmentUri(
 
 @Composable
 private fun TaskChangesCard(changes: com.vibelink.app.network.TaskChangesResponse) {
+    val strings = LocalAppStrings.current
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Task changes", style = MaterialTheme.typography.titleSmall)
+            Text(strings.taskChanges, style = MaterialTheme.typography.titleSmall)
             (changes.items.ifEmpty { changes.changes }).take(8).forEach { change ->
                 val label = change["path"]?.toString() ?: change["title"]?.toString() ?: change["type"]?.toString() ?: change.toString()
                 Text(label, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)

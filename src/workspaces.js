@@ -1,10 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { execFile, spawn } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { withAgentReachPath } from "./agentReachRuntime.js";
-import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
+import { artifactPreview } from "./artifactRuntime.js";
+import { parseTestOutput } from "./testAdapters.js";
+import { deleteWorkspaceByPath, getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
+import { getExecutionHostFacade } from "./executionHostClient.js";
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
 import { createWorkspaceTreeSidecarClient } from "./workspaceTreeSidecarClient.js";
 
@@ -22,6 +26,8 @@ let rustWorkspaceTreeSidecarKey = "";
 let rustWorkspaceTreeSidecarReady = null;
 let rustWorkspaceTreeLastClientStats = { terminated: true, pending: 0 };
 const workspaceContextFileCache = new Map();
+const workspaceFileRevisionCache = new Map();
+const workspaceMutationQueues = new Map();
 const workspaceContextFileStats = { cacheHits: 0, cacheMisses: 0, cacheEvictions: 0 };
 const rustWorkspaceTreeStats = {
   hits: 0,
@@ -75,6 +81,7 @@ const textExtensions = new Set([
   ".cs",
   ".sql"
 ]);
+const richBinaryExtensions = new Set([".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip"]);
 
 function lineCount(value) {
   if (!value) return 0;
@@ -453,6 +460,7 @@ function invalidateWorkspaceCaches(root = "") {
   workspaceTreeCache.clear();
   rustWorkspaceTreeCache.clear();
   workspaceContextFileCache.clear();
+  workspaceFileRevisionCache.clear();
   invalidateGitSummaryCache(root);
 }
 
@@ -703,8 +711,22 @@ function rustWorkspaceTreeSessionMode() {
 }
 
 function rustWorkspaceTreeSessionTimeoutMs() {
-  const value = Number(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS || 10000);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10000;
+  const command = path.basename(String(process.env.VIBELINK_RUST_BIN || "")).toLowerCase();
+  const fallback = command === "cargo" || command === "cargo.exe" ? 120000 : 10000;
+  const value = Number(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS || fallback);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function isUtf8TextSample(sample, extension) {
+  if (richBinaryExtensions.has(extension) || sample.includes(0)) return false;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let trim = 0; trim <= Math.min(3, sample.length); trim += 1) {
+    try {
+      decoder.decode(sample.subarray(0, sample.length - trim));
+      return true;
+    } catch {}
+  }
+  return false;
 }
 
 function recordRustWorkspaceTreeBudgetFallback(message) {
@@ -1042,7 +1064,48 @@ export async function getWorkspaceContext(id, settings, body = {}) {
   };
 }
 
-export async function getWorkspaceFile(id, settings, filePath = "") {
+async function workspaceFileRevision(target) {
+  const stat = fs.statSync(target);
+  const key = path.resolve(target).toLowerCase();
+  const signature = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  const cached = workspaceFileRevisionCache.get(key);
+  if (cached?.signature === signature) return cached.revision;
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const input = fs.createReadStream(target);
+    input.on("error", reject);
+    input.on("data", (chunk) => hash.update(chunk));
+    input.on("end", () => {
+      const revision = hash.digest("hex");
+      workspaceFileRevisionCache.set(key, { signature, revision });
+      while (workspaceFileRevisionCache.size > 256) workspaceFileRevisionCache.delete(workspaceFileRevisionCache.keys().next().value);
+      resolve(revision);
+    });
+  });
+}
+
+function workspaceFileEtag(revision) {
+  return `"vibelink:workspace-file:${revision}"`;
+}
+
+async function assertWorkspaceFileRevision(id, settings, filePath, target, expectedRevision, requireAbsent = false) {
+  if (!requireAbsent && (expectedRevision === undefined || expectedRevision === null || expectedRevision === "")) return;
+  const exists = fs.existsSync(target) && fs.statSync(target).isFile();
+  const current = exists ? await getWorkspaceFile(id, settings, filePath) : null;
+  const actualRevision = current?.revision || null;
+  if (requireAbsent && !exists) return;
+  if (String(expectedRevision) === String(actualRevision || "")) return;
+
+  const error = new Error("Workspace file changed on another device.");
+  error.status = 409;
+  error.code = "WORKSPACE_FILE_CONFLICT";
+  error.expectedRevision = expectedRevision === undefined || expectedRevision === null ? null : String(expectedRevision);
+  error.actualRevision = actualRevision;
+  error.current = current;
+  throw error;
+}
+
+export async function getWorkspaceFile(id, settings, filePath = "", options = {}) {
   const workspace = workspaceOrThrow(id);
   const root = resolveAllowedPath(workspace.path, settings);
   const target = safeWorkspaceChild(root, filePath);
@@ -1054,7 +1117,40 @@ export async function getWorkspaceFile(id, settings, filePath = "") {
   }
   touchWorkspace(workspace.id);
   const rel = path.relative(root, target).replaceAll("\\", "/");
-  const text = readTextSample(target, stat);
+  const maxPageBytes = 1024 * 1024;
+  const limit = Math.min(Math.max(Number(options.limit) || 512 * 1024, 1024), maxPageBytes);
+  const requestedOffset = Math.min(Math.max(Math.trunc(Number(options.offset) || 0), 0), stat.size);
+  const sampleLength = Math.min(stat.size, 8192);
+  const sample = Buffer.alloc(sampleLength);
+  const sampleHandle = fs.openSync(target, "r");
+  try { if (sampleLength) fs.readSync(sampleHandle, sample, 0, sampleLength, 0); } finally { fs.closeSync(sampleHandle); }
+  const extension = path.extname(target).toLowerCase();
+  const binary = !isUtf8TextSample(sample, extension);
+  let text = "";
+  let offset = requestedOffset;
+  let nextOffset = requestedOffset;
+  if (!binary && requestedOffset < stat.size) {
+    const readLength = Math.min(limit + 4, stat.size - requestedOffset);
+    const buffer = Buffer.alloc(readLength);
+    const handle = fs.openSync(target, "r");
+    let bytesRead;
+    try { bytesRead = fs.readSync(handle, buffer, 0, readLength, requestedOffset); } finally { fs.closeSync(handle); }
+    let leading = 0;
+    while (leading < bytesRead && (buffer[leading] & 0xc0) === 0x80) leading += 1;
+    offset = requestedOffset + leading;
+    let pageLength = Math.min(limit, bytesRead - leading);
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    while (pageLength > 0) {
+      try {
+        text = decoder.decode(buffer.subarray(leading, leading + pageLength));
+        break;
+      } catch {
+        pageLength -= 1;
+      }
+    }
+    nextOffset = offset + pageLength;
+  }
+  const revision = await workspaceFileRevision(target);
   return {
     ok: true,
     workspace,
@@ -1062,17 +1158,51 @@ export async function getWorkspaceFile(id, settings, filePath = "") {
     absolutePath: target,
     size: stat.size,
     updatedAt: stat.mtime.toISOString(),
+    revision,
+    etag: workspaceFileEtag(revision),
     text,
-    binary: !text
+    binary,
+    offset,
+    bytesRead: nextOffset - offset,
+    nextOffset,
+    eof: binary || nextOffset >= stat.size,
+    truncated: !binary && nextOffset < stat.size,
+    pageLimit: limit
   };
 }
 
-export async function mutateWorkspaceFile(id, settings, body = {}) {
+export async function previewWorkspaceFile(id, settings, filePath = "", options = {}) {
+  const workspace = workspaceOrThrow(id);
+  const root = resolveAllowedPath(workspace.path, settings);
+  const target = safeWorkspaceChild(root, filePath);
+  const stat = fs.statSync(target);
+  if (!stat.isFile()) {
+    const error = new Error("Workspace file path must be a file.");
+    error.status = 400;
+    throw error;
+  }
+  const rel = path.relative(root, target).replaceAll("\\", "/");
+  const revision = await workspaceFileRevision(target);
+  touchWorkspace(workspace.id);
+  return {
+    ok: true,
+    workspace,
+    path: rel,
+    size: stat.size,
+    revision,
+    etag: workspaceFileEtag(revision),
+    preview: await artifactPreview(target, { ...options, id: `${workspace.id}:${rel}`, name: path.basename(rel) })
+  };
+}
+
+async function mutateWorkspaceFileNow(id, settings, body = {}) {
   const workspace = workspaceOrThrow(id);
   const root = resolveAllowedPath(workspace.path, settings);
   const action = String(body.action || "write").trim().toLowerCase();
   const target = workspaceMutationPath(root, body.path || "", "path");
   touchWorkspace(workspace.id);
+
+  await assertWorkspaceFileRevision(id, settings, body.path || "", target, body.expectedRevision, body.requireAbsent === true);
 
   if (action === "write") {
     const text = typeof body.text === "string" ? body.text : "";
@@ -1138,6 +1268,171 @@ export async function mutateWorkspaceFile(id, settings, body = {}) {
   const error = new Error("Unsupported workspace file action.");
   error.status = 400;
   throw error;
+}
+
+function withWorkspaceMutationQueue(id, operation) {
+  const key = String(id || "");
+  const previous = workspaceMutationQueues.get(key) || Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  workspaceMutationQueues.set(key, next);
+  return next.finally(() => {
+    if (workspaceMutationQueues.get(key) === next) workspaceMutationQueues.delete(key);
+  });
+}
+
+export function mutateWorkspaceFile(id, settings, body = {}) {
+  return withWorkspaceMutationQueue(id, () => mutateWorkspaceFileNow(id, settings, body));
+}
+
+function batchAffectedPaths(root, operation) {
+  const paths = [workspaceMutationPath(root, operation.path || "", "path")];
+  if (operation.action === "rename") paths.push(workspaceMutationPath(root, operation.nextPath || "", "nextPath"));
+  return paths;
+}
+
+async function validateBatchOperation(id, settings, root, operation) {
+  const action = String(operation.action || "").trim().toLowerCase();
+  if (!new Set(["write", "rename", "delete"]).has(action)) {
+    const error = new Error("Batch file action must be write, rename, or delete.");
+    error.status = 400;
+    error.code = "WORKSPACE_BATCH_ACTION_INVALID";
+    throw error;
+  }
+  operation.action = action;
+  const [target, nextTarget] = batchAffectedPaths(root, operation);
+  await assertWorkspaceFileRevision(id, settings, operation.path, target, operation.expectedRevision, operation.requireAbsent === true);
+  if (action === "write") {
+    if (Buffer.byteLength(typeof operation.text === "string" ? operation.text : "", "utf8") > 1024 * 1024) {
+      const error = new Error("Workspace file text is too large.");
+      error.status = 413;
+      throw error;
+    }
+    if (fs.existsSync(target) && !fs.statSync(target).isFile()) {
+      const error = new Error("Workspace file path must be a file.");
+      error.status = 400;
+      throw error;
+    }
+  } else if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+    const error = new Error("Workspace file path must be a file.");
+    error.status = 404;
+    throw error;
+  }
+  if (action === "rename" && fs.existsSync(nextTarget)) {
+    const error = new Error("Workspace destination already exists.");
+    error.status = 409;
+    error.code = "WORKSPACE_DESTINATION_CONFLICT";
+    throw error;
+  }
+}
+
+function publicBatchError(error, index, operation) {
+  return {
+    ok: false,
+    index,
+    action: operation.action,
+    path: operation.path,
+    code: error.code || "WORKSPACE_FILE_ERROR",
+    error: error.message,
+    expectedRevision: error.expectedRevision ?? null,
+    actualRevision: error.actualRevision ?? null,
+    current: error.current || null
+  };
+}
+
+async function mutateWorkspaceFilesBatchNow(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const root = resolveAllowedPath(workspace.path, settings);
+  const mode = body.mode === "best-effort" ? "best-effort" : "atomic";
+  if (!Array.isArray(body.operations) || !body.operations.length || body.operations.length > 100) {
+    const error = new Error("Workspace batch requires between 1 and 100 operations.");
+    error.status = 400;
+    error.code = "WORKSPACE_BATCH_INVALID";
+    throw error;
+  }
+  const operations = body.operations.map((operation) => ({
+    ...operation,
+    action: String(operation?.action || "").trim().toLowerCase()
+  }));
+
+  if (mode === "best-effort") {
+    const items = [];
+    for (let index = 0; index < operations.length; index += 1) {
+      try {
+        await validateBatchOperation(id, settings, root, operations[index]);
+        items.push({ ok: true, index, ...(await mutateWorkspaceFileNow(id, settings, operations[index])) });
+      } catch (error) {
+        items.push(publicBatchError(error, index, operations[index]));
+      }
+    }
+    return { ok: items.every((item) => item.ok), mode, workspace, items };
+  }
+
+  const conflicts = [];
+  const affected = new Map();
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+    try {
+      for (const target of batchAffectedPaths(root, operation)) {
+        const key = path.resolve(target).toLowerCase();
+        if (affected.has(key)) {
+          const error = new Error("Atomic batch operations cannot target the same path more than once.");
+          error.status = 400;
+          error.code = "WORKSPACE_BATCH_OVERLAP";
+          throw error;
+        }
+        affected.set(key, target);
+      }
+      await validateBatchOperation(id, settings, root, operation);
+    } catch (error) {
+      if (error.code === "WORKSPACE_FILE_CONFLICT" || error.code === "WORKSPACE_DESTINATION_CONFLICT") {
+        conflicts.push(publicBatchError(error, index, operation));
+      } else {
+        throw error;
+      }
+    }
+  }
+  if (conflicts.length) {
+    const error = new Error("Workspace batch contains conflicting file revisions or destinations.");
+    error.status = 409;
+    error.code = "WORKSPACE_BATCH_CONFLICT";
+    error.conflicts = conflicts;
+    throw error;
+  }
+
+  const backupRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-workspace-batch-"));
+  const snapshots = [];
+  try {
+    let snapshotIndex = 0;
+    for (const target of affected.values()) {
+      const exists = fs.existsSync(target) && fs.statSync(target).isFile();
+      const backup = path.join(backupRoot, String(snapshotIndex++));
+      if (exists) fs.copyFileSync(target, backup);
+      snapshots.push({ target, exists, backup });
+    }
+    const items = [];
+    try {
+      for (let index = 0; index < operations.length; index += 1) {
+        items.push({ ok: true, index, ...(await mutateWorkspaceFileNow(id, settings, operations[index])) });
+      }
+    } catch (error) {
+      for (const snapshot of snapshots.reverse()) {
+        if (fs.existsSync(snapshot.target) && fs.statSync(snapshot.target).isFile()) fs.unlinkSync(snapshot.target);
+        if (snapshot.exists) {
+          fs.mkdirSync(path.dirname(snapshot.target), { recursive: true });
+          fs.copyFileSync(snapshot.backup, snapshot.target);
+        }
+      }
+      invalidateWorkspaceCaches(root);
+      throw error;
+    }
+    return { ok: true, mode, workspace, items };
+  } finally {
+    fs.rmSync(backupRoot, { recursive: true, force: true });
+  }
+}
+
+export function mutateWorkspaceFilesBatch(id, settings, body = {}) {
+  return withWorkspaceMutationQueue(id, () => mutateWorkspaceFilesBatchNow(id, settings, body));
 }
 
 export async function openWorkspaceInExplorer(id, settings) {
@@ -1614,24 +1909,6 @@ export async function applyWorkspaceGitAction(id, settings, body = {}) {
   };
 }
 
-function parseTestOutput(stdout = "", stderr = "", exitCode = 0) {
-  const text = [stdout, stderr].filter(Boolean).join("\n");
-  const lines = text.split(/\r?\n/);
-  const failed = [];
-  for (const line of lines) {
-    if (/\b(fail|failed|error|exception)\b/i.test(line)) failed.push(line.trim());
-  }
-  const passedMatch = text.match(/(\d+)\s+(?:passing|passed|tests?\s+passed)/i);
-  const failedMatch = text.match(/(\d+)\s+(?:failing|failed|tests?\s+failed|failures?)/i);
-  return {
-    ok: exitCode === 0,
-    passed: passedMatch ? Number(passedMatch[1]) || 0 : exitCode === 0 ? 1 : 0,
-    failed: failedMatch ? Number(failedMatch[1]) || failed.length : exitCode === 0 ? 0 : Math.max(1, failed.length),
-    failures: failed.slice(0, 30),
-    log: text
-  };
-}
-
 export async function runWorkspaceCommand(id, settings, body = {}) {
   const workspace = workspaceOrThrow(id);
   const cwd = resolveAllowedPath(workspace.path, settings);
@@ -1647,138 +1924,165 @@ export async function runWorkspaceCommand(id, settings, body = {}) {
   const args = process.platform === "win32"
     ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
     : ["-lc", command];
-  if (typeof body.onOutput === "function") {
-    const result = await runWorkspaceCommandStream({ shell, args, cwd, command, body });
-    return {
-      ...result,
-      workspace,
-      cwd,
-      command,
-      test: body.kind === "test" ? parseTestOutput(result.stdout, result.stderr, result.exitCode || 0) : null
-    };
-  }
-  let result;
-  try {
-    const { stdout, stderr } = await execFileAsync(shell, args, {
-      cwd,
-      env: withAgentReachPath(process.env),
-      windowsHide: true,
-      timeout: Math.min(Number(body.timeoutMs || 120000), 300000),
-      maxBuffer: 20 * 1024 * 1024
-    });
-    result = { ok: true, stdout, stderr, exitCode: 0 };
-  } catch (error) {
-    result = {
-      ok: false,
-      stdout: error.stdout || "",
-      stderr: error.stderr || error.message,
-      exitCode: error.code ?? 1
-    };
-  }
+  const inherited = withAgentReachPath(process.env);
+  const facade = body.executionHost || getExecutionHostFacade();
+  const result = await facade.runCommand({
+    executionId: body.executionId,
+    shell,
+    args,
+    cwd,
+    env: { PATH: inherited.PATH || inherited.Path || "" },
+    timeoutMs: Math.min(Number(body.timeoutMs || 120000), 300000),
+    signal: body.signal || null,
+    onExecutionStart: body.onExecutionStart || null,
+    onHostEvent: body.onHostEvent || null,
+    onHostAck: body.onHostAck || null,
+    onSnapshot: body.onSnapshot || null,
+    onOutput: typeof body.onOutput === "function"
+      ? (chunk) => body.onOutput({ ...chunk, command, cwd })
+      : null
+  });
 
   return {
     ...result,
     workspace,
     cwd,
     command,
-    test: body.kind === "test" ? parseTestOutput(result.stdout, result.stderr, result.exitCode || 0) : null
+    test: body.kind === "test" ? parseTestOutput({
+      command,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode || 0
+    }) : null
   };
 }
 
-function runWorkspaceCommandStream({ shell, args, cwd, command, body = {} }) {
-  return new Promise((resolve) => {
-    const timeoutMs = Math.min(Number(body.timeoutMs || 120000), 300000);
-    const signal = body.signal || null;
-    if (signal?.aborted) {
-      resolve({
-        ok: false,
-        stdout: "",
-        stderr: "Command was stopped before it started.",
-        exitCode: -1,
-        cancelled: true
-      });
-      return;
+function parseWorktreeList(stdout = "") {
+  const entries = [];
+  let current = null;
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    if (!line) {
+      if (current) entries.push(current);
+      current = null;
+      continue;
     }
-    const child = spawn(shell, args, {
-      cwd,
-      env: withAgentReachPath(process.env),
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const startedAt = Date.now();
-    const onOutput = typeof body.onOutput === "function" ? body.onOutput : null;
-    const emit = (stream, data) => {
-      const text = data.toString();
-      if (stream === "stdout") stdout += text;
-      else stderr += text;
-      onOutput?.({
-        stream,
-        text,
-        command,
-        cwd,
-        elapsedMs: Date.now() - startedAt
-      });
-    };
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener?.("abort", abortCommand);
-      resolve(result);
-    };
-    const abortCommand = () => {
-      try {
-        child.kill();
-      } catch {
-        // Process may already be gone.
-      }
-      finish({
-        ok: false,
-        stdout,
-        stderr: stderr || "Command stopped by user.",
-        exitCode: -1,
-        cancelled: true
-      });
-    };
-    signal?.addEventListener?.("abort", abortCommand, { once: true });
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // Process may already be gone.
-      }
-      finish({
-        ok: false,
-        stdout,
-        stderr: stderr || `Command timed out after ${timeoutMs}ms.`,
-        exitCode: -1,
-        timedOut: true
-      });
-    }, timeoutMs);
+    const separator = line.indexOf(" ");
+    const key = separator < 0 ? line : line.slice(0, separator);
+    const value = separator < 0 ? "" : line.slice(separator + 1);
+    if (key === "worktree") {
+      if (current) entries.push(current);
+      current = {
+        path: path.resolve(value),
+        headSha: "",
+        branch: "",
+        detached: false,
+        bare: false,
+        locked: false,
+        lockReason: "",
+        prunable: false,
+        pruneReason: ""
+      };
+      continue;
+    }
+    if (!current) continue;
+    if (key === "HEAD") current.headSha = value;
+    else if (key === "branch") current.branch = value.replace(/^refs\/heads\//, "");
+    else if (key === "detached") current.detached = true;
+    else if (key === "bare") current.bare = true;
+    else if (key === "locked") {
+      current.locked = true;
+      current.lockReason = value;
+    } else if (key === "prunable") {
+      current.prunable = true;
+      current.pruneReason = value;
+    }
+  }
+  if (current) entries.push(current);
+  return entries.map((entry, index) => ({ ...entry, isMain: index === 0 }));
+}
 
-    child.stdout?.on("data", (data) => emit("stdout", data));
-    child.stderr?.on("data", (data) => emit("stderr", data));
-    child.on("error", (error) => {
-      finish({
-        ok: false,
-        stdout,
-        stderr: stderr || error.message,
-        exitCode: -1
-      });
-    });
-    child.on("close", (code, signal) => {
-      finish({
-        ok: code === 0,
-        stdout,
-        stderr,
-        exitCode: code ?? (signal ? -1 : 0),
-        signal: signal || ""
-      });
-    });
-  });
+function sameResolvedPath(left, right) {
+  const normalize = (value) => {
+    let resolved = path.resolve(value);
+    try { resolved = fs.realpathSync.native(resolved); } catch {}
+    return resolved.replace(/[\\/]+$/, "").toLowerCase();
+  };
+  return normalize(left) === normalize(right);
+}
+
+export async function listWorkspaceWorktrees(id, settings) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const result = await gitRequired(["worktree", "list", "--porcelain"], cwd, "Failed to list git worktrees.");
+  const registered = new Map(listWorkspaces().map((item) => [path.resolve(item.path).toLowerCase(), item]));
+  const worktrees = parseWorktreeList(result.stdout).map((item) => ({
+    ...item,
+    workspace: registered.get(item.path.toLowerCase()) || null
+  }));
+  touchWorkspace(workspace.id);
+  return { ok: true, workspaceId: workspace.id, worktrees };
+}
+
+export async function applyWorkspaceWorktreeAction(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const action = String(body.action || "").trim().toLowerCase();
+  if (!new Set(["remove", "prune", "lock", "unlock"]).has(action)) {
+    const error = new Error("Worktree action must be remove, prune, lock, or unlock.");
+    error.status = 400;
+    error.code = "WORKTREE_ACTION_INVALID";
+    throw error;
+  }
+
+  if (action === "prune") {
+    const expire = String(body.expire || "").trim().slice(0, 100);
+    const args = ["worktree", "prune", "--verbose"];
+    if (expire) args.push("--expire", expire);
+    const result = await gitRequired(args, cwd, "Failed to prune git worktrees.");
+    touchWorkspace(workspace.id);
+    return { ok: true, action, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  if (!body.path) {
+    const error = new Error(`Worktree path is required for ${action}.`);
+    error.status = 400;
+    error.code = "WORKTREE_PATH_REQUIRED";
+    throw error;
+  }
+  const targetPath = resolveAllowedPath(body.path, settings);
+  const listed = await listWorkspaceWorktrees(id, settings);
+  const target = listed.worktrees.find((item) => sameResolvedPath(item.path, targetPath));
+  if (!target) {
+    const error = new Error("Path is not a worktree of this repository.");
+    error.status = 404;
+    error.code = "WORKTREE_NOT_FOUND";
+    throw error;
+  }
+  if (target.isMain && action === "remove") {
+    const error = new Error("The main worktree cannot be removed.");
+    error.status = 409;
+    error.code = "WORKTREE_MAIN_PROTECTED";
+    throw error;
+  }
+
+  const args = ["worktree", action];
+  if (action === "remove" && body.force === true) args.push("--force");
+  if (action === "lock") {
+    const reason = String(body.reason || "").trim().slice(0, 500);
+    if (reason) args.push("--reason", reason);
+  }
+  args.push(target.path);
+  const result = await gitRequired(args, cwd, `Failed to ${action} git worktree.`);
+  if (action === "remove") deleteWorkspaceByPath(target.path);
+  touchWorkspace(workspace.id);
+  return {
+    ok: true,
+    action,
+    path: target.path,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    worktrees: (await listWorkspaceWorktrees(id, settings)).worktrees
+  };
 }
 
 export async function getTaskChanges(task, settings) {

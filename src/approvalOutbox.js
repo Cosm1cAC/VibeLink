@@ -58,6 +58,20 @@ function decisionName(value) {
   return name;
 }
 
+function canonicalDecision(value) {
+  const source = typeof value === "string" ? value : value?.decision;
+  if (typeof source !== "string") return value;
+  const normalized = source.trim().toLowerCase();
+  const mapped = normalized === "approve" ? "accept" : normalized === "deny" ? "decline" : null;
+  if (!mapped) return value;
+  if (typeof value === "string") return mapped;
+  return { ...value, decision: mapped };
+}
+
+function normalizedDecisionName(value) {
+  return decisionName(value).toLowerCase().replace(/[^a-z]/g, "");
+}
+
 function approvalStatus(name) {
   const normalized = name.toLowerCase().replace(/[^a-z]/g, "");
   if (APPROVED_DECISIONS.has(normalized)) return "approved";
@@ -72,7 +86,11 @@ function publicApproval(row) {
     status: row.status,
     continuationRef: row.continuation_ref || "",
     decisionVersion: Number(row.decision_version || 0),
+    expectedVersion: Number(row.decision_version || 0),
     deliveryStatus: row.delivery_status || "pending",
+    provider: row.provider || "",
+    request: fromJson(row.request_json, null),
+    availableDecisions: fromJson(row.available_decisions_json, []),
     decision: fromJson(row.decision_json, null),
     expiresAt: row.expires_at || "",
     decidedAt: row.decided_at || ""
@@ -86,6 +104,7 @@ function publicOutbox(row) {
     approvalId: row.approval_id,
     operationId: row.operation_id,
     continuationRef: row.continuation_ref,
+    expectedVersion: Number(row.expected_version || 0),
     decision: fromJson(row.decision_json, null),
     status: row.status,
     attempts: Number(row.attempts || 0),
@@ -117,6 +136,7 @@ export function createApprovalOutboxPersistence({
     if (
       row.approval_id !== expected.approvalId ||
       row.continuation_ref !== expected.continuationRef ||
+      Number(row.expected_version || 0) !== expected.expectedDecisionVersion ||
       row.decision_json !== expected.serializedDecision
     ) {
       throw outboxError("OPERATION_CONFLICT", "Operation id is already bound to a different approval decision.");
@@ -135,14 +155,15 @@ export function createApprovalOutboxPersistence({
     if (!approvalId || !operationId || !continuationRef) {
       throw outboxError("APPROVAL_DECISION_INVALID", "Approval, operation, and continuation ids are required.");
     }
-    const name = decisionName(input.decision);
+    const canonical = canonicalDecision(input.decision);
+    const name = decisionName(canonical);
     const status = approvalStatus(name);
-    const serializedDecision = decisionJson(input.decision);
+    const serializedDecision = decisionJson(canonical);
     const expectedDecisionVersion = Number(input.expectedDecisionVersion);
     if (!Number.isSafeInteger(expectedDecisionVersion) || expectedDecisionVersion < 0) {
       throw outboxError("APPROVAL_DECISION_INVALID", "Expected decision version is required.");
     }
-    const expected = { approvalId, continuationRef, serializedDecision };
+    const expected = { approvalId, continuationRef, expectedDecisionVersion, serializedDecision };
     const db = database();
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -175,8 +196,8 @@ export function createApprovalOutboxPersistence({
       }
       const available = fromJson(approval.available_decisions_json, []);
       if (Array.isArray(available) && available.length) {
-        const allowedNames = available.map((item) => decisionName(item));
-        if (!allowedNames.includes(name)) {
+        const allowedNames = available.map((item) => normalizedDecisionName(item));
+        if (!allowedNames.includes(normalizedDecisionName(name))) {
           throw outboxError("APPROVAL_DECISION_INVALID", "Decision is not available for this approval.", { decision: name });
         }
       }
@@ -219,10 +240,10 @@ export function createApprovalOutboxPersistence({
       );
       db.prepare(`
         INSERT INTO approval_outbox (
-          id, approval_id, operation_id, continuation_ref, decision_json,
+          id, approval_id, operation_id, continuation_ref, expected_version, decision_json,
           status, attempts, next_attempt_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'decision_recorded', 0, ?, ?, ?)
-      `).run(outboxId, approvalId, operationId, continuationRef, serializedDecision, current, current, current);
+        ) VALUES (?, ?, ?, ?, ?, ?, 'decision_recorded', 0, ?, ?, ?)
+      `).run(outboxId, approvalId, operationId, continuationRef, expectedDecisionVersion, serializedDecision, current, current, current);
       db.exec("COMMIT");
       return { approval: getApproval(approvalId), outbox: getApprovalOutbox(outboxId), duplicate: false };
     } catch (error) {
@@ -296,7 +317,7 @@ export function createApprovalOutboxPersistence({
     db.exec("BEGIN IMMEDIATE");
     try {
       const existing = db.prepare("SELECT * FROM approval_outbox WHERE id = ?").get(outboxId);
-      if (!existing || existing.status !== "delivering") {
+      if (!existing || !["delivering", "delivered"].includes(existing.status)) {
         throw outboxError("OUTBOX_STATE_CONFLICT", "Outbox command is not delivering.");
       }
       db.prepare(`
@@ -314,12 +335,104 @@ export function createApprovalOutboxPersistence({
     }
   }
 
+  function listApprovalOutbox({ status = "", limit = 100 } = {}) {
+    const boundedLimit = Math.min(500, Math.max(1, Math.floor(Number(limit) || 100)));
+    return database().prepare(`
+      SELECT * FROM approval_outbox
+      WHERE (? = '' OR status = ?)
+      ORDER BY created_at ASC LIMIT ?
+    `).all(cleanString(status, 40), cleanString(status, 40), boundedLimit).map(publicOutbox);
+  }
+
+  function settleApprovalContinuation(continuationRef, status, options = {}) {
+    const reference = cleanString(continuationRef, 2000);
+    const row = database().prepare("SELECT * FROM approval_outbox WHERE continuation_ref = ?").get(reference);
+    if (!row) return null;
+    if (row.status === status || (status === "delivered" && row.status === "applied")) return publicOutbox(row);
+    if (status === "delivered") return markApprovalOutboxDelivered(row.id, options);
+    if (status === "applied") return markApprovalOutboxApplied(row.id, options);
+    if (status === "stale") return markApprovalOutboxStale(row.id, options);
+    throw outboxError("OUTBOX_STATE_CONFLICT", "Approval continuation status is invalid.");
+  }
+
+  function markApprovalOutboxDelivered(id, { deliveredAt = now() } = {}) {
+    const outboxId = cleanString(id, 160);
+    const current = now();
+    const db = database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = db.prepare("SELECT * FROM approval_outbox WHERE id = ?").get(outboxId);
+      if (!existing || existing.status !== "delivering") {
+        throw outboxError("OUTBOX_STATE_CONFLICT", "Outbox command is not delivering.");
+      }
+      db.prepare(`UPDATE approval_outbox SET status = 'delivered', delivered_at = ?, updated_at = ?, last_error = '' WHERE id = ?`)
+        .run(cleanString(deliveredAt, 80), current, outboxId);
+      db.prepare("UPDATE approval_requests SET delivery_status = 'delivered', updated_at = ? WHERE id = ?")
+        .run(current, existing.approval_id);
+      db.exec("COMMIT");
+      return getApprovalOutbox(outboxId);
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
+  function markApprovalOutboxStale(id, { reason = "Upstream approval continuation is no longer available." } = {}) {
+    const outboxId = cleanString(id, 160);
+    const current = now();
+    const db = database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = db.prepare("SELECT * FROM approval_outbox WHERE id = ?").get(outboxId);
+      if (!existing || ["applied", "stale", "outcome_unknown"].includes(existing.status)) {
+        if (existing && existing.status === "stale") { db.exec("COMMIT"); return getApprovalOutbox(outboxId); }
+        throw outboxError("OUTBOX_STATE_CONFLICT", "Outbox command cannot become stale.");
+      }
+      db.prepare("UPDATE approval_outbox SET status = 'stale', updated_at = ?, last_error = ? WHERE id = ?")
+        .run(current, cleanString(reason, 2000), outboxId);
+      db.prepare("UPDATE approval_requests SET delivery_status = 'stale', updated_at = ? WHERE id = ?")
+        .run(current, existing.approval_id);
+      db.exec("COMMIT");
+      return getApprovalOutbox(outboxId);
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
+  function markApprovalOutboxOutcomeUnknown(id, { reason = "Bridge restart left the provider response outcome unknown." } = {}) {
+    const outboxId = cleanString(id, 160);
+    const current = now();
+    const db = database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = db.prepare("SELECT * FROM approval_outbox WHERE id = ?").get(outboxId);
+      if (!existing) throw outboxError("APPROVAL_NOT_FOUND", "Outbox command does not exist.");
+      if (existing.status === "outcome_unknown") { db.exec("COMMIT"); return getApprovalOutbox(outboxId); }
+      if (["applied", "stale"].includes(existing.status)) throw outboxError("OUTBOX_STATE_CONFLICT", "Outbox command is already terminal.");
+      db.prepare("UPDATE approval_outbox SET status = 'outcome_unknown', updated_at = ?, last_error = ? WHERE id = ?")
+        .run(current, cleanString(reason, 2000), outboxId);
+      db.prepare("UPDATE approval_requests SET delivery_status = 'outcome_unknown', updated_at = ? WHERE id = ?")
+        .run(current, existing.approval_id);
+      db.exec("COMMIT");
+      return getApprovalOutbox(outboxId);
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
   return {
     getApproval,
     getApprovalOutbox,
+    listApprovalOutbox,
     recordApprovalDecision,
     claimApprovalOutbox,
     retryApprovalOutbox,
-    markApprovalOutboxApplied
+    markApprovalOutboxDelivered,
+    markApprovalOutboxApplied,
+    markApprovalOutboxStale,
+    markApprovalOutboxOutcomeUnknown,
+    settleApprovalContinuation
   };
 }

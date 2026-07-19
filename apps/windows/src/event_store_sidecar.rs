@@ -104,6 +104,9 @@ fn is_event_store_write_method(method: &str) -> bool {
             | "insertLiveCallEvent"
             | "insertLiveCallEvents"
             | "pruneLiveCallEvents"
+            | "upsertEventAck"
+            | "deleteDeviceEventAcks"
+            | "recordCompactionMarker"
     )
 }
 
@@ -179,7 +182,14 @@ impl EventStoreSidecar {
                     "listLiveCallEvents",
                     "pruneLiveCallEvents",
                     "listUnifiedEvents",
-                    "replayWindow"
+                    "replayWindow",
+                    "upsertEventAck",
+                    "getEventAck",
+                    "listEventAcks",
+                    "deleteDeviceEventAcks",
+                    "planRetention",
+                    "recordCompactionMarker",
+                    "listCompactionMarkers"
                 ],
                 "controlMethods": ["__health", "stats", "__close"],
                 "schemaReady": self.schema_ready()?,
@@ -266,6 +276,41 @@ impl EventStoreSidecar {
                 "stats": self.get_tool_event_stats()?
             })),
             "pruneLiveCallEvents" => Ok(Value::Null),
+            "upsertEventAck" => {
+                let device: String = sidecar_arg(args, 0)?;
+                let stream: String = sidecar_arg(args, 1)?;
+                let cursor: i64 = sidecar_arg_or_default(args, 2)?;
+                let options: Value = sidecar_arg_or_default(args, 3)?;
+                self.upsert_event_ack(&device, &stream, cursor, &options)
+            }
+            "getEventAck" => {
+                let device: String = sidecar_arg(args, 0)?;
+                let stream: String = sidecar_arg(args, 1)?;
+                self.get_event_ack(&device, &stream)
+            }
+            "listEventAcks" => {
+                let options: Value = sidecar_arg_or_default(args, 0)?;
+                self.list_event_acks(&options)
+            }
+            "deleteDeviceEventAcks" => {
+                let device: String = sidecar_arg(args, 0)?;
+                Ok(json!(self.db.execute(
+                    "DELETE FROM event_acks WHERE device_id = ?",
+                    params![device]
+                )?))
+            }
+            "planRetention" => {
+                let options: Value = sidecar_arg_or_default(args, 0)?;
+                self.plan_retention(&options)
+            }
+            "recordCompactionMarker" => {
+                let options: Value = sidecar_arg_or_default(args, 0)?;
+                self.record_compaction_marker(&options)
+            }
+            "listCompactionMarkers" => {
+                let options: Value = sidecar_arg_or_default(args, 0)?;
+                self.list_compaction_markers(&options)
+            }
             _ => bail!("Unsupported event store sidecar method: {method}"),
         }
     }
@@ -277,6 +322,8 @@ impl EventStoreSidecar {
             "tool_events",
             "live_calls",
             "live_call_events",
+            "event_acks",
+            "compaction_markers",
         ] {
             let exists: Option<i64> = self
                 .db
@@ -291,6 +338,136 @@ impl EventStoreSidecar {
             }
         }
         Ok(true)
+    }
+
+    fn upsert_event_ack(
+        &self,
+        device: &str,
+        stream: &str,
+        cursor: i64,
+        options: &Value,
+    ) -> Result<Value> {
+        if device.trim().is_empty() || stream.trim().is_empty() {
+            bail!("deviceId and streamId are required.");
+        }
+        let now = now_iso();
+        let event_id = event_string(options, "eventId");
+        let metadata = options
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        self.db.execute(
+            "INSERT INTO event_acks (device_id, stream_id, cursor, event_id, acked_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id, stream_id) DO UPDATE SET cursor = MAX(event_acks.cursor, excluded.cursor), event_id = excluded.event_id, acked_at = excluded.acked_at, metadata_json = excluded.metadata_json",
+            params![device, stream, cursor.max(0), event_id, now, serde_json::to_string(&metadata)?],
+        )?;
+        self.get_event_ack(device, stream)
+    }
+
+    fn get_event_ack(&self, device: &str, stream: &str) -> Result<Value> {
+        Ok(self.db.query_row(
+            "SELECT device_id, stream_id, cursor, event_id, acked_at, metadata_json FROM event_acks WHERE device_id = ? AND stream_id = ?",
+            params![device, stream],
+            event_ack_row,
+        ).optional()?.unwrap_or(Value::Null))
+    }
+
+    fn list_event_acks(&self, options: &Value) -> Result<Value> {
+        let device = event_string(options, "deviceId");
+        let stream = event_string(options, "streamId");
+        let mut stmt = self.db.prepare(
+            "SELECT device_id, stream_id, cursor, event_id, acked_at, metadata_json FROM event_acks WHERE (? = '' OR device_id = ?) AND (? = '' OR stream_id = ?) ORDER BY stream_id, device_id",
+        )?;
+        let rows = stmt.query_map(params![device, device, stream, stream], event_ack_row)?;
+        Ok(Value::Array(
+            rows.collect::<std::result::Result<Vec<_>, _>>()?,
+        ))
+    }
+
+    fn plan_retention(&self, options: &Value) -> Result<Value> {
+        let stream = event_string(options, "streamId");
+        let days = options
+            .get("retentionDays")
+            .and_then(Value::as_i64)
+            .unwrap_or(30)
+            .max(0);
+        let keep = options
+            .get("keepLatest")
+            .and_then(Value::as_i64)
+            .unwrap_or(5000)
+            .max(0);
+        let current = options
+            .get("now")
+            .and_then(Value::as_i64)
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .unwrap_or_else(|| std::time::SystemTime::now().into());
+        let ack_cursor: Option<i64> = if stream.is_empty() {
+            None
+        } else {
+            self.db.query_row(
+                "SELECT MIN(cursor) FROM event_acks WHERE stream_id = ?",
+                params![stream],
+                |row| row.get(0),
+            )?
+        };
+        Ok(json!({
+            "streamId": stream,
+            "cutoff": (current - chrono::Duration::days(days))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "keepLatest": keep,
+            "ackCursor": ack_cursor,
+            "safeCursor": ack_cursor.map(|cursor| cursor.max(0))
+        }))
+    }
+
+    fn record_compaction_marker(&self, options: &Value) -> Result<Value> {
+        let id = event_string_or(options, "markerId", &uuid::Uuid::new_v4().to_string());
+        let stream = event_string(options, "streamId");
+        let from = options
+            .get("fromCursor")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let to = options.get("toCursor").and_then(Value::as_i64).unwrap_or(0);
+        let now = now_iso();
+        let metadata = options
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        self.db.execute(
+            "INSERT OR REPLACE INTO compaction_markers (marker_id, stream_id, from_cursor, to_cursor, compacted_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+            params![id, stream, from, to, now, serde_json::to_string(&metadata)?],
+        )?;
+        Ok(
+            json!({"markerId": id, "streamId": stream, "fromCursor": from, "toCursor": to, "compactedAt": now, "metadata": metadata}),
+        )
+    }
+
+    fn list_compaction_markers(&self, options: &Value) -> Result<Value> {
+        let stream = event_string(options, "streamId");
+        let after = options
+            .get("afterCursor")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let limit = options
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(100)
+            .clamp(1, 1000);
+        let mut stmt = self.db.prepare(
+            "SELECT marker_id, stream_id, from_cursor, to_cursor, compacted_at, metadata_json FROM compaction_markers WHERE (? = '' OR stream_id = ?) AND to_cursor > ? ORDER BY to_cursor LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![stream, stream, after, limit], |row| {
+            Ok(json!({
+                "markerId": row.get::<_, String>(0)?,
+                "streamId": row.get::<_, String>(1)?,
+                "fromCursor": row.get::<_, i64>(2)?,
+                "toCursor": row.get::<_, i64>(3)?,
+                "compactedAt": row.get::<_, String>(4)?,
+                "metadata": json_column(row.get::<_, Option<String>>(5)?)
+            }))
+        })?;
+        Ok(Value::Array(
+            rows.collect::<std::result::Result<Vec<_>, _>>()?,
+        ))
     }
 
     fn insert_task_event(&self, task_id: &str, event: &Value) -> Result<Option<i64>> {
@@ -715,6 +892,23 @@ fn event_string(event: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
+}
+
+fn json_column(value: Option<String>) -> Value {
+    value
+        .and_then(|json| serde_json::from_str::<Value>(&json).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn event_ack_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "deviceId": row.get::<_, String>(0)?,
+        "streamId": row.get::<_, String>(1)?,
+        "cursor": row.get::<_, i64>(2)?,
+        "eventId": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        "ackedAt": row.get::<_, String>(4)?,
+        "metadata": json_column(row.get::<_, Option<String>>(5)?)
+    }))
 }
 
 fn event_string_or(event: &Value, key: &str, fallback: &str) -> String {

@@ -11,6 +11,9 @@ dist/
 artifacts/
 public/assets/
 **/bin/
+!tools/whisper-cpp/bin/
+!tools/whisper-cpp/bin/**
+tools/whisper-cpp/bin/ggml-cpu.dll
 **/obj/
 apps/windows/target/
 apps/android/app/build/
@@ -22,7 +25,7 @@ apps/android/.idea/
 # Local Android configuration and generated wrapper files
 apps/android/local.properties
 apps/android/gradle/wrapper/gradle-wrapper.jar
-apps/android/gradlew.bat
+!apps/android/gradlew.bat
 *.apk
 *.idsig
 
@@ -31,6 +34,7 @@ reference/
 tools/whisper-cpp/source/
 tools/whisper-cpp/build/
 tools/whisper-cpp/models/*.bin
+!tools/whisper-cpp/models/ggml-base.bin
 
 # Logs and operating-system metadata
 *.log

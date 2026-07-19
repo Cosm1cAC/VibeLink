@@ -21,10 +21,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Close
@@ -33,6 +36,8 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -106,6 +111,10 @@ fun SessionListScreen(
     val searchError by viewModel.searchError.collectAsState()
     val searchNextCursor by viewModel.searchNextCursor.collectAsState()
     val searchScope by viewModel.searchScope.collectAsState()
+    val searchSort by viewModel.searchSort.collectAsState()
+    val searchOrder by viewModel.searchOrder.collectAsState()
+    val savedSearches by viewModel.savedSearches.collectAsState()
+    val searchHistory by viewModel.searchHistory.collectAsState()
     val selectedSearchTag by viewModel.selectedSearchTag.collectAsState()
     val selectedTags by viewModel.selectedTags.collectAsState()
     val availableTags by viewModel.availableTags.collectAsState()
@@ -129,6 +138,10 @@ fun SessionListScreen(
     var commandFilter by remember { mutableStateOf("") }
     var focusSearchRequested by remember { mutableStateOf(false) }
     var tagMenuOpen by remember { mutableStateOf(false) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    var searchLibraryOpen by remember { mutableStateOf(false) }
+    var saveSearchOpen by remember { mutableStateOf(false) }
+    var saveSearchName by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
     val unifiedSearchActive = query.trim().length >= 2
     val searchScopes = listOf(
@@ -156,7 +169,7 @@ fun SessionListScreen(
             TopAppBar(
                 title = {
                     if (selectionMode) {
-                        Text("${selectedConversationKeys.size} selected", style = MaterialTheme.typography.titleMedium)
+                        Text(strings.text("已选择 ${selectedConversationKeys.size} 项", "${selectedConversationKeys.size} selected"), style = MaterialTheme.typography.titleMedium)
                     } else {
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Text(
@@ -178,16 +191,16 @@ fun SessionListScreen(
                 actions = {
                     if (selectionMode) {
                         IconButton(onClick = { viewModel.batchSetFavorite(apiClient, true) }) {
-                            Icon(Icons.Default.Favorite, contentDescription = "Favorite selected")
+                            Icon(Icons.Default.Favorite, contentDescription = strings.text("收藏所选会话", "Favorite selected"))
                         }
                         IconButton(onClick = { viewModel.batchSetFavorite(apiClient, false) }) {
-                            Icon(Icons.Default.FavoriteBorder, contentDescription = "Remove favorite selected")
+                            Icon(Icons.Default.FavoriteBorder, contentDescription = strings.text("取消收藏所选会话", "Remove favorite from selected"))
                         }
                         IconButton(onClick = { batchTagsText = ""; batchAddTagsOpen = true }) {
-                            Icon(Icons.Default.Edit, contentDescription = "Add tags to selected")
+                            Icon(Icons.Default.Edit, contentDescription = strings.text("为所选会话添加标签", "Add tags to selected"))
                         }
                         IconButton(onClick = { batchTagsText = ""; batchRemoveTagsOpen = true }) {
-                            Icon(Icons.Default.Archive, contentDescription = "Remove tags from selected")
+                            Icon(Icons.Default.Archive, contentDescription = strings.text("移除所选会话的标签", "Remove tags from selected"))
                         }
                         IconButton(onClick = viewModel::clearSelection) {
                             Icon(Icons.Default.Close, contentDescription = strings.close)
@@ -209,7 +222,7 @@ fun SessionListScreen(
                             }
                             DropdownMenu(expanded = topMenuOpen, onDismissRequest = { topMenuOpen = false }) {
                                 DropdownMenuItem(
-                                    text = { Text("Command palette") },
+                                    text = { Text(strings.text("命令面板", "Command palette")) },
                                     leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
                                     onClick = { topMenuOpen = false; commandPaletteOpen = true },
                                 )
@@ -263,17 +276,89 @@ fun SessionListScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = viewModel::setQuery,
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .focusRequester(searchFocusRequester)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                label = { Text(strings.searchChats) },
-                singleLine = true,
-            )
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = viewModel::setQuery,
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(searchFocusRequester),
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    label = { Text(strings.searchChats) },
+                    singleLine = true,
+                )
+                IconButton(
+                    onClick = {
+                        saveSearchName = query.trim()
+                        saveSearchOpen = true
+                    },
+                    enabled = unifiedSearchActive,
+                ) {
+                    Icon(Icons.Default.BookmarkAdd, contentDescription = strings.text("保存搜索", "Save search"))
+                }
+                Box {
+                    IconButton(onClick = {
+                        viewModel.refreshSearchCollections(apiClient)
+                        searchLibraryOpen = true
+                    }) {
+                        Icon(Icons.Default.History, contentDescription = strings.text("已保存搜索和历史记录", "Saved searches and history"))
+                    }
+                    DropdownMenu(expanded = searchLibraryOpen, onDismissRequest = { searchLibraryOpen = false }) {
+                        if (savedSearches.isNotEmpty()) {
+                            DropdownMenuItem(text = { Text(strings.text("已保存搜索", "Saved searches"), style = MaterialTheme.typography.labelMedium) }, onClick = {}, enabled = false)
+                            savedSearches.forEach { item ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(item.query, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    },
+                                    trailingIcon = {
+                                        IconButton(onClick = { viewModel.deleteSavedSearch(apiClient, item.id) }, modifier = Modifier.size(36.dp)) {
+                                            Icon(Icons.Default.Delete, contentDescription = strings.text("删除已保存搜索", "Delete saved search"), modifier = Modifier.size(18.dp))
+                                        }
+                                    },
+                                    onClick = {
+                                        searchLibraryOpen = false
+                                        viewModel.applySavedSearch(item)
+                                    },
+                                )
+                            }
+                        }
+                        if (searchHistory.isNotEmpty()) {
+                            DropdownMenuItem(text = { Text(strings.text("最近搜索", "Recent searches"), style = MaterialTheme.typography.labelMedium) }, onClick = {}, enabled = false)
+                            searchHistory.forEach { item ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(item.query, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(strings.text("${item.resultCount} 个结果 · ${item.scope}", "${item.resultCount} results · ${item.scope}"), style = MaterialTheme.typography.bodySmall)
+                                        }
+                                    },
+                                    onClick = {
+                                        searchLibraryOpen = false
+                                        viewModel.applySearchHistory(item)
+                                    },
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text(strings.text("清空搜索历史", "Clear search history")) },
+                                leadingIcon = { Icon(Icons.Default.ClearAll, contentDescription = null) },
+                                onClick = { viewModel.clearSearchHistory(apiClient) },
+                            )
+                        }
+                        if (savedSearches.isEmpty() && searchHistory.isEmpty()) {
+                            DropdownMenuItem(text = { Text(strings.text("没有已保存或最近搜索", "No saved or recent searches")) }, onClick = {}, enabled = false)
+                        }
+                    }
+                }
+            }
 
             Row(
                 modifier = Modifier
@@ -308,7 +393,7 @@ fun SessionListScreen(
                     )
                     DropdownMenu(expanded = tagMenuOpen, onDismissRequest = { tagMenuOpen = false }) {
                         DropdownMenuItem(
-                            text = { Text("All tags") },
+                            text = { Text(strings.text("全部标签", "All tags")) },
                             onClick = {
                                 viewModel.clearTagFilters()
                                 tagMenuOpen = false
@@ -345,6 +430,42 @@ fun SessionListScreen(
                         label = { Text(label) },
                     )
                 }
+                Box {
+                    AssistChip(
+                        onClick = { sortMenuOpen = true },
+                        leadingIcon = { Icon(Icons.Default.Sort, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = {
+                            Text(
+                                when (searchSort to searchOrder) {
+                                    "updatedAt" to "desc" -> "Newest"
+                                    "updatedAt" to "asc" -> "Oldest"
+                                    "title" to "asc" -> "Title A-Z"
+                                    "title" to "desc" -> "Title Z-A"
+                                    "kind" to "asc" -> "Type"
+                                    else -> "Relevant"
+                                },
+                            )
+                        },
+                    )
+                    DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                        listOf(
+                            Triple("relevance", "desc", "Most relevant"),
+                            Triple("updatedAt", "desc", "Newest first"),
+                            Triple("updatedAt", "asc", "Oldest first"),
+                            Triple("title", "asc", "Title A-Z"),
+                            Triple("title", "desc", "Title Z-A"),
+                            Triple("kind", "asc", "Result type"),
+                        ).forEach { (sort, order, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    sortMenuOpen = false
+                                    viewModel.setSearchSort(sort, order)
+                                },
+                            )
+                        }
+                    }
+                }
             }
 
             Box(modifier = Modifier.fillMaxSize()) {
@@ -378,21 +499,21 @@ fun SessionListScreen(
                         ) {
                             if (unifiedSearchActive && searchLoading) {
                                 item(key = "remote-search-loading") {
-                                    ListItem(headlineContent = { Text("Searching…") }, supportingContent = { Text("Loading unified results") })
+                                    ListItem(headlineContent = { Text(strings.text("正在搜索…", "Searching…")) }, supportingContent = { Text(strings.text("正在加载统一搜索结果", "Loading unified results")) })
                                 }
                             }
                             if (unifiedSearchActive && searchError.isNotBlank()) {
                                 item(key = "remote-search-error") {
-                                    ListItem(headlineContent = { Text("Search failed") }, supportingContent = { Text(searchError) })
+                                    ListItem(headlineContent = { Text(strings.text("搜索失败", "Search failed")) }, supportingContent = { Text(searchError) })
                                 }
                             }
                             if (unifiedSearchActive && !searchLoading && searchError.isBlank() && searchResults.isEmpty()) {
                                 item(key = "remote-search-empty") {
-                                    ListItem(headlineContent = { Text("No matching results") })
+                                    ListItem(headlineContent = { Text(strings.text("没有匹配结果", "No matching results")) })
                                 }
                             }
                             if (unifiedSearchActive && searchResults.isNotEmpty()) {
-                                item(key = "remote-search-header") { Text("Search results", style = MaterialTheme.typography.titleSmall) }
+                                item(key = "remote-search-header") { Text(strings.text("搜索结果", "Search results"), style = MaterialTheme.typography.titleSmall) }
                                 items(searchResults, key = { "search:${it.kind}:${it.id}:${it.turnId}:${it.path}" }) { result ->
                                     ListItem(
                                         headlineContent = { Text(result.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -403,12 +524,12 @@ fun SessionListScreen(
                                 }
                                 if (searchAppending) {
                                     item(key = "remote-search-appending") {
-                                        ListItem(headlineContent = { Text("Loading more…") })
+                                        ListItem(headlineContent = { Text(strings.text("正在加载更多…", "Loading more…")) })
                                     }
                                 } else if (searchNextCursor.isNotBlank()) {
                                     item(key = "remote-search-load-more") {
                                         Button(onClick = { viewModel.loadMoreSearch(apiClient) }, modifier = Modifier.fillMaxWidth()) {
-                                            Text("Load more")
+                                            Text(strings.text("加载更多", "Load more"))
                                         }
                                     }
                                 }
@@ -507,6 +628,20 @@ fun SessionListScreen(
         )
     }
 
+    if (saveSearchOpen) {
+        TextInputDialog(
+            title = "Save search",
+            value = saveSearchName,
+            onValueChange = { saveSearchName = it },
+            confirmText = strings.save,
+            onDismiss = { saveSearchOpen = false },
+            onConfirm = {
+                viewModel.saveCurrentSearch(apiClient, saveSearchName)
+                saveSearchOpen = false
+            },
+        )
+    }
+
     if (batchAddTagsOpen) {
         TextInputDialog(
             title = "Add tags to selected",
@@ -538,10 +673,10 @@ fun SessionListScreen(
     if (commandPaletteOpen) {
         AlertDialog(
             onDismissRequest = { commandPaletteOpen = false },
-            title = { Text("Command palette") },
+            title = { Text(strings.text("命令面板", "Command palette")) },
             text = {
                 Column {
-                    OutlinedTextField(value = commandFilter, onValueChange = { commandFilter = it }, label = { Text("Filter commands") }, singleLine = true)
+                    OutlinedTextField(value = commandFilter, onValueChange = { commandFilter = it }, label = { Text(strings.text("筛选命令", "Filter commands")) }, singleLine = true)
                     LazyColumn {
                         items(filterSessionCommands(commands, commandFilter), key = { it.id }) { command ->
                             val plan = resolveSessionCommand(command)
@@ -572,7 +707,7 @@ fun SessionListScreen(
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { commandPaletteOpen = false }) { Text("Close") } },
+            confirmButton = { TextButton(onClick = { commandPaletteOpen = false }) { Text(strings.close) } },
         )
     }
 }
@@ -720,7 +855,7 @@ private fun ConversationCard(
                                 onClick = { menuOpen = false; onFavorite() },
                             )
                             DropdownMenuItem(
-                                text = { Text("Edit tags") },
+                                text = { Text(strings.text("编辑标签", "Edit tags")) },
                                 leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
                                 onClick = { menuOpen = false; onTags() },
                             )

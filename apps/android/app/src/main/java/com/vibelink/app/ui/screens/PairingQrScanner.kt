@@ -39,6 +39,7 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.vibelink.app.ui.i18n.LocalAppStrings
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -48,6 +49,7 @@ fun PairingQrScanner(
     onCodeScanned: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val strings = LocalAppStrings.current
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasPermission by remember {
@@ -73,9 +75,9 @@ fun PairingQrScanner(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Camera permission is needed to scan the VibeLink QR.", style = MaterialTheme.typography.bodyMedium)
+                Text(strings.cameraPermissionForQr, style = MaterialTheme.typography.bodyMedium)
                 Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
-                    Text("Allow camera")
+                    Text(strings.allowCamera)
                 }
             }
         }

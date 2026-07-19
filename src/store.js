@@ -45,6 +45,81 @@ function mergeSettings(base, next) {
   };
 }
 
+const structuredSettingsKeys = new Set(["security", "toolEvents", "codebaseMemory", "webPush", "nativePush"]);
+
+export function settingsRevision(settings = {}) {
+  const revision = Number(settings.revision || 0);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+}
+
+export function settingsEtag(settings = {}) {
+  return `"vibelink:settings:${settingsRevision(settings)}"`;
+}
+
+function settingsPatchFields(value, prefix = "") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return prefix ? [prefix] : [];
+  const fields = [];
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "expectedRevision" || key === "revision" || key === "_fieldRevisions") continue;
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (child && typeof child === "object" && !Array.isArray(child)) fields.push(...settingsPatchFields(child, path));
+    else fields.push(path);
+  }
+  return fields;
+}
+
+function applySettingsPatch(current, patch) {
+  const next = { ...current };
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (["expectedRevision", "revision", "_fieldRevisions", "apiKeys"].includes(key)) continue;
+    if (key === "mcp") {
+      next.mcp = mergeMcpSettings(current.mcp || {}, value || {});
+    } else if (structuredSettingsKeys.has(key)) {
+      next[key] = { ...(current[key] || {}), ...(value || {}) };
+    } else {
+      next[key] = value;
+    }
+  }
+  next.apiKeys = { ...(current.apiKeys || {}) };
+  return next;
+}
+
+function expectedSettingsRevision(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
+export function prepareSettingsMutation(current = {}, patch = {}, options = {}) {
+  const actualRevision = settingsRevision(current);
+  const expectedRevision = expectedSettingsRevision(options.expectedRevision);
+  const fieldRevisions = { ...(current._fieldRevisions || {}) };
+  const touchedFields = [...new Set(settingsPatchFields(patch))].sort();
+
+  if (expectedRevision !== null && expectedRevision !== actualRevision) {
+    const conflictingFields = expectedRevision > actualRevision
+      ? touchedFields
+      : touchedFields.filter((field) => Number(fieldRevisions[field] || 0) > expectedRevision);
+    if (conflictingFields.length) {
+      const error = new Error("Settings changed on another device.");
+      error.status = 409;
+      error.code = "SETTINGS_CONFLICT";
+      error.expectedRevision = expectedRevision;
+      error.actualRevision = actualRevision;
+      error.conflictingFields = conflictingFields;
+      throw error;
+    }
+  }
+
+  if (!touchedFields.length) return { settings: current, touchedFields, revision: actualRevision };
+  const revision = actualRevision + 1;
+  for (const field of touchedFields) fieldRevisions[field] = revision;
+  const settings = applySettingsPatch(current, patch);
+  settings.revision = revision;
+  settings._fieldRevisions = fieldRevisions;
+  return { settings, touchedFields, revision };
+}
+
 function sanitizeSecurity(value = {}) {
   const next = {};
   const sandboxValues = new Set(["read-only", "workspace-write", "danger-full-access"]);
@@ -374,6 +449,7 @@ export async function publicSettings(settings) {
     ? settings
     : mergeCodebaseMemoryServer(settings, codebaseMemoryServerConfig());
   return {
+    revision: settingsRevision(settings),
     host: settings.host,
     port: settings.port,
     pairingTokenConfigured: Boolean(settings.pairingToken),

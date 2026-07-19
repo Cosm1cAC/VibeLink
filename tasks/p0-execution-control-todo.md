@@ -19,50 +19,51 @@
 - [x] 添加 `execution_bindings` migration 和 repository API。
 - [x] 添加 approval continuation 字段和 `approval_outbox`。
 - [x] 添加 event ingest + host cursor 原子事务。
-- [ ] 实现 Rust `execd` mode 和 named-pipe handshake。
-- [ ] 实现 manifest discovery 与 worker identity 校验。
-- [ ] 实现 execution worker 与 Windows Job Object。
-- [ ] 实现 ConPTY terminal backend。
-- [ ] 实现 piped stdio command backend。
-- [ ] 实现分段 event spool、ack、replay 和 quota marker。
+- [x] 实现 Rust `execd` mode 和 named-pipe handshake。
+- [x] 实现 manifest discovery 与 worker identity 校验。
+- [x] 实现 execution worker 与 Windows Job Object。
+- [x] 实现 ConPTY terminal backend。
+- [x] 实现 piped stdio command backend。
+- [x] 实现分段 event spool、ack、replay 和 quota marker。
 
 ## Checkpoint 1
 
-- [ ] Parent/Bridge 停止时 worker 和 child 继续运行。
-- [ ] `execd` 重启后重新连接同一个 worker/child PID。
-- [ ] Worker crash 清理 child 并留下 `lost` 状态。
+- [x] Parent/Bridge 停止时 worker 和 child 继续运行。
+- [x] `execd` 重启后重新连接同一个 worker/child PID。
+- [x] Worker crash 清理 child 并留下 `lost` 状态。
 - [ ] Named-pipe ACL、forged manifest 和 PID reuse tests 通过。
 
 ## Phase 2: VibeLink-Owned Execution
 
-- [ ] 新增 Node execution host client。
-- [ ] 将 `terminalRuntime` 改为 execution host facade。
-- [ ] 保持现有 Terminal HTTP endpoint 与 Android/Web contract。
+- [x] 新增 Node execution host client。
+- [x] 将 `terminalRuntime` 改为 execution host facade。
+- [x] 保持现有 Terminal HTTP endpoint 与 Android/Web contract。
 - [ ] 迁移 Workspace streaming command、cancel 和 timeout。
-- [ ] 迁移 Agent CLI spawn、stdout/stderr 和 exit status。
-- [ ] 将运行中 Agent 输入改成 queued resume turn。
+- [x] 迁移 Agent CLI spawn、stdout/stderr、exit status 和 stop。
+- [x] 将运行中 Agent 输入改成 queued resume turn。
 - [ ] 实现 startup reconciliation、event ingest 和 ack。
 - [ ] 实现 attached/reconnecting/unreachable/lost/external 状态收敛。
 
 ## Checkpoint 2
 
-- [ ] Terminal 在 Bridge/execd restart 后 input/resize/stop 正常。
+- [x] Terminal 在 Bridge/execd restart 后 input/resize/stop 正常。
 - [ ] Workspace command 在 restart 后输出、取消和 exit code 正常。
 - [ ] Agent CLI 在 restart 后事件无丢失无重复。
 - [ ] Legacy 与 execution-host owner 混合运行和 rollback 正常。
 
 ## Phase 3: Codex Provider And Approval
 
-- [ ] 实现 app-server version/schema capability gate。
-- [ ] Worker 持有 app-server process 和 JSON-RPC connection。
-- [ ] 归一化 thread/turn/item/tool/output/exit 事件。
-- [ ] 映射 command execution approval request/response。
-- [ ] 映射 file change approval request/response。
-- [ ] 映射 permission request/grant scope。
+- [x] 实现 app-server version/schema capability gate（已审查 Codex CLI 0.144.5）。
+- [x] Worker 持有 app-server process 和 WebSocket JSON-RPC connection。
+- [x] 归一化 thread/turn/item/tool/output/approval request 事件并增加 JSON-RPC mock tests。
+- [x] 在 worker 边界归一化 process/turn exit，并赋予 durable host sequence。
+- [x] 映射 command execution approval request/response。
+- [x] 映射 file change approval request/response。
+- [x] 映射 permission request/grant scope。
 - [x] 实现 approval decision transactional outbox。
-- [ ] 实现 continuationRef、available decisions 和 expected version 校验。
-- [ ] 实现 decision recorded/delivered/applied/stale 状态。
-- [ ] 验证 Bridge restart 后继续同一个上游 request 和 tool call。
+- [x] 实现 continuationRef、available decisions 和 expected version 校验。
+- [x] 实现 decision recorded/delivered/applied/stale 状态。
+- [x] 验证 Bridge restart 后继续同一个上游 request 和 tool call。
 
 ## Checkpoint 3
 
@@ -74,12 +75,12 @@
 
 ## Phase 4: Clients And Rollout
 
-- [ ] Provider registry 返回 execution ownership、capability 和 fidelity。
+- [x] Provider registry 返回 execution ownership、capability 和 fidelity。
 - [ ] Web 展示权限增量、scope、可选决定和 delivery 状态。
 - [ ] Android 展示权限增量、scope、可选决定和 delivery 状态。
 - [ ] Web/Android 展示 attach/recovery 状态并限制非法操作。
 - [ ] Desktop Remote 固定为 external/sample-only capability。
-- [ ] 更新 product status、architecture、OpenAPI 和 Doctor。
+- [x] 更新 product status、architecture、OpenAPI 和 Doctor。
 - [ ] 增加 `off|canary|on` rollout flags。
 - [ ] 执行 package、restart drill、rollback 和 public canary。
 

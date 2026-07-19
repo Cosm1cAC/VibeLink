@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
+import fs from "node:fs";
+import WebSocket from "ws";
 
 const DEFAULT_URL = "http://127.0.0.1:8787";
 const DEFAULT_QUESTIONS = [
@@ -17,10 +19,14 @@ function parseArgs(argv) {
     intervalSeconds: 30,
     title: "Live Call 10 minute QA stress",
     source: "qa-stress",
-    asrProvider: "mock",
+    asrProvider: process.env.VIBELINK_ASR || "whisper-cpp",
     agent: "claude",
     model: "",
     workspaceId: "",
+    pcmFile: "",
+    dropRate: 0,
+    jitterMs: 0,
+    reconnectEverySeconds: 0,
     verify: true,
     stop: true
   };
@@ -41,6 +47,15 @@ function parseArgs(argv) {
     else if (arg === "--agent") options.agent = next();
     else if (arg === "--model") options.model = next();
     else if (arg === "--workspace-id") options.workspaceId = next();
+    else if (arg === "--pcm-file") options.pcmFile = next();
+    else if (arg === "--drop-rate") options.dropRate = Math.min(0.9, Math.max(0, Number(next()) || 0));
+    else if (arg === "--jitter-ms") options.jitterMs = Math.min(5000, Math.max(0, Number(next()) || 0));
+    else if (arg === "--reconnect-every-seconds") options.reconnectEverySeconds = Math.max(0, Number(next()) || 0);
+    else if (arg === "--weak-network") {
+      options.dropRate = 0.05;
+      options.jitterMs = 120;
+      options.reconnectEverySeconds = 90;
+    }
     else if (arg === "--no-verify") options.verify = false;
     else if (arg === "--no-stop") options.stop = false;
     else if (arg === "--help" || arg === "-h") options.help = true;
@@ -58,10 +73,15 @@ Options:
   --token TOKEN             Device token. Or set VIBELINK_TOKEN.
   --seconds N               Duration. Default: 600.
   --interval-seconds N      Transcript/level push interval. Default: 30.
-  --asr-provider ID         ASR provider for the created session. Default: mock.
+  --asr-provider ID         ASR provider for the created session. Default: whisper-cpp.
   --agent ID                Assistant provider. Default: claude.
   --model ID                Optional assistant model.
   --workspace-id ID         Optional workspace id.
+  --pcm-file PATH           Raw 16 kHz mono PCM16LE input, looped for the run.
+  --weak-network            Simulate 5% loss, up to 120 ms jitter, and reconnects.
+  --drop-rate N             Client-side frame loss ratio (0-0.9).
+  --jitter-ms N             Random delay added to each 20 ms frame.
+  --reconnect-every-seconds N  Force a recoverable socket reconnect interval.
   --no-verify               Skip final event assertions.
   --no-stop                 Keep the test session active after completion.
 `;
@@ -108,6 +128,42 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function syntheticPcm() {
+  const frame = Buffer.alloc(640);
+  for (let index = 0; index < 320; index += 1) {
+    frame.writeInt16LE(Math.round(Math.sin(index * 2 * Math.PI * 220 / 16000) * 8000), index * 2);
+  }
+  return frame;
+}
+
+function audioWebSocketUrl(options, sessionId) {
+  const url = new URL(options.url);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = `/api/live-calls/${encodeURIComponent(sessionId)}/audio`;
+  if (options.token) url.searchParams.set("token", options.token);
+  return url.toString();
+}
+
+function connectAudio(options, sessionId) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(audioWebSocketUrl(options, sessionId));
+    const timer = setTimeout(() => reject(new Error("Audio WebSocket ready timeout.")), 10_000);
+    socket.once("open", () => socket.send(JSON.stringify({ sampleRate: 16000, channels: 1, encoding: "pcm16le", device: "remote" })));
+    socket.on("message", (value) => {
+      let message;
+      try { message = JSON.parse(value.toString("utf8")); } catch { return; }
+      if (message.type === "ready") {
+        clearTimeout(timer);
+        resolve(socket);
+      } else if (message.type === "error") {
+        clearTimeout(timer);
+        reject(new Error(`Audio WebSocket error: ${message.error}`));
+      }
+    });
+    socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
 function eventTypes(events) {
   return new Set((events || []).map((event) => event.type));
 }
@@ -131,27 +187,50 @@ async function createSession(options) {
 
 async function runStress(options) {
   const session = await createSession(options);
+  const pcm = options.pcmFile ? fs.readFileSync(options.pcmFile) : syntheticPcm();
+  if (!pcm.length || pcm.length % 2) throw new Error("PCM input must be non-empty PCM16LE data.");
   const startedAt = Date.now();
   const endAt = startedAt + options.seconds * 1000;
   const intervalMs = options.intervalSeconds * 1000;
   let tick = 0;
   let bytes = 0;
+  let droppedFrames = 0;
+  let reconnects = 0;
   let pauseResumeChecked = false;
+  let nextLevelAt = startedAt;
+  let nextReconnectAt = options.reconnectEverySeconds ? startedAt + options.reconnectEverySeconds * 1000 : Infinity;
+  let pcmOffset = 0;
+  let socket = await connectAudio(options, session.id);
 
   while (Date.now() < endAt) {
-    bytes += 32000;
-    await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/level`, {
-      method: "POST",
-      body: JSON.stringify(levelPayload("remote", tick, bytes))
-    });
-    await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/level`, {
-      method: "POST",
-      body: JSON.stringify(levelPayload("local", tick, Math.floor(bytes / 2)))
-    });
-    await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/transcript`, {
-      method: "POST",
-      body: JSON.stringify({ text: questionForTick(tick), final: true, speaker: "remote" })
-    });
+    if (Date.now() >= nextReconnectAt) {
+      socket.close(1001, "qa-weak-network-reconnect");
+      await sleep(100 + Math.floor(Math.random() * Math.max(1, options.jitterMs)));
+      socket = await connectAudio(options, session.id);
+      reconnects += 1;
+      nextReconnectAt = Date.now() + options.reconnectEverySeconds * 1000;
+    }
+
+    const frame = Buffer.alloc(640);
+    for (let copied = 0; copied < frame.length;) {
+      const available = Math.min(frame.length - copied, pcm.length - pcmOffset);
+      pcm.copy(frame, copied, pcmOffset, pcmOffset + available);
+      copied += available;
+      pcmOffset = (pcmOffset + available) % pcm.length;
+    }
+    if (Math.random() < options.dropRate) droppedFrames += 1;
+    else {
+      socket.send(frame);
+      bytes += frame.length;
+    }
+
+    if (Date.now() >= nextLevelAt) {
+      await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/level`, {
+        method: "POST",
+        body: JSON.stringify(levelPayload("remote", tick, bytes))
+      });
+      nextLevelAt = Date.now() + intervalMs;
+    }
 
     if (!pauseResumeChecked && Date.now() - startedAt >= Math.min(60_000, Math.max(1000, options.seconds * 250))) {
       await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/pause`, {
@@ -167,9 +246,13 @@ async function runStress(options) {
     }
 
     tick += 1;
-    if (Date.now() + intervalMs > endAt) break;
-    await sleep(intervalMs);
+    await sleep(20 + Math.floor(Math.random() * (options.jitterMs + 1)));
   }
+
+  socket.send(JSON.stringify({ type: "flush" }));
+  await sleep(500);
+  socket.send(JSON.stringify({ type: "stop" }));
+  await sleep(100);
 
   if (options.stop) {
     await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/stop`, {
@@ -181,9 +264,10 @@ async function runStress(options) {
   const events = (await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/events/catch-up?limit=5000`)).items || [];
   if (options.verify) {
     const types = eventTypes(events);
-    for (const type of ["live_call.started", "live_call.audio_level", "live_call.transcript.final", "live_call.question.detected", "live_call.paused", "live_call.resumed"]) {
+    for (const type of ["live_call.started", "live_call.audio_level", "live_call.asr.provider", "live_call.audio_segment", "live_call.paused", "live_call.resumed"]) {
       if (!types.has(type)) throw new Error(`Verification failed: missing ${type}`);
     }
+    if (options.pcmFile && !types.has("live_call.transcript.final")) throw new Error("Verification failed: real PCM produced no final transcript.");
     if (options.stop && !types.has("live_call.stopped")) throw new Error("Verification failed: missing live_call.stopped");
     if (tick < 1) throw new Error("Verification failed: no stress ticks were executed.");
   }
@@ -193,6 +277,10 @@ async function runStress(options) {
     ok: true,
     durationSeconds: options.seconds,
     ticks: tick,
+    sentBytes: bytes,
+    droppedFrames,
+    reconnects,
+    pcmSource: options.pcmFile || "synthetic",
     session: finalSession,
     eventCount: events.length,
     eventTypes: [...eventTypes(events)]

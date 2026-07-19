@@ -47,3 +47,9 @@ test("listToolRegistry exposes Doubao web tools", () => {
   assert.equal(byName.get("doubao.ask")?.permission, "doubao.read");
   assert.equal(byName.get("doubao.ask")?.inputSchema.required.includes("prompt"), true);
 });
+
+test("listToolRegistry exposes complete Git worktree lifecycle actions", () => {
+  const tool = listToolRegistry().find((item) => item.name === "workspace.git_worktree_action");
+  assert.deepEqual(tool.inputSchema.properties.action.enum, ["remove", "prune", "lock", "unlock"]);
+  assert.deepEqual(tool.inputSchema.required, ["workspaceId", "action"]);
+});

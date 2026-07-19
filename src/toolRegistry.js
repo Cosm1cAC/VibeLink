@@ -86,7 +86,7 @@ const TOOL_DEFINITIONS = [
     label: "Terminal session",
     permission: "workspace.terminal",
     risk: "high",
-    description: "Start an interactive workspace terminal session using node-pty when available, with spawn fallback.",
+    description: "Start an interactive workspace terminal session on the durable execution host with ConPTY control and output replay.",
     inputSchema: {
       type: "object",
       properties: {
@@ -183,6 +183,35 @@ const TOOL_DEFINITIONS = [
         path: { type: "string", description: "Absolute worktree path" },
         branchName: { type: "string", description: "Created or checked-out branch name" },
         toolRunId: { type: "string", description: "ID of the recorded tool run" }
+      }
+    }
+  },
+  {
+    name: "workspace.git_worktree_action",
+    kind: "git",
+    label: "Git worktree lifecycle",
+    permission: "workspace.git",
+    risk: "medium",
+    description: "Remove, prune, lock, or unlock a Git worktree.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: { type: "string" },
+        action: { type: "string", enum: ["remove", "prune", "lock", "unlock"] },
+        path: { type: "string" },
+        force: { type: "boolean" },
+        reason: { type: "string" },
+        expire: { type: "string" }
+      },
+      required: ["workspaceId", "action"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string" },
+        path: { type: "string" },
+        worktrees: { type: "array", items: { type: "object" } },
+        toolRunId: { type: "string" }
       }
     }
   },

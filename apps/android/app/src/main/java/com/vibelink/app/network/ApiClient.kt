@@ -63,11 +63,16 @@ class ApiClient(
         }
     }
 
-    private suspend fun post(path: String, body: Any? = null): String = withContext(Dispatchers.IO) {
+    private suspend fun post(
+        path: String,
+        body: Any? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): String = withContext(Dispatchers.IO) {
         val jsonBody = if (body != null) gson.toJson(body) else ""
         val req = Request.Builder()
             .url("$baseUrl$path")
             .apply { authHeaders().forEach { (k, v) -> addHeader(k, v) } }
+            .apply { extraHeaders.forEach { (k, v) -> addHeader(k, v) } }
             .post(jsonBody.toRequestBody(jsonType))
             .build()
         httpClient.newCall(req).execute().use { response ->
@@ -135,10 +140,16 @@ class ApiClient(
         return gson.fromJson(json, SettingsExportResponse::class.java)
     }
 
-    suspend fun importSettings(rawJson: String, dryRun: Boolean = false): SettingsImportResponse {
+    suspend fun importSettings(
+        rawJson: String,
+        dryRun: Boolean = false,
+        expectedRevision: Int? = null,
+    ): SettingsImportResponse {
         val payload = JsonParser.parseString(rawJson).asJsonObject
         if (dryRun) payload.addProperty("dryRun", true)
-        val json = post("/api/settings/import${if (dryRun) "?dryRun=1" else ""}", payload)
+        expectedRevision?.let { payload.addProperty("expectedRevision", it) }
+        val headers = expectedRevision?.let { mapOf("If-Match" to "\"vibelink:settings:$it\"") }.orEmpty()
+        val json = post("/api/settings/import${if (dryRun) "?dryRun=1" else ""}", payload, headers)
         return gson.fromJson(json, SettingsImportResponse::class.java)
     }
 
@@ -205,13 +216,35 @@ class ApiClient(
         cursor: String = "",
         tag: String = "",
         favorite: Boolean = false,
+        sort: String = "relevance",
+        order: String = "desc",
+        record: Boolean = true,
     ): SearchResponse {
         val cursorParam = if (cursor.isBlank()) "" else "&cursor=${encode(cursor)}"
         val tagParam = if (tag.isBlank()) "" else "&tag=${encode(tag)}"
         val favoriteParam = if (favorite) "&favorite=1" else ""
-        val json = get("/api/search?q=${encode(query)}&scope=${encode(scope)}&limit=$limit$cursorParam$tagParam$favoriteParam")
+        val recordParam = if (record) "" else "&record=0"
+        val json = get("/api/search?q=${encode(query)}&scope=${encode(scope)}&limit=$limit$cursorParam$tagParam$favoriteParam&sort=${encode(sort)}&order=${encode(order)}$recordParam")
         return gson.fromJson(json, SearchResponse::class.java)
     }
+
+    suspend fun listSavedSearches(): List<SavedSearch> =
+        gson.fromJson(get("/api/search/saved"), SavedSearchListResponse::class.java).items
+
+    suspend fun saveSearch(request: SavedSearchRequest): SavedSearch =
+        gson.fromJson(post("/api/search/saved", request), SavedSearch::class.java)
+
+    suspend fun deleteSavedSearch(id: String): SimpleOk =
+        gson.fromJson(delete("/api/search/saved/${encode(id)}"), SimpleOk::class.java)
+
+    suspend fun listSearchHistory(limit: Int = 30): List<SearchHistoryItem> =
+        gson.fromJson(get("/api/search/history?limit=$limit"), SearchHistoryListResponse::class.java).items
+
+    suspend fun deleteSearchHistory(id: String): SimpleOk =
+        gson.fromJson(delete("/api/search/history/${encode(id)}"), SimpleOk::class.java)
+
+    suspend fun clearSearchHistory(): SimpleOk =
+        gson.fromJson(delete("/api/search/history"), SimpleOk::class.java)
 
     suspend fun listCommands(filter: String = ""): List<CommandDefinition> {
         val suffix = if (filter.isBlank()) "" else "?filter=${encode(filter)}"
@@ -306,7 +339,8 @@ class ApiClient(
     }
 
     suspend fun saveSettings(patch: SettingsPatchRequest): SettingsPatchResponse {
-        val json = post("/api/settings", patch)
+        val headers = patch.expectedRevision?.let { mapOf("If-Match" to "\"vibelink:settings:$it\"") }.orEmpty()
+        val json = post("/api/settings", patch, headers)
         return gson.fromJson(json, SettingsPatchResponse::class.java)
     }
 
@@ -581,10 +615,24 @@ class ApiClient(
         path: String,
         text: String = "",
         nextPath: String = "",
+        expectedRevision: String? = null,
+        requireAbsent: Boolean = false,
     ): WorkspaceFileMutationResponse {
+        val headers = when {
+            !expectedRevision.isNullOrBlank() -> mapOf("If-Match" to "\"vibelink:workspace-file:$expectedRevision\"")
+            requireAbsent -> mapOf("If-None-Match" to "*")
+            else -> emptyMap()
+        }
         val json = post(
             "/api/workspaces/${encode(workspaceId)}/file",
-            WorkspaceFileMutationRequest(action = action, path = path, text = text, nextPath = nextPath),
+            WorkspaceFileMutationRequest(
+                action = action,
+                path = path,
+                text = text,
+                nextPath = nextPath,
+                expectedRevision = expectedRevision,
+            ),
+            headers,
         )
         return gson.fromJson(json, WorkspaceFileMutationResponse::class.java)
     }

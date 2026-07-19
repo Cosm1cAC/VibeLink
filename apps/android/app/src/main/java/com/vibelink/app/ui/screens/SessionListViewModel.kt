@@ -21,6 +21,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import com.vibelink.app.network.SearchResult
+import com.vibelink.app.network.SavedSearch
+import com.vibelink.app.network.SavedSearchRequest
+import com.vibelink.app.network.SearchHistoryItem
 import com.vibelink.app.ui.i18n.AppStrings
 import com.vibelink.app.ui.i18n.appStringsFor
 import com.vibelink.app.data.AppLanguage
@@ -57,6 +60,18 @@ class SessionListViewModel : ViewModel() {
 
     private val _searchScope = MutableStateFlow("all")
     val searchScope: StateFlow<String> = _searchScope.asStateFlow()
+
+    private val _searchSort = MutableStateFlow("relevance")
+    val searchSort: StateFlow<String> = _searchSort.asStateFlow()
+
+    private val _searchOrder = MutableStateFlow("desc")
+    val searchOrder: StateFlow<String> = _searchOrder.asStateFlow()
+
+    private val _savedSearches = MutableStateFlow<List<SavedSearch>>(emptyList())
+    val savedSearches: StateFlow<List<SavedSearch>> = _savedSearches.asStateFlow()
+
+    private val _searchHistory = MutableStateFlow<List<SearchHistoryItem>>(emptyList())
+    val searchHistory: StateFlow<List<SearchHistoryItem>> = _searchHistory.asStateFlow()
 
     private val _selectedSearchTag = MutableStateFlow("")
     val selectedSearchTag: StateFlow<String> = _selectedSearchTag.asStateFlow()
@@ -106,6 +121,7 @@ class SessionListViewModel : ViewModel() {
             _error.value = ""
             try {
                 _commands.value = runCatching { apiClient.listCommands() }.getOrDefault(_commands.value)
+                refreshSearchCollections(apiClient)
                 val snapshot = loadSessionListSnapshot(
                     loadHistories = apiClient::listHistories,
                     loadTasks = apiClient::listTasks,
@@ -140,6 +156,84 @@ class SessionListViewModel : ViewModel() {
     fun setSearchScope(value: String) {
         if (_searchScope.value == value) return
         _searchScope.value = value
+        scheduleSearch()
+    }
+
+    fun setSearchSort(sort: String, order: String? = null) {
+        val normalizedSort = sort.takeIf { it in setOf("relevance", "updatedAt", "title", "kind") } ?: "relevance"
+        val normalizedOrder = order?.takeIf { it == "asc" || it == "desc" }
+            ?: if (normalizedSort == "relevance" || normalizedSort == "updatedAt") "desc" else "asc"
+        if (_searchSort.value == normalizedSort && _searchOrder.value == normalizedOrder) return
+        _searchSort.value = normalizedSort
+        _searchOrder.value = normalizedOrder
+        scheduleSearch()
+    }
+
+    fun refreshSearchCollections(apiClient: ApiClient) {
+        lastApiClient = apiClient
+        viewModelScope.launch {
+            _savedSearches.value = runCatching { apiClient.listSavedSearches() }.getOrDefault(_savedSearches.value)
+            _searchHistory.value = runCatching { apiClient.listSearchHistory() }.getOrDefault(_searchHistory.value)
+        }
+    }
+
+    fun saveCurrentSearch(apiClient: ApiClient, name: String) {
+        val query = _query.value.trim()
+        if (query.length < 2) return
+        viewModelScope.launch {
+            try {
+                val saved = apiClient.saveSearch(
+                    SavedSearchRequest(
+                        name = name.trim().ifBlank { query },
+                        query = query,
+                        scope = _searchScope.value,
+                        tag = _selectedSearchTag.value,
+                        favorite = _showFavorites.value,
+                        sort = _searchSort.value,
+                        order = _searchOrder.value,
+                    ),
+                )
+                _savedSearches.value = listOf(saved) + _savedSearches.value.filterNot { it.id == saved.id }
+            } catch (error: Exception) {
+                _searchError.value = error.message ?: strings.searchFailed
+            }
+        }
+    }
+
+    fun deleteSavedSearch(apiClient: ApiClient, id: String) {
+        viewModelScope.launch {
+            runCatching { apiClient.deleteSavedSearch(id) }
+                .onSuccess { _savedSearches.value = _savedSearches.value.filterNot { item -> item.id == id } }
+                .onFailure { _searchError.value = it.message ?: strings.searchFailed }
+        }
+    }
+
+    fun applySavedSearch(item: SavedSearch) {
+        applySearchPreset(item.query, item.scope, item.tag, item.favorite, item.sort, item.order)
+    }
+
+    fun applySearchHistory(item: SearchHistoryItem) {
+        applySearchPreset(item.query, item.scope, item.tag, item.favorite, item.sort, item.order)
+    }
+
+    fun clearSearchHistory(apiClient: ApiClient) {
+        viewModelScope.launch {
+            runCatching { apiClient.clearSearchHistory() }
+                .onSuccess { _searchHistory.value = emptyList() }
+                .onFailure { _searchError.value = it.message ?: strings.searchFailed }
+        }
+    }
+
+    private fun applySearchPreset(query: String, scope: String, tag: String, favorite: Boolean, sort: String, order: String) {
+        searchJob?.cancel()
+        _query.value = query
+        _searchScope.value = scope
+        _selectedSearchTag.value = tag
+        _selectedTags.value = setOf(tag).filter { it.isNotBlank() }.toSet()
+        _showFavorites.value = favorite
+        _searchSort.value = sort
+        _searchOrder.value = order
+        applyFilters()
         scheduleSearch()
     }
 
@@ -522,6 +616,8 @@ class SessionListViewModel : ViewModel() {
         val scope = _searchScope.value
         val tag = _selectedSearchTag.value
         val favorite = _showFavorites.value
+        val sort = _searchSort.value
+        val order = _searchOrder.value
 
         viewModelScope.launch {
             if (append) _searchAppending.value = true else _searchLoading.value = true
@@ -533,12 +629,17 @@ class SessionListViewModel : ViewModel() {
                     cursor = cursor,
                     tag = tag,
                     favorite = favorite,
+                    sort = sort,
+                    order = order,
+                    record = !append,
                 )
                 if (generation != searchGeneration ||
                     query != _query.value.trim() ||
                     scope != _searchScope.value ||
                     tag != _selectedSearchTag.value ||
-                    favorite != _showFavorites.value
+                    favorite != _showFavorites.value ||
+                    sort != _searchSort.value ||
+                    order != _searchOrder.value
                 ) {
                     return@launch
                 }

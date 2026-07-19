@@ -38,13 +38,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.network.ApiClient
-import com.vibelink.app.network.WorkspaceItem
+import com.vibelink.app.ui.i18n.LocalAppStrings
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 fun ReviewScreen(apiClient: ApiClient, viewModel: ReviewViewModel, onBack: () -> Unit) {
+    val strings = LocalAppStrings.current
     val workspaces by viewModel.workspaces.collectAsState()
     val selectedWorkspace by viewModel.selectedWorkspace.collectAsState()
     val reviews by viewModel.reviews.collectAsState()
@@ -64,31 +67,31 @@ fun ReviewScreen(apiClient: ApiClient, viewModel: ReviewViewModel, onBack: () ->
     var selectedFilePath by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) { viewModel.load(apiClient) }
-    Scaffold(topBar = { TopAppBar(title = { Text("PR Review") }, navigationIcon = { TextButton(onClick = onBack) { Text("Back") } }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text(strings.review) }, navigationIcon = { TextButton(onClick = onBack) { Text(strings.back) } }) }) { padding ->
         LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Review setup", style = MaterialTheme.typography.titleMedium)
+                        Text(strings.text("审查设置", "Review setup"), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
                         Box {
-                            Button(onClick = { workspaceMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(selectedWorkspace?.title?.ifBlank { selectedWorkspace?.id ?: "Choose Workspace" } ?: "Choose Workspace") }
+                            Button(onClick = { workspaceMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(selectedWorkspace?.title?.ifBlank { selectedWorkspace?.id ?: strings.text("选择工作区", "Choose workspace") } ?: strings.text("选择工作区", "Choose workspace")) }
                             DropdownMenu(expanded = workspaceMenu, onDismissRequest = { workspaceMenu = false }) {
                                 workspaces.forEach { workspace ->
                                     DropdownMenuItem(text = { Text(workspace.title.ifBlank { workspace.id }) }, onClick = { workspaceMenu = false; viewModel.selectWorkspace(apiClient, workspace) })
                                 }
                             }
                         }
-                        OutlinedTextField(value = branch.ifBlank { diff?.branch.orEmpty() }, onValueChange = { branch = it }, label = { Text("Branch") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                        OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Review title") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                        Button(onClick = { viewModel.createReview(apiClient, title, branch) }, enabled = selectedWorkspace != null && !loading) { Text("Create or save review") }
+                        OutlinedTextField(value = branch.ifBlank { diff?.branch.orEmpty() }, onValueChange = { branch = it }, label = { Text(strings.text("分支", "Branch")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                        OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text(strings.text("审查标题", "Review title")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                        Button(onClick = { viewModel.createReview(apiClient, title, branch) }, enabled = selectedWorkspace != null && !loading) { Text(strings.text("创建或保存审查", "Create or save review")) }
                     }
                 }
             }
             if (error.isNotBlank()) item { Text(error, color = MaterialTheme.colorScheme.error) }
             if (reviews.isNotEmpty()) {
-                item { Text("Saved reviews", style = MaterialTheme.typography.titleMedium) }
+                item { Text(strings.text("已保存的审查", "Saved reviews"), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() }) }
                 items(reviews, key = { it.id }) { review ->
-                    ListItem(headlineContent = { Text(review.title) }, supportingContent = { Text("${review.branch} · ${review.status} · ${review.comments.size} comments") }, modifier = Modifier.clickable { viewModel.selectReview(apiClient, review) })
+                    ListItem(headlineContent = { Text(review.title) }, supportingContent = { Text(strings.text("${review.branch} · ${review.status} · ${review.comments.size} 条评论", "${review.branch} · ${review.status} · ${review.comments.size} comments")) }, modifier = Modifier.clickable { viewModel.selectReview(apiClient, review) })
                 }
             }
             selectedReview?.let { review ->
@@ -99,7 +102,7 @@ fun ReviewScreen(apiClient: ApiClient, viewModel: ReviewViewModel, onBack: () ->
                     }
                 }
                 val files = diff?.files.orEmpty()
-                if (files.isEmpty()) item { Text("No changed files on this branch") }
+                if (files.isEmpty()) item { Text(strings.text("此分支没有变更文件", "No changed files on this branch")) }
                 items(files, key = { it.path }) { file ->
                     Card(modifier = Modifier.fillMaxWidth().clickable { selectedFilePath = file.path }) {
                         Column(Modifier.padding(12.dp)) {
@@ -124,7 +127,7 @@ fun ReviewScreen(apiClient: ApiClient, viewModel: ReviewViewModel, onBack: () ->
                 }
                 val visibleComments = viewModel.visibleComments()
                 if (visibleComments.isNotEmpty()) {
-                    item { Text("Comments", style = MaterialTheme.typography.titleMedium) }
+                    item { Text(strings.text("评论", "Comments"), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() }) }
                     items(visibleComments, key = { it.id }) { comment ->
                         ListItem(headlineContent = { Text("${comment.file}:${comment.line} · ${comment.severity}") }, supportingContent = { Text(comment.body) })
                     }
@@ -136,16 +139,16 @@ fun ReviewScreen(apiClient: ApiClient, viewModel: ReviewViewModel, onBack: () ->
     if (commentDialog) {
         AlertDialog(
             onDismissRequest = { commentDialog = false },
-            title = { Text("Add line comment") },
+            title = { Text(strings.text("添加行评论", "Add line comment")) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("$commentFile:$commentLine")
-                    OutlinedTextField(value = commentText, onValueChange = { commentText = it }, label = { Text("Comment") }, minLines = 3)
+                    OutlinedTextField(value = commentText, onValueChange = { commentText = it }, label = { Text(strings.text("评论", "Comment")) }, minLines = 3)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("critical", "high", "medium", "low", "info").forEach { value -> AssistChip(onClick = { commentSeverity = value }, label = { Text(value) }) } }
                 }
             },
-            confirmButton = { TextButton(onClick = { viewModel.addComment(apiClient, commentFile, commentLine, commentText, commentSeverity); commentText = ""; commentDialog = false }) { Text("Save") } },
-            dismissButton = { TextButton(onClick = { commentDialog = false }) { Text("Cancel") } },
+            confirmButton = { TextButton(onClick = { viewModel.addComment(apiClient, commentFile, commentLine, commentText, commentSeverity); commentText = ""; commentDialog = false }) { Text(strings.save) } },
+            dismissButton = { TextButton(onClick = { commentDialog = false }) { Text(strings.cancel) } },
         )
     }
 }

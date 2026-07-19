@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { URL } from "node:url";
+import { StringDecoder } from "node:string_decoder";
 import QRCode from "qrcode";
 import { agentReachInstallInfo, getAgentReachStatus, runAgentReachCommand, withAgentReachPath } from "./agentReachRuntime.js";
 import { codebaseMemoryInstallInfo } from "./codebaseMemoryRuntime.js";
@@ -14,11 +15,14 @@ import {
   attachToolRunToTask,
   approvePairingSession,
   claimPairingSession,
+  createApprovalRequest,
   drainEventStoreRuntime,
   createPairingSession,
   denyPairingSession,
   getDbPath,
+  getExecutionBinding,
   getApprovalRequest,
+  recordApprovalDecisionWithOutbox,
   getCachedMcpTools,
   getPairingSession,
   getToolRun,
@@ -27,6 +31,7 @@ import {
   listApprovalRequests,
   listAuditLogs,
   listDesktopObservations,
+  listExecutionBindings,
   listDevices,
   listPairingSessions,
   listTaskEventsAsync,
@@ -39,16 +44,23 @@ import {
   revokeDevice,
   revokePushSubscription,
   rotateDeviceToken,
+  settleApprovalContinuation,
   updateToolRun,
+  upsertExecutionBinding,
+  ingestExecutionHostEvent,
+  acknowledgeExecutionHostEvents,
   eventStoreMode,
   getEventStoreRuntimeStats,
+  initDb,
   replayEventWindowAsync,
   upsertNativePushToken,
   upsertPushSubscription
 } from "./db.js";
-import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
+import { applyTaskQueueTransition, appendExternalTaskEvent, configureTaskScheduler, createTask, executeQueuedTask, getTask, getTasks, restoreTaskExecution, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
+import { artifactMetadata, artifactPreview, readArtifactRange } from "./artifactRuntime.js";
+import { createApprovalDispatcher } from "./approvalDispatcher.js";
 import { getCompactServiceMetrics } from "./compactService.js";
 import { getContextBudgetMetrics } from "./contextBudget.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
@@ -56,6 +68,8 @@ import { commandApprovalRequired } from "./commandSafety.js";
 import { subscribeDesktopObserver } from "./desktopObserver.js";
 import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
 import { filterArchivedCodexTasks, getHistory, listHistories } from "./history.js";
+import { getExecutionHostFacade } from "./executionHostClient.js";
+import { createExecutionStartupReconciler } from "./executionReconciliation.js";
 import {
   createLiveCallSession,
   getLiveCallSession,
@@ -72,11 +86,37 @@ import {
   stopLiveCallSession,
   subscribeLiveCallEvents
 } from "./liveCall.js";
-import { getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, listAsrProviders, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
+import { deleteLiveCallAudioFile, getLiveCallAsrCheckpoints, getLiveCallAsrMetrics, getLiveCallAsrReadiness, getLiveCallAudioPolicy, listAsrProviders, listLiveCallAudioFiles, recoverLiveCallAsrFromCheckpoints } from "./liveCallAsr.js";
 import { getCommands, getCommand, refreshSkills } from "./commandRegistry.js";
-import { searchAll } from "./search.js";
-import { filterBySessionOrigin, resolveSessionOriginFilter } from "./sessionOrigins.js";
-import { addReviewComment, createReview, getReview, listReviews, updateReview } from "./reviews.js";
+import {
+  clearSearchHistory,
+  deleteSavedSearch,
+  deleteSearchHistory,
+  getSavedSearch,
+  getSearchIndexStatus,
+  listSavedSearches,
+  listSearchHistory,
+  markSavedSearchUsed,
+  recordSearchHistory,
+  refreshSearchIndex,
+  refreshWorkspaceSearchPaths,
+  saveSearch,
+  searchAll,
+  startSearchIndex,
+  stopSearchIndex,
+  updateSavedSearch
+} from "./search.js";
+import { resolveSessionOriginFilter } from "./sessionOrigins.js";
+import {
+  addReviewComment,
+  createReview,
+  getReview,
+  listReviews,
+  submitRemoteReview,
+  syncRemoteReview,
+  updateReview,
+  updateReviewComment
+} from "./reviews.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
   authenticateRequest,
@@ -95,16 +135,21 @@ import {
   resolveAllowedPath
 } from "./security.js";
 import { ensureNotificationSettings, sendCriticalNotification } from "./notifications.js";
-import { buildProviderRegistry } from "./providerRegistry.js";
+import { buildProviderRegistry, createProviderCatalogResolver, createProviderHealthResolver } from "./providerRegistry.js";
+import { createPersistentProviderCacheLoader } from "./providerCacheLoader.js";
+import { createProviderCacheStore } from "./providerCacheStore.js";
+import { createProviderRuntimeLoaders } from "./providerRuntimeLoaders.js";
 import { internalControlAuthorized, originalHostRequest } from "./internalControl.js";
 import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
 import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
 import { startSupervisorMonitor } from "./supervisorMonitor.js";
-import { buildSettingsExport, importSettingsSnapshot, loadSettings, mergeMcpSettings, publicSettings, sanitizeSettingsPatch, saveSettings, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
+import { buildSettingsExport, importSettingsSnapshot, loadSettings, prepareSettingsMutation, publicSettings, sanitizeSettingsPatch, saveSettings, settingsEtag, settingsWithSecrets, summarizeSettingsImport } from "./store.js";
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
-import { getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
-import { createThreadFork, getThreadState, updateThreadState, updateThreadStateBatch } from "./threadState.js";
-import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
+import { configureTerminalSessionRecovery, getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
+import { createThreadFork, getThreadState, threadStateEtag, updateThreadState, updateThreadStateBatch } from "./threadState.js";
+import { createTaskQueuePersistence } from "./taskQueuePersistence.js";
+import { createTaskScheduler } from "./taskScheduler.js";
+import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, applyWorkspaceWorktreeAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, listWorkspaceWorktrees, mutateWorkspaceFile, mutateWorkspaceFilesBatch, openWorkspaceInExplorer, previewWorkspaceFile, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
@@ -127,9 +172,51 @@ import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, Bro
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
+const providerRuntimeLoaders = createProviderRuntimeLoaders({
+  getSettings: () => settingsWithSecrets(settings)
+});
+const persistentProviderCache = createPersistentProviderCacheLoader({
+  store: createProviderCacheStore({ database: initDb }),
+  catalogResolver: createProviderCatalogResolver({ loaders: providerRuntimeLoaders.catalogLoaders }),
+  healthResolver: createProviderHealthResolver({ loaders: providerRuntimeLoaders.healthLoaders })
+});
+const providerCatalogResolver = persistentProviderCache.catalogResolver;
+const providerHealthResolver = persistentProviderCache.healthResolver;
 settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
+if (process.env.VIBELINK_PROVIDER_CACHE_STARTUP !== "0") {
+  providerRegistryPayload({ backgroundRefresh: true }).catch((error) => {
+    console.error(`[provider-cache] startup hydration failed: ${error.message}`);
+  });
+}
+if (process.env.VIBELINK_SEARCH_INDEX_STARTUP !== "0") startSearchIndex({
+    getWorkspaces: () => getWorkspaces(settings),
+    refreshIntervalMs: Number(process.env.VIBELINK_SEARCH_INDEX_REFRESH_MS || 60_000)
+  }).catch((error) => {
+    console.error(`[search-index] startup refresh failed: ${error.message}`);
+  });
 restoreTasks();
+const taskScheduler = createTaskScheduler({
+  store: createTaskQueuePersistence({ database: initDb }),
+  execute: (job) => executeQueuedTask(job, settings),
+  concurrency: Number(process.env.VIBELINK_TASK_CONCURRENCY || 2),
+  pollIntervalMs: Number(process.env.VIBELINK_TASK_SCHEDULER_MS || 250),
+  retryBaseMs: Number(process.env.VIBELINK_TASK_RETRY_BASE_MS || 1000),
+  onTransition: applyTaskQueueTransition
+});
+configureTaskScheduler(taskScheduler);
+const approvalDispatcher = createApprovalDispatcher({
+  resolveApproval: (command) => getExecutionHostFacade().resolveProviderApproval(command)
+});
+let approvalDispatchRunning = false;
+const approvalDispatchTimer = setInterval(() => {
+  if (approvalDispatchRunning) return;
+  approvalDispatchRunning = true;
+  approvalDispatcher.dispatchOnce()
+    .catch((error) => console.error(`[approval-dispatch] ${error.stack || error.message}`))
+    .finally(() => { approvalDispatchRunning = false; });
+}, Math.max(50, Number(process.env.VIBELINK_APPROVAL_DISPATCH_MS || 250)));
+approvalDispatchTimer.unref?.();
 const restoredLiveCallSessions = restoreLiveCallSessions();
 for (const sessionId of restoredLiveCallSessions) {
   setLiveCallQuestionHook(sessionId, (question, sess, questionEvent, transcriptBody = {}) => {
@@ -276,30 +363,60 @@ const uploadMimeToExt = new Map([
   ["application/zip", ".zip"]
 ]);
 
-function sendJson(response, status, value) {
+function sendJson(response, status, value, headers = {}) {
   if (response.headersSent || response.writableEnded || response.destroyed) return;
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-store",
+    ...headers
   });
   response.end(JSON.stringify(value));
 }
 
-function sendError(response, status, message, extra = {}) {
+function sendError(response, status, message, extra = {}, headers = {}) {
   if (response.headersSent || response.writableEnded || response.destroyed) {
     console.error(message);
     return;
   }
-  sendJson(response, status, { error: message, ...extra });
+  sendJson(response, status, { error: message, ...extra }, headers);
+}
+
+function revisionFromIfMatch(request, scope) {
+  const value = String(request.headers["if-match"] || "").trim();
+  if (!value) return undefined;
+  const match = value.match(new RegExp(`^(?:W\\/)?"vibelink:${scope}:(\\d+)"$`));
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+function workspaceRevisionFromIfMatch(request) {
+  const value = String(request.headers["if-match"] || "").trim();
+  if (!value) return undefined;
+  const match = value.match(/^(?:W\/)?"vibelink:workspace-file:([a-f0-9]{64})"$/i);
+  return match ? match[1].toLowerCase() : "invalid-etag";
+}
+
+let settingsMutationQueue = Promise.resolve();
+
+async function withSettingsMutation(work) {
+  const previous = settingsMutationQueue;
+  let release;
+  settingsMutationQueue = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+  }
 }
 
 function sendKnownThreadStateError(response, error) {
   if (error?.status === 409 && error?.code === "THREAD_STATE_CONFLICT") {
+    const state = getThreadState();
     sendError(response, 409, error.message || "Thread state conflict.", {
       code: error.code,
       conflicts: error.conflicts || [],
-      state: getThreadState()
-    });
+      state
+    }, { ETag: threadStateEtag(state) });
     return true;
   }
   if (error?.status === 400) {
@@ -642,6 +759,232 @@ function terminalSessionApprovalRisk(workspacePath = "", policy = {}) {
   };
 }
 
+function terminalSessionMetadata(toolRunId) {
+  const run = getToolRun(toolRunId);
+  const input = run?.input || {};
+  let cwd = "";
+  try {
+    if (input.workspaceId) cwd = resolveWorkspacePath(input.workspaceId, settings);
+  } catch {}
+  return {
+    cwd,
+    shell: input.shell || "",
+    mode: input.mode === "spawn" ? "spawn" : "pty",
+    backend: input.mode === "spawn" ? "stdio" : "conpty"
+  };
+}
+
+function sendKnownReviewError(response, error) {
+  if (!error?.code || (!String(error.code).startsWith("REVIEW_") && !String(error.code).startsWith("GITHUB_"))) return false;
+  const status = Number(error.status || 500);
+  sendError(response, status, error.message || "Review operation failed.", {
+    code: error.code,
+    ...(error.expectedHeadSha !== undefined ? { expectedHeadSha: error.expectedHeadSha } : {}),
+    ...(error.actualHeadSha !== undefined ? { actualHeadSha: error.actualHeadSha } : {}),
+    ...(error.current ? { current: error.current } : {})
+  });
+  return true;
+}
+
+function projectTerminalOutput(toolRunId, chunk) {
+  const metadata = terminalSessionMetadata(toolRunId);
+  const payload = {
+    sessionId: toolRunId,
+    stream: chunk.stream,
+    text: chunk.text,
+    mode: chunk.mode,
+    bytes: Buffer.byteLength(chunk.text || "", "utf8"),
+    cwd: metadata.cwd
+  };
+  const event = emitToolEvent(toolRunId, {
+    id: chunk.eventId || undefined,
+    type: "tool.output",
+    text: chunk.text,
+    payload
+  });
+  mirrorWorkspaceCommandTaskEvent(
+    toolRunId,
+    chunk.stream === "stderr" ? "stderr" : "stdout",
+    chunk.text,
+    payload,
+    event?.id || "",
+    "workspace.terminal_session"
+  );
+}
+
+function projectTerminalExit(toolRunId, sessionResult, hostEvent = null) {
+  const ok = Number(sessionResult.exitCode || 0) === 0;
+  updateToolRun(toolRunId, {
+    status: ok ? "completed" : "failed",
+    result: sessionResult,
+    error: ok ? "" : `Terminal exited with code ${sessionResult.exitCode}`,
+    completedAt: new Date().toISOString()
+  });
+  emitToolEvent(toolRunId, {
+    id: hostEvent?.eventId || `${toolRunId}:terminal-exited`,
+    type: ok ? "tool.completed" : "tool.failed",
+    text: sessionResult.signal ? `Terminal exited with signal ${sessionResult.signal}` : `Terminal exited with code ${sessionResult.exitCode}`,
+    payload: { session: sessionResult, ok }
+  });
+  mirrorWorkspaceCommandTaskEvent(
+    toolRunId,
+    "system",
+    ok ? "Terminal session completed." : `Terminal session failed with code ${sessionResult.exitCode}`,
+    { session: sessionResult, ok },
+    "terminal-exited",
+    "workspace.terminal_session"
+  );
+}
+
+configureTerminalSessionRecovery({
+  metadata: terminalSessionMetadata,
+  onOutput: projectTerminalOutput,
+  onExit: projectTerminalExit
+});
+
+const reconciliationDecoders = new Map();
+
+function reconciliationText(binding, event) {
+  const stream = event.type === "stream.stderr" ? "stderr" : "stdout";
+  const key = `${binding.id}:${stream}`;
+  let decoder = reconciliationDecoders.get(key);
+  if (!decoder) {
+    decoder = new StringDecoder("utf8");
+    reconciliationDecoders.set(key, decoder);
+  }
+  const payload = event.payload || {};
+  const bytes = payload.encoding === "base64"
+    ? Buffer.from(String(payload.data || ""), "base64")
+    : Buffer.from(String(payload.text ?? payload.data ?? ""), "utf8");
+  return { stream, text: decoder.write(bytes) };
+}
+
+function projectReconciledExecutionEvent(binding, event) {
+  if (event.type === "provider.event" && event.payload?.type) {
+    event = { ...event.payload, eventId: event.eventId, hostSeq: event.hostSeq, at: event.payload.at || event.at };
+  }
+  if (["stream.stdout", "stream.stderr", "stream.pty"].includes(event.type)) {
+    const chunk = reconciliationText(binding, event);
+    if (!chunk.text) return;
+    if (binding.kind === "terminal") {
+      projectTerminalOutput(binding.toolRunId || binding.id, {
+        ...chunk,
+        mode: binding.capabilities?.backend === "stdio" ? "spawn" : "pty",
+        eventId: event.eventId,
+        hostSeq: event.hostSeq
+      });
+    } else if (binding.kind === "command") {
+      const payload = { executionId: binding.id, stream: chunk.stream, text: chunk.text };
+      emitToolEvent(binding.toolRunId || binding.id, { id: event.eventId, type: "tool.output", text: chunk.text, payload });
+      mirrorWorkspaceCommandTaskEvent(binding.toolRunId || binding.id, chunk.stream, chunk.text, payload, event.eventId);
+    } else if (binding.taskId) {
+      appendExternalTaskEvent(binding.taskId, { id: event.eventId, at: event.at, type: chunk.stream, text: chunk.text });
+    }
+    return;
+  }
+
+  if (binding.taskId && event.type.startsWith("provider.")) {
+    if (event.type === "provider.approval.required") {
+      const payload = event.payload || {};
+      const requestId = payload.requestId === undefined ? "" : String(payload.requestId);
+      const continuationRef = String(payload.continuationRef || `provider:${binding.id}:${requestId}`).slice(0, 2000);
+      const approvalId = String(payload.approvalId || `provider:${binding.id}:${requestId}`).slice(0, 160);
+      try {
+        createApprovalRequest({
+          id: approvalId,
+          toolRunId: binding.toolRunId || "",
+          taskId: binding.taskId,
+          kind: `provider.${payload.kind || "approval"}`,
+          title: "Provider approval required",
+          reason: payload.reason || "",
+          request: { ...(payload.request || payload), executionId: binding.id, approvalHostSeq: event.hostSeq },
+          provider: binding.provider || "",
+          threadId: event.threadId || "",
+          turnId: event.turnId || "",
+          itemId: event.itemId || "",
+          continuationRef,
+          decisionVersion: payload.expectedDecisionVersion || 0,
+          requestedPermissions: payload.requestedPermissions,
+          availableDecisions: Array.isArray(payload.availableDecisions) ? payload.availableDecisions : []
+        });
+      } catch {
+        // Replayed approval events are idempotent at the approval row.
+      }
+    } else if (["provider.approval.delivered", "provider.approval.applied", "provider.approval.stale"].includes(event.type)) {
+      const continuationRef = String(event.payload?.continuationRef || "");
+      if (continuationRef) {
+        try {
+          settleApprovalContinuation(continuationRef, event.type.slice("provider.approval.".length), {
+            reason: event.payload?.reason || "Provider continuation ended before the decision was applied."
+          });
+        } catch (error) {
+          if (error.code !== "OUTBOX_STATE_CONFLICT") throw error;
+        }
+      }
+    }
+    appendExternalTaskEvent(binding.taskId, {
+      id: event.eventId,
+      at: event.at,
+      type: event.type,
+      payload: event.payload || {}
+    });
+  }
+  if (binding.kind === "command" && event.type === "execution.exited") {
+    const exitCode = Number(event.payload?.exitCode ?? 1);
+    const toolRunId = binding.toolRunId || binding.id;
+    updateToolRun(toolRunId, {
+      status: exitCode === 0 ? "completed" : "failed",
+      result: event.payload || {},
+      error: exitCode === 0 ? "" : `Command exited with code ${exitCode}`,
+      completedAt: event.at || new Date().toISOString()
+    });
+    emitToolEvent(toolRunId, {
+      id: event.eventId,
+      type: exitCode === 0 ? "tool.completed" : "tool.failed",
+      text: `Command exited with code ${exitCode}`,
+      payload: event.payload || {}
+    });
+  }
+}
+
+async function monitorReconciledCommand(binding) {
+  const facade = getExecutionHostFacade();
+  let cursor = Number(binding.lastAckedHostSeq || 0);
+  try {
+    while (true) {
+      const page = await facade.executionEvents(binding.id, cursor, 128);
+      const events = Array.isArray(page?.events) ? page.events : [];
+      for (const event of events) {
+        ingestExecutionHostEvent(binding.id, event, () => projectReconciledExecutionEvent(binding, event));
+        cursor = Math.max(cursor, Number(event.hostSeq || 0));
+      }
+      if (cursor > Number(binding.lastAckedHostSeq || 0)) {
+        await facade.acknowledgeExecutionEvents(binding.id, cursor);
+        acknowledgeExecutionHostEvents(binding.id, cursor);
+        binding.lastAckedHostSeq = cursor;
+      }
+      const snapshot = await facade.getExecution(binding.id);
+      upsertExecutionBinding({
+        id: binding.id,
+        status: snapshot.status,
+        attachState: snapshot.attachState || "attached",
+        lastSeenHostSeq: Math.max(cursor, Number(snapshot.lastHostSeq || 0)),
+        endedAt: snapshot.endedAt,
+        exitCode: snapshot.exitCode,
+        signal: snapshot.signal
+      });
+      if (["completed", "failed", "cancelled", "lost", "outcome_unknown"].includes(snapshot.status)) return;
+      if (!events.length) await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 25);
+        timer.unref?.();
+      });
+    }
+  } catch (error) {
+    upsertExecutionBinding({ id: binding.id, attachState: "unreachable", lostReason: error.message });
+    console.error(`[execution-reconciliation] command ${binding.id}: ${error.message}`);
+  }
+}
+
 async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
   const run = getToolRun(toolRunId);
   if (!run) {
@@ -668,51 +1011,8 @@ async function startWorkspaceTerminalSessionToolRun(toolRunId, settingsValue) {
       cols: input.cols || 100,
       rows: input.rows || 30,
       mode: input.mode || "auto",
-      onOutput: (chunk) => {
-        const payload = {
-          sessionId: toolRunId,
-          stream: chunk.stream,
-          text: chunk.text,
-          mode: chunk.mode,
-          bytes: Buffer.byteLength(chunk.text || "", "utf8"),
-          cwd
-        };
-        const event = emitToolEventBatched(toolRunId, {
-          type: "tool.output",
-          text: chunk.text,
-          payload
-        });
-        mirrorWorkspaceCommandTaskEvent(
-          toolRunId,
-          chunk.stream === "stderr" ? "stderr" : "stdout",
-          chunk.text,
-          payload,
-          event?.id || "",
-          "workspace.terminal_session"
-        );
-      },
-      onExit: (sessionResult) => {
-        const ok = Number(sessionResult.exitCode || 0) === 0;
-        updateToolRun(toolRunId, {
-          status: ok ? "completed" : "failed",
-          result: sessionResult,
-          error: ok ? "" : `Terminal exited with code ${sessionResult.exitCode}`,
-          completedAt: new Date().toISOString()
-        });
-        emitToolEvent(toolRunId, {
-          type: ok ? "tool.completed" : "tool.failed",
-          text: sessionResult.signal ? `Terminal exited with signal ${sessionResult.signal}` : `Terminal exited with code ${sessionResult.exitCode}`,
-          payload: { session: sessionResult, ok }
-        });
-        mirrorWorkspaceCommandTaskEvent(
-          toolRunId,
-          "system",
-          ok ? "Terminal session completed." : `Terminal session failed with code ${sessionResult.exitCode}`,
-          { session: sessionResult, ok },
-          "terminal-exited",
-          "workspace.terminal_session"
-        );
-      }
+      onOutput: (chunk) => projectTerminalOutput(toolRunId, chunk),
+      onExit: (sessionResult, hostEvent) => projectTerminalExit(toolRunId, sessionResult, hostEvent)
     });
     emitToolEventBatched(toolRunId, {
       type: "tool.output",
@@ -748,11 +1048,45 @@ async function executeWorkspaceCommandToolRun(toolRunId, settingsValue) {
           "started"
         );
         const result = await runWorkspaceCommand(input.workspaceId, settingsValue, {
+          executionId: toolRunId,
           command: input.command,
           kind: input.kind,
           timeoutMs: input.timeoutMs,
           approved: true,
           signal: controller.signal,
+          onExecutionStart: (snapshot) => upsertExecutionBinding({
+            id: snapshot.executionId || toolRunId,
+            kind: "command",
+            taskId: getToolRun(toolRunId)?.taskId || "",
+            toolRunId,
+            owner: "execution-host",
+            status: snapshot.status || "running",
+            attachState: snapshot.attachState || "attached",
+            workerPid: snapshot.workerPid,
+            processPid: snapshot.processPid,
+            processStartedAt: snapshot.processStartedAt,
+            workerInstanceId: snapshot.workerInstanceId,
+            capabilities: snapshot.capabilities || {},
+            lastSeenHostSeq: Number(snapshot.lastHostSeq || 0),
+            lastIngestedHostSeq: Number(snapshot.lastAckedHostSeq || 0),
+            lastAckedHostSeq: Number(snapshot.lastAckedHostSeq || 0)
+          }),
+          onHostEvent: (event) => ingestExecutionHostEvent(toolRunId, {
+            ...event,
+            executionId: event.executionId || toolRunId,
+            eventId: event.eventId || `${toolRunId}:${event.hostSeq}`,
+            at: event.at || new Date().toISOString()
+          }),
+          onHostAck: (hostSeq) => acknowledgeExecutionHostEvents(toolRunId, hostSeq),
+          onSnapshot: (snapshot) => upsertExecutionBinding({
+            id: toolRunId,
+            status: snapshot.status,
+            attachState: snapshot.attachState || "attached",
+            lastSeenHostSeq: Number(snapshot.lastHostSeq || 0),
+            endedAt: snapshot.endedAt,
+            exitCode: snapshot.exitCode,
+            signal: snapshot.signal
+          }),
           onOutput: (chunk) => {
             const payload = {
               stream: chunk.stream,
@@ -762,7 +1096,7 @@ async function executeWorkspaceCommandToolRun(toolRunId, settingsValue) {
               command: chunk.command,
               cwd: chunk.cwd
             };
-            const event = emitToolEventBatched(toolRunId, {
+            const event = emitToolEvent(toolRunId, {
               type: "tool.output",
               text: chunk.text,
               payload
@@ -1133,19 +1467,19 @@ function sandboxDoctorStatus(settingsValue = settings) {
 
 async function buildDoctorReport(request) {
   const publicSettingsValue = await publicSettings(settings);
-  const [desktop, git, gh, codex, claude, agentReach, doubao] = await Promise.all([
+  const [desktop, git, gh, glab, agentReach, providerRegistry] = await Promise.all([
     getCodexDesktopStatus().catch((error) => ({ ok: false, error: error.message })),
     commandProbe("git"),
     commandProbe("gh"),
-    settings.codexCommand && settings.codexCommand !== "auto" ? commandProbe(settings.codexCommand) : Promise.resolve({ ok: true, command: settings.codexCommand || "auto", version: "auto" }),
-    commandProbe(settings.claudeCommand || "claude"),
+    commandProbe("glab"),
     commandProbe("agent-reach", ["version"]),
-    getDoubaoStatus({
-      endpoint: settings.doubaoCdpEndpoint,
-      url: settings.doubaoUrl,
-      timeoutMs: 5000
-    }).catch((error) => ({ ok: false, error: error.message }))
+    providerRegistryPayload({ freshHealth: true })
   ]);
+  const providers = new Map(providerRegistry.providers.map((provider) => [provider.id, provider]));
+  const codex = providers.get("codex");
+  const claude = providers.get("claude");
+  const doubao = providers.get("doubao");
+  const zhipu = providers.get("zhipu");
   const toolStats = await toolEventStatsPayload();
   const workspaces = getWorkspaces(settings);
   const trusted = settings.security?.trustedWorkspaces || [];
@@ -1165,10 +1499,12 @@ async function buildDoctorReport(request) {
     doctorCheck("zhipu-key", Boolean(publicSettingsValue.hasZhipuKey), "Zhipu/GLM key", publicSettingsValue.hasZhipuKey ? "configured" : "missing", "warn"),
     doctorCheck("git", git.ok, "Git", git.version || git.error),
     doctorCheck("gh", gh.ok, "GitHub CLI", gh.version || gh.error, "warn"),
-    doctorCheck("codex", codex.ok, "Codex command", codex.version || codex.error || codex.command, settings.codexCommand && settings.codexCommand !== "auto" ? "error" : "warn"),
-    doctorCheck("claude", claude.ok, "Claude command", claude.version || claude.error, "warn"),
+    doctorCheck("glab", glab.ok, "GitLab CLI", glab.version || glab.error, "warn"),
+    doctorCheck("codex", Boolean(codex?.available), "Codex provider", codex?.health?.version || codex?.reason || codex?.health?.error || "unavailable", settings.codexCommand && settings.codexCommand !== "auto" ? "error" : "warn"),
+    doctorCheck("claude", Boolean(claude?.available), "Claude provider", claude?.health?.version || claude?.reason || claude?.health?.error || "unavailable", "warn"),
     doctorCheck("agent-reach", agentReach.ok, "Agent Reach", agentReach.version || agentReach.error, "warn"),
-    doctorCheck("doubao", doubao.ok, "Doubao web CLI", doubao.status?.target?.ok ? doubao.status.target.url : doubao.status?.target?.reason || doubao.doctor?.stderr || doubao.doctor?.stdout || doubao.error || "not ready", "warn"),
+    doctorCheck("doubao", Boolean(doubao?.available), "Doubao web provider", doubao?.reason || doubao?.health?.error || doubao?.health?.source || "not ready", "warn"),
+    doctorCheck("zhipu", Boolean(zhipu?.available), "GLM provider", zhipu?.reason || zhipu?.health?.error || zhipu?.health?.source || "not ready", "warn"),
     doctorCheck("desktop", Boolean(desktop?.ok || desktop?.found), "Codex Desktop", desktop?.target?.windowTitle || desktop?.windowTitle || desktop?.error || "not found", "warn"),
     doctorCheck("host", isHostAllowed(request, settings), "Host allowlist", request.headers.host || "unknown"),
     doctorCheck("workspace-command-network", settings.security?.networkAccess !== false, "Workspace command network", settings.security?.networkAccess === false ? "network commands require approval" : "enabled", "warn"),
@@ -1216,7 +1552,8 @@ async function buildDoctorReport(request) {
       ...agentReach,
       install: agentReachInstallInfo()
     },
-    doubao,
+    doubao: doubao?.health || {},
+    providerRegistry,
     codebaseMemory,
     toolEvents: toolStats,
     mcp,
@@ -1244,29 +1581,19 @@ async function runDoctorToolRequest(request, url, auth) {
 
 async function providerRegistryPayload(options = {}) {
   const settingsValue = await settingsWithSecrets(settings);
-  const probes = {};
-  if (options.fresh) {
-    const [codex, claude, doubao] = await Promise.all([
-      settings.codexCommand && settings.codexCommand !== "auto"
-        ? commandProbe(settings.codexCommand).catch((error) => ({ ok: false, error: error.message }))
-        : Promise.resolve({ ok: true }),
-      commandProbe(settings.claudeCommand || "claude").catch((error) => ({ ok: false, error: error.message })),
-      getDoubaoStatus({
-        endpoint: settings.doubaoCdpEndpoint,
-        url: settings.doubaoUrl,
-        timeoutMs: 5000
-      }).catch((error) => ({ ok: false, error: error.message }))
-    ]);
-    probes.codex = codex;
-    probes.claude = claude;
-    probes.doubao = doubao;
-  }
-  return buildProviderRegistry({ settings: settingsValue, probes });
+  return buildProviderRegistry({
+    settings: settingsValue,
+    catalogResolver: providerCatalogResolver,
+    healthResolver: providerHealthResolver,
+    freshCatalogs: Boolean(options.freshCatalogs ?? options.fresh),
+    freshHealth: Boolean(options.freshHealth ?? options.fresh),
+    backgroundRefresh: Boolean(options.backgroundRefresh)
+  });
 }
 
 async function buildStatusSnapshot(request) {
   const publicSettingsValue = await publicSettings(settings);
-  const providerRegistry = await providerRegistryPayload();
+  const providerRegistry = await providerRegistryPayload({ backgroundRefresh: true });
   return {
     ok: true,
     settings: publicSettingsValue,
@@ -1434,6 +1761,7 @@ async function saveAttachment(request, response) {
   const filePath = path.join(attachmentsDir, id);
   await fs.promises.writeFile(filePath, data);
   const isImage = imageExtensions.has(extension);
+  const detected = isImage ? null : await artifactMetadata(filePath, { id, name: originalName }).catch(() => null);
   sendJson(response, 201, {
     ok: true,
     id,
@@ -1443,10 +1771,65 @@ async function saveAttachment(request, response) {
     url: `/api/attachments/${encodeURIComponent(id)}`,
     kind: isImage ? "image" : "file",
     markdown: isImage ? `![${originalName}](${filePath})` : `[${originalName}](${filePath})`,
-    mimeType,
+    mimeType: detected?.mimeType || mimeType,
     size: data.length,
-    preview: textPreview(data, mimeType, extension)
+    preview: textPreview(data, detected?.mimeType || mimeType, extension),
+    artifact: detected ? { metadataUrl: `/api/artifacts/${encodeURIComponent(id)}`, previewUrl: `/api/artifacts/${encodeURIComponent(id)}/preview`, contentUrl: `/api/artifacts/${encodeURIComponent(id)}/content` } : undefined
   });
+}
+
+function artifactPathFromId(id) {
+  const filePath = attachmentPathFor(id);
+  if (!filePath || !filePath.startsWith(attachmentsDir)) {
+    throw Object.assign(new Error("Invalid artifact."), { status: 400, code: "ARTIFACT_INVALID" });
+  }
+  return filePath;
+}
+
+async function serveArtifactMetadata(request, response, url, auth, id) {
+  try {
+    const metadata = await artifactMetadata(artifactPathFromId(id), { id, name: id });
+    audit(request, url, auth, { type: "artifact.metadata", success: true, target: id, meta: { size: metadata.size, mimeType: metadata.mimeType } });
+    sendJson(response, 200, { artifact: metadata });
+  } catch (error) {
+    audit(request, url, auth, { type: "artifact.metadata", success: false, target: id, reason: error.message });
+    sendError(response, error.status || 500, error.message, { code: error.code || "ARTIFACT_ERROR" });
+  }
+}
+
+async function serveArtifactPreview(request, response, url, auth, id) {
+  try {
+    const preview = await artifactPreview(artifactPathFromId(id), { id, name: id });
+    audit(request, url, auth, { type: "artifact.preview", success: true, target: id, meta: { kind: preview.kind, redactions: preview.redaction.count } });
+    sendJson(response, 200, { preview });
+  } catch (error) {
+    audit(request, url, auth, { type: "artifact.preview", success: false, target: id, reason: error.message });
+    sendError(response, error.status || 500, error.message, { code: error.code || "ARTIFACT_ERROR" });
+  }
+}
+
+async function serveArtifactRange(request, response, url, auth, id) {
+  let result;
+  try {
+    result = await readArtifactRange(artifactPathFromId(id), request.headers.range);
+  } catch (error) {
+    let size = "*";
+    try { size = String((await fs.promises.stat(artifactPathFromId(id))).size); } catch {}
+    audit(request, url, auth, { type: "artifact.range", success: false, target: id, reason: error.message });
+    sendError(response, error.status || 500, error.message, { code: error.code || "ARTIFACT_ERROR" }, error.status === 416 ? { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" } : {});
+    return;
+  }
+  audit(request, url, auth, { type: "artifact.range", success: true, target: id, meta: { start: result.start, end: result.end, size: result.size } });
+  response.writeHead(206, {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": result.length,
+    "Content-Range": `bytes ${result.start}-${result.end}/${result.size}`,
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, no-store",
+    "Content-Disposition": `inline; filename="${path.basename(id).replaceAll('"', "")}"`,
+    "X-Content-Type-Options": "nosniff"
+  });
+  response.end(result.data);
 }
 
 function serveAttachment(request, response, url) {
@@ -1624,6 +2007,16 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  const artifactMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)(?:\/(content|preview))?$/);
+  if (artifactMatch && request.method === "GET") {
+    if (!enforceRateLimit(request, response, url, "artifact.read", { limit: 120, windowMs: 60 * 1000 }, auth)) return;
+    const id = safeDecode(artifactMatch[1]);
+    if (artifactMatch[2] === "content") await serveArtifactRange(request, response, url, auth, id);
+    else if (artifactMatch[2] === "preview") await serveArtifactPreview(request, response, url, auth, id);
+    else await serveArtifactMetadata(request, response, url, auth, id);
+    return;
+  }
+
   if (url.pathname === "/api/status" && request.method === "GET") {
     sendJson(response, 200, await renderStatusPayload(await buildStatusSnapshot(request)));
     return;
@@ -1657,6 +2050,24 @@ async function routeApi(request, response, url) {
     const approvalBefore = getApprovalRequest(approvalDecisionMatch[1]);
     if (!approvalBefore) {
       sendError(response, 404, "Approval request not found.");
+      return;
+    }
+    if (approvalBefore.provider === "codex" || approvalBefore.continuationRef) {
+      try {
+        const recorded = recordApprovalDecisionWithOutbox({
+          approvalId: approvalBefore.id,
+          operationId: body.operationId || crypto.randomUUID(),
+          continuationRef: body.continuationRef || approvalBefore.continuationRef,
+          expectedDecisionVersion: body.expectedDecisionVersion ?? body.expectedVersion ?? approvalBefore.decisionVersion,
+          decision: body.decision === "approve" ? { decision: "accept" } : body.decision === "deny" ? { decision: "decline" } : body.decision,
+          reason: body.reason || "",
+          deviceId: body.deviceId || ""
+        });
+        sendJson(response, recorded.duplicate ? 200 : 202, { ok: true, approval: recorded.approval, outbox: recorded.outbox, duplicate: recorded.duplicate });
+      } catch (error) {
+        const status = error.code === "APPROVAL_NOT_FOUND" ? 404 : ["APPROVAL_STALE", "APPROVAL_ALREADY_DECIDED", "OPERATION_CONFLICT"].includes(error.code) ? 409 : 400;
+        sendJson(response, status, { ok: false, error: error.message, code: error.code, ...(error.details ? { details: error.details } : {}) });
+      }
       return;
     }
 
@@ -1744,7 +2155,7 @@ async function routeApi(request, response, url) {
     const toolRunId = toolRunStopMatch[1];
     let result = stopWorkspaceToolRun(toolRunId, body.reason || "Stopped from VibeLink.");
     if (!result.ok) {
-      const terminalResult = stopTerminalSession(toolRunId, body.reason || "Stopped from VibeLink.");
+      const terminalResult = await stopTerminalSession(toolRunId, body.reason || "Stopped from VibeLink.");
       if (terminalResult.ok) {
         emitToolEvent(toolRunId, {
           type: "tool.cancel_requested",
@@ -2223,9 +2634,38 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/live-calls/audio-files" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listLiveCallAudioFiles(), url), policy: getLiveCallAudioPolicy() });
+    return;
+  }
+
+  const liveCallAudioFileMatch = url.pathname.match(/^\/api\/live-calls\/audio-files\/([^/]+)$/);
+  if (liveCallAudioFileMatch && request.method === "DELETE") {
+    const name = decodeURIComponent(liveCallAudioFileMatch[1]);
+    const result = deleteLiveCallAudioFile(name);
+    if (!result.ok) {
+      const status = result.reason === "not_found" ? 404 : result.reason === "recording_active" ? 409 : 400;
+      sendError(response, status, result.reason);
+      return;
+    }
+    audit(request, url, auth, { type: "live_call.audio_file.delete", success: true, target: name });
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (url.pathname === "/api/live-calls" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "live_call.create", { limit: 20, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
+    const asrReadiness = getLiveCallAsrReadiness(body.asrProvider);
+    if (!asrReadiness.ready) {
+      sendJson(response, 503, {
+        error: "No production ASR provider is available.",
+        code: asrReadiness.code,
+        provider: asrReadiness.provider,
+        diagnostics: asrReadiness.diagnostics
+      });
+      return;
+    } // ASR readiness preflight
     const session = createLiveCallSession({
       title: body.title,
       source: body.source,
@@ -2425,41 +2865,56 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/settings" && request.method === "GET") {
+    const current = await publicSettings(settings);
+    sendJson(response, 200, { settings: current }, { ETag: settingsEtag(settings) });
+    return;
+  }
+
   if (url.pathname === "/api/settings" && request.method === "POST") {
     const body = await readBody(request);
-    const validation = validate(SettingsPatchSchema, body);
-    if (!validation.ok) {
-      sendJson(response, 400, { error: "Validation failed", details: validation.issues });
-      return;
-    }
-    const patch = sanitizeSettingsPatch(body);
-    if (isDryRun(url)) {
-      const currentPublic = await publicSettings(settings);
-      const diff = {};
-      for (const key of Object.keys(patch)) {
-        diff[key] = { from: currentPublic[key], to: patch[key] };
+    await withSettingsMutation(async () => {
+      const validation = validate(SettingsPatchSchema, body);
+      if (!validation.ok) {
+        sendJson(response, 400, { error: "Validation failed", details: validation.issues });
+        return;
       }
-      sendJson(response, 200, { dryRun: true, diff, wouldChange: Object.keys(diff).length > 0 });
-      return;
-    }
-    const credentialResult = patch.apiKeys ? await writeApiKeys(patch.apiKeys) : {};
-    if (typeof body.nativePush?.fcmServiceAccountJson === "string" && body.nativePush.fcmServiceAccountJson.trim()) {
-      credentialResult.fcmServiceAccount = await writeSecret("fcmServiceAccount", body.nativePush.fcmServiceAccountJson.trim());
-    }
-    settings = {
-      ...settings,
-      ...patch,
-      mcp: patch.mcp ? mergeMcpSettings(settings.mcp || {}, patch.mcp) : settings.mcp,
-      apiKeys: {
-        ...settings.apiKeys
+      const patch = sanitizeSettingsPatch(body);
+      const expectedRevision = body.expectedRevision ?? revisionFromIfMatch(request, "settings");
+      let prepared;
+      try {
+        prepared = prepareSettingsMutation(settings, patch, { expectedRevision });
+      } catch (error) {
+        if (error?.status !== 409 || error?.code !== "SETTINGS_CONFLICT") throw error;
+        sendError(response, 409, error.message, {
+          code: error.code,
+          expectedRevision: error.expectedRevision,
+          actualRevision: error.actualRevision,
+          conflictingFields: error.conflictingFields,
+          current: { settings: await publicSettings(settings) }
+        }, { ETag: settingsEtag(settings) });
+        return;
       }
-    };
-    settings = ensureNotificationSettings(settings);
-    await saveSettings(settings);
-    ensureDefaultWorkspaces(settings);
-    scheduleToolEventsPrune();
-    audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch), credentials: credentialResult } });
-    sendJson(response, 200, { ok: true, settings: await publicSettings(settings) });
+      if (isDryRun(url)) {
+        const currentPublic = await publicSettings(settings);
+        const diff = {};
+        for (const key of Object.keys(patch)) {
+          diff[key] = { from: currentPublic[key], to: patch[key] };
+        }
+        sendJson(response, 200, { dryRun: true, diff, wouldChange: Object.keys(diff).length > 0 }, { ETag: settingsEtag(settings) });
+        return;
+      }
+      const credentialResult = patch.apiKeys ? await writeApiKeys(patch.apiKeys) : {};
+      if (typeof body.nativePush?.fcmServiceAccountJson === "string" && body.nativePush.fcmServiceAccountJson.trim()) {
+        credentialResult.fcmServiceAccount = await writeSecret("fcmServiceAccount", body.nativePush.fcmServiceAccountJson.trim());
+      }
+      settings = ensureNotificationSettings(prepared.settings);
+      await saveSettings(settings);
+      ensureDefaultWorkspaces(settings);
+      scheduleToolEventsPrune();
+      audit(request, url, auth, { type: "settings.update", success: true, meta: { keys: Object.keys(patch), credentials: credentialResult } });
+      sendJson(response, 200, { ok: true, settings: await publicSettings(settings) }, { ETag: settingsEtag(settings) });
+    });
     return;
   }
 
@@ -2471,28 +2926,48 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/settings/import" && request.method === "POST") {
     const body = await readBody(request);
-    let nextSettings;
-    try {
-      nextSettings = importSettingsSnapshot(settings, body);
-    } catch (error) {
-      sendError(response, error.status || 400, error.message || "Invalid settings import.");
-      return;
-    }
-    const summary = summarizeSettingsImport(settings, nextSettings);
-    if (isDryRun(url) || body.dryRun === true) {
-      sendJson(response, 200, {
-        dryRun: true,
-        ...summary,
-        settings: await publicSettings(nextSettings)
-      });
-      return;
-    }
-    settings = ensureNotificationSettings(nextSettings);
-    await saveSettings(settings);
-    ensureDefaultWorkspaces(settings);
-    scheduleToolEventsPrune();
-    audit(request, url, auth, { type: "settings.import", success: true, meta: summary });
-    sendJson(response, 200, { ok: true, ...summary, settings: await publicSettings(settings) });
+    await withSettingsMutation(async () => {
+      let nextSettings;
+      try {
+        nextSettings = importSettingsSnapshot(settings, body);
+      } catch (error) {
+        sendError(response, error.status || 400, error.message || "Invalid settings import.");
+        return;
+      }
+      const patch = sanitizeSettingsPatch(body.settings && typeof body.settings === "object" ? body.settings : body);
+      const expectedRevision = body.expectedRevision ?? revisionFromIfMatch(request, "settings");
+      let prepared;
+      try {
+        prepared = prepareSettingsMutation(settings, patch, { expectedRevision });
+      } catch (error) {
+        if (error?.status !== 409 || error?.code !== "SETTINGS_CONFLICT") throw error;
+        sendError(response, 409, error.message, {
+          code: error.code,
+          expectedRevision: error.expectedRevision,
+          actualRevision: error.actualRevision,
+          conflictingFields: error.conflictingFields,
+          current: { settings: await publicSettings(settings) }
+        }, { ETag: settingsEtag(settings) });
+        return;
+      }
+      const summary = summarizeSettingsImport(settings, nextSettings);
+      if (isDryRun(url) || body.dryRun === true) {
+        sendJson(response, 200, {
+          dryRun: true,
+          ...summary,
+          settings: await publicSettings(nextSettings)
+        }, { ETag: settingsEtag(settings) });
+        return;
+      }
+      nextSettings.revision = prepared.revision;
+      nextSettings._fieldRevisions = prepared.settings._fieldRevisions || settings._fieldRevisions || {};
+      settings = ensureNotificationSettings(nextSettings);
+      await saveSettings(settings);
+      ensureDefaultWorkspaces(settings);
+      scheduleToolEventsPrune();
+      audit(request, url, auth, { type: "settings.import", success: true, meta: summary });
+      sendJson(response, 200, { ok: true, ...summary, settings: await publicSettings(settings) }, { ETag: settingsEtag(settings) });
+    });
     return;
   }
 
@@ -2671,7 +3146,11 @@ async function routeApi(request, response, url) {
 
   const workspaceFileMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file$/);
   if (workspaceFileMatch && request.method === "GET") {
-    sendJson(response, 200, await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || ""));
+    const result = await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || "", {
+      offset: url.searchParams.get("offset") || 0,
+      limit: url.searchParams.get("limit") || undefined
+    });
+    sendJson(response, 200, result, { ETag: result.etag });
     return;
   }
 
@@ -2691,14 +3170,20 @@ async function routeApi(request, response, url) {
       return;
     }
     try {
+      if (body.expectedRevision === undefined) body.expectedRevision = workspaceRevisionFromIfMatch(request);
+      body.requireAbsent = body.requireAbsent === true || String(request.headers["if-none-match"] || "").trim() === "*";
       const result = await mutateWorkspaceFile(workspaceFileMatch[1], settings, body);
+      const workspace = getWorkspaces(settings).find((item) => item.id === workspaceFileMatch[1]);
+      if (workspace) {
+        await refreshWorkspaceSearchPaths(workspace, [result.previousPath || "", result.path || body.path || ""].filter(Boolean));
+      }
       audit(request, url, auth, {
         type: "workspace.file",
         success: true,
         target: result.path || body.path || "",
         meta: { action: result.action || body.action || "write", previousPath: result.previousPath || "" }
       });
-      sendJson(response, result.action === "write" ? 200 : 200, result);
+      sendJson(response, 200, result, result.etag ? { ETag: result.etag } : {});
     } catch (error) {
       audit(request, url, auth, {
         type: "workspace.file",
@@ -2707,7 +3192,70 @@ async function routeApi(request, response, url) {
         reason: error.message,
         meta: { action: body.action || "write" }
       });
-      sendError(response, error.status || 500, error.message);
+      if (error?.status === 409 && error?.code === "WORKSPACE_FILE_CONFLICT") {
+        sendError(response, 409, error.message, {
+          code: error.code,
+          path: body.path || "",
+          expectedRevision: error.expectedRevision,
+          actualRevision: error.actualRevision,
+          current: error.current
+        }, error.current?.etag ? { ETag: error.current.etag } : {});
+      } else {
+        sendError(response, error.status || 500, error.message);
+      }
+    }
+    return;
+  }
+
+  const workspaceFilePreviewMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file\/preview$/);
+  if (workspaceFilePreviewMatch && request.method === "GET") {
+    const result = await previewWorkspaceFile(workspaceFilePreviewMatch[1], settings, url.searchParams.get("path") || "", {
+      maxRows: url.searchParams.get("maxRows") || undefined,
+      maxColumns: url.searchParams.get("maxColumns") || undefined,
+      maxTextChars: url.searchParams.get("maxTextChars") || undefined
+    });
+    sendJson(response, 200, result, { ETag: result.etag });
+    return;
+  }
+
+  const workspaceFileBatchMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/files\/batch$/);
+  if (workspaceFileBatchMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceFileBatchMatch[1];
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        workspaceId,
+        mode: body.mode === "best-effort" ? "best-effort" : "atomic",
+        operationCount: Array.isArray(body.operations) ? body.operations.length : 0,
+        wouldExecute: true
+      });
+      return;
+    }
+    try {
+      const result = await mutateWorkspaceFilesBatch(workspaceId, settings, body);
+      const workspace = getWorkspaces(settings).find((item) => item.id === workspaceId);
+      const changedPaths = result.items.flatMap((item) => [item.previousPath || "", item.path || ""]).filter(Boolean);
+      if (workspace && changedPaths.length) await refreshWorkspaceSearchPaths(workspace, changedPaths);
+      audit(request, url, auth, {
+        type: "workspace.file_batch",
+        success: result.ok,
+        target: workspaceId,
+        meta: { mode: result.mode, operationCount: result.items.length, failureCount: result.items.filter((item) => !item.ok).length }
+      });
+      sendJson(response, 200, result);
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.file_batch",
+        success: false,
+        target: workspaceId,
+        reason: error.message,
+        meta: { mode: body.mode || "atomic", operationCount: body.operations?.length || 0 }
+      });
+      sendError(response, error.status || 500, error.message, {
+        code: error.code || "WORKSPACE_BATCH_ERROR",
+        ...(error.conflicts ? { conflicts: error.conflicts } : {})
+      });
     }
     return;
   }
@@ -2719,6 +3267,11 @@ async function routeApi(request, response, url) {
   }
 
   const workspaceWorktreeMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/worktrees$/);
+  if (workspaceWorktreeMatch && request.method === "GET") {
+    sendJson(response, 200, await listWorkspaceWorktrees(workspaceWorktreeMatch[1], settings));
+    return;
+  }
+
   if (workspaceWorktreeMatch && request.method === "POST") {
     const body = await readBody(request);
     const workspaceId = workspaceWorktreeMatch[1];
@@ -3085,13 +3638,13 @@ async function routeApi(request, response, url) {
   }
 
   if (url.pathname === "/api/terminal-sessions" && request.method === "GET") {
-    sendJson(response, 200, { items: applyFields(listTerminalSessions(), url) });
+    sendJson(response, 200, { items: applyFields(await listTerminalSessions(), url) });
     return;
   }
 
   const terminalSessionMatch = url.pathname.match(/^\/api\/terminal-sessions\/([^/]+)$/);
   if (terminalSessionMatch && request.method === "GET") {
-    const session = getTerminalSession(terminalSessionMatch[1]);
+    const session = await getTerminalSession(terminalSessionMatch[1]);
     if (!session) {
       sendError(response, 404, "Terminal session not found.");
       return;
@@ -3105,7 +3658,7 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     const toolRunId = terminalSessionInputMatch[1];
     const text = String(body.text || "");
-    const result = writeTerminalSession(toolRunId, text);
+    const result = await writeTerminalSession(toolRunId, text);
     if (result.ok) {
       emitToolEvent(toolRunId, { type: "tool.input", text, payload: { session: result.session, bytes: Buffer.byteLength(text, "utf8") } });
       mirrorWorkspaceCommandTaskEvent(toolRunId, "stdin", text, { session: result.session }, `input:${Date.now()}`, "workspace.terminal_session");
@@ -3125,7 +3678,7 @@ async function routeApi(request, response, url) {
   if (terminalSessionResizeMatch && request.method === "POST") {
     const body = await readBody(request);
     const toolRunId = terminalSessionResizeMatch[1];
-    const result = resizeTerminalSession(toolRunId, body.cols, body.rows);
+    const result = await resizeTerminalSession(toolRunId, body.cols, body.rows);
     if (result.ok) emitToolEvent(toolRunId, { type: "tool.resize", text: `${result.cols}x${result.rows}`, payload: result });
     audit(request, url, auth, {
       type: "workspace.terminal_session.resize",
@@ -3265,27 +3818,185 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  const workspaceWorktreeActionMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/worktrees\/action$/);
+  if (workspaceWorktreeActionMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceWorktreeActionMatch[1];
+    const action = String(body.action || "").trim().toLowerCase();
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        workspaceId,
+        action,
+        path: body.path || "",
+        force: body.force === true,
+        wouldExecute: true
+      });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      workspaceId,
+      toolName: "workspace.git_worktree_action",
+      title: `${action || "worktree action"} ${body.path || ""}`.trim(),
+      input: {
+        action,
+        path: body.path || "",
+        force: body.force === true,
+        reason: body.reason || "",
+        expire: body.expire || ""
+      }
+    });
+    try {
+      const result = await runWorkspaceToolAction({
+        toolRunId: toolRun.id,
+        startedText: `git worktree ${action || "action"}`,
+        completedText: "Git worktree action completed.",
+        failedText: "Git worktree action failed.",
+        execute: () => applyWorkspaceWorktreeAction(workspaceId, settings, body)
+      });
+      audit(request, url, auth, {
+        type: "workspace.git_worktree_action",
+        success: true,
+        target: result.path || workspaceId,
+        meta: { action, toolRunId: toolRun.id }
+      });
+      sendJson(response, 200, { ...result, toolRunId: toolRun.id });
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.git_worktree_action",
+        success: false,
+        target: body.path || workspaceId,
+        reason: error.message,
+        meta: { action, toolRunId: toolRun.id }
+      });
+      sendError(response, error.status || 500, error.message, error.code ? { code: error.code } : {});
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/search/saved" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listSavedSearches(), url) });
+    return;
+  }
+
+  if (url.pathname === "/api/search/saved" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "search.saved", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    try {
+      const item = saveSearch(body);
+      audit(request, url, auth, { type: "search.saved.create", success: true, target: item.id });
+      sendJson(response, 201, item);
+    } catch (error) {
+      sendError(response, 400, error.message);
+    }
+    return;
+  }
+
+  const savedSearchMatch = url.pathname.match(/^\/api\/search\/saved\/([^/]+)$/);
+  if (savedSearchMatch && request.method === "GET") {
+    const item = getSavedSearch(decodeURIComponent(savedSearchMatch[1]));
+    if (!item) { sendError(response, 404, "Saved search not found."); return; }
+    sendJson(response, 200, item);
+    return;
+  }
+  if (savedSearchMatch && request.method === "PATCH") {
+    if (!enforceRateLimit(request, response, url, "search.saved", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    try {
+      const item = updateSavedSearch(decodeURIComponent(savedSearchMatch[1]), body);
+      if (!item) { sendError(response, 404, "Saved search not found."); return; }
+      audit(request, url, auth, { type: "search.saved.update", success: true, target: item.id });
+      sendJson(response, 200, item);
+    } catch (error) {
+      sendError(response, 400, error.message);
+    }
+    return;
+  }
+  if (savedSearchMatch && request.method === "DELETE") {
+    if (!enforceRateLimit(request, response, url, "search.saved", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const id = decodeURIComponent(savedSearchMatch[1]);
+    const deleted = deleteSavedSearch(id);
+    if (!deleted) { sendError(response, 404, "Saved search not found."); return; }
+    audit(request, url, auth, { type: "search.saved.delete", success: true, target: id });
+    sendJson(response, 200, { ok: true, id });
+    return;
+  }
+
+  if (url.pathname === "/api/search/history" && request.method === "GET") {
+    sendJson(response, 200, { items: applyFields(listSearchHistory({ limit: url.searchParams.get("limit") || 50 }), url) });
+    return;
+  }
+  if (url.pathname === "/api/search/history" && request.method === "DELETE") {
+    if (!enforceRateLimit(request, response, url, "search.history", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    const deleted = clearSearchHistory();
+    audit(request, url, auth, { type: "search.history.clear", success: true, meta: { deleted } });
+    sendJson(response, 200, { ok: true, deleted });
+    return;
+  }
+
+  const searchHistoryMatch = url.pathname.match(/^\/api\/search\/history\/([^/]+)$/);
+  if (searchHistoryMatch && request.method === "DELETE") {
+    if (!enforceRateLimit(request, response, url, "search.history", { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const id = decodeURIComponent(searchHistoryMatch[1]);
+    const deleted = deleteSearchHistory(id);
+    if (!deleted) { sendError(response, 404, "Search history item not found."); return; }
+    sendJson(response, 200, { ok: true, id });
+    return;
+  }
+
+  if (url.pathname === "/api/search/index" && request.method === "GET") {
+    sendJson(response, 200, getSearchIndexStatus());
+    return;
+  }
+  if (url.pathname === "/api/search/index/refresh" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "search.index", { limit: 6, windowMs: 60 * 1000 }, auth)) return;
+    const result = await refreshSearchIndex();
+    audit(request, url, auth, { type: "search.index.refresh", success: true, meta: { workspaces: result.length } });
+    sendJson(response, 200, { ok: true, result, index: getSearchIndexStatus() });
+    return;
+  }
+
   if (url.pathname === "/api/search" && request.method === "GET") {
     const sessionOrigin = sessionOriginForRequest(response, url);
     if (!sessionOrigin) return;
+    const savedSearchId = url.searchParams.get("savedSearchId") || "";
+    const saved = savedSearchId ? getSavedSearch(savedSearchId) : null;
+    if (savedSearchId && !saved) { sendError(response, 404, "Saved search not found."); return; }
+    const parameter = (name, fallback = "") => url.searchParams.has(name) ? url.searchParams.get(name) : fallback;
     const result = await searchAll({
-      query: url.searchParams.get("q") || "",
-      scope: url.searchParams.get("scope") || "all",
+      query: parameter("q", saved?.query || ""),
+      scope: parameter("scope", saved?.scope || "all"),
       limit: url.searchParams.get("limit") || 50,
       cursor: url.searchParams.get("cursor") || "0",
-      tag: url.searchParams.get("tag") || "",
-      favorite: url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true",
-      histories: listHistories({ fresh: false, sessionOrigin }),
-      tasks: filterBySessionOrigin(conversationTasks(), sessionOrigin),
+      tag: parameter("tag", saved?.tag || ""),
+      favorite: url.searchParams.has("favorite")
+        ? url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true"
+        : Boolean(saved?.favorite),
+      sort: parameter("sort", saved?.sort || "relevance"),
+      order: parameter("order", saved?.order || ""),
+      sessionOrigin,
       workspaces: getWorkspaces(settings),
       threadState: getThreadState()
     });
-    sendJson(response, 200, { ...result, items: applyFields(result.items, url) });
+    if (url.searchParams.get("record") !== "0" && (!url.searchParams.has("cursor") || url.searchParams.get("cursor") === "0")) {
+      recordSearchHistory({
+        ...result,
+        tag: parameter("tag", saved?.tag || ""),
+        favorite: url.searchParams.has("favorite")
+          ? url.searchParams.get("favorite") === "1" || url.searchParams.get("favorite") === "true"
+          : Boolean(saved?.favorite),
+        resultCount: result.total,
+        deviceId: auth.device?.id || ""
+      });
+    }
+    if (savedSearchId) markSavedSearchUsed(savedSearchId);
+    sendJson(response, 200, { ...result, savedSearchId, index: getSearchIndexStatus(), items: applyFields(result.items, url) });
     return;
   }
 
   if (url.pathname === "/api/thread-state" && request.method === "GET") {
-    sendJson(response, 200, getThreadState());
+    const state = getThreadState();
+    sendJson(response, 200, state, { ETag: threadStateEtag(state) });
     return;
   }
 
@@ -3293,7 +4004,7 @@ async function routeApi(request, response, url) {
     const body = await readBody(request);
     try {
       const state = updateThreadState(body.key, body.patch || {}, { expectedRevision: body.expectedRevision });
-      sendJson(response, 200, state);
+      sendJson(response, 200, state, { ETag: threadStateEtag(state) });
     } catch (error) {
       if (!sendKnownThreadStateError(response, error)) throw error;
     }
@@ -3306,7 +4017,18 @@ async function routeApi(request, response, url) {
   }
   if (url.pathname === "/api/reviews" && request.method === "POST") {
     const body = await readBody(request);
-    sendJson(response, 201, createReview(body));
+    const isRemoteReview = Boolean(body.pullRequest || body.number);
+    if (isRemoteReview && !enforceRateLimit(request, response, url, "github_review.sync", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const review = isRemoteReview
+        ? await syncRemoteReview(null, body, { settings })
+        : createReview(body);
+      if (isRemoteReview) audit(request, url, auth, { type: "github_review.sync", success: true, target: `${review.remote?.repository || ""}#${review.remote?.number || ""}` });
+      sendJson(response, 201, review);
+    } catch (error) {
+      if (isRemoteReview) audit(request, url, auth, { type: "github_review.sync", success: false, reason: error.message });
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
     return;
   }
   const reviewMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)$/);
@@ -3324,16 +4046,64 @@ async function routeApi(request, response, url) {
   }
   const commentMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/comments$/);
   if (commentMatch && request.method === "POST") {
-    const review = addReviewComment(decodeURIComponent(commentMatch[1]), await readBody(request));
-    if (!review) { sendError(response, 404, "Review not found"); return; }
-    sendJson(response, 201, review);
+    try {
+      const review = addReviewComment(decodeURIComponent(commentMatch[1]), await readBody(request));
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      sendJson(response, 201, review);
+    } catch (error) {
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
+    return;
+  }
+  const reviewCommentMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/comments\/([^/]+)$/);
+  if (reviewCommentMatch && request.method === "PATCH") {
+    try {
+      const review = updateReviewComment(
+        decodeURIComponent(reviewCommentMatch[1]),
+        decodeURIComponent(reviewCommentMatch[2]),
+        await readBody(request)
+      );
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      sendJson(response, 200, review);
+    } catch (error) {
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
+    return;
+  }
+  const reviewSyncMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/sync$/);
+  if (reviewSyncMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "github_review.sync", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const review = await syncRemoteReview(decodeURIComponent(reviewSyncMatch[1]), await readBody(request), { settings });
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      audit(request, url, auth, { type: "github_review.sync", success: true, target: `${review.remote?.repository || ""}#${review.remote?.number || ""}` });
+      sendJson(response, 200, review);
+    } catch (error) {
+      audit(request, url, auth, { type: "github_review.sync", success: false, target: decodeURIComponent(reviewSyncMatch[1]), reason: error.message });
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
+    return;
+  }
+  const reviewSubmitMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/submit$/);
+  if (reviewSubmitMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "github_review.submit", { limit: 10, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const review = await submitRemoteReview(decodeURIComponent(reviewSubmitMatch[1]), await readBody(request), { settings });
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      audit(request, url, auth, { type: "github_review.submit", success: true, target: `${review.remote?.repository || ""}#${review.remote?.number || ""}`, meta: { decision: review.decision || "" } });
+      sendJson(response, 200, review);
+    } catch (error) {
+      audit(request, url, auth, { type: "github_review.submit", success: false, target: decodeURIComponent(reviewSubmitMatch[1]), reason: error.message });
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
     return;
   }
 
   if (url.pathname === "/api/thread-state/batch" && request.method === "POST") {
     const body = await readBody(request);
     try {
-      sendJson(response, 200, updateThreadStateBatch(body.updates));
+      const state = updateThreadStateBatch(body.updates);
+      sendJson(response, 200, state, { ETag: threadStateEtag(state) });
     } catch (error) {
       if (!sendKnownThreadStateError(response, error)) throw error;
     }
@@ -3343,7 +4113,7 @@ async function routeApi(request, response, url) {
   if (url.pathname === "/api/thread-state/forks" && request.method === "POST") {
     const body = await readBody(request);
     const result = createThreadFork(body);
-    sendJson(response, 201, result);
+    sendJson(response, 201, result, { ETag: threadStateEtag(result.state) });
     return;
   }
 
@@ -3361,6 +4131,24 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/tasks" && request.method === "GET") {
     sendJson(response, 200, { items: applyFields(conversationTasks(), url) });
+    return;
+  }
+
+  if (url.pathname === "/api/task-scheduler" && request.method === "GET") {
+    sendJson(response, 200, taskScheduler.status());
+    return;
+  }
+
+  const schedulerActionMatch = url.pathname.match(/^\/api\/task-scheduler\/([^/]+)\/(retry|cancel)$/);
+  if (schedulerActionMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, `task.scheduler.${schedulerActionMatch[2]}`, { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const id = decodeURIComponent(schedulerActionMatch[1]);
+    const job = schedulerActionMatch[2] === "retry" ? taskScheduler.retry(id) : taskScheduler.cancel(id);
+    if (!job) {
+      sendError(response, 404, "Queue item not found");
+      return;
+    }
+    sendJson(response, 200, { ok: true, job });
     return;
   }
 
@@ -3507,7 +4295,7 @@ async function routeApi(request, response, url) {
 
   const taskStopMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/stop$/);
   if (taskStopMatch && request.method === "POST") {
-    const ok = stopTask(taskStopMatch[1]);
+    const ok = await stopTask(taskStopMatch[1]);
     sendJson(response, ok ? 200 : 409, { ok });
     return;
   }
@@ -3633,6 +4421,8 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(approvalDispatchTimer);
+  taskScheduler.stop();
   console.log(`Received ${signal}; draining event store runtime...`);
   const forceExit = setTimeout(() => process.exit(1), 5000);
   forceExit.unref?.();
@@ -3640,6 +4430,7 @@ async function shutdown(signal) {
     await drainEventStoreRuntime();
     await closePersistentMcpSessions();
     await closeStatusRuntime();
+    await stopSearchIndex();
   } catch (error) {
     console.error(`[shutdown] runtime drain failed: ${error.stack || error.message}`);
   }
@@ -3700,6 +4491,47 @@ server.on("upgrade", async (request, socket, head) => {
 });
 
 scheduleToolEventsPrune();
+
+const executionFacade = getExecutionHostFacade();
+if (typeof executionFacade?.getExecution === "function") {
+  const executionReconciler = createExecutionStartupReconciler({
+    persistence: {
+      listExecutionBindings,
+      getExecutionBinding,
+      upsertExecutionBinding,
+      ingestExecutionEvent: ingestExecutionHostEvent,
+      ackExecutionEvents: acknowledgeExecutionHostEvents
+    },
+    host: {
+      get: (id) => executionFacade.getExecution(id),
+      events: (id, after, limit) => executionFacade.executionEvents(id, after, limit),
+      ack: (id, seq, operationId) => executionFacade.acknowledgeExecutionEvents(id, seq, operationId)
+    },
+    projectEvent: projectReconciledExecutionEvent,
+    async restoreSubscription(binding, snapshot) {
+      if (!snapshot || binding.attachState !== "attached") return;
+      if (binding.kind === "terminal") await getTerminalSession(binding.id);
+      else if (binding.kind === "command") void monitorReconciledCommand(binding);
+      else await restoreTaskExecution(binding, snapshot, settings);
+    }
+  });
+  const reconciliationResults = await executionReconciler.reconcile();
+  const failures = reconciliationResults.filter((item) => item.error);
+  console.log(`[execution-reconciliation] bindings=${reconciliationResults.length} failures=${failures.length}`);
+} else {
+  // Legacy execution has no durable host to reconcile; external bindings remain descriptive only.
+  for (const binding of listExecutionBindings({ activeOnly: true })) {
+    upsertExecutionBinding({
+      id: binding.id,
+      attachState: binding.owner === "external" ? "external" : "unreachable"
+    });
+  }
+}
+
+const attachedTaskIds = listExecutionBindings({ activeOnly: true })
+  .filter((binding) => binding.taskId && binding.attachState === "attached")
+  .map((binding) => binding.taskId);
+taskScheduler.start({ preserveTaskIds: attachedTaskIds });
 
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;

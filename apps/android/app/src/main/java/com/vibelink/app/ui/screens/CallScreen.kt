@@ -49,7 +49,7 @@ fun LegacyCallScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Live Call") },
+                title = { Text(strings.liveCall) },
                 actions = {
                     TextButton(onClick = onLogout) { Text(strings.legacyDisconnect) }
                 }

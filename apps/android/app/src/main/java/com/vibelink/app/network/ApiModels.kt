@@ -7,6 +7,7 @@ import com.google.gson.annotations.SerializedName
 // ── Auth / Status ──
 
 data class PublicSettings(
+    val revision: Int = 0,
     @SerializedName("hasOpenAIKey") val hasOpenAIKey: Boolean = false,
     @SerializedName("hasAnthropicKey") val hasAnthropicKey: Boolean = false,
     @SerializedName("hasZhipuKey") val hasZhipuKey: Boolean = false,
@@ -614,6 +615,8 @@ data class WorkspaceFileResponse(
     @SerializedName("absolutePath") val absolutePath: String = "",
     val size: Long = 0,
     @SerializedName("updatedAt") val updatedAt: String = "",
+    val revision: String = "",
+    val etag: String = "",
     val text: String = "",
     val binary: Boolean = false,
 )
@@ -623,6 +626,7 @@ data class WorkspaceFileMutationRequest(
     val path: String,
     val text: String = "",
     @SerializedName("nextPath") val nextPath: String = "",
+    @SerializedName("expectedRevision") val expectedRevision: String? = null,
 )
 
 data class WorkspaceFileMutationResponse(
@@ -634,6 +638,8 @@ data class WorkspaceFileMutationResponse(
     @SerializedName("absolutePath") val absolutePath: String = "",
     val size: Long = 0,
     @SerializedName("updatedAt") val updatedAt: String = "",
+    val revision: String = "",
+    val etag: String = "",
     val text: String = "",
     val binary: Boolean = false,
 )
@@ -759,10 +765,40 @@ data class TestSummary(
     val ok: Boolean = false,
     val passed: Int = 0,
     val failed: Int = 0,
+    val skipped: Int = 0,
     val failures: List<String> = emptyList(),
     val log: String = "",
+    val runner: String = "",
+    @SerializedName("durationMs") val durationMs: Double? = null,
+    val suites: List<TestSuiteResult> = emptyList(),
+    val cases: List<TestCaseResult> = emptyList(),
 )
 
+data class TestLocation(
+    val path: String = "",
+    val line: Int? = null,
+    val column: Int? = null,
+)
+
+data class TestCaseResult(
+    val id: String = "",
+    val name: String = "",
+    @SerializedName("fullName") val fullName: String = "",
+    val suite: String = "",
+    val status: String = "skip",
+    @SerializedName("durationMs") val durationMs: Double? = null,
+    val location: TestLocation = TestLocation(),
+    val failure: String = "",
+    @SerializedName("rerunCommand") val rerunCommand: String? = null,
+)
+
+data class TestSuiteResult(
+    val name: String = "",
+    val status: String = "skip",
+    @SerializedName("durationMs") val durationMs: Double? = null,
+    val location: TestLocation = TestLocation(),
+    val cases: List<TestCaseResult> = emptyList(),
+)
 
 data class GitFileActionRequest(
     val action: String,
@@ -895,9 +931,13 @@ data class SearchResponse(
     val items: List<SearchResult> = emptyList(),
     val query: String = "",
     val scope: String = "all",
+    val sort: String = "relevance",
+    val order: String = "desc",
+    val total: Int = 0,
     val limit: Int = 0,
     val cursor: String = "",
     val nextCursor: String = "",
+    val savedSearchId: String = "",
 )
 data class SearchResult(
     val kind: String = "",
@@ -909,6 +949,47 @@ data class SearchResult(
     val workspaceId: String = "",
     val turnId: String = "",
 )
+
+data class SavedSearch(
+    val id: String = "",
+    val name: String = "",
+    val query: String = "",
+    val scope: String = "all",
+    val tag: String = "",
+    val favorite: Boolean = false,
+    val sort: String = "relevance",
+    val order: String = "desc",
+    val createdAt: String = "",
+    val updatedAt: String = "",
+    val lastUsedAt: String = "",
+)
+
+data class SavedSearchRequest(
+    val name: String,
+    val query: String,
+    val scope: String = "all",
+    val tag: String = "",
+    val favorite: Boolean = false,
+    val sort: String = "relevance",
+    val order: String = "desc",
+)
+
+data class SavedSearchListResponse(val items: List<SavedSearch> = emptyList())
+
+data class SearchHistoryItem(
+    val id: String = "",
+    val query: String = "",
+    val scope: String = "all",
+    val tag: String = "",
+    val favorite: Boolean = false,
+    val sort: String = "relevance",
+    val order: String = "desc",
+    val resultCount: Int = 0,
+    val useCount: Int = 0,
+    val searchedAt: String = "",
+)
+
+data class SearchHistoryListResponse(val items: List<SearchHistoryItem> = emptyList())
 
 data class CommandRegistryResponse(val items: List<CommandDefinition> = emptyList())
 data class CommandAction(
@@ -1148,6 +1229,13 @@ data class ApprovalTaskExecutionResult(
     @SerializedName("toolRunId") val toolRunId: String = "",
     val session: TerminalSessionInfo? = null,
     val task: ApprovalTaskResult? = null,
+    val workspace: WorkspaceItem? = null,
+    val cwd: String = "",
+    val command: String = "",
+    val stdout: String = "",
+    val stderr: String = "",
+    @SerializedName("exitCode") val exitCode: Int = 0,
+    val test: TestSummary? = null,
 )
 
 data class ApprovalDecisionResponse(
@@ -1179,6 +1267,7 @@ data class SettingsPatchRequest(
     @SerializedName("toolEvents") val toolEvents: ToolEventsSettings? = null,
     val mcp: McpSettingsPatch? = null,
     val apiKeys: Map<String, String>? = null,
+    @SerializedName("expectedRevision") val expectedRevision: Int? = null,
 )
 
 data class SettingsPatchResponse(

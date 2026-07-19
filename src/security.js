@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { rootDir } from "./config.js";
 import { createDevice, deleteWorkspaceByPath, findDeviceByToken, listWorkspaces, upsertWorkspace } from "./db.js";
@@ -79,10 +80,33 @@ export function allowedRoots(settings = {}) {
   return unique([...explicit, ...workspaceRoots, ...defaultAllowedRoots(settings)]).map((item) => path.resolve(item));
 }
 
+function comparablePath(value) {
+  const resolved = path.resolve(String(value || ""));
+  if (process.platform !== "win32") return resolved;
+
+  const suffix = [];
+  let existing = resolved;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    suffix.unshift(path.basename(existing));
+    existing = parent;
+  }
+  try {
+    return path.resolve(fs.realpathSync.native(existing), ...suffix).toLowerCase();
+  } catch {
+    return resolved.toLowerCase();
+  }
+}
+
 export function resolveAllowedPath(value, settings = {}) {
   const resolved = path.resolve(String(value || ""));
   const roots = allowedRoots(settings);
-  const root = roots.find((candidate) => resolved === candidate || resolved.toLowerCase().startsWith(`${candidate.toLowerCase()}${path.sep}`));
+  const comparable = comparablePath(resolved);
+  const root = roots.find((candidate) => {
+    const comparableRoot = comparablePath(candidate);
+    return comparable === comparableRoot || comparable.startsWith(`${comparableRoot}${path.sep}`);
+  });
   if (!root) {
     const error = new Error("Path is outside allowed roots.");
     error.status = 403;

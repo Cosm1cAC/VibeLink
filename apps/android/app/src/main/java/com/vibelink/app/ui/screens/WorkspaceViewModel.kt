@@ -58,6 +58,9 @@ class WorkspaceViewModel : ViewModel() {
     private val _commandResult = MutableStateFlow<CommandResult?>(null)
     val commandResult: StateFlow<CommandResult?> = _commandResult.asStateFlow()
 
+    private val _testResult = MutableStateFlow<CommandResult?>(null)
+    val testResult: StateFlow<CommandResult?> = _testResult.asStateFlow()
+
     private val _loading = MutableStateFlow(false)
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
 
@@ -255,6 +258,7 @@ class WorkspaceViewModel : ViewModel() {
     fun mutateFile(apiClient: ApiClient, action: String, path: String, text: String = "", nextPath: String = "") {
         val workspaceId = _selectedWorkspaceId.value
         if (workspaceId.isBlank() || path.trim().isBlank()) return
+        val baseFile = _selectedFile.value?.takeIf { it.path == path.trim() }
         viewModelScope.launch {
             _refreshing.value = true
             _error.value = ""
@@ -265,12 +269,28 @@ class WorkspaceViewModel : ViewModel() {
                     path = path.trim(),
                     text = text,
                     nextPath = nextPath.trim(),
+                    expectedRevision = baseFile?.revision?.takeIf { it.isNotBlank() },
+                    requireAbsent = action == "write" && baseFile == null,
                 )
                 _selectedFile.value = when (result.action) {
                     "delete" -> null
                     else -> apiClient.getWorkspaceFile(workspaceId, result.path)
                 }
                 loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
+            } catch (error: ApiException) {
+                if (error.statusCode == 409) {
+                    val latest = runCatching { apiClient.getWorkspaceFile(workspaceId, path.trim()) }.getOrNull()
+                    _selectedFile.value = if (action == "write" && baseFile != null && latest != null) {
+                        val merged = RevisionConflictPolicy.mergeWorkspaceText(baseFile.text, text, latest.text)
+                        latest.copy(text = merged.text)
+                    } else {
+                        latest
+                    }
+                    runCatching { loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value) }
+                    _error.value = "File changed on another device. Latest content was refreshed and local edits were preserved for review."
+                } else {
+                    _error.value = error.message ?: "Workspace file action failed"
+                }
             } catch (error: Exception) {
                 _error.value = error.message ?: "Workspace file action failed"
             } finally {
@@ -363,9 +383,19 @@ class WorkspaceViewModel : ViewModel() {
         viewModelScope.launch {
             _commandRunning.value = true
             _error.value = ""
+            _pendingApproval.value = null
             try {
-                _commandResult.value = apiClient.runCommand(workspaceId, trimmed, kind = kind)
+                val result = apiClient.runCommand(workspaceId, trimmed, kind = kind)
+                if (kind == "test") _testResult.value = result else _commandResult.value = result
                 loadWorkspaceDetails(apiClient, workspaceId, _currentDir.value)
+            } catch (error: ApiException) {
+                val notice = WorkspaceApprovalHandoff.commandNoticeFromException(error)
+                if (notice == null) {
+                    _error.value = error.message ?: "Command failed"
+                } else {
+                    _pendingApproval.value = notice
+                    _error.value = notice.message
+                }
             } catch (error: Exception) {
                 _error.value = error.message ?: "Command failed"
             } finally {
@@ -405,6 +435,36 @@ class WorkspaceViewModel : ViewModel() {
     }
 
     fun applyApprovalDecision(apiClient: ApiClient, response: ApprovalDecisionResponse): Boolean {
+        val approvalKind = response.approval?.kind.orEmpty()
+        if (approvalKind in setOf("workspace.command", "workspace.test")) {
+            val approval = response.approval ?: return false
+            val pending = _pendingApproval.value
+            if (pending != null && pending.approvalId != approval.id) return false
+            _pendingApproval.value = null
+            if (approval.status == "denied") {
+                _error.value = "Command approval ${approval.id.take(8)} was denied."
+                return true
+            }
+            val result = response.result
+            if (result == null) {
+                _error.value = response.error.ifBlank { "Approved command did not return a result." }
+                return true
+            }
+            val commandResult = CommandResult(
+                ok = result.ok,
+                workspace = result.workspace,
+                cwd = result.cwd,
+                command = result.command,
+                stdout = result.stdout,
+                stderr = result.stderr,
+                exitCode = result.exitCode,
+                test = result.test,
+            )
+            if (approvalKind == "workspace.test") _testResult.value = commandResult else _commandResult.value = commandResult
+            _error.value = ""
+            viewModelScope.launch { runCatching { loadWorkspaceDetails(apiClient, _selectedWorkspaceId.value, _currentDir.value) } }
+            return true
+        }
         if (!WorkspaceApprovalHandoff.isTerminalDecision(response)) return false
         val approval = response.approval ?: return false
         val pending = _pendingApproval.value

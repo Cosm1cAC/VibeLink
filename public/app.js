@@ -34,7 +34,12 @@ async function api(path, options = {}) {
   });
 
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 
@@ -602,8 +607,15 @@ function bindEvents() {
     $("#planModeButton").setAttribute("aria-pressed", String(permissionMode === "plan"));
     await api("/api/settings", {
       method: "POST",
-      body: JSON.stringify({ permissionMode })
-    }).catch(showToast);
+      headers: { "If-Match": `"vibelink:settings:${Number(state.settings.revision || 0)}"` },
+      body: JSON.stringify({ permissionMode, expectedRevision: Number(state.settings.revision || 0) })
+    }).then((result) => { state.settings = result.settings || state.settings; }).catch(async (error) => {
+      if (error.status === 409 && error.data?.current?.settings) {
+        state.settings = error.data.current.settings;
+        renderSettings({ settings: state.settings });
+      }
+      showToast(error);
+    });
   });
 
   on("#planModeButton", "click", togglePlanMode);
@@ -645,20 +657,33 @@ function bindEvents() {
 
   on("#settingsForm", "submit", async (event) => {
     event.preventDefault();
+    const draft = {
+      defaultCwd: $("#defaultCwd").value.trim(),
+      claudeCommand: $("#claudeCommand").value.trim(),
+      codexCommand: $("#codexCommand").value.trim(),
+      codexTemplate: $("#codexTemplate").value.trim()
+    };
     const apiKeys = {};
     if ($("#settingsOpenAIKey").value.trim()) apiKeys.openai = $("#settingsOpenAIKey").value.trim();
     if ($("#settingsAnthropicKey").value.trim()) apiKeys.anthropic = $("#settingsAnthropicKey").value.trim();
 
-    await api("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({
-        defaultCwd: $("#defaultCwd").value.trim(),
-        claudeCommand: $("#claudeCommand").value.trim(),
-        codexCommand: $("#codexCommand").value.trim(),
-        codexTemplate: $("#codexTemplate").value.trim(),
-        apiKeys
-      })
-    });
+    try {
+      await api("/api/settings", {
+        method: "POST",
+        headers: { "If-Match": `"vibelink:settings:${Number(state.settings.revision || 0)}"` },
+        body: JSON.stringify({ ...draft, apiKeys, expectedRevision: Number(state.settings.revision || 0) })
+      });
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      state.settings = error.data?.current?.settings || (await api("/api/settings")).settings;
+      renderSettings({ settings: state.settings });
+      $("#defaultCwd").value = draft.defaultCwd;
+      $("#claudeCommand").value = draft.claudeCommand;
+      $("#codexCommand").value = draft.codexCommand;
+      $("#codexTemplate").value = draft.codexTemplate;
+      showToast("设置已在其他设备修改；已刷新基线并保留本机草稿，请检查后重试。");
+      return;
+    }
     $("#settingsOpenAIKey").value = "";
     $("#settingsAnthropicKey").value = "";
     closeSettings();

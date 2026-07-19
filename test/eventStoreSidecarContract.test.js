@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,15 +11,7 @@ import {
   EVENT_STORE_SIDECAR_PROTOCOL_VERSION
 } from "../src/eventStoreContract.js";
 import { createEventStoreSidecarClient } from "../src/eventStoreSidecarClient.js";
-
-function cargoPath() {
-  if (process.platform === "win32") {
-    const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
-    return result.status === 0 ? String(result.stdout || "").split(/\r?\n/).find(Boolean) || "" : "";
-  }
-  const result = spawnSync("sh", ["-lc", "command -v cargo"], { encoding: "utf8", windowsHide: true });
-  return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
-}
+import { cargoPath, rustBinaryIsCurrent } from "./rustTestSupport.js";
 
 function parseRustSidecarArgs() {
   if (!process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON) return ["event-store-sidecar"];
@@ -47,9 +38,10 @@ function rustSidecarRunner(dbPath, extraArgs = []) {
   }
 
   const binaryName = process.platform === "win32" ? "vibelink.exe" : "vibelink";
+  const sourceRoot = path.join(process.cwd(), "apps", "windows", "src");
   for (const profile of ["release", "debug"]) {
     const command = path.join(process.cwd(), "apps", "windows", "target", profile, binaryName);
-    if (fs.existsSync(command)) {
+    if (rustBinaryIsCurrent(command, sourceRoot)) {
       return {
         command,
         args: ["event-store-sidecar", dbPath, ...extraArgs],
@@ -146,6 +138,23 @@ function createSidecarDb() {
       created_at TEXT NOT NULL,
       UNIQUE(session_id, event_id)
     );
+    CREATE TABLE event_acks (
+      device_id TEXT NOT NULL,
+      stream_id TEXT NOT NULL,
+      cursor INTEGER NOT NULL DEFAULT 0,
+      event_id TEXT,
+      acked_at TEXT NOT NULL,
+      metadata_json TEXT,
+      PRIMARY KEY(device_id, stream_id)
+    );
+    CREATE TABLE compaction_markers (
+      marker_id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      from_cursor INTEGER NOT NULL,
+      to_cursor INTEGER NOT NULL,
+      compacted_at TEXT NOT NULL,
+      metadata_json TEXT
+    );
   `);
   db.prepare("INSERT INTO tool_runs (id, task_id, workspace_id, tool_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .run("tool-sidecar", "task-sidecar", "workspace-sidecar", "shell", "running", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
@@ -169,6 +178,19 @@ test("event store JSON sidecar contract handles append and replay requests", asy
     assert.equal(health.protocolVersion, EVENT_STORE_SIDECAR_PROTOCOL_VERSION);
     assert.deepEqual(health.supportedMethods, EVENT_STORE_CONTRACT_METHODS);
     assert.equal(health.schemaReady, true);
+
+    assert.equal((await client.upsertEventAck("device-1", "task:sidecar", 12, { eventId: "event-12" })).cursor, 12);
+    assert.equal((await client.upsertEventAck("device-1", "task:sidecar", 4, { eventId: "event-4" })).cursor, 12);
+    assert.equal((await client.getEventAck("device-1", "task:sidecar")).cursor, 12);
+    assert.equal((await client.listEventAcks({ streamId: "task:sidecar" })).length, 1);
+    const retention = await client.planRetention({ streamId: "task:sidecar", retentionDays: 7, keepLatest: 50, now: Date.UTC(2026, 0, 8) });
+    assert.equal(retention.cutoff, "2026-01-01T00:00:00.000Z");
+    assert.equal(retention.ackCursor, 12);
+    assert.equal(retention.safeCursor, 12);
+    await client.recordCompactionMarker({ markerId: "marker-1", streamId: "task:sidecar", fromCursor: 1, toCursor: 10 });
+    assert.equal((await client.listCompactionMarkers({ streamId: "task:sidecar" }))[0].markerId, "marker-1");
+    assert.equal(await client.deleteDeviceEventAcks("device-1"), 1);
+    assert.equal(await client.getEventAck("device-1", "task:sidecar"), null);
 
     const taskCursors = await client.insertTaskEvents("task-sidecar", [
       {

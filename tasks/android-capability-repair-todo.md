@@ -13,7 +13,7 @@
 - [ ] T11: Complete Workspace context and create/upsert
 - [ ] T12: Add PR review and complete worktree operations
 - [ ] T13: Add command palette, full-text search, tags, and favorites
-- [ ] T14: Close accessibility, localization, and rotation coverage
+- [x] T14: Close accessibility, localization, and rotation coverage
 
 ## Verification Gates
 

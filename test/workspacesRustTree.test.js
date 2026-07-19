@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +10,7 @@ import {
   getWorkspaceRuntimeStats,
   getWorkspaceTree
 } from "../src/workspaces.js";
+import { cargoPath } from "./rustTestSupport.js";
 import { upsertWorkspace } from "../src/db.js";
 
 function restoreEnv(key, previous) {
@@ -78,15 +78,6 @@ function writeRustScannerInvalidItemsStub(dir) {
     "utf8"
   );
   return scanner;
-}
-
-function cargoPath() {
-  if (process.platform === "win32") {
-    const result = spawnSync("where.exe", ["cargo"], { encoding: "utf8", windowsHide: true });
-    return result.status === 0 ? String(result.stdout || "").split(/\r?\n/).find(Boolean) || "" : "";
-  }
-  const result = spawnSync("sh", ["-lc", "command -v cargo"], { encoding: "utf8", windowsHide: true });
-  return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/)[0] || "" : "";
 }
 
 test("getWorkspaceContext preserves Node and Rust scanner parity for supported ignore rules", async (t) => {

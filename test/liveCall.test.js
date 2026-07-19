@@ -11,14 +11,20 @@ import {
   stopLiveCallSession
 } from "../src/liveCall.js";
 import {
+  deleteLiveCallAudioFile,
   getActiveAsrProviderId,
   getLiveCallAsrCheckpoints,
   getLiveCallAsrMetrics,
+  getLiveCallAsrReadiness,
+  getLiveCallAudioPolicy,
   ingestLiveCallAudio,
   listAsrProviders,
+  listLiveCallAudioFiles,
+  pcm16ToWav,
   recoverLiveCallAsrFromCheckpoints,
   resetLiveCallAsrMetrics,
-  setActiveAsrProvider
+  setActiveAsrProvider,
+  transcriptFromWhisperJson
 } from "../src/liveCallAsr.js";
 
 test("live call sessions preserve workspace and ASR metadata", () => {
@@ -130,7 +136,7 @@ test("live call ASR normalizes audio, segments speech, and records checkpoints",
     const session = createLiveCallSession({
       title: "ASR pipeline test",
       source: "node-test",
-      asrProvider: "missing-real-provider"
+      asrProvider: "mock"
     });
     const silence = Buffer.alloc(4800 * 2 * 2);
     const speech = Buffer.alloc(4800 * 2 * 2);
@@ -173,7 +179,7 @@ test("live call ASR normalizes audio, segments speech, and records checkpoints",
     const recovered = recoverLiveCallAsrFromCheckpoints(session.id);
 
     assert.equal(providerEvent.provider, "mock");
-    assert.equal(providerEvent.fallback, true);
+    assert.equal(providerEvent.fallback, false);
     assert.equal(segmentEvent.sampleRate, 16000);
     assert.equal(segmentEvent.channels, 1);
     assert.ok(segmentEvent.bytes > 0);
@@ -195,7 +201,7 @@ test("live call ASR metrics count normalized audio segments", () => {
     const session = createLiveCallSession({
       title: "ASR metrics test",
       source: "node-test",
-      asrProvider: "missing-real-provider"
+      asrProvider: "mock"
     });
     const silence = Buffer.alloc(4800 * 2 * 2);
     const speech = Buffer.alloc(4800 * 2 * 2);
@@ -241,11 +247,70 @@ test("live call ASR metrics count normalized audio segments", () => {
     assert.equal(metrics.ingestDurationSamples, metrics.ingestCalls);
     assert.equal(typeof metrics.avgIngestMs, "number");
     assert.ok(metrics.maxIngestMs >= 0);
-    assert.equal(sessionMetrics.providerFallbacks, 1);
+    assert.equal(sessionMetrics.providerFallbacks, 0);
     assert.equal(sessionMetrics.ingestDurationSamples, sessionMetrics.ingestCalls);
     assert.equal(sessionMetrics.segments, metrics.segments);
     stopLiveCallSession(session.id, "test-cleanup");
   } finally {
     setActiveAsrProvider(previousProvider);
   }
+});
+
+test("live call ASR never silently substitutes deterministic mock", () => {
+  const previousProvider = getActiveAsrProviderId();
+  setActiveAsrProvider("mock");
+  try {
+    const session = createLiveCallSession({
+      title: "Missing production provider test",
+      source: "node-test",
+      asrProvider: "missing-real-provider"
+    });
+    assert.deepEqual(getLiveCallAsrReadiness("missing-real-provider"), {
+      ready: false,
+      provider: "missing-real-provider",
+      code: "no_production_asr_provider",
+      diagnostics: {}
+    });
+    assert.throws(() => ingestLiveCallAudio(session.id, {
+      channel: "remote",
+      sampleRate: 16000,
+      channels: 1,
+      encoding: "pcm16le",
+      buffer: Buffer.alloc(640)
+    }), /No production ASR provider/);
+    const errorEvent = listLiveCallEvents(session.id, { limit: 20 }).find((event) => event.type === "live_call.asr.error");
+    assert.equal(errorEvent.requestedProvider, "missing-real-provider");
+    assert.equal(errorEvent.error, "no_production_asr_provider");
+    stopLiveCallSession(session.id, "test-cleanup");
+  } finally {
+    setActiveAsrProvider(previousProvider);
+  }
+});
+
+test("whisper segment adapter writes valid WAV and parses CLI JSON", () => {
+  const wav = pcm16ToWav(Buffer.alloc(640), 16000, 1);
+  assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
+  assert.equal(wav.subarray(8, 12).toString("ascii"), "WAVE");
+  assert.equal(wav.readUInt32LE(24), 16000);
+  assert.equal(wav.readUInt32LE(40), 640);
+  assert.equal(transcriptFromWhisperJson(JSON.stringify({ transcription: [{ text: " hello" }, { text: "world " }] })), "hello world");
+});
+
+test("live call PCM lifecycle protects active files and deletes stopped recordings", () => {
+  const session = createLiveCallSession({ title: "PCM lifecycle test", source: "node-test", asrProvider: "mock" });
+  ingestLiveCallAudio(session.id, {
+    channel: "remote",
+    sampleRate: 16000,
+    channels: 1,
+    encoding: "pcm16le",
+    buffer: Buffer.alloc(640)
+  });
+  const checkpoint = getLiveCallAsrCheckpoints(session.id)[0];
+  const name = checkpoint.path.split(/[\\/]/).at(-1);
+  assert.equal(listLiveCallAudioFiles().some((file) => file.name === name && file.active), true);
+  assert.deepEqual(deleteLiveCallAudioFile(name), { ok: false, reason: "recording_active" });
+  ingestLiveCallAudio(session.id, { channel: "remote", stop: true });
+  assert.deepEqual(deleteLiveCallAudioFile(name), { ok: true, name });
+  assert.ok(getLiveCallAudioPolicy().maxTotalBytes >= getLiveCallAudioPolicy().maxFileBytes);
+  stopLiveCallSession(session.id, "test-cleanup");
 });

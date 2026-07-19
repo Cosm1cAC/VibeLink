@@ -391,6 +391,34 @@ export function initDb() {
       discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS event_acks (
+      device_id TEXT NOT NULL,
+      stream_id TEXT NOT NULL,
+      cursor INTEGER NOT NULL DEFAULT 0,
+      event_id TEXT,
+      acked_at TEXT NOT NULL,
+      metadata_json TEXT,
+      PRIMARY KEY (device_id, stream_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_acks_stream ON event_acks(stream_id, cursor);
+
+    CREATE TABLE IF NOT EXISTS retention_policies (
+      stream_id TEXT PRIMARY KEY,
+      retention_days INTEGER NOT NULL DEFAULT 30,
+      keep_latest INTEGER NOT NULL DEFAULT 5000,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS compaction_markers (
+      marker_id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      from_cursor INTEGER NOT NULL,
+      to_cursor INTEGER NOT NULL,
+      compacted_at TEXT NOT NULL,
+      metadata_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_compaction_markers_stream ON compaction_markers(stream_id, to_cursor);
   `);
 
   try { db.exec("ALTER TABLE tasks ADD COLUMN workspace_id TEXT"); } catch {}
@@ -979,8 +1007,17 @@ export function listDevices() {
 }
 
 export function revokeDevice(id) {
-  const result = database().prepare("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(nowIso(), id);
-  return result.changes > 0;
+  const db = database();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(nowIso(), id);
+    if (result.changes > 0) {
+      db.prepare("DELETE FROM event_acks WHERE device_id = ?").run(id);
+      db.prepare("DELETE FROM push_subscriptions WHERE device_id = ?").run(id);
+    }
+    db.exec("COMMIT");
+    return result.changes > 0;
+  } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
 }
 
 export function rotateDeviceToken(id, { ttlDays = 90 } = {}) {
@@ -1364,6 +1401,14 @@ export function getTaskEventCount(taskId) {
   return sqliteEventStore().getTaskEventCount(taskId);
 }
 
+export function upsertEventAck(deviceId, streamId, cursor, options) { return sqliteEventStore().upsertEventAck(deviceId, streamId, cursor, options); }
+export function getEventAck(deviceId, streamId) { return sqliteEventStore().getEventAck(deviceId, streamId); }
+export function listEventAcks(options) { return sqliteEventStore().listEventAcks(options); }
+export function deleteDeviceEventAcks(deviceId) { return sqliteEventStore().deleteDeviceEventAcks(deviceId); }
+export function planRetention(options) { return sqliteEventStore().planRetention(options); }
+export function recordCompactionMarker(options) { return sqliteEventStore().recordCompactionMarker(options); }
+export function listCompactionMarkers(options) { return sqliteEventStore().listCompactionMarkers(options); }
+
 function publicToolRun(row) {
   if (!row) return null;
   return {
@@ -1567,6 +1612,7 @@ function publicApprovalRequest(row) {
     itemId: row.item_id || "",
     continuationRef: row.continuation_ref || "",
     decisionVersion: Number(row.decision_version || 0),
+    expectedVersion: Number(row.decision_version || 0),
     deliveryStatus: row.delivery_status || "pending",
     requestedPermissions: fromJson(row.requested_permissions_json, null),
     availableDecisions: fromJson(row.available_decisions_json, []),
@@ -1651,12 +1697,16 @@ export function getExecutionBinding(id) {
   return executionPersistenceStore().getExecutionBinding(id);
 }
 
+export function listExecutionBindings(options = {}) {
+  return executionPersistenceStore().listExecutionBindings(options);
+}
+
 export function upsertExecutionBinding(input = {}) {
   return executionPersistenceStore().upsertExecutionBinding(input);
 }
 
-export function ingestExecutionHostEvent(executionId, event = {}) {
-  return executionPersistenceStore().ingestExecutionEvent(executionId, event);
+export function ingestExecutionHostEvent(executionId, event = {}, project = null) {
+  return executionPersistenceStore().ingestExecutionEvent(executionId, event, project);
 }
 
 export function listExecutionHostEvents(executionId, options = {}) {
@@ -1675,12 +1725,32 @@ export function claimApprovalOutboxCommands(options = {}) {
   return approvalOutboxStore().claimApprovalOutbox(options);
 }
 
+export function listApprovalOutboxCommands(options = {}) {
+  return approvalOutboxStore().listApprovalOutbox(options);
+}
+
 export function retryApprovalOutboxCommand(id, options = {}) {
   return approvalOutboxStore().retryApprovalOutbox(id, options);
 }
 
 export function markApprovalOutboxCommandApplied(id, options = {}) {
   return approvalOutboxStore().markApprovalOutboxApplied(id, options);
+}
+
+export function markApprovalOutboxCommandDelivered(id, options = {}) {
+  return approvalOutboxStore().markApprovalOutboxDelivered(id, options);
+}
+
+export function markApprovalOutboxCommandStale(id, options = {}) {
+  return approvalOutboxStore().markApprovalOutboxStale(id, options);
+}
+
+export function markApprovalOutboxCommandOutcomeUnknown(id, options = {}) {
+  return approvalOutboxStore().markApprovalOutboxOutcomeUnknown(id, options);
+}
+
+export function settleApprovalContinuation(continuationRef, status, options = {}) {
+  return approvalOutboxStore().settleApprovalContinuation(continuationRef, status, options);
 }
 
 export function updateApprovalRequest(id, patch = {}) {

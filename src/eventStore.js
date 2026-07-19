@@ -60,6 +60,7 @@ function replayCursorParts(value) {
 
 export function createSqliteEventStore({ database }) {
   if (typeof database !== "function") throw new TypeError("createSqliteEventStore requires a database function.");
+  try { database().exec(`CREATE TABLE IF NOT EXISTS event_acks (device_id TEXT NOT NULL, stream_id TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0, event_id TEXT, acked_at TEXT NOT NULL, metadata_json TEXT, PRIMARY KEY(device_id, stream_id)); CREATE TABLE IF NOT EXISTS retention_policies (stream_id TEXT PRIMARY KEY, retention_days INTEGER NOT NULL DEFAULT 30, keep_latest INTEGER NOT NULL DEFAULT 5000, updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS compaction_markers (marker_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, from_cursor INTEGER NOT NULL, to_cursor INTEGER NOT NULL, compacted_at TEXT NOT NULL, metadata_json TEXT);`); } catch {}
 
   function withTransaction(callback) {
     const db = database();
@@ -72,6 +73,37 @@ export function createSqliteEventStore({ database }) {
       try { db.exec("ROLLBACK"); } catch {}
       throw error;
     }
+  }
+
+  function normalizeStream(value) { return cleanString(value, 240); }
+  function publicAck(row) {
+    if (!row) return null;
+    return { deviceId: row.device_id, streamId: row.stream_id, cursor: Number(row.cursor || 0), eventId: row.event_id || "", ackedAt: row.acked_at || "", metadata: fromJson(row.metadata_json, {}) || {} };
+  }
+  function upsertEventAck(deviceId, streamId, cursor = 0, options = {}) {
+    const device = cleanString(deviceId, 160); const stream = normalizeStream(streamId);
+    if (!device || !stream) throw new TypeError("deviceId and streamId are required.");
+    const db = database(); const current = nowIso(); const next = Math.max(0, Math.floor(Number(cursor || 0)));
+    db.prepare(`INSERT INTO event_acks (device_id, stream_id, cursor, event_id, acked_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(device_id, stream_id) DO UPDATE SET cursor = MAX(event_acks.cursor, excluded.cursor), event_id = excluded.event_id, acked_at = excluded.acked_at, metadata_json = excluded.metadata_json`).run(device, stream, next, cleanString(options.eventId, 240), current, toJson(options.metadata || {}));
+    return publicAck(db.prepare("SELECT * FROM event_acks WHERE device_id = ? AND stream_id = ?").get(device, stream));
+  }
+  function getEventAck(deviceId, streamId) { return publicAck(database().prepare("SELECT * FROM event_acks WHERE device_id = ? AND stream_id = ?").get(deviceId, streamId)); }
+  function listEventAcks({ deviceId = "", streamId = "" } = {}) {
+    return database().prepare(`SELECT * FROM event_acks WHERE (? = '' OR device_id = ?) AND (? = '' OR stream_id = ?) ORDER BY stream_id, device_id`).all(deviceId, deviceId, streamId, streamId).map(publicAck);
+  }
+  function deleteDeviceEventAcks(deviceId) { return database().prepare("DELETE FROM event_acks WHERE device_id = ?").run(deviceId).changes; }
+  function planRetention({ streamId = "", retentionDays = 30, keepLatest = 5000, now = Date.now() } = {}) {
+    const cutoff = new Date(Number(now) - Math.max(0, Number(retentionDays || 0)) * 86400000).toISOString();
+    const ack = streamId ? database().prepare("SELECT MIN(cursor) AS cursor FROM event_acks WHERE stream_id = ?").get(streamId) : null;
+    return { streamId: normalizeStream(streamId), cutoff, keepLatest: Math.max(0, Math.floor(Number(keepLatest || 0))), ackCursor: ack?.cursor == null ? null : Number(ack.cursor), safeCursor: ack?.cursor == null ? null : Math.max(0, Number(ack.cursor)) };
+  }
+  function recordCompactionMarker({ markerId = crypto.randomUUID(), streamId, fromCursor = 0, toCursor = 0, metadata = {} } = {}) {
+    const current = nowIso(); database().prepare("INSERT OR REPLACE INTO compaction_markers (marker_id, stream_id, from_cursor, to_cursor, compacted_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)").run(markerId, normalizeStream(streamId), Number(fromCursor || 0), Number(toCursor || 0), current, toJson(metadata));
+    return { markerId, streamId: normalizeStream(streamId), fromCursor: Number(fromCursor || 0), toCursor: Number(toCursor || 0), compactedAt: current, metadata };
+  }
+  function listCompactionMarkers({ streamId = "", afterCursor = 0, limit = 100 } = {}) {
+    return database().prepare("SELECT * FROM compaction_markers WHERE (? = '' OR stream_id = ?) AND to_cursor > ? ORDER BY to_cursor ASC LIMIT ?").all(streamId, streamId, Number(afterCursor || 0), Math.max(1, Math.min(1000, Number(limit || 100)))).map((row) => ({ markerId: row.marker_id, streamId: row.stream_id, fromCursor: row.from_cursor, toCursor: row.to_cursor, compactedAt: row.compacted_at, metadata: fromJson(row.metadata_json, {}) || {} }));
   }
 
   function insertTaskEvent(taskId, event = {}) {
@@ -540,5 +572,22 @@ export function createSqliteEventStore({ database }) {
     pruneLiveCallEvents,
     listUnifiedEvents,
     replayWindow
+    ,upsertEventAck, getEventAck, listEventAcks, deleteDeviceEventAcks, planRetention, recordCompactionMarker, listCompactionMarkers
   };
+}
+
+// Small repository facades keep persistence usable without exposing the event-store selector.
+export function createEventAckRepository({ database }) {
+  const store = createSqliteEventStore({ database });
+  return { upsert: store.upsertEventAck, get: store.getEventAck, list: store.listEventAcks, removeDevice: store.deleteDeviceEventAcks };
+}
+
+export function createRetentionPlanner({ database }) {
+  const store = createSqliteEventStore({ database });
+  return { plan: store.planRetention };
+}
+
+export function createCompactionMarkerRepository({ database }) {
+  const store = createSqliteEventStore({ database });
+  return { record: store.recordCompactionMarker, list: store.listCompactionMarkers };
 }

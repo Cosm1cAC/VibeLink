@@ -70,6 +70,11 @@ export function getThreadState() {
   return getThreadStateFromDb();
 }
 
+export function threadStateEtag(state) {
+  const digest = crypto.createHash("sha256").update(JSON.stringify(state || emptyState())).digest("hex");
+  return `"vibelink:thread-state:${digest}"`;
+}
+
 export function updateThreadState(key, patch = {}, options = {}) {
   const cleanKey = cleanString(key, 320);
   if (!cleanKey) throw new Error("Thread key is required.");

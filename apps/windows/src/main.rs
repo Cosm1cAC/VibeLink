@@ -18,6 +18,7 @@ mod compression_sidecar;
 mod device_http;
 mod doctor_http;
 mod event_store_sidecar;
+mod execution_host;
 mod http_frontdoor;
 mod mcp_session_sidecar;
 mod pairing_http;
@@ -143,6 +144,19 @@ enum Mode {
         #[arg(long = "max-samples-per-chunk", default_value_t = 8_192)]
         max_samples_per_chunk: usize,
     },
+    /// Run the durable local execution router and worker discovery daemon.
+    Execd {
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
+        pipe: Option<String>,
+    },
+    /// Internal role: own one execution and its OS process handles.
+    #[command(hide = true)]
+    ExecutionWorker {
+        #[arg(long)]
+        bootstrap: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -204,6 +218,19 @@ fn run() -> Result<()> {
             max_buffered_samples,
             max_samples_per_chunk,
         } => audio_pipeline_sidecar::run(max_buffered_samples, max_samples_per_chunk),
+        Mode::Execd { data_dir, pipe } => {
+            let root = project_root()?;
+            let data_dir = data_dir.unwrap_or_else(|| {
+                resolve_data_dir(
+                    &root,
+                    env::var_os("VIBELINK_DATA_DIR"),
+                    env::var_os("LOCALAPPDATA"),
+                    Path::exists,
+                )
+            });
+            execution_host::run_execd(&data_dir, pipe.as_deref())
+        }
+        Mode::ExecutionWorker { bootstrap } => execution_host::run_worker(&bootstrap),
     }
 }
 

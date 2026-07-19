@@ -10,6 +10,7 @@ data class WorkspaceApprovalNotice(
     val approvalId: String,
     val toolRunId: String,
     val message: String,
+    val kind: String = "",
 )
 
 data class ApprovedTerminalHandoff(
@@ -36,6 +37,24 @@ object WorkspaceApprovalHandoff {
             approvalId = approvalId,
             toolRunId = toolRunId,
             message = "$reason Open Settings > Approvals; approving starts and reconnects this terminal automatically.",
+            kind = kind.ifBlank { TERMINAL_APPROVAL_KIND },
+        )
+    }
+
+    fun commandNoticeFromException(error: ApiException): WorkspaceApprovalNotice? {
+        if (error.statusCode != 428) return null
+        val json = parseObject(error.body)
+        val approval = objectMember(json, "approval")
+        val kind = stringMember(approval, "kind")
+        if (kind !in setOf("workspace.command", "workspace.test")) return null
+        val approvalId = stringMember(json, "approvalId").ifBlank { stringMember(approval, "id") }
+        if (approvalId.isBlank()) return null
+        return WorkspaceApprovalNotice(
+            approvalId = approvalId,
+            toolRunId = stringMember(json, "toolRunId").ifBlank { stringMember(approval, "toolRunId") },
+            message = stringMember(json, "error").ifBlank { "Workspace command needs approval." } +
+                " Open Settings > Approvals; the result will return here after approval.",
+            kind = kind,
         )
     }
 

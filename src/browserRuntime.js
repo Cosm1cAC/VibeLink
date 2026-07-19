@@ -1,6 +1,8 @@
 const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_BYTES = 1024 * 1024;
 
+export { createBrowserSessionRuntime, createBrowserTraceRedactor } from "./browserSessionRuntime.js";
+
 function compact(value, max = 500) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }

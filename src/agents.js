@@ -1,14 +1,15 @@
-import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { withAgentReachPath } from "./agentReachRuntime.js";
 import { bridgeAgentToolEvent } from "./agentToolBridge.js";
 import { withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 import { tasksDir } from "./config.js";
 import { doubaoAgentArgs, doubaoBridgeCliPath, doubaoCliPath } from "./doubaoRuntime.js";
-import { getDefaultEventReplayLimit, insertTaskEvent, listTaskEvents, listTaskEventsAsync, resolveEventReplayLimit, upsertTask } from "./db.js";
+import { acknowledgeExecutionHostEvents, createApprovalRequest, getDefaultEventReplayLimit, ingestExecutionHostEvent, insertTaskEvent, listTaskEvents, listTaskEventsAsync, resolveEventReplayLimit, settleApprovalContinuation, upsertExecutionBinding, upsertTask } from "./db.js";
+import { getExecutionHostFacade } from "./executionHostClient.js";
 import { resolveAllowedPath } from "./security.js";
 import { settingsWithSecrets } from "./store.js";
 import { zhipuAgentArgs, zhipuCliPath } from "./zhipuRuntime.js";
@@ -17,14 +18,16 @@ import { recordSessionOrigin, SESSION_ORIGINS } from "./sessionOrigins.js";
 const tasks = new Map();
 const MAX_RESTORED_TASKS = 80;
 let notificationHandler = null;
+let taskScheduler = null;
 
 function nowIso() {
   return new Date().toISOString();
 }
 
 function appendTaskEvent(task, event) {
-  if (event.payload?.thread_id && !task.sessionId) {
-    task.sessionId = event.payload.thread_id;
+  const sessionId = event.payload?.thread_id || event.payload?.session_id || event.payload?.sessionId;
+  if (sessionId && !task.sessionId) {
+    task.sessionId = sessionId;
     if (task.launchMode === "new") {
       try {
         recordSessionOrigin({
@@ -339,7 +342,9 @@ function resolveWorkingDir(payload, settings) {
 export const __testInternals = {
   agentLaunchPlan,
   claudeArgs,
-  resolveWorkingDir
+  persistentLaunchPayload,
+  resolveWorkingDir,
+  createOutputNormalizer: (...args) => createOutputNormalizer(...args)
 };
 
 function newestExisting(paths) {
@@ -549,6 +554,302 @@ function normalizeOutput(data) {
   });
 }
 
+function persistentLaunchPayload(payload = {}) {
+  return Object.fromEntries([
+    "agent", "title", "prompt", "cwd", "model", "mode", "sessionId", "reasoningEffort",
+    "permissionMode", "security", "template", "name"
+  ].filter((key) => payload[key] !== undefined).map((key) => [key, payload[key]]));
+}
+
+function createOutputNormalizer(onEvent) {
+  let buffered = "";
+  const decoder = new StringDecoder("utf8");
+  return {
+    write(data) {
+      buffered += decoder.write(Buffer.isBuffer(data) ? data : Buffer.from(String(data || ""), "utf8"));
+      const lines = buffered.split(/\r?\n/);
+      buffered = lines.pop() || "";
+      for (const line of lines) {
+        if (!line) continue;
+        for (const event of normalizeOutput(`${line}\n`)) onEvent(event);
+      }
+    },
+    end() {
+      buffered += decoder.end();
+      if (!buffered) return;
+      for (const event of normalizeOutput(buffered)) onEvent(event);
+      buffered = "";
+    }
+  };
+}
+
+const HOST_EXECUTION_STATUSES = new Set(["completed", "failed", "cancelled", "lost", "outcome_unknown"]);
+
+function eventBytes(event = {}) {
+  const payload = event.payload || {};
+  if (payload.encoding === "base64") return Buffer.from(String(payload.data || ""), "base64");
+  return Buffer.from(String(payload.text ?? payload.data ?? ""), "utf8");
+}
+
+function queuedResumePayload(task, prompt) {
+  const payload = { ...task.launchPayload, prompt };
+  if ((task.agent === "codex" || task.agent === "claude") && task.sessionId) {
+    payload.mode = "resume";
+    payload.sessionId = task.sessionId;
+  } else {
+    delete payload.mode;
+    delete payload.sessionId;
+  }
+  return payload;
+}
+
+async function monitorProviderTurn(task, execution, runtimeSettings) {
+  const stderrDecoder = new StringDecoder("utf8");
+  const normalizer = createOutputNormalizer((event) => {
+    task.updatedAt = nowIso();
+    appendTaskEvent(task, event);
+  });
+  let exit = null;
+  try {
+    while (!exit) {
+      const page = await execution.facade.providerEvents(execution.id, execution.afterHostSeq, 128);
+      const events = Array.isArray(page?.events) ? page.events : [];
+      for (const hostEvent of events) {
+        ingestExecutionHostEvent(execution.id, {
+          ...hostEvent,
+          executionId: hostEvent.executionId || execution.id,
+          eventId: hostEvent.eventId || `${execution.id}:${hostEvent.hostSeq}`,
+          at: hostEvent.at || nowIso()
+        });
+        const event = hostEvent.type === "provider.event" && hostEvent.payload?.type
+          ? { ...hostEvent.payload, eventId: hostEvent.eventId, hostSeq: hostEvent.hostSeq, at: hostEvent.payload.at || hostEvent.at }
+          : hostEvent;
+        execution.afterHostSeq = Math.max(execution.afterHostSeq, Number(event.hostSeq || 0));
+        if (event.protocol === "codex-app-server" && event.threadId && !task.sessionId) {
+          task.sessionId = event.threadId;
+          upsertTask(task);
+        }
+        if (event.type === "stream.stdout") normalizer.write(eventBytes(event));
+        else if (event.type === "stream.stderr") {
+          task.updatedAt = nowIso();
+          const text = stderrDecoder.write(eventBytes(event));
+          if (text) appendTaskEvent(task, { type: "stderr", text });
+        } else if (event.type === "provider.approval.required") {
+          const payload = event.payload || {};
+          const requestId = payload.requestId === undefined ? "" : String(payload.requestId);
+          const continuationRef = String(payload.continuationRef || `codex:${event.threadId || ""}:${event.turnId || ""}:${event.itemId || ""}:${requestId}`).slice(0, 2000);
+          const approvalId = String(payload.approvalId || `provider:${execution.id}:${requestId}`).slice(0, 160);
+          try {
+            createApprovalRequest({
+              id: approvalId,
+              toolRunId: task.toolRunId || "",
+              taskId: task.id,
+              kind: `provider.${payload.kind || "approval"}`,
+              title: "Codex approval required",
+              reason: payload.reason || "",
+              request: {
+                ...(payload.request || payload),
+                executionId: execution.id,
+                approvalHostSeq: Number(event.hostSeq || 0)
+              },
+              provider: "codex",
+              threadId: event.threadId || "",
+              turnId: event.turnId || "",
+              itemId: event.itemId || "",
+              continuationRef,
+              decisionVersion: payload.expectedDecisionVersion || 0,
+              requestedPermissions: payload.requestedPermissions,
+              availableDecisions: Array.isArray(payload.availableDecisions) ? payload.availableDecisions : []
+            });
+          } catch {
+            // Replayed host events are expected to hit the existing approval row.
+          }
+          appendTaskEvent(task, { type: "approval.required", payload: { ...payload, approvalId, continuationRef } });
+        } else if (["provider.approval.delivered", "provider.approval.applied", "provider.approval.stale"].includes(event.type)) {
+          const continuationRef = String(event.payload?.continuationRef || "");
+          const status = event.type.slice("provider.approval.".length);
+          if (continuationRef) {
+            try {
+              settleApprovalContinuation(continuationRef, status, {
+                reason: event.payload?.reason || "Provider continuation ended before the decision was applied."
+              });
+            } catch (error) {
+              if (error.code !== "OUTBOX_STATE_CONFLICT") throw error;
+            }
+          }
+          appendTaskEvent(task, { type: `approval.${status}`, payload: event.payload || {} });
+        } else if (event.type === "execution.exited") exit = event.payload || {};
+        else if (event.type === "execution.lost" || event.type === "operation.outcome_unknown") {
+          appendTaskEvent(task, { type: "error", text: event.payload?.message || event.type });
+        } else if (event.type === "output.truncated") {
+          appendTaskEvent(task, { type: "system", text: "Execution host output was truncated." });
+        }
+      }
+      if (execution.afterHostSeq > execution.ackedHostSeq) {
+        await execution.facade.acknowledgeProviderEvents(execution.id, execution.afterHostSeq);
+        acknowledgeExecutionHostEvents(execution.id, execution.afterHostSeq);
+        execution.ackedHostSeq = execution.afterHostSeq;
+      }
+      if (exit) break;
+      const snapshot = await execution.facade.getProvider(execution.id);
+      upsertExecutionBinding({
+        id: execution.id,
+        status: snapshot.status,
+        attachState: snapshot.attachState || "attached",
+        workerPid: snapshot.workerPid,
+        processPid: snapshot.processPid,
+        processStartedAt: snapshot.processStartedAt,
+        workerInstanceId: snapshot.workerInstanceId,
+        capabilities: snapshot.capabilities,
+        lastSeenHostSeq: Math.max(Number(snapshot.lastHostSeq || 0), execution.afterHostSeq),
+        endedAt: snapshot.endedAt,
+        exitCode: snapshot.exitCode,
+        signal: snapshot.signal
+      });
+      if (HOST_EXECUTION_STATUSES.has(snapshot.status)) {
+        exit = { exitCode: snapshot.exitCode, signal: snapshot.signal || "", status: snapshot.status };
+        break;
+      }
+      if (!events.length) await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 25);
+        timer.unref?.();
+      });
+    }
+    normalizer.end();
+    const trailingStderr = stderrDecoder.end();
+    if (trailingStderr) appendTaskEvent(task, { type: "stderr", text: trailingStderr });
+    const exitCode = Number(exit?.exitCode ?? 1);
+    if (!task.stopRequested && task.inputQueue.length) {
+      const prompt = task.inputQueue.shift();
+      appendTaskEvent(task, { type: "system", text: "Turn completed; starting queued resume." });
+      await startProviderTurn(task, queuedResumePayload(task, prompt), runtimeSettings, crypto.randomUUID());
+      return { status: task.status, exitCode: task.exitCode };
+    }
+    task.status = exitCode === 0 ? "done" : "failed";
+    task.exitCode = exitCode;
+    task.updatedAt = nowIso();
+    task.execution = null;
+    upsertTask(task);
+    appendTaskEvent(task, {
+      type: "system",
+      text: exit?.signal ? `Exited with signal ${exit.signal}` : `Exited with code ${exitCode}`
+    });
+    notificationHandler?.({
+      type: task.status === "done" ? "task.done" : "task.failed",
+      title: task.status === "done" ? "Task completed" : "Task failed",
+      body: task.title || task.commandLabel || task.id,
+      tag: `task:${task.id}`,
+      url: "/",
+      meta: { taskId: task.id, status: task.status, exitCode, signal: exit?.signal || "" }
+    });
+    taskScheduler?.settleTask?.(task.id, { status: task.status, exitCode });
+    return { status: task.status, exitCode };
+  } catch (error) {
+    normalizer.end();
+    const trailingStderr = stderrDecoder.end();
+    if (trailingStderr) appendTaskEvent(task, { type: "stderr", text: trailingStderr });
+    task.status = "failed";
+    task.updatedAt = nowIso();
+    task.execution = null;
+    upsertTask(task);
+    appendTaskEvent(task, { type: "error", text: error.message });
+    taskScheduler?.settleTask?.(task.id, { status: "failed", error: error.message });
+    return { status: "failed", error: error.message };
+  }
+}
+
+async function startProviderTurn(task, payload, runtimeSettings, executionId) {
+  const launch = agentLaunchPlan({ ...payload, cwd: task.cwd, agent: task.agent }, runtimeSettings);
+  const facade = task.executionFacade;
+  if (typeof facade?.startProvider !== "function") {
+    const error = new Error("Agent CLI execution requires the configured execution host.");
+    error.code = "EXECUTION_HOST_REQUIRED";
+    throw error;
+  }
+  task.commandLabel = commandLabel(launch.base.command, launch.args);
+  const useAppServer = task.agent === "codex" && typeof facade.startAppServerProvider === "function";
+  const policy = securityPolicy(payload, runtimeSettings);
+  const common = {
+    executionId,
+    command: launch.base.command,
+    cwd: task.cwd,
+    env: buildEnv(task.agent, runtimeSettings, payload.env)
+  };
+  const snapshot = useAppServer
+    ? await facade.startAppServerProvider({
+      ...common,
+      args: [...launch.base.args, ...codexGlobalArgs(payload, runtimeSettings, policy)],
+      ...(payload.sessionId
+        ? { threadResumeParams: { threadId: payload.sessionId, cwd: task.cwd, runtimeWorkspaceRoots: [task.cwd] } }
+        : {
+            threadStartParams: {
+              cwd: task.cwd,
+              runtimeWorkspaceRoots: [task.cwd],
+              approvalPolicy: codexApprovalPolicy(policy.approvalPolicy || "on-request"),
+              sandbox: policy.sandboxMode || "workspace-write",
+              threadSource: "appServer",
+              ephemeral: false
+            }
+          }),
+      turnStartParams: {
+        ...(payload.sessionId ? { threadId: payload.sessionId } : {}),
+        input: [{ type: "text", text: payload.prompt || "", text_elements: [] }]
+      }
+    })
+    : await facade.startProvider({ ...common, args: launch.args });
+  upsertExecutionBinding({
+    id: snapshot.executionId,
+    kind: useAppServer ? "provider.appServer" : "provider.cli",
+    taskId: task.id,
+    toolRunId: task.toolRunId || "",
+    provider: task.agent,
+    owner: "execution-host",
+    status: snapshot.status || "running",
+    attachState: snapshot.attachState || "attached",
+    workerPid: snapshot.workerPid,
+    processPid: snapshot.processPid,
+    processStartedAt: snapshot.processStartedAt,
+    workerInstanceId: snapshot.workerInstanceId,
+    capabilities: snapshot.capabilities || {},
+    lastSeenHostSeq: Number(snapshot.lastHostSeq || 0),
+    lastIngestedHostSeq: Number(snapshot.lastAckedHostSeq || 0),
+    lastAckedHostSeq: Number(snapshot.lastAckedHostSeq || 0)
+  });
+  task.execution = {
+    id: snapshot.executionId,
+    facade,
+    afterHostSeq: Number(snapshot.lastAckedHostSeq || 0),
+    ackedHostSeq: Number(snapshot.lastAckedHostSeq || 0)
+  };
+  task.status = "running";
+  task.updatedAt = nowIso();
+  upsertTask(task);
+  appendTaskEvent(task, { type: "system", text: task.commandLabel });
+  return monitorProviderTurn(task, task.execution, runtimeSettings);
+}
+
+export async function restoreTaskExecution(binding, snapshot, settings) {
+  const task = tasks.get(binding.taskId);
+  if (!task || !snapshot || task.execution) return false;
+  const facade = getExecutionHostFacade();
+  if (typeof facade?.providerEvents !== "function") return false;
+  task.executionFacade = facade;
+  task.launchPayload ||= {};
+  task.inputQueue ||= [];
+  task.stopRequested = false;
+  task.execution = {
+    id: binding.id,
+    facade,
+    afterHostSeq: Number(binding.lastAckedHostSeq || 0),
+    ackedHostSeq: Number(binding.lastAckedHostSeq || 0)
+  };
+  task.status = "running";
+  task.updatedAt = nowIso();
+  upsertTask(task);
+  void monitorProviderTurn(task, task.execution, await settingsWithSecrets(settings));
+  return true;
+}
+
 export function getTasks() {
   return [...tasks.values()]
     .map((task) => ({
@@ -566,6 +867,81 @@ export function getTasks() {
       sessionOrigin: task.sessionOrigin || SESSION_ORIGINS.VIBELINK_CLI
     }))
     .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+}
+
+export function configureTaskScheduler(scheduler) {
+  taskScheduler = scheduler || null;
+}
+
+export async function executeQueuedTask(job, settings) {
+  const payload = job.payload || {};
+  const runtimeSettings = await settingsWithSecrets(settings);
+  let task = tasks.get(job.taskId);
+  if (!task) {
+    const agent = taskAgent(payload.agent);
+    const { cwd } = resolveWorkingDir(payload, runtimeSettings);
+    const launch = agentLaunchPlan({ ...payload, cwd, agent }, runtimeSettings);
+    task = {
+      id: job.taskId,
+      agent,
+      title: (payload.title || payload.prompt || `${agent} task`).slice(0, 96),
+      cwd,
+      status: "queued",
+      createdAt: job.createdAt || nowIso(),
+      updatedAt: nowIso(),
+      exitCode: null,
+      sessionId: payload.sessionId || "",
+      commandLabel: commandLabel(launch.base.command, launch.args),
+      security: securityPolicy(payload, runtimeSettings),
+      execution: null,
+      listeners: new Set(),
+      events: [],
+      logPath: path.join(tasksDir, `${job.taskId}.jsonl`)
+    };
+    tasks.set(task.id, task);
+    upsertTask(task);
+    appendTaskEvent(task, { type: "system", text: "Restored queued task from SQLite." });
+  }
+  task.executionFacade = payload.executionHost || getExecutionHostFacade();
+  task.launchPayload = { ...payload, executionHost: undefined };
+  task.inputQueue ||= [];
+  task.stopRequested = false;
+  task.status = "starting";
+  task.exitCode = null;
+  task.updatedAt = nowIso();
+  upsertTask(task);
+  appendTaskEvent(task, {
+    type: "system",
+    text: job.attempts > 1 ? `Retry attempt ${job.attempts} of ${job.maxAttempts}.` : "Task claimed by background scheduler."
+  });
+  try {
+    return await startProviderTurn(task, payload, runtimeSettings, crypto.randomUUID());
+  } catch (error) {
+    task.status = "failed";
+    task.updatedAt = nowIso();
+    task.execution = null;
+    upsertTask(task);
+    appendTaskEvent(task, { type: "error", text: error.message });
+    return { status: "failed", error: error.message };
+  }
+}
+
+export function applyTaskQueueTransition(job, detail = {}) {
+  const task = tasks.get(job?.taskId);
+  if (!task) return;
+  if (job.status === "queued") {
+    task.status = "queued";
+    task.updatedAt = nowIso();
+    upsertTask(task);
+    if (detail.type === "retry_scheduled") {
+      appendTaskEvent(task, { type: "system", text: `Attempt ${job.attempts} failed; retry scheduled for ${job.nextAttemptAt}.` });
+    }
+  } else if (job.status === "cancelled" && !task.execution) {
+    task.status = "cancelled";
+    task.updatedAt = nowIso();
+    upsertTask(task);
+    appendTaskEvent(task, { type: "system", text: "Queued task cancelled." });
+  }
 }
 
 export function getTask(id) {
@@ -631,7 +1007,7 @@ export async function createTask(payload, settings) {
     agent,
     title,
     cwd,
-    status: "starting",
+    status: "queued",
     createdAt: nowIso(),
     updatedAt: nowIso(),
     exitCode: null,
@@ -640,7 +1016,11 @@ export async function createTask(payload, settings) {
     sessionOrigin: SESSION_ORIGINS.VIBELINK_CLI,
     commandLabel: commandLabel(base.command, args),
     security: policy,
-    process: null,
+    execution: null,
+    executionFacade: payload.executionHost || getExecutionHostFacade(),
+    launchPayload: persistentLaunchPayload(payload),
+    inputQueue: [],
+    stopRequested: false,
     listeners: new Set(),
     events: [],
     logPath
@@ -696,61 +1076,16 @@ export async function createTask(payload, settings) {
     return task;
   }
 
-  try {
-    const child = spawn(base.command, args, {
-      cwd,
-      env: buildEnv(agent, runtimeSettings, payload.env),
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: false,
-      windowsHide: true
-    });
-
-    task.process = child;
-    task.status = "running";
-    task.updatedAt = nowIso();
-    upsertTask(task);
-    appendTaskEvent(task, { type: "system", text: task.commandLabel });
-
-    child.stdout.on("data", (data) => {
-      task.updatedAt = nowIso();
-      for (const event of normalizeOutput(data)) appendTaskEvent(task, event);
-    });
-
-    child.stderr.on("data", (data) => {
-      task.updatedAt = nowIso();
-      appendTaskEvent(task, { type: "stderr", text: data.toString() });
-    });
-
-    child.on("error", (error) => {
+  if (taskScheduler) {
+    taskScheduler.enqueue({ taskId: task.id, payload: task.launchPayload, priority: payload.priority, maxAttempts: payload.maxAttempts });
+    appendTaskEvent(task, { type: "system", text: "Task added to the persistent execution queue." });
+  } else {
+    void startProviderTurn(task, payload, runtimeSettings, id).catch((error) => {
       task.status = "failed";
       task.updatedAt = nowIso();
       upsertTask(task);
       appendTaskEvent(task, { type: "error", text: error.message });
     });
-
-    child.on("close", (code, signal) => {
-      task.status = code === 0 ? "done" : "failed";
-      task.exitCode = code;
-      task.updatedAt = nowIso();
-      upsertTask(task);
-      appendTaskEvent(task, {
-        type: "system",
-        text: signal ? `Exited with signal ${signal}` : `Exited with code ${code}`
-      });
-      notificationHandler?.({
-        type: task.status === "done" ? "task.done" : "task.failed",
-        title: task.status === "done" ? "Task completed" : "Task failed",
-        body: task.title || task.commandLabel || task.id,
-        tag: `task:${task.id}`,
-        url: "/",
-        meta: { taskId: task.id, status: task.status, exitCode: code, signal: signal || "" }
-      });
-    });
-  } catch (error) {
-    task.status = "failed";
-    task.updatedAt = nowIso();
-    upsertTask(task);
-    appendTaskEvent(task, { type: "error", text: error.message });
   }
 
   return task;
@@ -758,23 +1093,30 @@ export async function createTask(payload, settings) {
 
 export function writeTaskInput(id, text) {
   const task = tasks.get(id);
-  if (!task || !task.process || task.status !== "running") return { ok: false, reason: "Task is not running." };
-  if (!task.process.stdin?.writable) {
-    appendTaskEvent(task, {
-      type: "error",
-      text: "This agent run does not accept live stdin. Send a new message to continue the conversation."
-    });
-    return { ok: false, reason: "This agent run does not accept live stdin." };
-  }
-  task.process.stdin.write(`${text}\n`);
+  const prompt = String(text || "");
+  if (!task || !task.execution || task.status !== "running") return { ok: false, reason: "Task is not running." };
+  if (!prompt.trim()) return { ok: false, reason: "Input is required." };
+  task.inputQueue.push(prompt);
   appendTaskEvent(task, { type: "stdin", text });
-  return { ok: true };
+  appendTaskEvent(task, { type: "system", text: "Input queued for the next resume turn." });
+  return { ok: true, queued: true, queueLength: task.inputQueue.length };
 }
 
-export function stopTask(id) {
+export async function stopTask(id) {
   const task = tasks.get(id);
-  if (!task || !task.process || task.status !== "running") return false;
-  task.process.kill();
+  if (task?.status === "queued" && taskScheduler) {
+    return taskScheduler.cancel(id)?.status === "cancelled";
+  }
+  if (!task || !task.execution || task.status !== "running") return false;
+  task.stopRequested = true;
+  task.inputQueue.length = 0;
+  taskScheduler?.cancelRunning?.(id);
+  try {
+    await task.execution.facade.signalProvider(task.execution.id, "stop", "task stopped by user");
+  } catch (error) {
+    if (error.code === "EXECUTION_STATE_CONFLICT") return false;
+    throw error;
+  }
   appendTaskEvent(task, { type: "system", text: "Stop requested" });
   return true;
 }

@@ -220,6 +220,19 @@ function isClientTranscriptEntry(entry) {
   return true;
 }
 
+export function historySearchEntry(item) {
+  if (!item || typeof item !== "object") return null;
+  const text = extractText(item);
+  const role = entryRole(item);
+  if (!text || !["user", "assistant", "error"].includes(role) || isPreviewNoiseEntry(item, text)) return null;
+  return {
+    role,
+    text,
+    turnId: turnIdForItem(item),
+    timestamp: item.timestamp || item.payload?.timestamp || ""
+  };
+}
+
 function toolText(block) {
   if (!block) return "";
   if (block.type === "tool_use") {

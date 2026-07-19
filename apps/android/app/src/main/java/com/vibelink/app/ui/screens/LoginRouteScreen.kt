@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -25,9 +27,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.data.SettingsStore
@@ -47,14 +61,14 @@ fun LoginScreen(
     initialPairingUri: String? = null,
     onLoginSuccess: () -> Unit,
 ) {
-    var bridgeUrl by remember { mutableStateOf("http://192.168.1.10:8787") }
-    var pairingToken by remember { mutableStateOf("") }
-    var pairingSessionId by remember { mutableStateOf("") }
-    var pairingCode by remember { mutableStateOf("") }
-    var status by remember { mutableStateOf("Loading saved connection") }
-    var loading by remember { mutableStateOf(false) }
-    var scannerOpen by remember { mutableStateOf(false) }
     val strings = LocalAppStrings.current
+    var bridgeUrl by rememberSaveable { mutableStateOf("http://192.168.1.10:8787") }
+    var pairingToken by rememberSaveable { mutableStateOf("") }
+    var pairingSessionId by rememberSaveable { mutableStateOf("") }
+    var pairingCode by rememberSaveable { mutableStateOf("") }
+    var status by rememberSaveable(strings.currentLanguage) { mutableStateOf(strings.loadingSavedConnection) }
+    var loading by rememberSaveable { mutableStateOf(false) }
+    var scannerOpen by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     suspend fun persistLogin(url: String, token: String) {
@@ -130,17 +144,31 @@ fun LoginScreen(
         }
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("VibeLink") }) }) { padding ->
-        Column(
+    val tokenFocusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+
+    Scaffold(topBar = { TopAppBar(title = { Text(strings.brandName) }) }) { padding ->
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .imePadding(),
+            contentAlignment = Alignment.TopCenter,
         ) {
-            Text(strings.bridgeConnection, style = MaterialTheme.typography.titleMedium)
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 560.dp)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 16.dp)
+                    .semantics { paneTitle = strings.loginForm },
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+            Text(
+                strings.bridgeConnection,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.semantics { heading() },
+            )
 
             Button(
                 onClick = { scannerOpen = !scannerOpen },
@@ -164,6 +192,11 @@ fun LoginScreen(
                 label = { Text(strings.bridgeUrl) },
                 placeholder = { Text("http://192.168.1.10:8787") },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Uri,
+                    imeAction = ImeAction.Next,
+                ),
+                keyboardActions = KeyboardActions(onNext = { tokenFocusRequester.requestFocus() }),
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -173,9 +206,13 @@ fun LoginScreen(
                 label = { Text(strings.pairingToken) },
                 placeholder = { Text(strings.legacyTokenPlaceholder) },
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = ImeAction.Done,
+                ),
+                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                 visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().focusRequester(tokenFocusRequester),
             )
 
             Text(
@@ -254,7 +291,12 @@ fun LoginScreen(
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
+                    modifier = Modifier.semantics {
+                        liveRegion = LiveRegionMode.Polite
+                        paneTitle = strings.connectionStatus
+                    },
                 )
+            }
             }
         }
     }

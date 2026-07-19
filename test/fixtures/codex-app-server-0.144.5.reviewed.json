@@ -1,0 +1,45 @@
+{
+  "review": {
+    "cliVersion": "0.144.5",
+    "reviewedAt": "2026-07-18",
+    "generator": "codex app-server generate-json-schema --experimental",
+    "requiredSchemaBundleSha256": "d8e58b799789f244462e1755014171058b860d6ae25528d2a36c4ec6f72a4449"
+  },
+  "schemas": {
+    "ServerRequest.json": {
+      "title": "ServerRequest",
+      "oneOf": [
+        { "properties": { "method": { "enum": ["item/commandExecution/requestApproval"] }, "params": { "$ref": "#/definitions/CommandExecutionRequestApprovalParams" } } },
+        { "properties": { "method": { "enum": ["item/fileChange/requestApproval"] }, "params": { "$ref": "#/definitions/FileChangeRequestApprovalParams" } } },
+        { "properties": { "method": { "enum": ["item/permissions/requestApproval"] }, "params": { "$ref": "#/definitions/PermissionsRequestApprovalParams" } } },
+        { "properties": { "method": { "enum": ["item/tool/call"] }, "params": { "$ref": "#/definitions/DynamicToolCallParams" } } }
+      ]
+    },
+    "ServerNotification.json": {
+      "title": "ServerNotification",
+      "oneOf": [
+        { "properties": { "method": { "enum": ["thread/started"] }, "params": { "$ref": "#/definitions/ThreadStartedNotification" } } },
+        { "properties": { "method": { "enum": ["turn/started"] }, "params": { "$ref": "#/definitions/TurnStartedNotification" } } },
+        { "properties": { "method": { "enum": ["turn/completed"] }, "params": { "$ref": "#/definitions/TurnCompletedNotification" } } },
+        { "properties": { "method": { "enum": ["item/started"] }, "params": { "$ref": "#/definitions/ItemStartedNotification" } } },
+        { "properties": { "method": { "enum": ["item/completed"] }, "params": { "$ref": "#/definitions/ItemCompletedNotification" } } },
+        { "properties": { "method": { "enum": ["item/agentMessage/delta"] }, "params": { "$ref": "#/definitions/AgentMessageDeltaNotification" } } },
+        { "properties": { "method": { "enum": ["item/commandExecution/outputDelta"] }, "params": { "$ref": "#/definitions/CommandExecutionOutputDeltaNotification" } } },
+        { "properties": { "method": { "enum": ["item/mcpToolCall/progress"] }, "params": { "$ref": "#/definitions/McpToolCallProgressNotification" } } }
+      ],
+      "definitions": {
+        "ThreadItem": {
+          "oneOf": [
+            { "properties": { "type": { "enum": ["commandExecution"] } } },
+            { "properties": { "type": { "enum": ["mcpToolCall"] } } },
+            { "properties": { "type": { "enum": ["dynamicToolCall"] } } }
+          ]
+        }
+      }
+    },
+    "CommandExecutionRequestApprovalResponse.json": { "type": "object", "required": ["decision"] },
+    "FileChangeRequestApprovalResponse.json": { "type": "object", "required": ["decision"] },
+    "PermissionsRequestApprovalResponse.json": { "type": "object", "required": ["permissions"] },
+    "DynamicToolCallResponse.json": { "type": "object", "required": ["contentItems", "success"] }
+  }
+}

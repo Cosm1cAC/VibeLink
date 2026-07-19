@@ -1275,3 +1275,60 @@ data class SettingsPatchResponse(
     val settings: PublicSettings? = null,
     val error: String = "",
 )
+
+data class BrowserPageInfo(
+    val id: String = "",
+    val url: String = "",
+    val title: String = "",
+    val status: String = "",
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class BrowserSessionInfo(
+    val id: String = "",
+    @SerializedName("browserType") val browserType: String = "chromium",
+    val status: String = "",
+    val pages: List<BrowserPageInfo> = emptyList(),
+    @SerializedName("traceEvents") val traceEvents: Int = 0,
+    @SerializedName("droppedTraceEvents") val droppedTraceEvents: Int = 0,
+)
+
+data class BrowserSessionListResponse(val items: List<BrowserSessionInfo> = emptyList())
+data class BrowserSessionResponse(val session: BrowserSessionInfo = BrowserSessionInfo())
+data class BrowserPageResponse(val page: BrowserPageInfo = BrowserPageInfo())
+
+data class BrowserNavigationResult(
+    val ok: Boolean = false,
+    @SerializedName("pageId") val pageId: String = "",
+    val url: String = "",
+    val title: String = "",
+    val status: Int = 0,
+)
+
+data class BrowserNavigationResponse(val navigation: BrowserNavigationResult = BrowserNavigationResult())
+
+data class BrowserScreenshot(
+    @SerializedName("pageId") val pageId: String = "",
+    @SerializedName("mimeType") val mimeType: String = "",
+    val bytes: Int = 0,
+    @SerializedName("dataBase64") val dataBase64: String = "",
+    @SerializedName("capturedAt") val capturedAt: String = "",
+)
+
+data class BrowserScreenshotResponse(val screenshot: BrowserScreenshot = BrowserScreenshot())
+
+data class BrowserTraceEvent(
+    val seq: Long = 0,
+    val type: String = "",
+    val at: String = "",
+    @SerializedName("pageId") val pageId: String = "",
+    val data: Map<String, Any?> = emptyMap(),
+)
+
+data class BrowserTraceResponse(
+    val items: List<BrowserTraceEvent> = emptyList(),
+    @SerializedName("nextCursor") val nextCursor: Long = 0,
+    @SerializedName("hasMore") val hasMore: Boolean = false,
+    @SerializedName("droppedBefore") val droppedBefore: Long = 0,
+)

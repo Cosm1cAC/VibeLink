@@ -56,6 +56,9 @@ import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.AuditLogItem
 import com.vibelink.app.network.ApprovalRequestItem
 import com.vibelink.app.network.ApprovalDecisionResponse
+import com.vibelink.app.network.BrowserScreenshot
+import com.vibelink.app.network.BrowserSessionInfo
+import com.vibelink.app.network.BrowserTraceEvent
 import com.vibelink.app.network.CloudflareGuideResponse
 import com.vibelink.app.network.DeviceAdminItem
 import com.vibelink.app.network.DoctorResponse
@@ -95,6 +98,7 @@ data class SettingsUiState(
     val settingsExportText: String = "",
     val settingsImportPreview: List<String> = emptyList(),
     val doctor: DoctorResponse = DoctorResponse(),
+    val browser: BrowserWorkspaceUiState = BrowserWorkspaceUiState(),
     val loading: Boolean = false,
     val saving: Boolean = false,
     val adminBusy: String = "",
@@ -125,6 +129,11 @@ class SettingsViewModel : ViewModel() {
                 val pushSubscriptions = runCatching { apiClient.listPushSubscriptions() }.getOrDefault(emptyList())
                 val toolEventStats = runCatching { apiClient.getToolEventStats() }.getOrDefault(ToolEventStatsResponse())
                 val doctor = runCatching { apiClient.getDoctor() }.getOrDefault(DoctorResponse())
+                val browserSessions = runCatching { apiClient.listBrowserSessions() }.getOrDefault(emptyList())
+                val browserSelection = browserSelection(browserSessions)
+                val browserTrace = browserSelection.first?.let {
+                    runCatching { apiClient.getBrowserTrace(it.id).items }.getOrDefault(emptyList())
+                }.orEmpty()
                 _uiState.update {
                     it.copy(
                         settings = status.settings,
@@ -138,6 +147,12 @@ class SettingsViewModel : ViewModel() {
                         pushSubscriptions = pushSubscriptions,
                         toolEventStats = toolEventStats,
                         doctor = doctor,
+                        browser = BrowserWorkspaceUiState(
+                            sessions = browserSessions,
+                            sessionId = browserSelection.first?.id.orEmpty(),
+                            pageId = browserSelection.second.orEmpty(),
+                            trace = browserTrace,
+                        ),
                         loading = false,
                     )
                 }
@@ -382,12 +397,104 @@ class SettingsViewModel : ViewModel() {
                 .onFailure { error -> _uiState.update { it.copy(error = strings.rotateDeviceTokenFailed.withFallback(error.message)) } }
         }
     }
+
+    fun refreshBrowser(apiClient: ApiClient) = browserAction("refresh") {
+        updateBrowserSelection(apiClient)
+    }
+
+    fun createBrowserSession(apiClient: ApiClient) = browserAction("create") {
+        val created = apiClient.createBrowserSession()
+        updateBrowserSelection(apiClient, created.id, created.pages.firstOrNull()?.id.orEmpty())
+    }
+
+    fun selectBrowserSession(apiClient: ApiClient, sessionId: String) = browserAction("select") {
+        updateBrowserSelection(apiClient, sessionId, "")
+    }
+
+    fun selectBrowserPage(pageId: String) {
+        _uiState.update { it.copy(browser = it.browser.copy(pageId = pageId, screenshot = null)) }
+    }
+
+    fun navigateBrowser(apiClient: ApiClient, address: String) = browserAction("navigate") {
+        val browser = _uiState.value.browser
+        apiClient.navigateBrowserSession(browser.sessionId, browser.pageId, address.trim())
+        val screenshot = apiClient.captureBrowserScreenshot(browser.sessionId, browser.pageId)
+        updateBrowserSelection(apiClient, browser.sessionId, browser.pageId, screenshot)
+    }
+
+    fun captureBrowserScreenshot(apiClient: ApiClient) = browserAction("screenshot") {
+        val browser = _uiState.value.browser
+        val screenshot = apiClient.captureBrowserScreenshot(browser.sessionId, browser.pageId)
+        _uiState.update { it.copy(browser = it.browser.copy(screenshot = screenshot)) }
+    }
+
+    fun createBrowserPage(apiClient: ApiClient) = browserAction("page") {
+        val browser = _uiState.value.browser
+        val page = apiClient.createBrowserPage(browser.sessionId)
+        updateBrowserSelection(apiClient, browser.sessionId, page.id)
+    }
+
+    fun closeBrowserSession(apiClient: ApiClient) = browserAction("close") {
+        val id = _uiState.value.browser.sessionId
+        apiClient.closeBrowserSession(id)
+        updateBrowserSelection(apiClient)
+    }
+
+    private fun browserAction(key: String, action: suspend () -> Unit) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(browser = it.browser.copy(busy = key, error = "")) }
+            runCatching { action() }
+                .onFailure { error -> _uiState.update { it.copy(browser = it.browser.copy(error = error.message.orEmpty())) } }
+            _uiState.update { it.copy(browser = it.browser.copy(busy = "")) }
+        }
+    }
+
+    private suspend fun updateBrowserSelection(
+        apiClient: ApiClient,
+        preferredSessionId: String = "",
+        preferredPageId: String = "",
+        screenshot: BrowserScreenshot? = null,
+    ) {
+        val sessions = apiClient.listBrowserSessions()
+        val (selected, pageId) = browserSelection(sessions, preferredSessionId, preferredPageId)
+        val trace = selected?.let { apiClient.getBrowserTrace(it.id).items }.orEmpty()
+        _uiState.update {
+            it.copy(browser = it.browser.copy(
+                sessions = sessions,
+                sessionId = selected?.id.orEmpty(),
+                pageId = pageId.orEmpty(),
+                screenshot = screenshot,
+                trace = trace,
+            ))
+        }
+    }
+
+    private fun browserSelection(
+        sessions: List<BrowserSessionInfo>,
+        preferredSessionId: String = "",
+        preferredPageId: String = "",
+    ): Pair<BrowserSessionInfo?, String?> {
+        val session = sessions.firstOrNull { it.id == preferredSessionId } ?: sessions.firstOrNull()
+        val pages = session?.pages.orEmpty().filter { it.status != "closed" }
+        val page = pages.firstOrNull { it.id == preferredPageId } ?: pages.firstOrNull()
+        return session to page?.id
+    }
 }
+
+data class BrowserWorkspaceUiState(
+    val sessions: List<BrowserSessionInfo> = emptyList(),
+    val sessionId: String = "",
+    val pageId: String = "",
+    val screenshot: BrowserScreenshot? = null,
+    val trace: List<BrowserTraceEvent> = emptyList(),
+    val busy: String = "",
+    val error: String = "",
+)
 
 private val settingsJson = GsonBuilder().setPrettyPrinting().create()
 
 object SettingsSectionTarget {
-    private const val sectionsBeforeApprovals = 6
+    private const val sectionsBeforeApprovals = 7
 
     fun pendingApprovalsIndex(hasError: Boolean, hasNotice: Boolean): Int {
         return sectionsBeforeApprovals + (if (hasError) 1 else 0) + (if (hasNotice) 1 else 0)
@@ -584,6 +691,20 @@ fun SettingsScreen(
                                 }
                             }
                         }
+                    }
+
+                    item {
+                        BrowserWorkspaceSection(
+                            state = state.browser,
+                            onRefresh = { viewModel.refreshBrowser(apiClient) },
+                            onCreateSession = { viewModel.createBrowserSession(apiClient) },
+                            onCloseSession = { viewModel.closeBrowserSession(apiClient) },
+                            onSelectSession = { viewModel.selectBrowserSession(apiClient, it) },
+                            onSelectPage = viewModel::selectBrowserPage,
+                            onCreatePage = { viewModel.createBrowserPage(apiClient) },
+                            onNavigate = { viewModel.navigateBrowser(apiClient, it) },
+                            onScreenshot = { viewModel.captureBrowserScreenshot(apiClient) },
+                        )
                     }
 
                     item {

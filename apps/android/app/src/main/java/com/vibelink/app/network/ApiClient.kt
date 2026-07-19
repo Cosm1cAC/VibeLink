@@ -115,6 +115,53 @@ class ApiClient(
         return gson.fromJson(json, McpStatusResponse::class.java)
     }
 
+    suspend fun listBrowserSessions(): List<BrowserSessionInfo> =
+        gson.fromJson(get("/api/browser-sessions"), BrowserSessionListResponse::class.java).items
+
+    suspend fun createBrowserSession(
+        timeoutMs: Int = 20_000,
+        maxTraceEvents: Int = 1_000,
+    ): BrowserSessionInfo = gson.fromJson(
+        post("/api/browser-sessions", mapOf("timeoutMs" to timeoutMs, "maxTraceEvents" to maxTraceEvents)),
+        BrowserSessionResponse::class.java,
+    ).session
+
+    suspend fun createBrowserPage(sessionId: String): BrowserPageInfo = gson.fromJson(
+        post("/api/browser-sessions/${encode(sessionId)}/pages", emptyMap<String, String>()),
+        BrowserPageResponse::class.java,
+    ).page
+
+    suspend fun navigateBrowserSession(
+        sessionId: String,
+        pageId: String,
+        url: String,
+    ): BrowserNavigationResult = gson.fromJson(
+        post(
+            "/api/browser-sessions/${encode(sessionId)}/navigate",
+            mapOf("pageId" to pageId, "url" to url, "waitUntil" to "domcontentloaded", "timeoutMs" to 20_000),
+        ),
+        BrowserNavigationResponse::class.java,
+    ).navigation
+
+    suspend fun captureBrowserScreenshot(sessionId: String, pageId: String): BrowserScreenshot = gson.fromJson(
+        post(
+            "/api/browser-sessions/${encode(sessionId)}/screenshot",
+            mapOf("pageId" to pageId, "fullPage" to false),
+        ),
+        BrowserScreenshotResponse::class.java,
+    ).screenshot
+
+    suspend fun getBrowserTrace(sessionId: String, after: Long = 0, limit: Int = 100): BrowserTraceResponse =
+        gson.fromJson(
+            get("/api/browser-sessions/${encode(sessionId)}/trace?after=$after&limit=$limit"),
+            BrowserTraceResponse::class.java,
+        )
+
+    suspend fun closeBrowserSession(sessionId: String): BrowserSessionInfo = gson.fromJson(
+        delete("/api/browser-sessions/${encode(sessionId)}"),
+        BrowserSessionResponse::class.java,
+    ).session
+
     suspend fun probeMcp(timeoutMs: Int = 10000): McpProbeResponse {
         val json = post("/api/mcp/probe", mapOf("timeoutMs" to timeoutMs))
         return gson.fromJson(json, McpProbeResponse::class.java)

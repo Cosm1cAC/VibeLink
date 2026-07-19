@@ -6,7 +6,7 @@ import kotlin.test.assertEquals
 class SettingsSectionTargetTest {
     @Test
     fun approvalIndexAccountsForOptionalNotices() {
-        assertEquals(6, SettingsSectionTarget.pendingApprovalsIndex(hasError = false, hasNotice = false))
-        assertEquals(8, SettingsSectionTarget.pendingApprovalsIndex(hasError = true, hasNotice = true))
+        assertEquals(7, SettingsSectionTarget.pendingApprovalsIndex(hasError = false, hasNotice = false))
+        assertEquals(9, SettingsSectionTarget.pendingApprovalsIndex(hasError = true, hasNotice = true))
     }
 }

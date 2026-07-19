@@ -89,7 +89,30 @@ async function waitForEvents(client, executionId, predicate, { after = 0 } = {})
     }
     await delay(25);
   }
-  throw lastError || new Error(`event condition timed out after hostSeq ${cursor}`);
+  if (lastError) throw lastError;
+  const error = new Error(`event condition timed out after hostSeq ${cursor}`);
+  error.canaryDiagnostics = {
+    afterHostSeq: after,
+    lastObservedHostSeq: cursor,
+    observedEventCount: events.length,
+    observedEventTypes: events.slice(-32).map((event) => event.type),
+    observedTextTail: eventText(events).slice(-2_000)
+  };
+  throw error;
+}
+
+function dataDirInventory(root) {
+  const files = [];
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(absolute);
+      else files.push({ path: path.relative(root, absolute), bytes: fs.statSync(absolute).size });
+    }
+  }
+  return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function check(report, name, pass, detail, startedAt = Date.now()) {
@@ -116,12 +139,13 @@ async function main() {
   const executionId = crypto.randomUUID();
   const logs = [];
   let daemon;
+  let client;
   let workerPid = 0;
   let processPid = 0;
 
   try {
     daemon = launch(dataDir, pipeName, logs);
-    let client = createExecutionHostClient({ pipeName, command: "", requestTimeoutMs: 3_000 });
+    client = createExecutionHostClient({ pipeName, command: "", requestTimeoutMs: 3_000 });
     const healthStarted = Date.now();
     await waitForHost(client, daemon);
     check(report, "execd startup", true, "host.health responded", healthStarted);
@@ -130,8 +154,8 @@ async function main() {
       executionId,
       kind: "terminal",
       backend: "conpty",
-      command: "powershell.exe",
-      args: ["-NoLogo", "-NoExit"],
+      command: "cmd.exe",
+      args: ["/D", "/Q", "/K"],
       cwd: dataDir,
       env: { TERM: "xterm-256color" },
       cols: 100,
@@ -144,7 +168,7 @@ async function main() {
     processPid = Number(started.processPid || 0);
 
     const bridgeMarker = `bridge-${crypto.randomUUID()}`;
-    await client.input(executionId, `Write-Output '${bridgeMarker}'\r\n`, "utf8", `bridge-input:${executionId}`);
+    await client.input(executionId, `echo ${bridgeMarker}\r\n`, "utf8", `bridge-input:${executionId}`);
     client = createExecutionHostClient({ pipeName, command: "", requestTimeoutMs: 3_000 });
     report.metrics.bridgeReconnects += 1;
     const bridgeReplay = await waitForEvents(client, executionId, (events) => eventText(events).includes(bridgeMarker));
@@ -153,7 +177,7 @@ async function main() {
     const restartMarker = `execd-${crypto.randomUUID()}`;
     await client.input(
       executionId,
-      `Start-Sleep -Milliseconds 350; Write-Output '${restartMarker}'\r\n`,
+      `(ping -n 2 127.0.0.1 >nul) & echo ${restartMarker}\r\n`,
       "utf8",
       `restart-input:${executionId}`
     );
@@ -187,11 +211,12 @@ async function main() {
     const soakDeadline = Date.now() + durationMs;
     while (Date.now() < soakDeadline) {
       const marker = `soak-${report.metrics.soakRounds}-${crypto.randomUUID()}`;
-      await client.input(executionId, `Write-Output '${marker}'\r\n`, "utf8", `soak:${executionId}:${report.metrics.soakRounds}`);
+      await client.input(executionId, `echo ${marker}\r\n`, "utf8", `soak:${executionId}:${report.metrics.soakRounds}`);
       const round = await waitForEvents(client, executionId, (events) => eventText(events).includes(marker), { after: cursor });
       cursor = round.cursor;
       await client.ack(executionId, cursor, `soak-ack:${executionId}:${cursor}`);
       report.metrics.soakRounds += 1;
+      report.metrics.ackedHostSeq = cursor;
       await delay(intervalMs);
     }
     report.metrics.ackedHostSeq = cursor;
@@ -227,6 +252,13 @@ async function main() {
     report.passed = report.checks.every((item) => item.pass);
   } catch (error) {
     report.error = error.stack || error.message || String(error);
+    report.diagnostics = { ...(error.canaryDiagnostics || {}) };
+    try { report.diagnostics.snapshot = await client?.get(executionId); } catch (snapshotError) {
+      report.diagnostics.snapshotError = snapshotError.message || String(snapshotError);
+    }
+    try { report.diagnostics.dataDirFiles = dataDirInventory(dataDir); } catch (inventoryError) {
+      report.diagnostics.inventoryError = inventoryError.message || String(inventoryError);
+    }
   } finally {
     report.finishedAt = new Date().toISOString();
     report.logs = logs.join("").slice(-16_000);

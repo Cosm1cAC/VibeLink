@@ -25,6 +25,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - Provider registry 已接入真实动态 catalog/health loader：Codex 走 app-server `model/list`，Claude/GLM 走模型 API，豆包走 browser bridge doctor；catalog/health 具备 TTL、single-flight、失败回退和 SQLite last-known-good 跨重启缓存，并发布当前 execution ownership、capability、protocol/version 和逐字段 fidelity。Status 与 Doctor 共用这份 readiness。
 - Codex app-server contract gate 已审查 CLI 0.144.5，并覆盖 thread/turn/item/tool 生命周期、agent/command output、MCP progress 和 approval schema；execution worker 现在同时支持 `thread/start` 与 `thread/resume`，并在同一条存活 WebSocket 上把 command/file/permission 审批决定写回原始 JSON-RPC request。未知版本仍会 fail-closed。
 - SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox；Rust `execd`、独立 worker、Job Object、ConPTY/stdio/app-server、分段 spool/replay/ack 和启动身份校验已实现。Bridge 启动会统一读取 binding、查询 execd、补 ingest/ack，并恢复 Terminal、Workspace command 与 Agent task/tool 订阅。通用 approval dispatcher 已轮询 transactional outbox 并向 execution host 投递，worker 事件可回写 delivered/applied/stale；Codex 新任务和恢复任务均走 durable app-server adapter。
+- Durable execution host release canary 已覆盖 Bridge 重连、execd 重启、downtime replay、ack/prune、worker crash 和 durable `execution.lost` 告警。长时验证定位并修复了 worker named-pipe instance 切换时 `ERROR_FILE_NOT_FOUND` 被误判为永久失败的竞态；修复后的 release 样本完成 10 分钟高频 6021 轮 ack（`hostSeq 17597`），随后标准间隔样本继续运行约 18 分钟无异常。canary 失败报告现在保留实时 ack、最后快照、事件尾部和 spool inventory。
 - Agent 任务统一进入 SQLite `task_queue`；后台调度器提供可配置并发上限、优先级认领、指数退避失败重试、重启恢复，以及 Settings 内的运行/等待/失败队列面板和手动重试、取消操作。
 - Event Store 已增加单调 device/stream ack、ack-aware retention plan 和 compaction marker repository，并同步覆盖 SQLite、Worker client 与 Rust sidecar contract；客户端 ack API、实际 compaction 执行和 spool quota 仍未接入。
 - Workspace 测试命令已接入 Jest、Vitest 和 Pytest 结构化 adapter；Web 与 Android 均展示 suite/case 结果树、状态、耗时、文件位置和失败文本，并可从失败 case 直接执行后端生成的 rerun command。重跑仍经过 Workspace test 风险评估与审批链，Android 可在批准后回填结果。
@@ -38,7 +39,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ### P0 阻塞项
 
-- **待签发：durable execution host 生产可靠性。** `execution-host:canary` 已覆盖 Bridge 重连、execd 两次崩溃重启、downtime spool replay、durable ack/prune、持续 spool/ack 和 worker crash 的 durable `execution.lost` 告警信号；本地 debug 二进制 60 秒样本完成 168 轮 ack 并通过全部检查。发布二进制仍必须产出 `execution-host:soak` 一小时报告后，才能把跨重启恢复视为达到生产可靠性门槛。
+当前没有未关闭的 P0 阻塞项。
 
 ### P1 产品缺口
 
@@ -86,7 +87,6 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 
 ## 下一批优先级
 
-1. 用发布二进制执行一小时 `execution-host:soak` 并归档 JSON 报告，签发 durable execution host 生产可靠性门槛。
-2. 在 Web/Android 完整展示 approval delivery/attach/fidelity 状态。
-4. 在发布流水线持续执行 Live Call 一小时真实音频/弱网门禁并归档质量基线。
-5. 完成客户端事件 ack、实际 retention/compaction、Workspace 结构化结果的客户端消费和跨设备合并体验。
+1. 在 Web/Android 完整展示 approval delivery/attach/fidelity 状态。
+2. 在发布流水线持续执行 Live Call 一小时真实音频/弱网门禁并归档质量基线。
+3. 完成客户端事件 ack、实际 retention/compaction、Workspace 结构化结果的客户端消费和跨设备合并体验。

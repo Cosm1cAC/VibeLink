@@ -37,7 +37,8 @@ test("buildProviderRegistry exposes provider readiness and model catalog", async
   assert.ok(byId.get("zhipu").models.some((model) => model.id === "glm-5.2"));
   assert.equal(byId.get("codex").executionOwnership, "vibelink-host");
   assert.equal(byId.get("codex").capabilities.reattach, true);
-  assert.equal(byId.get("codex").capabilities.approvalContinuation, false);
+  assert.equal(byId.get("codex").capabilities.approvalContinuation, true);
+  assert.equal(byId.get("codex").capabilities.protocol, "codex-app-server");
   assert.equal(byId.get("codex").fidelity.structuredToolEvents, "observed");
   assert.equal(byId.get("doubao").executionOwnership, "external");
   assert.equal(byId.get("doubao").fidelity.toolOutput, "sampled");

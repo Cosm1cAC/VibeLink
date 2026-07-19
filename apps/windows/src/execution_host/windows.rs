@@ -9,8 +9,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, LocalFree, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE,
-        INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+        CloseHandle, GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+        ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
     },
     Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -239,14 +239,24 @@ pub fn connect_named_pipe(name: &str, timeout: Duration) -> Result<File> {
             return Ok(unsafe { File::from_raw_handle(handle as _) });
         }
         let error = unsafe { GetLastError() };
-        if error != ERROR_PIPE_BUSY || Instant::now() >= deadline {
+        if !is_transient_pipe_connect_error(error) || Instant::now() >= deadline {
             return Err(std::io::Error::from_raw_os_error(error as i32))
                 .with_context(|| format!("failed to connect to named pipe {name}"));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let wait_ms = remaining.min(Duration::from_millis(200)).as_millis() as u32;
-        unsafe { WaitNamedPipeW(wide_name.as_ptr(), wait_ms.max(1)) };
+        if error == ERROR_PIPE_BUSY {
+            let wait_ms = remaining.min(Duration::from_millis(200)).as_millis() as u32;
+            unsafe { WaitNamedPipeW(wide_name.as_ptr(), wait_ms.max(1)) };
+        } else {
+            // The worker recreates a pipe instance after each connection. CreateFileW can
+            // briefly observe no instance between accept loop iterations.
+            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+        }
     }
+}
+
+fn is_transient_pipe_connect_error(error: u32) -> bool {
+    matches!(error, ERROR_PIPE_BUSY | ERROR_FILE_NOT_FOUND)
 }
 
 fn wide(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
@@ -284,5 +294,12 @@ mod tests {
         let ticks = current_process_creation_ticks().unwrap();
         assert!(process_matches(pid, ticks));
         assert!(!process_matches(pid, ticks.saturating_add(1)));
+    }
+
+    #[test]
+    fn pipe_instance_handoff_errors_are_retried() {
+        assert!(is_transient_pipe_connect_error(ERROR_PIPE_BUSY));
+        assert!(is_transient_pipe_connect_error(ERROR_FILE_NOT_FOUND));
+        assert!(!is_transient_pipe_connect_error(5));
     }
 }

@@ -95,9 +95,9 @@ Thread 标签、收藏和批量编辑写入 SQLite。每次变更增加 revision
 - `approval_requests` 增加 continuation、available decisions、decision version 和 delivery status。
 - `approval_outbox` 用 operation id 去重，在一个 SQLite 事务中记录 decision、审批状态、审计 decision 和待投递命令，并支持 claim/retry/applied 状态流转。
 
-Rust execution host 已实现 `execd`、per-execution worker、named-pipe v1、Job Object、ConPTY/stdio backend、分段事件 spool 和启动身份校验。Terminal、Workspace command 与 Agent CLI spawn 已接入 host facade；Bridge 启动读取 SQLite binding，查询 execd，按 durable cursor 事务化补 ingest/产品投影/ack，并恢复 task/tool/terminal 订阅。状态统一收敛为 `attached`、`reconnecting`、`unreachable`、`lost` 或 `external`；approval continuation 的完整 rollout 仍未完成。
+Rust execution host 已实现 `execd`、per-execution worker、named-pipe v1、Job Object、ConPTY/stdio/app-server backend、分段事件 spool 和启动身份校验。Terminal、Workspace command 与 Agent execution 已接入 host facade；Bridge 启动读取 SQLite binding，查询 execd，按 durable cursor 事务化补 ingest/产品投影/ack，并恢复 task/tool/terminal 订阅。状态统一收敛为 `attached`、`reconnecting`、`unreachable`、`lost` 或 `external`。worker pipe instance 切换时的短暂 not-found 会在 deadline 内重试，不再把存活 execution 误标为不可达。
 
-Bridge 内的 approval dispatcher 已周期 claim outbox，并通过 execution host facade 向存活 worker 投递；worker 的 provider approval events 可将 continuation 收敛为 `delivered`、`applied` 或 `stale`，不明确副作用则标记 `OUTCOME_UNKNOWN`。这只是通用传输闭环：当前 Codex/Claude/GLM CLI registry 仍发布 `approvalContinuation=false`，因为没有 adapter 持有可恢复的 upstream approval request connection。
+Bridge 内的 approval dispatcher 已周期 claim outbox，并通过 execution host facade 向存活 worker 投递；worker 的 provider approval events 可将 continuation 收敛为 `delivered`、`applied` 或 `stale`，不明确副作用则标记 `OUTCOME_UNKNOWN`。Codex 任务使用 schema-gated app-server adapter，由 worker 持有原 upstream JSON-RPC request connection，因此 registry 发布 `approvalContinuation=true` 和 `protocol=codex-app-server`。Claude 与 GLM CLI 仍发布 `approvalContinuation=false`。
 
 ADR-0010 规定的目标边界保持有效：只有 VibeLink 从启动时拥有的 execution 才能承诺重连；worker crash 必须收敛为 `lost`；外部进程和 Desktop 永远不能伪装为 attachable；外部副作用结果不明确时返回 `OUTCOME_UNKNOWN`，不得自动重放。
 
@@ -109,9 +109,9 @@ Windows 手工启动 `codex app-server --listen ws://127.0.0.1:<port>` 可工作
 
 - `src/codexAppServerProbe.js` 可手工启动真实 app-server，验证双客户端 start/resume 和 live delta，并保存诊断结果。
 - `tools/codex-app-server/contract-probe.mjs` 生成实验 schema，并接受已审查的 Codex CLI 0.117/0.144 协议面；0.144.5 fixture 固定了真实 bundle hash、生命周期/输出方法、tool item 类型和 approval response 字段，缺失或漂移都会 fail-closed。
-- `src/codexAppServerEvents.js` 纯函数归一化 thread/turn/item/tool/output/approval JSON-RPC 消息；approval request id 明确是 connection-scoped。`src/codexApprovalBridge.js` 已定义 register/resolve/dispatch/retry/stale/outcome-unknown 行为，但尚未绑定 production app-server connection。
+- `src/codexAppServerEvents.js` 纯函数归一化 thread/turn/item/tool/output/approval JSON-RPC 消息；approval request id 明确是 connection-scoped。production execution worker 在同一条 app-server WebSocket 上注册并解析 request，再由 transactional outbox dispatcher 投递一次性 decision。
 
-当前没有 app-server Provider runtime adapter，也没有 worker 持有其 JSON-RPC connection；normalizer 仅由 contract/mock tests 驱动。CLI resume 仍是 VibeLink Agent 的稳定 Codex 路径，Desktop UIA 仍是独立的 sampled Remote 路径。
+Codex 新任务使用 `thread/start`，恢复任务使用 `thread/resume`，两者都由 durable app-server worker 启动 turn 并持有 continuation。Desktop UIA 仍是独立的 sampled Remote 路径，不继承这项能力。
 
 ## 安全模型
 
@@ -124,11 +124,8 @@ Windows 手工启动 `codex app-server --listen ws://127.0.0.1:<port>` 可工作
 
 ## 近期架构任务
 
-1. 对 durable execution host 与产品侧 startup reconciliation 执行 Bridge/execd/worker crash rollout canary。
-2. 验证 Terminal、Workspace command 和 Agent provider 的长时 ingest/ack、spool retention 与故障告警。
-3. 让 execution worker 持有 schema-gated Codex app-server connection，将现有 approval dispatcher 接到真实 request，并验证 Bridge restart continuation。
-4. 完成 Provider 任务持久队列、并发上限、失败重试和后台调度。
-5. 暴露客户端 event ack，执行 ack-aware retention/compaction，并补齐多设备冲突和剩余 Rust route ownership；Node 只在所有产品职责通过观察与回滚门槛后退休。
+1. 暴露客户端 event ack，执行 ack-aware retention/compaction，并补齐多设备冲突。
+2. 继续迁移剩余 Rust route ownership；Node 只在所有产品职责通过观察与回滚门槛后退休。
 
 ## 并行实施评估
 

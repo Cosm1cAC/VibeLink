@@ -22,9 +22,9 @@ const PROVIDERS = [
       structuredToolEvents: "observed",
       toolOutput: "complete",
       exitStatus: "authoritative",
-      approvalContinuation: false,
+      approvalContinuation: true,
       liveInput: false,
-      protocol: "codex-cli-jsonl"
+      protocol: "codex-app-server"
     },
     executionOwnership: "vibelink-host",
     fidelity: {

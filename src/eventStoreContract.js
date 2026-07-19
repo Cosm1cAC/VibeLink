@@ -16,7 +16,7 @@ export const EVENT_STORE_CONTRACT_METHODS = Object.freeze([
   "pruneLiveCallEvents",
   "listUnifiedEvents",
   "replayWindow"
-  ,"upsertEventAck", "getEventAck", "listEventAcks", "deleteDeviceEventAcks", "planRetention", "recordCompactionMarker", "listCompactionMarkers"
+  ,"upsertEventAck", "getEventAck", "listEventAcks", "deleteDeviceEventAcks", "planRetention", "compactEvents", "recordCompactionMarker", "listCompactionMarkers"
 ]);
 
 export const EVENT_STORE_SIDECAR_CONTROL_METHODS = Object.freeze([

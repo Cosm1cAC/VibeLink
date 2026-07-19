@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-struct EventStoreSidecar {
+pub(crate) struct EventStoreSidecar {
     db: Connection,
     read_only: bool,
     started_at: String,
@@ -106,12 +106,13 @@ fn is_event_store_write_method(method: &str) -> bool {
             | "pruneLiveCallEvents"
             | "upsertEventAck"
             | "deleteDeviceEventAcks"
+            | "compactEvents"
             | "recordCompactionMarker"
     )
 }
 
 impl EventStoreSidecar {
-    fn open(db_path: &Path, read_only: bool) -> Result<Self> {
+    pub(crate) fn open(db_path: &Path, read_only: bool) -> Result<Self> {
         let db = if read_only {
             Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         } else {
@@ -158,7 +159,7 @@ impl EventStoreSidecar {
         self.last_error = message.to_string();
     }
 
-    fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
+    pub(crate) fn handle(&mut self, method: &str, args: &[Value]) -> Result<Value> {
         if self.read_only && is_event_store_write_method(method) {
             bail!("Event store sidecar is read-only; method {method} is not allowed.");
         }
@@ -188,6 +189,7 @@ impl EventStoreSidecar {
                     "listEventAcks",
                     "deleteDeviceEventAcks",
                     "planRetention",
+                    "compactEvents",
                     "recordCompactionMarker",
                     "listCompactionMarkers"
                 ],
@@ -303,6 +305,10 @@ impl EventStoreSidecar {
                 let options: Value = sidecar_arg_or_default(args, 0)?;
                 self.plan_retention(&options)
             }
+            "compactEvents" => {
+                let options: Value = sidecar_arg_or_default(args, 0)?;
+                self.compact_events(&options)
+            }
             "recordCompactionMarker" => {
                 let options: Value = sidecar_arg_or_default(args, 0)?;
                 self.record_compaction_marker(&options)
@@ -400,14 +406,60 @@ impl EventStoreSidecar {
             .and_then(Value::as_i64)
             .and_then(chrono::DateTime::from_timestamp_millis)
             .unwrap_or_else(|| std::time::SystemTime::now().into());
-        let ack_cursor: Option<i64> = if stream.is_empty() {
-            None
+        let devices_ready = self
+            .db
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'devices'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let current_iso = current.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let active_device_ids = if devices_ready {
+            let mut statement = self.db.prepare(
+                "SELECT id FROM devices
+                 WHERE (revoked_at IS NULL OR revoked_at = '')
+                   AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
+                 ORDER BY id",
+            )?;
+            let devices = statement
+                .query_map(params![current_iso], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            devices
         } else {
-            self.db.query_row(
-                "SELECT MIN(cursor) FROM event_acks WHERE stream_id = ?",
-                params![stream],
-                |row| row.get(0),
-            )?
+            Vec::new()
+        };
+        let mut ack_statement = self.db.prepare(
+            "SELECT device_id, cursor FROM event_acks WHERE stream_id = ? ORDER BY device_id",
+        )?;
+        let acks = ack_statement
+            .query_map(params![stream], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let blocked_by_device_ids = active_device_ids
+            .iter()
+            .filter(|device| !acks.iter().any(|(acked, _)| acked == *device))
+            .cloned()
+            .collect::<Vec<_>>();
+        let relevant_cursors = if active_device_ids.is_empty() {
+            acks.iter().map(|(_, cursor)| *cursor).collect::<Vec<_>>()
+        } else {
+            active_device_ids
+                .iter()
+                .filter_map(|device| {
+                    acks.iter()
+                        .find(|(acked, _)| acked == device)
+                        .map(|(_, cursor)| *cursor)
+                })
+                .collect::<Vec<_>>()
+        };
+        let ack_cursor = relevant_cursors.into_iter().min();
+        let safe_cursor = if blocked_by_device_ids.is_empty() {
+            ack_cursor.map(|cursor| cursor.max(0))
+        } else {
+            None
         };
         Ok(json!({
             "streamId": stream,
@@ -415,8 +467,155 @@ impl EventStoreSidecar {
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "keepLatest": keep,
             "ackCursor": ack_cursor,
-            "safeCursor": ack_cursor.map(|cursor| cursor.max(0))
+            "safeCursor": safe_cursor,
+            "activeDeviceIds": active_device_ids,
+            "blockedByDeviceIds": blocked_by_device_ids
         }))
+    }
+
+    fn compact_events(&self, options: &Value) -> Result<Value> {
+        let stream = event_string(options, "streamId");
+        let (table, owner_column, owner_id) = if let Some(owner) = stream.strip_prefix("task:") {
+            ("task_events", "task_id", owner)
+        } else if let Some(owner) = stream.strip_prefix("live-call:") {
+            ("live_call_events", "session_id", owner)
+        } else if let Some(owner) = stream.strip_prefix("tool-event:") {
+            ("tool_events", "tool_run_id", owner)
+        } else {
+            bail!("streamId must use task:<id>, live-call:<id>, or tool-event:<id>.");
+        };
+        if owner_id.trim().is_empty() || owner_id.chars().count() > 160 {
+            bail!("streamId owner is required and must not exceed 160 characters.");
+        }
+        let plan = self.plan_retention(options)?;
+        let safe_cursor = plan.get("safeCursor").and_then(Value::as_i64);
+        let quota = options
+            .get("spoolQuotaBytes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        let keep = plan
+            .get("keepLatest")
+            .and_then(Value::as_i64)
+            .unwrap_or(5000);
+        let cutoff = plan.get("cutoff").and_then(Value::as_str).unwrap_or("");
+        let dry_run = options
+            .get("dryRun")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let byte_sql = format!(
+            "SELECT COALESCE(SUM(LENGTH(COALESCE(text, '')) + LENGTH(COALESCE(payload_json, '')) + LENGTH(COALESCE(event_json, ''))), 0) FROM {table} WHERE {owner_column} = ?"
+        );
+        let retained_bytes: i64 = self
+            .db
+            .query_row(&byte_sql, params![owner_id], |row| row.get(0))?;
+        let quota_exceeded = quota > 0 && retained_bytes > quota;
+        let Some(safe_cursor) = safe_cursor else {
+            let mut result = plan;
+            if let Some(object) = result.as_object_mut() {
+                object.extend([
+                    ("retainedBytes".into(), json!(retained_bytes)),
+                    ("spoolQuotaBytes".into(), json!(quota)),
+                    ("quotaExceeded".into(), json!(quota_exceeded)),
+                    ("prunable".into(), json!(0)),
+                    ("deleted".into(), json!(0)),
+                    ("dryRun".into(), json!(dry_run)),
+                    ("marker".into(), Value::Null),
+                ]);
+            }
+            return Ok(result);
+        };
+        let threshold_sql = format!(
+            "SELECT cursor FROM {table} WHERE {owner_column} = ? ORDER BY cursor DESC LIMIT 1 OFFSET ?"
+        );
+        let keep_cursor = self
+            .db
+            .query_row(&threshold_sql, params![owner_id, keep], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+            .unwrap_or(0);
+        let predicate = if quota_exceeded {
+            format!("{owner_column} = ? AND cursor <= ?")
+        } else {
+            format!("{owner_column} = ? AND cursor <= ? AND event_at < ? AND (? = 0 OR (? > 0 AND cursor <= ?))")
+        };
+        let range_sql =
+            format!("SELECT COUNT(*), MIN(cursor), MAX(cursor) FROM {table} WHERE {predicate}");
+        let range: (i64, Option<i64>, Option<i64>) = if quota_exceeded {
+            self.db
+                .query_row(&range_sql, params![owner_id, safe_cursor], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+        } else {
+            self.db.query_row(
+                &range_sql,
+                params![
+                    owner_id,
+                    safe_cursor,
+                    cutoff,
+                    keep,
+                    keep_cursor,
+                    keep_cursor
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+        };
+        let mut marker = Value::Null;
+        if !dry_run && range.0 > 0 {
+            self.db.execute_batch("BEGIN IMMEDIATE")?;
+            let result = (|| -> Result<()> {
+                let delete_sql = format!("DELETE FROM {table} WHERE {predicate}");
+                if quota_exceeded {
+                    self.db
+                        .execute(&delete_sql, params![owner_id, safe_cursor])?;
+                } else {
+                    self.db.execute(
+                        &delete_sql,
+                        params![
+                            owner_id,
+                            safe_cursor,
+                            cutoff,
+                            keep,
+                            keep_cursor,
+                            keep_cursor
+                        ],
+                    )?;
+                }
+                marker = self.record_compaction_marker(&json!({
+                    "streamId": stream,
+                    "fromCursor": range.1.unwrap_or(0),
+                    "toCursor": range.2.unwrap_or(0),
+                    "metadata": {
+                        "reason": if quota_exceeded { "spool_quota" } else { "retention" },
+                        "deleted": range.0,
+                        "retainedBytes": retained_bytes,
+                        "spoolQuotaBytes": quota
+                    }
+                }))?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => self.db.execute_batch("COMMIT")?,
+                Err(error) => {
+                    let _ = self.db.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+        }
+        let mut result = plan;
+        if let Some(object) = result.as_object_mut() {
+            object.extend([
+                ("retainedBytes".into(), json!(retained_bytes)),
+                ("spoolQuotaBytes".into(), json!(quota)),
+                ("quotaExceeded".into(), json!(quota_exceeded)),
+                ("prunable".into(), json!(range.0)),
+                ("deleted".into(), json!(if dry_run { 0 } else { range.0 })),
+                ("dryRun".into(), json!(dry_run)),
+                ("marker".into(), marker),
+            ]);
+        }
+        Ok(result)
     }
 
     fn record_compaction_marker(&self, options: &Value) -> Result<Value> {
@@ -1012,4 +1211,79 @@ fn unified_live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "turnId": "",
         "blockId": ""
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventStoreSidecar;
+    use rusqlite::Connection;
+    use serde_json::json;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn compaction_waits_for_all_active_devices_and_records_the_gap() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "vibelink-event-compaction-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("events.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE devices (id TEXT PRIMARY KEY, revoked_at TEXT, expires_at TEXT);
+             CREATE TABLE task_events (
+               cursor INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+               event_id TEXT NOT NULL, event_at TEXT NOT NULL, text TEXT,
+               payload_json TEXT, event_json TEXT
+             );
+             CREATE TABLE event_acks (
+               device_id TEXT NOT NULL, stream_id TEXT NOT NULL, cursor INTEGER NOT NULL,
+               event_id TEXT, acked_at TEXT NOT NULL, metadata_json TEXT,
+               PRIMARY KEY(device_id, stream_id)
+             );
+             CREATE TABLE compaction_markers (
+               marker_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL,
+               from_cursor INTEGER NOT NULL, to_cursor INTEGER NOT NULL,
+               compacted_at TEXT NOT NULL, metadata_json TEXT
+             );
+             INSERT INTO devices VALUES ('device-1', NULL, NULL), ('device-2', NULL, NULL);
+             INSERT INTO task_events (task_id, event_id, event_at, text) VALUES
+               ('task-1', 'e1', '2026-01-01T00:00:00.000Z', 'one'),
+               ('task-1', 'e2', '2026-01-02T00:00:00.000Z', 'two'),
+               ('task-1', 'e3', '2026-01-03T00:00:00.000Z', 'three');
+             INSERT INTO event_acks VALUES
+               ('device-1', 'task:task-1', 3, '', '2026-07-20T00:00:00.000Z', '{}');",
+        )
+        .unwrap();
+        drop(db);
+        let sidecar = EventStoreSidecar::open(&path, false).unwrap();
+
+        let blocked = sidecar
+            .compact_events(&json!({
+                "streamId": "task:task-1", "retentionDays": 1,
+                "keepLatest": 1, "now": 1784505600000_i64, "dryRun": false
+            }))
+            .unwrap();
+        assert_eq!(blocked["safeCursor"], json!(null));
+        assert_eq!(blocked["deleted"], 0);
+
+        sidecar
+            .upsert_event_ack("device-2", "task:task-1", 2, &json!({}))
+            .unwrap();
+        let compacted = sidecar
+            .compact_events(&json!({
+                "streamId": "task:task-1", "retentionDays": 1,
+                "keepLatest": 1, "now": 1784505600000_i64, "dryRun": false
+            }))
+            .unwrap();
+        assert_eq!(compacted["deleted"], 2);
+        assert_eq!(compacted["marker"]["toCursor"], 2);
+        drop(sidecar);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

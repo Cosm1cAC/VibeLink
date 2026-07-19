@@ -320,6 +320,31 @@ data class SimpleOk(
     val ok: Boolean = false,
 )
 
+data class CapabilityListResponse(val items: List<CapabilityItem> = emptyList())
+data class CapabilityItem(
+    val id: String = "",
+    val category: String = "",
+    val label: String = "",
+    val title: String = "",
+    val version: String = "",
+    val source: String = "",
+    val status: String = "",
+    val enabled: Boolean = false,
+    val managed: Boolean = false,
+    val digest: String = "",
+    val preview: String = "",
+    @SerializedName("parentTaskId") val parentTaskId: String = "",
+    val agent: String = "",
+    val count: Int = 0,
+    @SerializedName("nextRunAt") val nextRunAt: String = "",
+    @SerializedName("lastStatus") val lastStatus: String = "",
+    @SerializedName("lastError") val lastError: String = "",
+    val schedule: CapabilitySchedule? = null,
+    val capabilities: Map<String, Boolean> = emptyMap(),
+)
+data class CapabilitySchedule(val type: String = "", val value: String = "")
+data class AutomationRunResponse(val started: Boolean = false, val automation: CapabilityItem? = null)
+
 data class AttachmentUploadResponse(
     val ok: Boolean = false,
     val id: String = "",

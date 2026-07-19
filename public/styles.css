@@ -348,6 +348,147 @@ textarea:focus {
   border-bottom: 1px solid var(--line);
 }
 
+.capability-center {
+  display: grid;
+  gap: 12px;
+  padding-block: 8px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.capability-heading,
+.capability-row-head,
+.capability-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.capability-heading,
+.capability-row-head {
+  justify-content: space-between;
+}
+
+.capability-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.capability-heading > button,
+.capability-actions > button {
+  display: inline-grid;
+  min-width: 34px;
+  min-height: 34px;
+  place-items: center;
+  padding: 0 9px;
+  color: var(--ink);
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.capability-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  overflow-x: auto;
+  background: var(--surface-soft);
+  border-radius: 8px;
+}
+
+.capability-tabs button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 10px;
+  color: var(--ink-soft);
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.capability-tabs button[aria-selected="true"] {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(25, 51, 49, 0.08);
+}
+
+.capability-create {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 8px;
+}
+
+.automation-create {
+  grid-template-columns: minmax(0, 1fr) 110px minmax(0, 1fr);
+}
+
+.automation-create textarea {
+  grid-column: 1 / -2;
+  min-height: 72px;
+}
+
+.capability-create input,
+.capability-create select,
+.capability-create textarea,
+.capability-row textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.capability-list {
+  display: grid;
+}
+
+.capability-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.capability-row-head > span {
+  display: grid;
+  min-width: 0;
+}
+
+.capability-row-head small {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capability-row textarea {
+  min-height: 120px;
+  resize: vertical;
+  font: 12px/1.5 "Cascadia Mono", "JetBrains Mono", monospace;
+}
+
+.capability-row p {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 620px) {
+  .capability-create,
+  .automation-create {
+    grid-template-columns: 1fr;
+  }
+
+  .automation-create textarea {
+    grid-column: auto;
+  }
+
+  .capability-row-head {
+    align-items: flex-start;
+  }
+}
+
 .browser-workspace-heading,
 .browser-session-controls,
 .browser-address,

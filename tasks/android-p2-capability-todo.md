@@ -9,10 +9,10 @@
 
 ## Phase 2: Capability Center
 
-- [ ] P2.5 Specify and test capability-resource list/detail/mutation contracts and SQLite Automation persistence.
-- [ ] P2.6 Build Plugins/Hooks/Automations/Subagents/AGENTS/config Web views.
-- [ ] P2.7 Build Plugins/Hooks/Automations/Subagents/AGENTS/config Android views.
-- [ ] P2.8 Verify approval, audit, offline, empty, and denied states.
+- [x] P2.5 Specify and test capability-resource list/detail/mutation contracts and SQLite Automation persistence.
+- [x] P2.6 Build Plugins/Hooks/Automations/Subagents/AGENTS/config Web views.
+- [x] P2.7 Build Plugins/Hooks/Automations/Subagents/AGENTS/config Android views.
+- [x] P2.8 Verify approval, audit, offline, empty, and denied states.
 
 ## Phase 3: Browser Workspace
 

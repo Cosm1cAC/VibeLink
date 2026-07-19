@@ -10,7 +10,7 @@ import QRCode from "qrcode";
 import { agentReachInstallInfo, getAgentReachStatus, runAgentReachCommand, withAgentReachPath } from "./agentReachRuntime.js";
 import { codebaseMemoryInstallInfo } from "./codebaseMemoryRuntime.js";
 import { getDoubaoStatus, runDoubaoCommand } from "./doubaoRuntime.js";
-import { attachmentsDir, getNetworkAddresses, publicDir } from "./config.js";
+import { attachmentsDir, getHomeDir, getNetworkAddresses, publicDir, rootDir } from "./config.js";
 import {
   attachToolRunToTask,
   approvePairingSession,
@@ -157,6 +157,8 @@ import { configureTerminalSessionRecovery, getTerminalSession, listTerminalSessi
 import { createThreadFork, getThreadState, threadStateEtag, updateThreadState, updateThreadStateBatch } from "./threadState.js";
 import { createTaskQueuePersistence } from "./taskQueuePersistence.js";
 import { createTaskScheduler } from "./taskScheduler.js";
+import { createAutomationRuntime } from "./automationRuntime.js";
+import { createCapabilityRuntime } from "./capabilityRuntime.js";
 import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, applyWorkspaceWorktreeAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, listWorkspaceWorktrees, mutateWorkspaceFile, mutateWorkspaceFilesBatch, openWorkspaceInExplorer, previewWorkspaceFile, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
@@ -226,6 +228,26 @@ const taskScheduler = createTaskScheduler({
   onTransition: applyTaskQueueTransition
 });
 configureTaskScheduler(taskScheduler);
+const automationRuntime = createAutomationRuntime({
+  database: initDb(),
+  executeAutomation: async (automation) => {
+    const payload = automation.payload || {};
+    if (!String(payload.prompt || "").trim()) throw new Error("Automation task prompt is required.");
+    const task = await createTask({
+      ...payload,
+      title: payload.title || automation.title,
+      parentTaskId: `automation:${automation.id}`
+    }, settings);
+    recordAuditLog({ type: "automation.run", success: task.status !== "failed", target: automation.id, meta: { taskId: task.id } });
+  }
+});
+const capabilityRuntime = createCapabilityRuntime({
+  rootDir,
+  homeDir: getHomeDir(),
+  getTasks,
+  automationRuntime
+});
+automationRuntime.start();
 const approvalDispatcher = createApprovalDispatcher({
   resolveApproval: (command) => getExecutionHostFacade().resolveProviderApproval(command)
 });
@@ -2030,6 +2052,121 @@ async function routeApi(request, response, url) {
     enforceRateLimit,
     audit
   })) return;
+
+  const capabilityListMatch = url.pathname.match(/^\/api\/capabilities\/(plugins|hooks|automations|subagents|config)$/);
+  if (capabilityListMatch && request.method === "GET") {
+    sendJson(response, 200, { category: capabilityListMatch[1], items: applyFields(await capabilityRuntime.list(capabilityListMatch[1]), url) });
+    return;
+  }
+  if (url.pathname === "/api/capabilities/plugins" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "capability.plugin.install", { limit: 10, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const plugin = await capabilityRuntime.installPlugin(await readBody(request));
+      audit(request, url, auth, { type: "capability.plugin.install", success: true, target: plugin.id });
+      sendJson(response, 201, { plugin });
+    } catch (error) {
+      audit(request, url, auth, { type: "capability.plugin.install", success: false, reason: error.message });
+      sendError(response, error.status || 400, error.message, { code: error.code || "CAPABILITY_ERROR" });
+    }
+    return;
+  }
+  const capabilityPluginMatch = url.pathname.match(/^\/api\/capabilities\/plugins\/([^/]+)$/);
+  if (capabilityPluginMatch && request.method === "PATCH") {
+    if (!enforceRateLimit(request, response, url, "capability.plugin.update", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    const id = safeDecode(capabilityPluginMatch[1]);
+    try {
+      const body = await readBody(request);
+      const plugin = body.action === "enable"
+        ? await capabilityRuntime.setPluginEnabled(id, true)
+        : body.action === "disable"
+          ? await capabilityRuntime.setPluginEnabled(id, false)
+          : await capabilityRuntime.updatePlugin(id, body);
+      audit(request, url, auth, { type: `capability.plugin.${body.action || "update"}`, success: true, target: id });
+      sendJson(response, 200, { plugin });
+    } catch (error) {
+      audit(request, url, auth, { type: "capability.plugin.update", success: false, target: id, reason: error.message });
+      sendError(response, error.status || 400, error.message, { code: error.code || "CAPABILITY_ERROR" });
+    }
+    return;
+  }
+  if (capabilityPluginMatch && request.method === "DELETE") {
+    const id = safeDecode(capabilityPluginMatch[1]);
+    try {
+      const result = await capabilityRuntime.removePlugin(id);
+      audit(request, url, auth, { type: "capability.plugin.remove", success: true, target: id });
+      sendJson(response, 200, result);
+    } catch (error) {
+      sendError(response, error.status || 400, error.message, { code: error.code || "CAPABILITY_ERROR" });
+    }
+    return;
+  }
+  const capabilityHookMatch = url.pathname.match(/^\/api\/capabilities\/hooks\/([^/]+)$/);
+  if (capabilityHookMatch && request.method === "PATCH") {
+    if (!enforceRateLimit(request, response, url, "capability.hook.update", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    const id = safeDecode(capabilityHookMatch[1]);
+    try {
+      const body = await readBody(request);
+      if (body.action !== "enable" && body.action !== "disable") { sendError(response, 400, "Hook action must be enable or disable."); return; }
+      const hook = await capabilityRuntime.setHookEnabled(id, body.action === "enable");
+      audit(request, url, auth, { type: "capability.hook.update", success: true, target: id });
+      sendJson(response, 200, { hook });
+    } catch (error) {
+      audit(request, url, auth, { type: "capability.hook.update", success: false, target: id, reason: error.message });
+      sendError(response, error.status || 400, error.message, { code: error.code || "CAPABILITY_ERROR" });
+    }
+    return;
+  }
+  const capabilityConfigMatch = url.pathname.match(/^\/api\/capabilities\/config\/([^/]+)$/);
+  if (capabilityConfigMatch && request.method === "PATCH") {
+    try {
+      const resource = await capabilityRuntime.updateTextResource(safeDecode(capabilityConfigMatch[1]), await readBody(request));
+      audit(request, url, auth, { type: "capability.config.update", success: true, target: resource.id });
+      sendJson(response, 200, { resource });
+    } catch (error) {
+      sendError(response, error.status || 400, error.message, { code: error.code || "CAPABILITY_ERROR" });
+    }
+    return;
+  }
+  if (url.pathname === "/api/automations" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "automation.create", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const automation = automationRuntime.create(await readBody(request));
+      audit(request, url, auth, { type: "automation.create", success: true, target: automation.id });
+      sendJson(response, 201, { automation });
+    } catch (error) { sendError(response, 400, error.message); }
+    return;
+  }
+  const automationMatch = url.pathname.match(/^\/api\/automations\/([^/]+)(?:\/(run))?$/);
+  if (automationMatch && request.method === "PATCH" && !automationMatch[2]) {
+    try {
+      const automation = automationRuntime.update(safeDecode(automationMatch[1]), await readBody(request));
+      if (!automation) { sendError(response, 404, "Automation not found."); return; }
+      audit(request, url, auth, { type: "automation.update", success: true, target: automation.id });
+      sendJson(response, 200, { automation });
+    } catch (error) { sendError(response, 400, error.message); }
+    return;
+  }
+  if (automationMatch && request.method === "DELETE" && !automationMatch[2]) {
+    try {
+      const ok = automationRuntime.remove(safeDecode(automationMatch[1]));
+      sendJson(response, ok ? 200 : 404, { ok });
+    } catch (error) { sendError(response, 409, error.message); }
+    return;
+  }
+  if (automationMatch && request.method === "POST" && automationMatch[2] === "run") {
+    const result = await automationRuntime.run(safeDecode(automationMatch[1]));
+    sendJson(response, result.reason === "not_found" ? 404 : result.reason === "already_running" ? 409 : 200, result);
+    return;
+  }
+  if (url.pathname === "/api/subagents" && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "subagent.create", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    const body = await readBody(request);
+    if (!String(body.parentTaskId || "").trim() || !String(body.prompt || "").trim()) { sendError(response, 400, "Subagent parentTaskId and prompt are required."); return; }
+    const task = await createTask({ ...body, title: body.title || body.prompt, parentTaskId: String(body.parentTaskId) }, settings);
+    audit(request, url, auth, { type: "subagent.create", success: task.status !== "failed", target: task.id, meta: { parentTaskId: body.parentTaskId } });
+    sendJson(response, 201, { task: { id: task.id, status: task.status, parentTaskId: task.parentTaskId } });
+    return;
+  }
 
   if (await routeEventSyncRequest(request, response, url, auth)) return;
 
@@ -4473,6 +4610,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   clearInterval(approvalDispatchTimer);
   taskScheduler.stop();
+  automationRuntime.stop();
   console.log(`Received ${signal}; draining event store runtime...`);
   const forceExit = setTimeout(() => process.exit(1), 5000);
   forceExit.unref?.();

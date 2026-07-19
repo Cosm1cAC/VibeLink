@@ -60,6 +60,7 @@ import {
 import "./styles.css";
 import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
 import { ArtifactWorkbench } from "./ArtifactWorkbench.jsx";
+import { CapabilityCenter } from "./CapabilityCenter.jsx";
 import { selectionStartState } from "./chatSelection.js";
 import { remoteTranscriptItems } from "./remoteTranscript.js";
 import {
@@ -5110,6 +5111,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
             </div>
           ) : null}
         </section>
+        <CapabilityCenter request={request} token={token} />
         <BrowserWorkspace request={request} token={token} />
         <section className="probe-panel">
           <div>

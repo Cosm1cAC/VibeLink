@@ -494,7 +494,7 @@ data class BrowserWorkspaceUiState(
 private val settingsJson = GsonBuilder().setPrettyPrinting().create()
 
 object SettingsSectionTarget {
-    private const val sectionsBeforeApprovals = 7
+    private const val sectionsBeforeApprovals = 8
 
     fun pendingApprovalsIndex(hasError: Boolean, hasNotice: Boolean): Int {
         return sectionsBeforeApprovals + (if (hasError) 1 else 0) + (if (hasNotice) 1 else 0)
@@ -706,6 +706,8 @@ fun SettingsScreen(
                             onScreenshot = { viewModel.captureBrowserScreenshot(apiClient) },
                         )
                     }
+
+                    item { CapabilityCenterSection(apiClient) }
 
                     item {
                         SectionCard(title = strings.text("运行时", "Runtime")) {

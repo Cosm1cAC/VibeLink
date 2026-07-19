@@ -50,9 +50,9 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ### P2 后续能力
 
-- 已有 Skills 扫描/刷新、Agent Reach skill 管理和 MCP tool registry，但仍缺通用插件生命周期、Hooks、Automations、Subagents，以及 AGENTS/config 可视化管理。
-- Playwright browser session runtime 已实现有界 session/page、导航、截图和脱敏 trace，但尚未接入生产 HTTP 契约、内置 Web/Android 浏览器视图或手机端浏览器遥控。
-- artifact 后端已有 PDF、表格、Notebook 和 OpenXML 文档的只读结构化 preview；仍缺 Web/Android 专门 renderer、交互式表格/Notebook 体验和编辑能力。
+- 已补齐受管插件生命周期、Hooks 安全开关、SQLite Automations、Subagents，以及 AGENTS/config 的 Web/Android 可视化管理，并统一暴露生产 HTTP 契约。
+- Playwright bridge-owned Chromium 已接入生产 HTTP 契约，Web/Android 均提供 session/page、导航、截图、trace 与移动视口遥控；不接管用户本地浏览器。
+- artifact 已提供 Web/Android 专门 renderer；CSV/TSV 与 Notebook 支持带 digest 冲突保护的交互式编辑，Office/PDF/XLSX 保持只读结构化 preview。
 
 ## 已知边界与当前非目标
 

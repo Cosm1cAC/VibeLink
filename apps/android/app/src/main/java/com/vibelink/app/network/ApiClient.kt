@@ -588,6 +588,32 @@ class ApiClient(
         return gson.fromJson(json, TaskStopResponse::class.java)
     }
 
+    // Capability center
+    suspend fun listCapabilities(category: String): List<CapabilityItem> {
+        val json = get("/api/capabilities/${encode(category)}")
+        return gson.fromJson(json, CapabilityListResponse::class.java).items
+    }
+
+    suspend fun runAutomation(id: String): AutomationRunResponse {
+        val json = post("/api/automations/${encode(id)}/run", emptyMap<String, String>())
+        return gson.fromJson(json, AutomationRunResponse::class.java)
+    }
+
+    suspend fun setPluginEnabled(id: String, enabled: Boolean): SimpleOk {
+        val json = patch("/api/capabilities/plugins/${encode(id)}", mapOf("action" to if (enabled) "enable" else "disable"))
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun setHookEnabled(id: String, enabled: Boolean): SimpleOk {
+        val json = patch("/api/capabilities/hooks/${encode(id)}", mapOf("action" to if (enabled) "enable" else "disable"))
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun setAutomationEnabled(id: String, enabled: Boolean): SimpleOk {
+        val json = patch("/api/automations/${encode(id)}", mapOf("enabled" to enabled))
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
     // ── Histories (session list + detail) ──
 
     suspend fun listHistories(): List<HistoryItem> {

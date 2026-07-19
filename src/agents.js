@@ -180,6 +180,7 @@ function restoreTaskFromLog(filePath) {
     sessionId: events.find((event) => event.payload?.thread_id)?.payload?.thread_id || inferResumeSessionId(events),
     launchMode: inferLaunchMode(events),
     sessionOrigin: SESSION_ORIGINS.VIBELINK_CLI,
+    parentTaskId: String(payload.parentTaskId || ""),
     commandLabel,
     process: null,
     listeners: new Set(),

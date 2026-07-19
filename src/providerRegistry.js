@@ -18,7 +18,7 @@ const PROVIDERS = [
       reasoningEffort: true,
       resume: true,
       liveCallAssistant: true,
-      reattach: false,
+      reattach: true,
       structuredToolEvents: "observed",
       toolOutput: "complete",
       exitStatus: "authoritative",
@@ -26,7 +26,7 @@ const PROVIDERS = [
       liveInput: false,
       protocol: "codex-cli-jsonl"
     },
-    executionOwnership: "legacy-node",
+    executionOwnership: "vibelink-host",
     fidelity: {
       executionState: "authoritative",
       structuredToolEvents: "observed",
@@ -53,7 +53,7 @@ const PROVIDERS = [
       reasoningEffort: true,
       resume: true,
       liveCallAssistant: true,
-      reattach: false,
+      reattach: true,
       structuredToolEvents: "observed",
       toolOutput: "complete",
       exitStatus: "authoritative",
@@ -61,7 +61,7 @@ const PROVIDERS = [
       liveInput: false,
       protocol: "claude-cli-stream-json"
     },
-    executionOwnership: "legacy-node",
+    executionOwnership: "vibelink-host",
     fidelity: {
       executionState: "authoritative",
       structuredToolEvents: "observed",
@@ -121,7 +121,7 @@ const PROVIDERS = [
       reasoningEffort: true,
       resume: false,
       liveCallAssistant: true,
-      reattach: false,
+      reattach: true,
       structuredToolEvents: "unavailable",
       toolOutput: "complete",
       exitStatus: "authoritative",
@@ -129,7 +129,7 @@ const PROVIDERS = [
       liveInput: false,
       protocol: "zhipu-http-cli"
     },
-    executionOwnership: "legacy-node",
+    executionOwnership: "vibelink-host",
     fidelity: {
       executionState: "authoritative",
       structuredToolEvents: "unavailable",

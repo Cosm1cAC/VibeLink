@@ -17,9 +17,34 @@ async function freePort() {
   return port;
 }
 
-async function requestJson(url, { method = "GET", token = "", body } = {}) {
+async function canConnect(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const finish = (connected) => {
+      socket.destroy();
+      resolve(connected);
+    };
+    socket.setTimeout(500, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function stopChild(child) {
+  if (child.exitCode !== null) return;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  child.kill();
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+  if (child.exitCode === null) {
+    child.kill("SIGKILL");
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+  }
+}
+
+async function requestJson(url, { method = "GET", token = "", body, timeoutMs = 5000 } = {}) {
   const response = await fetch(url, {
     method,
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" })
@@ -31,8 +56,8 @@ async function requestJson(url, { method = "GET", token = "", body } = {}) {
   return value;
 }
 
-test("search HTTP routes use the persistent index, saved searches, and history", { timeout: 30_000 }, async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-search-server-"));
+test("search HTTP routes use the persistent index, saved searches, and history", { timeout: 90_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "vibelink-search-server-"));
   const dataDir = path.join(root, "data");
   const workspaceDir = path.join(root, "workspace");
   const alphaToken = ["fixturealpha", "7f3d"].join("");
@@ -52,6 +77,8 @@ test("search HTTP routes use the persistent index, saved searches, and history",
     env: {
       ...process.env,
       VIBELINK_DATA_DIR: dataDir,
+      VIBELINK_SEARCH_INDEX_STARTUP: "1",
+      VIBELINK_PROVIDER_CACHE_STARTUP: "0",
       MOBILE_AGENT_HOST: "127.0.0.1",
       MOBILE_AGENT_PORT: String(port),
       MOBILE_AGENT_TOKEN: "SEARCH-E2E",
@@ -64,35 +91,41 @@ test("search HTTP routes use the persistent index, saved searches, and history",
   child.stdout.on("data", (chunk) => { logs += chunk; });
   child.stderr.on("data", (chunk) => { logs += chunk; });
   t.after(async () => {
-    if (child.exitCode === null) child.kill();
-    await Promise.race([
-      new Promise((resolve) => child.once("exit", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 3000))
-    ]);
-    fs.rmSync(root, { recursive: true, force: true });
+    await stopChild(child);
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   const baseUrl = `http://127.0.0.1:${port}`;
   const call = (url, options = {}) => requestJson(url, options).catch((error) => {
-    error.message = `${error.message}\n${logs}`;
-    throw error;
+    throw new Error(`${error.message}\n${logs}`, { cause: error });
   });
-  let login = null;
-  for (let attempt = 0; attempt < 60 && !login; attempt += 1) {
+  const startupDeadline = Date.now() + 30_000;
+  let listening = false;
+  while (Date.now() < startupDeadline && !listening) {
     if (child.exitCode !== null) throw new Error(`Server exited during startup.\n${logs}`);
-    try {
-      login = await call(`${baseUrl}/api/login`, {
-        method: "POST",
-        body: { pairingToken: "SEARCH-E2E", deviceLabel: "search-e2e" }
-      });
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
+    listening = await canConnect(port);
+    if (!listening) await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  assert.ok(login?.token, `Server did not become ready.\n${logs}`);
+  assert.equal(listening, true, `Server did not become ready.\n${logs}`);
+  const login = await call(`${baseUrl}/api/login`, {
+    method: "POST",
+    body: { pairingToken: "SEARCH-E2E", deviceLabel: "search-e2e" },
+    timeoutMs: 10_000
+  });
+  assert.ok(login?.token, `Server login failed after startup.\n${logs}`);
 
-  const index = await call(`${baseUrl}/api/search/index`, { token: login.token });
-  assert.equal(index.ready, true);
+  const indexDeadline = Date.now() + 45_000;
+  let index = null;
+  while (Date.now() < indexDeadline && !index?.ready) {
+    if (child.exitCode !== null) throw new Error(`Server exited while building the search index.\n${logs}`);
+    try {
+      index = await call(`${baseUrl}/api/search/index`, { token: login.token, timeoutMs: 2000 });
+    } catch {
+      index = null;
+    }
+    if (!index?.ready) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.equal(index?.ready, true, `Search index did not become ready.\n${logs}`);
   assert.ok(index.indexedFiles >= 1);
 
   const search = await call(`${baseUrl}/api/search?q=${encodeURIComponent(alphaToken)}&scope=files&sort=title&order=asc`, { token: login.token });

@@ -705,8 +705,10 @@ function rustWorkspaceTreeSessionMode() {
 }
 
 function rustWorkspaceTreeSessionTimeoutMs() {
-  const value = Number(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS || 10000);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10000;
+  const command = path.basename(String(process.env.VIBELINK_RUST_BIN || "")).toLowerCase();
+  const fallback = command === "cargo" || command === "cargo.exe" ? 120000 : 10000;
+  const value = Number(process.env.VIBELINK_RUST_WORKSPACE_TREE_SESSION_TIMEOUT_MS || fallback);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
 function recordRustWorkspaceTreeBudgetFallback(message) {

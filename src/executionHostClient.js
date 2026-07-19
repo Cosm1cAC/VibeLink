@@ -405,6 +405,7 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
       args = [],
       cwd,
       env = {},
+      threadStartParams,
       threadResumeParams,
       turnStartParams,
       connectTimeoutMs = 15000
@@ -416,7 +417,7 @@ export function createExecutionHostFacade({ client, pollIntervalMs = 25, eventLi
       args,
       cwd,
       env,
-      appServer: { threadResumeParams, turnStartParams, connectTimeoutMs },
+      appServer: { threadStartParams, threadResumeParams, turnStartParams, connectTimeoutMs },
       operationId: operationId("app-server-start", executionId)
     }),
     getProvider: (executionId) => client.get(executionId),

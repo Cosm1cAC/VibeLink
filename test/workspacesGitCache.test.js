@@ -17,6 +17,8 @@ function git(cwd, args) {
 }
 
 test("getWorkspaceGitDiff reuses a short-lived git summary cache", async () => {
+  const previousTtl = process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS;
+  process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS = "60000";
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-git-cache-"));
   const repo = path.join(tempRoot, "repo");
   fs.mkdirSync(repo, { recursive: true });
@@ -41,6 +43,8 @@ test("getWorkspaceGitDiff reuses a short-lived git summary cache", async () => {
     assert.equal(after.misses, before.misses + 1);
     assert.equal(after.hits, before.hits + 1);
   } finally {
+    if (previousTtl === undefined) delete process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS;
+    else process.env.VIBELINK_GIT_SUMMARY_CACHE_TTL_MS = previousTtl;
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });

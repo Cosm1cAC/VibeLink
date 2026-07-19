@@ -43,7 +43,7 @@ test("artifact HTTP contract is authenticated, bounded, redacted, and read-only"
   }), "utf8");
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: rootDir,
-    env: { ...process.env, VIBELINK_DATA_DIR: dataDir, MOBILE_AGENT_HOST: "127.0.0.1", MOBILE_AGENT_PORT: String(port), MOBILE_AGENT_TOKEN: pairingToken },
+    env: { ...process.env, VIBELINK_DATA_DIR: dataDir, VIBELINK_SEARCH_INDEX_STARTUP: "0", VIBELINK_PROVIDER_CACHE_STARTUP: "0", MOBILE_AGENT_HOST: "127.0.0.1", MOBILE_AGENT_PORT: String(port), MOBILE_AGENT_TOKEN: pairingToken },
     stdio: ["ignore", "pipe", "pipe"]
   });
 

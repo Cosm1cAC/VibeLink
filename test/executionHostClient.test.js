@@ -244,6 +244,29 @@ test("execution host facade starts a strict app-server resume turn", async () =>
   assert.equal(started.appServer.turnStartParams.input[0].text, "continue");
 });
 
+test("execution host facade starts a new app-server thread without a synthetic thread id", async () => {
+  let started;
+  const facade = createExecutionHostFacade({
+    client: {
+      async start(params) {
+        started = params;
+        return { executionId: params.executionId, status: "running" };
+      }
+    }
+  });
+  await facade.startAppServerProvider({
+    command: "codex",
+    cwd: "C:\\work",
+    threadStartParams: { cwd: "C:\\work", approvalPolicy: "on-request" },
+    turnStartParams: { input: [{ type: "text", text: "start", text_elements: [] }] }
+  });
+
+  assert.equal(started.kind, "provider.appServer");
+  assert.equal(started.appServer.threadStartParams.approvalPolicy, "on-request");
+  assert.equal(started.appServer.threadResumeParams, undefined);
+  assert.equal(started.appServer.turnStartParams.threadId, undefined);
+});
+
 test("a restarted Bridge reuses the worker operation for the same approval continuation", async () => {
   const calls = [];
   const results = new Map();

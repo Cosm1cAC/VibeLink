@@ -603,7 +603,7 @@ pub(crate) fn merge_settings(base: &Value, next: &Value) -> Value {
     Value::Object(merged)
 }
 
-fn merge_objects(existing: Option<&Value>, next: Option<&Value>) -> Value {
+pub(crate) fn merge_objects(existing: Option<&Value>, next: Option<&Value>) -> Value {
     let mut merged = existing
         .and_then(Value::as_object)
         .cloned()

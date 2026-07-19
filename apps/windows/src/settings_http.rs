@@ -1,6 +1,6 @@
 use crate::settings_contract::{
     build_settings_export, default_settings, import_settings_snapshot, load_settings,
-    merge_mcp_settings, sanitize_settings_patch, summarize_settings_import,
+    merge_mcp_settings, merge_objects, sanitize_settings_patch, summarize_settings_import,
 };
 use crate::settings_credentials::{
     public_credential_state, restore_secret_snapshots, write_requested_secrets,

@@ -21,8 +21,8 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - 全局 command registry 已接入 Web 命令面板，并向 Android 暴露导航、搜索、会话、Workspace、Live Call、Review、Settings 和 Approval 动作。
 - PR review 已有本地持久 session/comment API、Android Review 工作流和独立 GitHub runtime；后端可同步 PR metadata、changed files、diff、review threads/comment 状态，以 head SHA 检测冲突并提交 review decision。session 仍保存在 `reviews.json`。
 - Provider registry 已接入真实动态 catalog/health loader：Codex 走 app-server `model/list`，Claude/GLM 走模型 API，豆包走 browser bridge doctor；catalog/health 具备 TTL、single-flight、失败回退和 SQLite last-known-good 跨重启缓存，并发布当前 execution ownership、capability、protocol/version 和逐字段 fidelity。Status 与 Doctor 共用这份 readiness。
-- Codex app-server contract gate 已审查 CLI 0.144.5，并覆盖 thread/turn/item/tool 生命周期、agent/command output、MCP progress 和 approval schema；纯 normalizer、JSON-RPC mock 和 approval bridge 单元已落地，但 app-server JSON-RPC connection 尚未由 execution worker 持有，未知版本仍会 fail-closed。
-- SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox；Rust `execd`、独立 worker、Job Object、ConPTY/stdio、分段 spool/replay/ack 和启动身份校验已实现。Bridge 启动会统一读取 binding、查询 execd、补 ingest/ack，并恢复 Terminal、Workspace command 与 Agent task/tool 订阅。通用 approval dispatcher 已轮询 transactional outbox 并向 execution host 投递，worker 事件可回写 delivered/applied/stale；当前 CLI Provider 仍发布 `approvalContinuation=false`，Codex app-server adapter 尚未接入。
+- Codex app-server contract gate 已审查 CLI 0.144.5，并覆盖 thread/turn/item/tool 生命周期、agent/command output、MCP progress 和 approval schema；execution worker 现在同时支持 `thread/start` 与 `thread/resume`，并在同一条存活 WebSocket 上把 command/file/permission 审批决定写回原始 JSON-RPC request。未知版本仍会 fail-closed。
+- SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox；Rust `execd`、独立 worker、Job Object、ConPTY/stdio/app-server、分段 spool/replay/ack 和启动身份校验已实现。Bridge 启动会统一读取 binding、查询 execd、补 ingest/ack，并恢复 Terminal、Workspace command 与 Agent task/tool 订阅。通用 approval dispatcher 已轮询 transactional outbox 并向 execution host 投递，worker 事件可回写 delivered/applied/stale；Codex 新任务和恢复任务均走 durable app-server adapter。
 - Event Store 已增加单调 device/stream ack、ack-aware retention plan 和 compaction marker repository，并同步覆盖 SQLite、Worker client 与 Rust sidecar contract；客户端 ack API、实际 compaction 执行和 spool quota 仍未接入。
 - Workspace 测试命令已接入 Jest、Vitest 和 Pytest 结构化 adapter，能够返回 suite/case、位置、耗时和失败用例 rerun command；Web/Android 当前主要消费汇总、failure 和原始输出，尚未完整展示结果树或触发单测重跑。
 - 只读 artifact runtime 已支持鉴权 metadata、bounded range，以及 PDF、CSV/TSV、XLSX、Notebook 和 OpenXML 文档的有界 best-effort preview；Web 目前只有 PDF/Text 基础内联，Android 主要提供附件识别与打开，尚未消费完整结构化 preview。
@@ -35,8 +35,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ### P0 阻塞项
 
-- **未闭环：Provider tool-call 审批 continuation。** 当前高风险 VibeLink 工具可在批准后重跑受支持动作，transactional outbox 到 execution host 的通用投递链已接入，但现有 CLI adapter 没有可恢复的 upstream request connection；真正的 Codex request/tool-call continuation 仍需 app-server adapter。
-- **待验证：durable execution host 生产可靠性。** execution host 已进入产品运行链，但尚缺 Bridge/execd/worker crash canary、长时 spool/ack 和故障告警证据。在这些验证完成前，不能把跨重启恢复视为已达到生产可靠性门槛。
+- **待签发：durable execution host 生产可靠性。** `execution-host:canary` 已覆盖 Bridge 重连、execd 两次崩溃重启、downtime spool replay、durable ack/prune、持续 spool/ack 和 worker crash 的 durable `execution.lost` 告警信号；本地 debug 二进制 60 秒样本完成 168 轮 ack 并通过全部检查。发布二进制仍必须产出 `execution-host:soak` 一小时报告后，才能把跨重启恢复视为达到生产可靠性门槛。
 
 ### P1 产品缺口
 
@@ -83,13 +82,13 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 
 - Windows 上 `codex remote-control start --json` 的 daemon lifecycle 不可用，但手工启动 `codex app-server --listen ws://127.0.0.1:<port>` 可工作。
 - 第二客户端必须在已有 rollout 后显式 `thread/resume`，才能收到后续 turn delta；被动连接不会得到完整 turn 流。
-- 当前 contract gate 接受已审查的 Codex CLI 0.117/0.144 schema；0.144.5 fixture 固定真实 bundle hash，并校验 thread/turn/item/tool 生命周期、command/file/permission approval、dynamic tool call 和 output/progress。它仍是兼容性门禁与纯事件 normalizer，不是已启用的 Provider runtime adapter。
+- 当前 contract gate 接受已审查的 Codex CLI 0.117/0.144 schema；0.144.5 fixture 固定真实 bundle hash，并校验 thread/turn/item/tool 生命周期、command/file/permission approval、dynamic tool call 和 output/progress。通过门禁的 app-server adapter 已接入 execution worker；未审查版本不会回退到声称支持 continuation 的路径。
 - UIA 可以定位 Desktop composer 和发送按钮；纯 `ValuePattern.SetValue` 不会触发前端输入事件，可靠路径是窗口校验、点击 composer、剪贴板粘贴、发送并做 postflight。
 
 ## 下一批优先级
 
-1. 对 durable execution host 和 startup reconciliation 执行 Bridge/execd/worker crash、长时 spool/ack 与故障告警 canary。
-2. 让 execution worker 持有 schema-gated Codex app-server connection，把现有 approval dispatcher 接到真实 request continuation，并在 Web/Android 展示 delivery/attach/fidelity 状态。
+1. 用发布二进制执行一小时 `execution-host:soak` 并归档 JSON 报告，签发 durable execution host 生产可靠性门槛。
+2. 在 Web/Android 完整展示 approval delivery/attach/fidelity 状态。
 3. 补齐 Provider 任务持久队列、并发上限、失败重试和后台调度。
 4. 完成 Live Call 生产 ASR 配置与长时间真实音频/弱网 QA。
 5. 将 session/task/message 纳入持久搜索索引，并完成客户端事件 ack、实际 retention/compaction、Workspace 结构化结果和多设备冲突处理。

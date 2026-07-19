@@ -4,6 +4,7 @@ import path from "node:path";
 const DEFAULT_MAX_CONTENT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_FILES = 100_000;
 const DEFAULT_REFRESH_INTERVAL_MS = 60_000;
+const APPLY_BATCH_SIZE = 20;
 const SKIP_DIRS = new Set([".git", ".gradle", ".idea", ".next", ".turbo", ".vscode", "build", "coverage", "dist", "node_modules", "target"]);
 
 function cleanWorkspace(workspace = {}) {
@@ -78,6 +79,22 @@ async function scanWorkspace(root, maxFiles) {
   }
 
   return { files: files.filter((item) => item.path), complete };
+}
+
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function applyWorkspaceChangesInBatches(store, workspaceId, upserts, deletedPaths) {
+  const operations = Math.max(upserts.length, deletedPaths.length);
+  if (!operations) return;
+  for (let offset = 0; offset < operations; offset += APPLY_BATCH_SIZE) {
+    store.applyWorkspaceChanges(workspaceId, {
+      upserts: upserts.slice(offset, offset + APPLY_BATCH_SIZE),
+      deletedPaths: deletedPaths.slice(offset, offset + APPLY_BATCH_SIZE)
+    });
+    await yieldToEventLoop();
+  }
 }
 
 export function createWorkspaceSearchIndexer({
@@ -158,7 +175,7 @@ export function createWorkspaceSearchIndexer({
       });
     }
     const deletedPaths = snapshot.complete ? [...existing.keys()].filter((relativePath) => !seen.has(relativePath)) : [];
-    store.applyWorkspaceChanges(workspace.id, { upserts, deletedPaths });
+    await applyWorkspaceChangesInBatches(store, workspace.id, upserts, deletedPaths);
     state.changedFiles += upserts.length;
     state.deletedFiles += deletedPaths.length;
     return { workspaceId: workspace.id, changed: upserts.length, deleted: deletedPaths.length, complete: snapshot.complete };

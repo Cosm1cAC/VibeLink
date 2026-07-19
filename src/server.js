@@ -106,7 +106,16 @@ import {
   stopSearchIndex,
   updateSavedSearch
 } from "./search.js";
-import { addReviewComment, createReview, getReview, listReviews, updateReview } from "./reviews.js";
+import {
+  addReviewComment,
+  createReview,
+  getReview,
+  listReviews,
+  submitRemoteReview,
+  syncRemoteReview,
+  updateReview,
+  updateReviewComment
+} from "./reviews.js";
 import { dispatchLiveCallQuestion, stopLiveCallAgentTask } from "./liveCallAgent.js";
 import {
   authenticateRequest,
@@ -172,19 +181,17 @@ const providerCatalogResolver = persistentProviderCache.catalogResolver;
 const providerHealthResolver = persistentProviderCache.healthResolver;
 settings = applyRuntimeBindingOverrides(settings);
 ensureDefaultWorkspaces(settings);
-try {
-  await providerRegistryPayload({ backgroundRefresh: true });
-} catch (error) {
-  console.error(`[provider-cache] startup hydration failed: ${error.message}`);
+if (process.env.VIBELINK_PROVIDER_CACHE_STARTUP !== "0") {
+  providerRegistryPayload({ backgroundRefresh: true }).catch((error) => {
+    console.error(`[provider-cache] startup hydration failed: ${error.message}`);
+  });
 }
-try {
-  await startSearchIndex({
+if (process.env.VIBELINK_SEARCH_INDEX_STARTUP !== "0") startSearchIndex({
     getWorkspaces: () => getWorkspaces(settings),
     refreshIntervalMs: Number(process.env.VIBELINK_SEARCH_INDEX_REFRESH_MS || 60_000)
+  }).catch((error) => {
+    console.error(`[search-index] startup refresh failed: ${error.message}`);
   });
-} catch (error) {
-  console.error(`[search-index] startup refresh failed: ${error.message}`);
-}
 restoreTasks();
 const approvalDispatcher = createApprovalDispatcher({
   resolveApproval: (command) => getExecutionHostFacade().resolveProviderApproval(command)
@@ -744,6 +751,18 @@ function terminalSessionMetadata(toolRunId) {
     mode: input.mode === "spawn" ? "spawn" : "pty",
     backend: input.mode === "spawn" ? "stdio" : "conpty"
   };
+}
+
+function sendKnownReviewError(response, error) {
+  if (!error?.code || (!String(error.code).startsWith("REVIEW_") && !String(error.code).startsWith("GITHUB_"))) return false;
+  const status = Number(error.status || 500);
+  sendError(response, status, error.message || "Review operation failed.", {
+    code: error.code,
+    ...(error.expectedHeadSha !== undefined ? { expectedHeadSha: error.expectedHeadSha } : {}),
+    ...(error.actualHeadSha !== undefined ? { actualHeadSha: error.actualHeadSha } : {}),
+    ...(error.current ? { current: error.current } : {})
+  });
+  return true;
 }
 
 function projectTerminalOutput(toolRunId, chunk) {
@@ -3099,6 +3118,10 @@ async function routeApi(request, response, url) {
       if (body.expectedRevision === undefined) body.expectedRevision = workspaceRevisionFromIfMatch(request);
       body.requireAbsent = body.requireAbsent === true || String(request.headers["if-none-match"] || "").trim() === "*";
       const result = await mutateWorkspaceFile(workspaceFileMatch[1], settings, body);
+      const workspace = getWorkspaces(settings).find((item) => item.id === workspaceFileMatch[1]);
+      if (workspace) {
+        await refreshWorkspaceSearchPaths(workspace, [result.previousPath || "", result.path || body.path || ""].filter(Boolean));
+      }
       audit(request, url, auth, {
         type: "workspace.file",
         success: true,
@@ -3820,7 +3843,18 @@ async function routeApi(request, response, url) {
   }
   if (url.pathname === "/api/reviews" && request.method === "POST") {
     const body = await readBody(request);
-    sendJson(response, 201, createReview(body));
+    const isRemoteReview = Boolean(body.pullRequest || body.number);
+    if (isRemoteReview && !enforceRateLimit(request, response, url, "github_review.sync", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const review = isRemoteReview
+        ? await syncRemoteReview(null, body, { settings })
+        : createReview(body);
+      if (isRemoteReview) audit(request, url, auth, { type: "github_review.sync", success: true, target: `${review.remote?.repository || ""}#${review.remote?.number || ""}` });
+      sendJson(response, 201, review);
+    } catch (error) {
+      if (isRemoteReview) audit(request, url, auth, { type: "github_review.sync", success: false, reason: error.message });
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
     return;
   }
   const reviewMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)$/);
@@ -3838,9 +3872,56 @@ async function routeApi(request, response, url) {
   }
   const commentMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/comments$/);
   if (commentMatch && request.method === "POST") {
-    const review = addReviewComment(decodeURIComponent(commentMatch[1]), await readBody(request));
-    if (!review) { sendError(response, 404, "Review not found"); return; }
-    sendJson(response, 201, review);
+    try {
+      const review = addReviewComment(decodeURIComponent(commentMatch[1]), await readBody(request));
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      sendJson(response, 201, review);
+    } catch (error) {
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
+    return;
+  }
+  const reviewCommentMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/comments\/([^/]+)$/);
+  if (reviewCommentMatch && request.method === "PATCH") {
+    try {
+      const review = updateReviewComment(
+        decodeURIComponent(reviewCommentMatch[1]),
+        decodeURIComponent(reviewCommentMatch[2]),
+        await readBody(request)
+      );
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      sendJson(response, 200, review);
+    } catch (error) {
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
+    return;
+  }
+  const reviewSyncMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/sync$/);
+  if (reviewSyncMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "github_review.sync", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const review = await syncRemoteReview(decodeURIComponent(reviewSyncMatch[1]), await readBody(request), { settings });
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      audit(request, url, auth, { type: "github_review.sync", success: true, target: `${review.remote?.repository || ""}#${review.remote?.number || ""}` });
+      sendJson(response, 200, review);
+    } catch (error) {
+      audit(request, url, auth, { type: "github_review.sync", success: false, target: decodeURIComponent(reviewSyncMatch[1]), reason: error.message });
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
+    return;
+  }
+  const reviewSubmitMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/submit$/);
+  if (reviewSubmitMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, "github_review.submit", { limit: 10, windowMs: 60 * 1000 }, auth)) return;
+    try {
+      const review = await submitRemoteReview(decodeURIComponent(reviewSubmitMatch[1]), await readBody(request), { settings });
+      if (!review) { sendError(response, 404, "Review not found"); return; }
+      audit(request, url, auth, { type: "github_review.submit", success: true, target: `${review.remote?.repository || ""}#${review.remote?.number || ""}`, meta: { decision: review.decision || "" } });
+      sendJson(response, 200, review);
+    } catch (error) {
+      audit(request, url, auth, { type: "github_review.submit", success: false, target: decodeURIComponent(reviewSubmitMatch[1]), reason: error.message });
+      if (!sendKnownReviewError(response, error)) throw error;
+    }
     return;
   }
 

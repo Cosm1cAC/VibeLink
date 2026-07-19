@@ -46,6 +46,8 @@
         "mcp-session:server-canary": "node tools/mcp-session/server-canary.mjs",
         "mcp-session:soak": "node tools/mcp-session/soak.mjs",
         "codex-app-server:contract": "node --test test/codexAppServerContract.test.js test/codexAppServerJsonRpcMock.test.js && node tools/codex-app-server/contract-probe.mjs",
+        "execution-host:canary": "node tools/execution-host/reliability-canary.mjs",
+        "execution-host:soak": "node tools/execution-host/reliability-canary.mjs --duration-ms 3600000",
         "test:event-store": "node --test --test-concurrency=1 test/eventStoreContract.test.js test/eventStoreWorker.test.js test/eventStoreWorkerAppend.test.js test/eventStoreSidecarContract.test.js test/eventStoreRustRuntime.test.js test/eventStoreBatchAppend.test.js test/eventStoreBatcher.test.js test/eventStoreMetrics.test.js test/eventStoreCanaryStats.test.js test/eventStoreRealDataCanary.test.js",
         "event-store:canary": "node tools/event-store/canary.mjs",
         "event-store:runtime-canary": "node tools/event-store/runtime-canary.mjs",

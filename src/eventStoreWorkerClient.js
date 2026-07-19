@@ -103,6 +103,13 @@ export function createEventStoreWorkerClient({
     pruneLiveCallEvents: (options) => request("pruneLiveCallEvents", [options]),
     listUnifiedEvents: (options) => request("listUnifiedEvents", [options]),
     replayWindow: (options) => request("replayWindow", [options]),
+    upsertEventAck: (deviceId, streamId, cursor, options) => request("upsertEventAck", [deviceId, streamId, cursor, options]),
+    getEventAck: (deviceId, streamId) => request("getEventAck", [deviceId, streamId]),
+    listEventAcks: (options) => request("listEventAcks", [options]),
+    deleteDeviceEventAcks: (deviceId) => request("deleteDeviceEventAcks", [deviceId]),
+    planRetention: (options) => request("planRetention", [options]),
+    recordCompactionMarker: (options) => request("recordCompactionMarker", [options]),
+    listCompactionMarkers: (options) => request("listCompactionMarkers", [options]),
     close
   };
 }

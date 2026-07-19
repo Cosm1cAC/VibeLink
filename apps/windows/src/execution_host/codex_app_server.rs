@@ -136,7 +136,8 @@ pub fn start(
     )?;
     if let Err(error) = initialize_session(
         &mut socket,
-        &app_server.thread_resume_params,
+        app_server.thread_start_params.as_ref(),
+        app_server.thread_resume_params.as_ref(),
         &app_server.turn_start_params,
         &on_event,
     ) {
@@ -299,7 +300,8 @@ fn connect_with_retry(url: &str, timeout: Duration) -> Result<AppSocket> {
 
 fn initialize_session(
     socket: &mut AppSocket,
-    resume_params: &Value,
+    start_params: Option<&Value>,
+    resume_params: Option<&Value>,
     turn_params: &Value,
     on_event: &EventCallback,
 ) -> Result<()> {
@@ -318,8 +320,30 @@ fn initialize_session(
         on_event,
     )?;
     send_json(socket, &json!({ "method": "initialized", "params": {} }))?;
-    request(socket, 2, "thread/resume", resume_params.clone(), on_event)?;
-    request(socket, 3, "turn/start", turn_params.clone(), on_event)?;
+    let thread = match (start_params, resume_params) {
+        (Some(params), None) => request(socket, 2, "thread/start", params.clone(), on_event)?,
+        (None, Some(params)) => request(socket, 2, "thread/resume", params.clone(), on_event)?,
+        _ => bail!("appServer requires exactly one thread setup request"),
+    };
+    let thread_id = thread
+        .get("thread")
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .context("Codex app-server thread setup response did not include thread.id")?;
+    let mut turn_params = turn_params.clone();
+    let turn = turn_params
+        .as_object_mut()
+        .context("appServer.turnStartParams must be an object")?;
+    match turn.get("threadId").and_then(Value::as_str) {
+        Some(configured) if configured != thread_id => {
+            bail!("Codex app-server thread setup returned a different thread id")
+        }
+        Some(_) => {}
+        None => {
+            turn.insert("threadId".to_string(), Value::String(thread_id.to_string()));
+        }
+    }
+    request(socket, 3, "turn/start", turn_params, on_event)?;
     Ok(())
 }
 
@@ -984,8 +1008,7 @@ mod tests {
             "params": {
                 "threadId": "thread-1",
                 "turnId": "turn-1",
-                "itemId": "item-1",
-                "availableDecisions": ["accept", "decline"]
+                "itemId": "item-1"
             }
         }))
         .unwrap();
@@ -1048,6 +1071,75 @@ mod tests {
     }
 
     #[test]
+    fn approval_response_is_written_to_the_original_websocket_request() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket
+                .send(Message::Text(
+                    json!({
+                        "id": 42,
+                        "method": "item/commandExecution/requestApproval",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "itemId": "item-1"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+            match socket.read().unwrap() {
+                Message::Text(payload) => serde_json::from_str::<Value>(&payload).unwrap(),
+                other => panic!("unexpected client message {other:?}"),
+            }
+        });
+
+        let (mut socket, _) = connect(&url).unwrap();
+        let request = read_json(&mut socket).unwrap();
+        let mut pending = HashMap::new();
+        register_pending_approval(&request, &mut pending).unwrap();
+        let mut awaiting = HashMap::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let on_event: EventCallback = Arc::new(move |event_type, payload| {
+            captured
+                .lock()
+                .unwrap()
+                .push((event_type.to_string(), payload));
+        });
+        deliver_approval(
+            &mut socket,
+            &on_event,
+            &mut pending,
+            &mut awaiting,
+            &ApprovalCommand {
+                approval_id: "approval-1".to_string(),
+                continuation_ref: "codex:thread-1:turn-1:item-1:42".to_string(),
+                expected_version: 0,
+                decision: json!({ "decision": "accept" }),
+                result: mpsc::sync_channel(1).0,
+            },
+        )
+        .unwrap();
+
+        let response = server.join().unwrap();
+        assert_eq!(
+            response,
+            json!({ "id": 42, "result": { "decision": "accept" } })
+        );
+        assert!(pending.is_empty());
+        assert!(awaiting.contains_key("codex:thread-1:turn-1:item-1:42"));
+        assert_eq!(
+            events.lock().unwrap()[0].1["type"],
+            "provider.approval.delivered"
+        );
+    }
+
+    #[test]
     fn websocket_session_initializes_resumes_and_starts_turn() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -1077,9 +1169,14 @@ mod tests {
                             ))
                             .unwrap();
                     }
+                    let result = if message["method"] == "thread/resume" {
+                        json!({ "thread": { "id": "thread-1" } })
+                    } else {
+                        json!({})
+                    };
                     socket
                         .send(Message::Text(
-                            json!({ "id": id, "result": {} }).to_string().into(),
+                            json!({ "id": id, "result": result }).to_string().into(),
                         ))
                         .unwrap();
                 }
@@ -1098,7 +1195,8 @@ mod tests {
         });
         initialize_session(
             &mut socket,
-            &json!({ "threadId": "thread-1" }),
+            None,
+            Some(&json!({ "threadId": "thread-1" })),
             &json!({
                 "threadId": "thread-1",
                 "input": [{ "type": "text", "text": "hello", "text_elements": [] }]
@@ -1115,5 +1213,53 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "provider.event");
         assert_eq!(events[0].1["type"], "provider.turn.started");
+    }
+
+    #[test]
+    fn websocket_session_starts_a_thread_and_injects_its_id_into_the_turn() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let mut turn_thread_id = None;
+            for _ in 0..4 {
+                let message: Value = match socket.read().unwrap() {
+                    Message::Text(payload) => serde_json::from_str(&payload).unwrap(),
+                    other => panic!("unexpected client message {other:?}"),
+                };
+                if message["method"] == "turn/start" {
+                    turn_thread_id = message["params"]["threadId"].as_str().map(str::to_string);
+                }
+                if let Some(id) = message.get("id") {
+                    let result = if message["method"] == "thread/start" {
+                        json!({ "thread": { "id": "created-thread" } })
+                    } else {
+                        json!({})
+                    };
+                    socket
+                        .send(Message::Text(
+                            json!({ "id": id, "result": result }).to_string().into(),
+                        ))
+                        .unwrap();
+                }
+            }
+            turn_thread_id
+        });
+
+        let (mut socket, _) = connect(&url).unwrap();
+        let on_event: EventCallback = Arc::new(|_, _| {});
+        initialize_session(
+            &mut socket,
+            Some(&json!({ "cwd": "C:\\repo" })),
+            None,
+            &json!({
+                "input": [{ "type": "text", "text": "hello", "text_elements": [] }]
+            }),
+            &on_event,
+        )
+        .unwrap();
+
+        assert_eq!(server.join().unwrap().as_deref(), Some("created-thread"));
     }
 }

@@ -62,6 +62,8 @@ function startServer(dataDir, port, pairingToken, command) {
     env: {
       ...process.env,
       VIBELINK_DATA_DIR: dataDir,
+      VIBELINK_SEARCH_INDEX_STARTUP: "0",
+      VIBELINK_PROVIDER_CACHE_STARTUP: "0",
       MOBILE_AGENT_HOST: "127.0.0.1",
       MOBILE_AGENT_PORT: String(port),
       MOBILE_AGENT_TOKEN: pairingToken,

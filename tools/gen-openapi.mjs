@@ -227,6 +227,47 @@ const schemas = {
       searchedAt: { type: "string" }
     }
   },
+  ReviewSession: {
+    type: "object",
+    required: ["id", "workspaceId", "title", "status", "source", "files", "threads", "comments"],
+    properties: {
+      id: { type: "string" },
+      workspaceId: { type: "string" },
+      branch: { type: "string" },
+      title: { type: "string" },
+      status: { type: "string", enum: ["open", "submitted", "resolved"] },
+      source: { type: "string", enum: ["local", "github"] },
+      remote: {
+        type: "object",
+        properties: {
+          provider: { type: "string", enum: ["github"] },
+          repository: { type: "string" },
+          number: { type: "integer" },
+          url: { type: "string" },
+          headSha: { type: "string" },
+          baseSha: { type: "string" },
+          syncedAt: { type: "string", format: "date-time" }
+        }
+      },
+      files: { type: "array", items: { type: "object" } },
+      diff: { type: "string" },
+      threads: { type: "array", items: { type: "object" } },
+      comments: { type: "array", items: { type: "object" } },
+      createdAt: { type: "string", format: "date-time" },
+      updatedAt: { type: "string", format: "date-time" }
+    }
+  },
+  ReviewConflict: {
+    type: "object",
+    required: ["error", "code", "expectedHeadSha", "actualHeadSha"],
+    properties: {
+      error: { type: "string" },
+      code: { type: "string", enum: ["REVIEW_REMOTE_CONFLICT"] },
+      expectedHeadSha: { type: "string" },
+      actualHeadSha: { type: "string" },
+      current: { type: "object" }
+    }
+  },
   PaginationParams: {
     type: "object",
     properties: {
@@ -302,13 +343,14 @@ function get(summary, description, responseSchema, params = []) {
   };
 }
 
-function post(summary, description, requestBody, responses, extra = {}) {
+function post(summary, description, requestBody, responses, extra = {}, params = []) {
   const postDef = {
     post: {
       summary,
       description,
       parameters: [
-        { name: "dryRun", in: "query", schema: { type: "string", enum: ["1", "true"] }, description: "Preview without side effects" }
+        { name: "dryRun", in: "query", schema: { type: "string", enum: ["1", "true"] }, description: "Preview without side effects" },
+        ...params
       ],
       requestBody: requestBody ? {
         required: true,
@@ -341,7 +383,7 @@ function withEtag(methods, { ifMatch = false, ifNoneMatch = false } = {}) {
   return methods;
 }
 
-function mutation(method, summary, description, responseSchema, requestBody = null, params = []) {
+function mutation(method, summary, description, responseSchema, requestBody = null, params = [], extraResponses = {}) {
   return {
     [method]: {
       summary,
@@ -356,7 +398,8 @@ function mutation(method, summary, description, responseSchema, requestBody = nu
         "400": { description: "Validation error", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
         "401": { description: "Unauthorized", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
         "404": { description: "Not found", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
-        "429": { description: "Rate limit exceeded", content: { "application/json": { schema: { $ref: "#/components/schemas/RateLimitError" } } } }
+        "429": { description: "Rate limit exceeded", content: { "application/json": { schema: { $ref: "#/components/schemas/RateLimitError" } } } },
+        ...extraResponses
       }
     }
   };
@@ -1021,6 +1064,85 @@ const paths = {
     { type: "object" },
     { "409": { description: "Atomic batch conflict", content: { "application/json": { schema: { $ref: "#/components/schemas/RevisionConflict" } } } } }
   ))),
+
+  // Pull request reviews
+  ...path("/api/reviews", {
+    ...get("List review sessions",
+      "Returns local and GitHub-backed review sessions.",
+      { type: "object", properties: { items: { type: "array", items: { $ref: "#/components/schemas/ReviewSession" } } } }
+    ),
+    ...post("Create review session",
+      "Creates a local session, or imports a GitHub pull request when pullRequest or number is provided.",
+      {
+        type: "object",
+        required: ["workspaceId"],
+        properties: {
+          workspaceId: { type: "string" },
+          title: { type: "string" },
+          branch: { type: "string" },
+          pullRequest: { oneOf: [{ type: "integer" }, { type: "string" }] },
+          number: { type: "integer" },
+          repository: { type: "string" }
+        }
+      },
+      { $ref: "#/components/schemas/ReviewSession" },
+      { "201": { description: "Created", content: { "application/json": { schema: { $ref: "#/components/schemas/ReviewSession" } } } } }
+    )
+  }),
+  ...path("/api/reviews/{id}", {
+    ...get("Get review session", "Returns one review session.", { $ref: "#/components/schemas/ReviewSession" }, [
+      { name: "id", in: "path", required: true, schema: { type: "string" } }
+    ]),
+    ...mutation("patch", "Update review session", "Updates local review session fields.", { $ref: "#/components/schemas/ReviewSession" },
+      { type: "object" },
+      [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+    )
+  }),
+  ...path("/api/reviews/{id}/comments", post("Add review comment",
+    "Adds a local draft inline comment.",
+    {
+      type: "object",
+      required: ["file", "line", "body"],
+      properties: {
+        file: { type: "string" }, line: { type: "integer", minimum: 1 }, startLine: { type: "integer", minimum: 1 },
+        side: { type: "string", enum: ["left", "right"] }, body: { type: "string" }, severity: { type: "string" }
+      }
+    },
+    { $ref: "#/components/schemas/ReviewSession" },
+    { "201": { description: "Created", content: { "application/json": { schema: { $ref: "#/components/schemas/ReviewSession" } } } } },
+    [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+  )),
+  ...path("/api/reviews/{id}/comments/{commentId}", mutation("patch", "Update review comment",
+    "Updates a draft comment or its local status.",
+    { $ref: "#/components/schemas/ReviewSession" },
+    { type: "object", properties: { body: { type: "string" }, status: { type: "string", enum: ["open", "resolved", "dismissed", "submitted"] } } },
+    [
+      { name: "id", in: "path", required: true, schema: { type: "string" } },
+      { name: "commentId", in: "path", required: true, schema: { type: "string" } }
+    ]
+  )),
+  ...path("/api/reviews/{id}/sync", post("Sync GitHub review session",
+    "Refreshes PR metadata, changed files, diff, review threads, and remote comment status while preserving local comments.",
+    { type: "object", properties: { pullRequest: { oneOf: [{ type: "integer" }, { type: "string" }] }, repository: { type: "string" } } },
+    { $ref: "#/components/schemas/ReviewSession" },
+    {},
+    [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+  )),
+  ...path("/api/reviews/{id}/submit", post("Submit GitHub review",
+    "Submits the decision and open local comments after verifying the PR head SHA has not changed.",
+    {
+      type: "object",
+      required: ["decision", "expectedHeadSha"],
+      properties: {
+        decision: { type: "string", enum: ["approve", "request_changes", "comment"] },
+        body: { type: "string" },
+        expectedHeadSha: { type: "string" }
+      }
+    },
+    { $ref: "#/components/schemas/ReviewSession" },
+    { "409": { description: "Remote head changed", content: { "application/json": { schema: { $ref: "#/components/schemas/ReviewConflict" } } } } },
+    [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+  )),
 
   // Audit
   ...path("/api/audit-log", get("Audit log",

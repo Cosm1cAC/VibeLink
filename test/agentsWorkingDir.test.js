@@ -145,7 +145,16 @@ test("running CLI input queues a resume turn on the execution host under the sam
       if (starts[0]?.executionId === id && pages.get(id) === null) {
         await firstReady;
         pages.set(id, [
-          { hostSeq: 1, type: "stream.stdout", payload: { text: `${JSON.stringify({ type: "thread.started", thread_id: "session-1" })}\n` } },
+          {
+            hostSeq: 1,
+            type: "provider.event",
+            payload: {
+              type: "provider.thread.started",
+              protocol: "codex-app-server",
+              threadId: "session-1",
+              payload: { thread: { id: "session-1" } }
+            }
+          },
           { hostSeq: 2, type: "stream.stderr", payload: { text: "warning\n" } },
           { hostSeq: 3, type: "execution.exited", payload: { exitCode: 0, signal: "" } }
         ]);
@@ -170,6 +179,9 @@ test("running CLI input queues a resume turn on the execution host under the sam
   );
 
   assert.equal(starts[0].executionId, task.id);
+  assert.equal(starts[0].threadStartParams.threadSource, "appServer");
+  assert.equal(starts[0].threadResumeParams, undefined);
+  assert.equal(starts[0].turnStartParams.threadId, undefined);
   assert.deepEqual(writeTaskInput(task.id, "second"), { ok: true, queued: true, queueLength: 1 });
   releaseFirst();
   await new Promise((resolve, reject) => {

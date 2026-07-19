@@ -594,6 +594,10 @@ async function monitorProviderTurn(task, execution, runtimeSettings) {
           ? { ...hostEvent.payload, eventId: hostEvent.eventId, hostSeq: hostEvent.hostSeq, at: hostEvent.payload.at || hostEvent.at }
           : hostEvent;
         execution.afterHostSeq = Math.max(execution.afterHostSeq, Number(event.hostSeq || 0));
+        if (event.protocol === "codex-app-server" && event.threadId && !task.sessionId) {
+          task.sessionId = event.threadId;
+          upsertTask(task);
+        }
         if (event.type === "stream.stdout") normalizer.write(eventBytes(event));
         else if (event.type === "stream.stderr") {
           task.updatedAt = nowIso();
@@ -728,7 +732,8 @@ async function startProviderTurn(task, payload, runtimeSettings, executionId) {
     throw error;
   }
   task.commandLabel = commandLabel(launch.base.command, launch.args);
-  const useAppServer = task.agent === "codex" && payload.sessionId && typeof facade.startAppServerProvider === "function";
+  const useAppServer = task.agent === "codex" && typeof facade.startAppServerProvider === "function";
+  const policy = securityPolicy(payload, runtimeSettings);
   const common = {
     executionId,
     command: launch.base.command,
@@ -738,10 +743,21 @@ async function startProviderTurn(task, payload, runtimeSettings, executionId) {
   const snapshot = useAppServer
     ? await facade.startAppServerProvider({
       ...common,
-      args: [...launch.base.args, ...codexGlobalArgs(payload, runtimeSettings, securityPolicy(payload, runtimeSettings))],
-      threadResumeParams: { threadId: payload.sessionId, cwd: task.cwd },
+      args: [...launch.base.args, ...codexGlobalArgs(payload, runtimeSettings, policy)],
+      ...(payload.sessionId
+        ? { threadResumeParams: { threadId: payload.sessionId, cwd: task.cwd, runtimeWorkspaceRoots: [task.cwd] } }
+        : {
+            threadStartParams: {
+              cwd: task.cwd,
+              runtimeWorkspaceRoots: [task.cwd],
+              approvalPolicy: codexApprovalPolicy(policy.approvalPolicy || "on-request"),
+              sandbox: policy.sandboxMode || "workspace-write",
+              threadSource: "appServer",
+              ephemeral: false
+            }
+          }),
       turnStartParams: {
-        threadId: payload.sessionId,
+        ...(payload.sessionId ? { threadId: payload.sessionId } : {}),
         input: [{ type: "text", text: payload.prompt || "", text_elements: [] }]
       }
     })

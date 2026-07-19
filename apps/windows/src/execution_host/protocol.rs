@@ -119,7 +119,10 @@ pub enum BackendKind {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppServerParams {
-    pub thread_resume_params: Value,
+    #[serde(default)]
+    pub thread_start_params: Option<Value>,
+    #[serde(default)]
+    pub thread_resume_params: Option<Value>,
     pub turn_start_params: Value,
     #[serde(default = "default_app_server_connect_timeout")]
     pub connect_timeout_ms: u64,
@@ -207,26 +210,38 @@ impl StartParams {
 }
 
 fn validate_app_server_params(params: &AppServerParams) -> Result<()> {
-    let resume = params
-        .thread_resume_params
-        .as_object()
-        .context("appServer.threadResumeParams must be an object")?;
+    let thread_count = usize::from(params.thread_start_params.is_some())
+        + usize::from(params.thread_resume_params.is_some());
+    if thread_count != 1 {
+        bail!("appServer requires exactly one of threadStartParams or threadResumeParams");
+    }
     let turn = params
         .turn_start_params
         .as_object()
         .context("appServer.turnStartParams must be an object")?;
-    let resume_thread = resume
-        .get("threadId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .context("appServer.threadResumeParams.threadId is required")?;
-    let turn_thread = turn
-        .get("threadId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .context("appServer.turnStartParams.threadId is required")?;
-    if resume_thread != turn_thread {
-        bail!("appServer resume and turn threadId must match");
+    if let Some(resume) = params.thread_resume_params.as_ref() {
+        let resume = resume
+            .as_object()
+            .context("appServer.threadResumeParams must be an object")?;
+        let resume_thread = resume
+            .get("threadId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .context("appServer.threadResumeParams.threadId is required")?;
+        let turn_thread = turn
+            .get("threadId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .context("appServer.turnStartParams.threadId is required")?;
+        if resume_thread != turn_thread {
+            bail!("appServer resume and turn threadId must match");
+        }
+    } else if !params
+        .thread_start_params
+        .as_ref()
+        .is_some_and(Value::is_object)
+    {
+        bail!("appServer.threadStartParams must be an object");
     }
     if !turn.get("input").is_some_and(Value::is_array) {
         bail!("appServer.turnStartParams.input must be an array");
@@ -558,7 +573,8 @@ mod tests {
             cwd: Some("C:\\repo".to_string()),
             env: BTreeMap::new(),
             app_server: Some(AppServerParams {
-                thread_resume_params: json!({ "threadId": "thread-1" }),
+                thread_start_params: None,
+                thread_resume_params: Some(json!({ "threadId": "thread-1" })),
                 turn_start_params: json!({ "threadId": "thread-1", "input": [] }),
                 connect_timeout_ms: 15_000,
             }),
@@ -569,6 +585,17 @@ mod tests {
             operation_id: "start-1".to_string(),
         };
         valid.validate().unwrap();
+
+        let mut initial = valid.clone();
+        let initial_app_server = initial.app_server.as_mut().unwrap();
+        initial_app_server.thread_start_params = Some(json!({ "cwd": "C:\\repo" }));
+        initial_app_server.thread_resume_params = None;
+        initial_app_server
+            .turn_start_params
+            .as_object_mut()
+            .unwrap()
+            .remove("threadId");
+        initial.validate().unwrap();
 
         let mut mismatched = valid.clone();
         mismatched.app_server.as_mut().unwrap().turn_start_params["threadId"] =

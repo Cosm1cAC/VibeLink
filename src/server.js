@@ -53,9 +53,16 @@ import {
   getEventStoreRuntimeStats,
   initDb,
   replayEventWindowAsync,
+  getEventAck,
+  upsertEventAck,
+  listEventAcks,
+  planRetention,
+  compactEvents,
+  listCompactionMarkers,
   upsertNativePushToken,
   upsertPushSubscription
 } from "./db.js";
+import { createEventSyncHttpHandler } from "./eventSyncHttp.js";
 import { applyTaskQueueTransition, appendExternalTaskEvent, configureTaskScheduler, createTask, executeQueuedTask, getTask, getTasks, restoreTaskExecution, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, createBrowserSessionRuntime, fetchBrowserPage } from "./browserRuntime.js";
@@ -174,6 +181,18 @@ import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, Bro
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
 const browserSessionRuntime = createBrowserSessionRuntime();
+const routeEventSyncRequest = createEventSyncHttpHandler({
+  readBody,
+  sendJson,
+  getEventAck,
+  upsertEventAck,
+  listEventAcks,
+  planRetention,
+  compactEvents,
+  listCompactionMarkers,
+  enforceRateLimit,
+  audit
+});
 const providerRuntimeLoaders = createProviderRuntimeLoaders({
   getSettings: () => settingsWithSecrets(settings)
 });
@@ -1999,6 +2018,8 @@ async function routeApi(request, response, url) {
     enforceRateLimit,
     audit
   })) return;
+
+  if (await routeEventSyncRequest(request, response, url, auth)) return;
 
   if (url.pathname === "/api/files" && request.method === "GET") {
     if (!enforceRateLimit(request, response, url, "file.download", { limit: 120, windowMs: 60 * 1000 }, auth)) return;

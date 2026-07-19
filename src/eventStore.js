@@ -94,9 +94,38 @@ export function createSqliteEventStore({ database }) {
   }
   function deleteDeviceEventAcks(deviceId) { return database().prepare("DELETE FROM event_acks WHERE device_id = ?").run(deviceId).changes; }
   function planRetention({ streamId = "", retentionDays = 30, keepLatest = 5000, now = Date.now() } = {}) {
-    const cutoff = new Date(Number(now) - Math.max(0, Number(retentionDays || 0)) * 86400000).toISOString();
-    const ack = streamId ? database().prepare("SELECT MIN(cursor) AS cursor FROM event_acks WHERE stream_id = ?").get(streamId) : null;
-    return { streamId: normalizeStream(streamId), cutoff, keepLatest: Math.max(0, Math.floor(Number(keepLatest || 0))), ackCursor: ack?.cursor == null ? null : Number(ack.cursor), safeCursor: ack?.cursor == null ? null : Math.max(0, Number(ack.cursor)) };
+    const normalizedStream = normalizeStream(streamId);
+    const current = Number(now);
+    const cutoff = new Date(current - Math.max(0, Number(retentionDays || 0)) * 86400000).toISOString();
+    const db = database();
+    const acks = normalizedStream
+      ? db.prepare("SELECT device_id, cursor FROM event_acks WHERE stream_id = ? ORDER BY device_id").all(normalizedStream)
+      : [];
+    let activeDeviceIds = [];
+    try {
+      activeDeviceIds = db.prepare(`
+        SELECT id FROM devices
+        WHERE (revoked_at IS NULL OR revoked_at = '')
+          AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
+        ORDER BY id
+      `).all(new Date(current).toISOString()).map((row) => row.id);
+    } catch {}
+    const ackByDevice = new Map(acks.map((row) => [row.device_id, Number(row.cursor || 0)]));
+    const blockedByDeviceIds = activeDeviceIds.filter((deviceId) => !ackByDevice.has(deviceId));
+    const relevantCursors = activeDeviceIds.length
+      ? activeDeviceIds.map((deviceId) => ackByDevice.get(deviceId)).filter(Number.isFinite)
+      : acks.map((row) => Number(row.cursor || 0));
+    const ackCursor = relevantCursors.length ? Math.min(...relevantCursors) : null;
+    const safeCursor = blockedByDeviceIds.length || ackCursor == null ? null : Math.max(0, ackCursor);
+    return {
+      streamId: normalizedStream,
+      cutoff,
+      keepLatest: Math.max(0, Math.floor(Number(keepLatest || 0))),
+      ackCursor,
+      safeCursor,
+      activeDeviceIds,
+      blockedByDeviceIds
+    };
   }
   function recordCompactionMarker({ markerId = crypto.randomUUID(), streamId, fromCursor = 0, toCursor = 0, metadata = {} } = {}) {
     const current = nowIso(); database().prepare("INSERT OR REPLACE INTO compaction_markers (marker_id, stream_id, from_cursor, to_cursor, compacted_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)").run(markerId, normalizeStream(streamId), Number(fromCursor || 0), Number(toCursor || 0), current, toJson(metadata));
@@ -104,6 +133,68 @@ export function createSqliteEventStore({ database }) {
   }
   function listCompactionMarkers({ streamId = "", afterCursor = 0, limit = 100 } = {}) {
     return database().prepare("SELECT * FROM compaction_markers WHERE (? = '' OR stream_id = ?) AND to_cursor > ? ORDER BY to_cursor ASC LIMIT ?").all(streamId, streamId, Number(afterCursor || 0), Math.max(1, Math.min(1000, Number(limit || 100)))).map((row) => ({ markerId: row.marker_id, streamId: row.stream_id, fromCursor: row.from_cursor, toCursor: row.to_cursor, compactedAt: row.compacted_at, metadata: fromJson(row.metadata_json, {}) || {} }));
+  }
+
+  function compactEvents({ streamId, retentionDays = 30, keepLatest = 5000, spoolQuotaBytes = 0, now = Date.now(), dryRun = true } = {}) {
+    const stream = normalizeStream(streamId);
+    const match = /^(task|live-call|tool-event):(.+)$/.exec(stream);
+    if (!match) throw new TypeError("streamId must use task:<id>, live-call:<id>, or tool-event:<id>.");
+    const mappings = {
+      task: { table: "task_events", key: "task_id" },
+      "live-call": { table: "live_call_events", key: "session_id" },
+      "tool-event": { table: "tool_events", key: "tool_run_id" }
+    };
+    const { table, key } = mappings[match[1]];
+    const ownerId = cleanString(match[2], 160);
+    if (!ownerId) throw new TypeError("streamId owner is required.");
+    const plan = planRetention({ streamId: stream, retentionDays, keepLatest, now });
+    const db = database();
+    const quota = Math.max(0, Math.floor(Number(spoolQuotaBytes || 0)));
+    const availableColumns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+    const byteColumns = ["text", "payload_json", "event_json"].filter((column) => availableColumns.has(column));
+    const byteExpression = byteColumns.map((column) => `LENGTH(COALESCE(${column}, ''))`).join(" + ") || "0";
+    const retainedBytes = Number(db.prepare(`SELECT COALESCE(SUM(${byteExpression}), 0) AS bytes FROM ${table} WHERE ${key} = ?`).get(ownerId)?.bytes || 0);
+    const quotaExceeded = quota > 0 && retainedBytes > quota;
+    if (plan.safeCursor == null) {
+      return { ...plan, retainedBytes, spoolQuotaBytes: quota, quotaExceeded, prunable: 0, deleted: 0, dryRun: Boolean(dryRun), marker: null };
+    }
+    const threshold = db.prepare(`SELECT cursor FROM ${table} WHERE ${key} = ? ORDER BY cursor DESC LIMIT 1 OFFSET ?`).get(ownerId, plan.keepLatest);
+    const keepCursor = Number(threshold?.cursor || 0);
+    const predicate = quotaExceeded
+      ? `${key} = ? AND cursor <= ?`
+      : `${key} = ? AND cursor <= ? AND event_at < ? AND (? = 0 OR (? > 0 AND cursor <= ?))`;
+    const args = quotaExceeded
+      ? [ownerId, plan.safeCursor]
+      : [ownerId, plan.safeCursor, plan.cutoff, plan.keepLatest, keepCursor, keepCursor];
+    const range = db.prepare(`SELECT COUNT(*) AS count, MIN(cursor) AS first_cursor, MAX(cursor) AS last_cursor FROM ${table} WHERE ${predicate}`).get(...args);
+    const prunable = Number(range?.count || 0);
+    let marker = null;
+    if (!dryRun && prunable > 0) {
+      withTransaction(() => {
+        db.prepare(`DELETE FROM ${table} WHERE ${predicate}`).run(...args);
+        marker = recordCompactionMarker({
+          streamId: stream,
+          fromCursor: Number(range.first_cursor || 0),
+          toCursor: Number(range.last_cursor || 0),
+          metadata: {
+            reason: quotaExceeded ? "spool_quota" : "retention",
+            deleted: prunable,
+            retainedBytes,
+            spoolQuotaBytes: quota
+          }
+        });
+      });
+    }
+    return {
+      ...plan,
+      retainedBytes,
+      spoolQuotaBytes: quota,
+      quotaExceeded,
+      prunable,
+      deleted: dryRun ? 0 : prunable,
+      dryRun: Boolean(dryRun),
+      marker
+    };
   }
 
   function insertTaskEvent(taskId, event = {}) {
@@ -572,7 +663,7 @@ export function createSqliteEventStore({ database }) {
     pruneLiveCallEvents,
     listUnifiedEvents,
     replayWindow
-    ,upsertEventAck, getEventAck, listEventAcks, deleteDeviceEventAcks, planRetention, recordCompactionMarker, listCompactionMarkers
+    ,upsertEventAck, getEventAck, listEventAcks, deleteDeviceEventAcks, planRetention, compactEvents, recordCompactionMarker, listCompactionMarkers
   };
 }
 
@@ -584,7 +675,7 @@ export function createEventAckRepository({ database }) {
 
 export function createRetentionPlanner({ database }) {
   const store = createSqliteEventStore({ database });
-  return { plan: store.planRetention };
+  return { plan: store.planRetention, compact: store.compactEvents };
 }
 
 export function createCompactionMarkerRepository({ database }) {

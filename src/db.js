@@ -1406,6 +1406,7 @@ export function getEventAck(deviceId, streamId) { return sqliteEventStore().getE
 export function listEventAcks(options) { return sqliteEventStore().listEventAcks(options); }
 export function deleteDeviceEventAcks(deviceId) { return sqliteEventStore().deleteDeviceEventAcks(deviceId); }
 export function planRetention(options) { return sqliteEventStore().planRetention(options); }
+export function compactEvents(options) { return sqliteEventStore().compactEvents(options); }
 export function recordCompactionMarker(options) { return sqliteEventStore().recordCompactionMarker(options); }
 export function listCompactionMarkers(options) { return sqliteEventStore().listCompactionMarkers(options); }
 

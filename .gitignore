@@ -11,6 +11,8 @@ dist/
 artifacts/
 public/assets/
 **/bin/
+!tools/whisper-cpp/bin/
+!tools/whisper-cpp/bin/**
 **/obj/
 apps/windows/target/
 apps/android/app/build/
@@ -31,6 +33,7 @@ reference/
 tools/whisper-cpp/source/
 tools/whisper-cpp/build/
 tools/whisper-cpp/models/*.bin
+!tools/whisper-cpp/models/ggml-base.bin
 
 # Logs and operating-system metadata
 *.log

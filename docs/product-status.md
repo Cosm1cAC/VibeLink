@@ -19,7 +19,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - `/api/search` 统一搜索 session、task、message 和 Workspace 文件，Workspace 已改用 SQLite FTS5 持久索引，通过启动增量校验、文件监听和定时补偿更新；API 支持 scope、cursor、tag、favorite、排序、保存搜索和去重搜索历史，Android 已接入条件恢复、结果跳转及管理入口。
 - Thread metadata 已迁入 SQLite，支持标签、收藏、批量编辑和 revision/field revision 冲突检测；旧 `thread-state.json` 仅做一次兼容导入。
 - 全局 command registry 已接入 Web 命令面板，并向 Android 暴露导航、搜索、会话、Workspace、Live Call、Review、Settings 和 Approval 动作。
-- PR review 已有本地持久 session/comment API、Android Review 工作流和独立 GitHub runtime；后端可同步 PR metadata、changed files、diff、review threads/comment 状态，以 head SHA 检测冲突并提交 review decision。session 仍保存在 `reviews.json`。
+- PR review 已有本地持久 session/comment API、Android Review 工作流，以及独立 GitHub/GitLab runtime；后端可同步 PR/MR metadata、changed files、diff、review threads/comment 状态，以 head SHA 检测冲突并提交 review decision。GitLab 支持 draft notes 批量发布、reviewer state 和 approval；session 仍保存在 `reviews.json`。
 - Provider registry 已接入真实动态 catalog/health loader：Codex 走 app-server `model/list`，Claude/GLM 走模型 API，豆包走 browser bridge doctor；catalog/health 具备 TTL、single-flight、失败回退和 SQLite last-known-good 跨重启缓存，并发布当前 execution ownership、capability、protocol/version 和逐字段 fidelity。Status 与 Doctor 共用这份 readiness。
 - Codex app-server contract gate 已审查 CLI 0.144.5，并覆盖 thread/turn/item/tool 生命周期、agent/command output、MCP progress 和 approval schema；execution worker 现在同时支持 `thread/start` 与 `thread/resume`，并在同一条存活 WebSocket 上把 command/file/permission 审批决定写回原始 JSON-RPC request。未知版本仍会 fail-closed。
 - SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox；Rust `execd`、独立 worker、Job Object、ConPTY/stdio/app-server、分段 spool/replay/ack 和启动身份校验已实现。Bridge 启动会统一读取 binding、查询 execd、补 ingest/ack，并恢复 Terminal、Workspace command 与 Agent task/tool 订阅。通用 approval dispatcher 已轮询 transactional outbox 并向 execution host 投递，worker 事件可回写 delivered/applied/stale；Codex 新任务和恢复任务均走 durable app-server adapter。
@@ -43,7 +43,7 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
 - Workspace 全文搜索已不再在请求内扫描文件；索引器最多跟踪每个 Workspace 100,000 个文件，单文件正文索引上限 1 MiB，超限或二进制文件仍索引路径。session/task/message 仍在请求内聚合原生 history 与运行状态，尚未进入同一持久全文索引。
 - Workspace 仍缺大文件分页、富二进制预览、更完整的批量操作和成熟冲突处理。
-- Git 已支持常用状态、diff、stage、commit、push、pull、PR 创建、branch、stash、worktree 创建、per-hunk 和冲突动作；PR review 工作台已接入 GitHub 远端同步、冲突检测和 review 提交，仍缺 GitLab runtime，以及 worktree 列表、删除、prune/lock 等完整生命周期管理。
+- Git 已支持常用状态、diff、stage、commit、push、pull、PR 创建、branch、stash、per-hunk 和冲突动作；worktree 已覆盖创建、列表、删除、prune、lock/unlock，并保护主 worktree、校验仓库归属。PR review 工作台已接入 GitHub/GitLab 远端同步、冲突检测和 review 提交。
 - Live Call 已支持 pause/resume、本地 PCM 文件列表/删除、ASR provider 诊断、可选 whisper.cpp、默认生产配置、真实 PCM/弱网长时 QA，以及按天数、单文件和总容量约束的录音生命周期策略。缺少真实 provider 时会明确报错，deterministic mock 仅允许显式选择。
 - 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；仍缺客户端 ack API、实际 retention/compaction 执行、spool quota marker 和多设备冲突策略。
 

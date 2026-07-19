@@ -25,6 +25,17 @@ function snapshot(headSha = "head-1") {
   };
 }
 
+function gitlabSnapshot(headSha = "head-1") {
+  const value = snapshot(headSha);
+  value.metadata = {
+    ...value.metadata,
+    provider: "gitlab",
+    url: "https://gitlab.example/acme/widgets/-/merge_requests/42",
+    startSha: "start-1"
+  };
+  return value;
+}
+
 function fixture(t, runtime) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-review-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -126,4 +137,25 @@ test("review submission preserves comments added while the remote request is in 
   const submitted = await submitting;
 
   assert.deepEqual(submitted.comments.map((comment) => comment.status), ["submitted", "open"]);
+});
+
+test("remote review service selects the GitLab runtime and preserves provider metadata", async (t) => {
+  const submissions = [];
+  const service = fixture(t, {
+    github: { getPullRequest: async () => { throw new Error("wrong provider"); } },
+    gitlab: {
+      getPullRequest: async () => gitlabSnapshot(),
+      submitReview: async (input) => {
+        submissions.push(input);
+        return { id: 93, state: "reviewed", web_url: "https://gitlab.example/review/93" };
+      }
+    }
+  });
+
+  let review = await service.syncRemoteReview(null, { workspaceId: "w1", provider: "gitlab", pullRequest: 42 });
+  assert.equal(review.source, "gitlab");
+  review = await service.submitRemoteReview(review.id, { decision: "approve", body: "Looks good", expectedHeadSha: "head-1" });
+  assert.equal(submissions[0].headSha, "head-1");
+  assert.equal(submissions[0].startSha, "start-1");
+  assert.equal(review.remote.reviewUrl, "https://gitlab.example/review/93");
 });

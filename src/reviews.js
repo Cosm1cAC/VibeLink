@@ -4,6 +4,7 @@ import path from "node:path";
 import { dataDir } from "./config.js";
 import { getWorkspace } from "./db.js";
 import { githubReviewRuntime } from "./githubReviewRuntime.js";
+import { gitlabReviewRuntime } from "./gitlabReviewRuntime.js";
 import { resolveAllowedPath } from "./security.js";
 
 const reviewPath = path.join(dataDir, "reviews.json");
@@ -52,7 +53,7 @@ function normalizeComment(input = {}, current = null) {
 
 export function createReviewService(options = {}) {
   const filePath = options.filePath || reviewPath;
-  const runtime = options.runtime || githubReviewRuntime;
+  const runtimes = options.runtime || { github: githubReviewRuntime, gitlab: gitlabReviewRuntime };
   const resolveCwd = options.resolveCwd || defaultResolveCwd;
   const clock = options.clock || (() => new Date().toISOString());
 
@@ -85,7 +86,7 @@ export function createReviewService(options = {}) {
       branch: String(input.branch || ""),
       title: cleanText(input.title || "PR Review", 200),
       status: "open",
-      source: input.source === "github" ? "github" : "local",
+      source: ["github", "gitlab"].includes(input.source) ? input.source : "local",
       ...(input.remote ? { remote: input.remote } : {}),
       files: Array.isArray(input.files) ? input.files : [],
       diff: String(input.diff || ""),
@@ -96,6 +97,13 @@ export function createReviewService(options = {}) {
     };
     save([...load(), review]);
     return review;
+  }
+
+  function runtimeFor(provider = "github") {
+    if (typeof runtimes.getPullRequest === "function") return runtimes;
+    const runtime = runtimes[provider];
+    if (!runtime) throw reviewError(`Review provider '${provider}' is not configured.`, 400, "REVIEW_PROVIDER_INVALID");
+    return runtime;
   }
 
   function updateReview(id, patch = {}) {
@@ -137,7 +145,14 @@ export function createReviewService(options = {}) {
     const workspaceId = String(input.workspaceId || existing?.workspaceId || "");
     const cwd = await resolveCwd(workspaceId, context.settings || {});
     const pullRequest = input.pullRequest || input.number || existing?.remote?.number || existing?.remote?.url;
-    if (!pullRequest) throw reviewError("A GitHub pull request number or URL is required.", 400, "REVIEW_PULL_REQUEST_REQUIRED");
+    if (!pullRequest) throw reviewError("A pull request or merge request number/URL is required.", 400, "REVIEW_PULL_REQUEST_REQUIRED");
+    const provider = String(input.provider || existing?.remote?.provider
+      || (["github", "gitlab"].includes(existing?.source) ? existing.source : "")
+      || (/gitlab/i.test(String(pullRequest)) ? "gitlab" : "github")).toLowerCase();
+    if (!new Set(["github", "gitlab"]).has(provider)) {
+      throw reviewError("Review provider must be github or gitlab.", 400, "REVIEW_PROVIDER_INVALID");
+    }
+    const runtime = runtimeFor(provider);
     const snapshot = await runtime.getPullRequest({
       cwd,
       pullRequest,
@@ -148,7 +163,7 @@ export function createReviewService(options = {}) {
       workspaceId,
       branch: snapshot.metadata.headRefName,
       title: snapshot.metadata.title || existing?.title || "PR Review",
-      source: "github",
+      source: provider,
       remote: { ...snapshot.metadata, syncedAt },
       files: snapshot.files,
       diff: snapshot.diff,
@@ -162,8 +177,8 @@ export function createReviewService(options = {}) {
   async function submitRemoteReview(id, input = {}, context = {}) {
     const review = getReview(id);
     if (!review) return null;
-    if (review.source !== "github" || !review.remote?.number) {
-      throw reviewError("Review session is not connected to a GitHub pull request.", 409, "REVIEW_NOT_REMOTE");
+    if (!["github", "gitlab"].includes(review.source) || !review.remote?.number) {
+      throw reviewError("Review session is not connected to a remote pull request.", 409, "REVIEW_NOT_REMOTE");
     }
     const decision = String(input.decision || "").toLowerCase();
     if (!new Set(["approve", "request_changes", "comment"]).has(decision)) {
@@ -176,6 +191,7 @@ export function createReviewService(options = {}) {
       throw reviewError("The reviewed head SHA is required.", 400, "REVIEW_HEAD_REQUIRED");
     }
     const cwd = await resolveCwd(review.workspaceId, context.settings || {});
+    const runtime = runtimeFor(review.source);
     const latestResult = await (runtime.getPullRequestMetadata
       ? runtime.getPullRequestMetadata({
           cwd,
@@ -209,6 +225,9 @@ export function createReviewService(options = {}) {
       number: review.remote.number,
       decision,
       body: input.body,
+      headSha: actualHeadSha,
+      baseSha: latestMetadata.baseSha || review.remote.baseSha,
+      startSha: latestMetadata.startSha || review.remote.startSha,
       comments: openComments.map((comment) => ({
         path: comment.file,
         line: comment.line,
@@ -228,8 +247,8 @@ export function createReviewService(options = {}) {
         ...finalReview.remote,
         ...latestMetadata,
         reviewId: String(submitted.id || ""),
-        reviewUrl: String(submitted.html_url || ""),
-        reviewState: String(submitted.state || "").toLowerCase()
+        reviewUrl: String(submitted.html_url || submitted.web_url || ""),
+        reviewState: String(submitted.state || submitted.reviewer_state || "").toLowerCase()
       },
       comments: (finalReview.comments || []).map((comment) => comment.status === "open" && submittedCommentIds.has(comment.id)
         ? { ...comment, status: "submitted", submittedAt, remoteReviewId: String(submitted.id || ""), updatedAt: submittedAt }

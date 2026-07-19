@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { withAgentReachPath } from "./agentReachRuntime.js";
 import { parseTestOutput } from "./testAdapters.js";
-import { getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
+import { deleteWorkspaceByPath, getWorkspace, listWorkspaces, touchWorkspace, upsertWorkspace } from "./db.js";
 import { getExecutionHostFacade } from "./executionHostClient.js";
 import { ensureDefaultWorkspaces, resolveAllowedPath } from "./security.js";
 import { createWorkspaceTreeSidecarClient } from "./workspaceTreeSidecarClient.js";
@@ -1699,6 +1699,134 @@ export async function runWorkspaceCommand(id, settings, body = {}) {
       stderr: result.stderr,
       exitCode: result.exitCode || 0
     }) : null
+  };
+}
+
+function parseWorktreeList(stdout = "") {
+  const entries = [];
+  let current = null;
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    if (!line) {
+      if (current) entries.push(current);
+      current = null;
+      continue;
+    }
+    const separator = line.indexOf(" ");
+    const key = separator < 0 ? line : line.slice(0, separator);
+    const value = separator < 0 ? "" : line.slice(separator + 1);
+    if (key === "worktree") {
+      if (current) entries.push(current);
+      current = {
+        path: path.resolve(value),
+        headSha: "",
+        branch: "",
+        detached: false,
+        bare: false,
+        locked: false,
+        lockReason: "",
+        prunable: false,
+        pruneReason: ""
+      };
+      continue;
+    }
+    if (!current) continue;
+    if (key === "HEAD") current.headSha = value;
+    else if (key === "branch") current.branch = value.replace(/^refs\/heads\//, "");
+    else if (key === "detached") current.detached = true;
+    else if (key === "bare") current.bare = true;
+    else if (key === "locked") {
+      current.locked = true;
+      current.lockReason = value;
+    } else if (key === "prunable") {
+      current.prunable = true;
+      current.pruneReason = value;
+    }
+  }
+  if (current) entries.push(current);
+  return entries.map((entry, index) => ({ ...entry, isMain: index === 0 }));
+}
+
+function sameResolvedPath(left, right) {
+  const normalize = (value) => {
+    let resolved = path.resolve(value);
+    try { resolved = fs.realpathSync.native(resolved); } catch {}
+    return resolved.replace(/[\\/]+$/, "").toLowerCase();
+  };
+  return normalize(left) === normalize(right);
+}
+
+export async function listWorkspaceWorktrees(id, settings) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const result = await gitRequired(["worktree", "list", "--porcelain"], cwd, "Failed to list git worktrees.");
+  const registered = new Map(listWorkspaces().map((item) => [path.resolve(item.path).toLowerCase(), item]));
+  const worktrees = parseWorktreeList(result.stdout).map((item) => ({
+    ...item,
+    workspace: registered.get(item.path.toLowerCase()) || null
+  }));
+  touchWorkspace(workspace.id);
+  return { ok: true, workspaceId: workspace.id, worktrees };
+}
+
+export async function applyWorkspaceWorktreeAction(id, settings, body = {}) {
+  const workspace = workspaceOrThrow(id);
+  const cwd = resolveAllowedPath(workspace.path, settings);
+  const action = String(body.action || "").trim().toLowerCase();
+  if (!new Set(["remove", "prune", "lock", "unlock"]).has(action)) {
+    const error = new Error("Worktree action must be remove, prune, lock, or unlock.");
+    error.status = 400;
+    error.code = "WORKTREE_ACTION_INVALID";
+    throw error;
+  }
+
+  if (action === "prune") {
+    const expire = String(body.expire || "").trim().slice(0, 100);
+    const args = ["worktree", "prune", "--verbose"];
+    if (expire) args.push("--expire", expire);
+    const result = await gitRequired(args, cwd, "Failed to prune git worktrees.");
+    touchWorkspace(workspace.id);
+    return { ok: true, action, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  if (!body.path) {
+    const error = new Error(`Worktree path is required for ${action}.`);
+    error.status = 400;
+    error.code = "WORKTREE_PATH_REQUIRED";
+    throw error;
+  }
+  const targetPath = resolveAllowedPath(body.path, settings);
+  const listed = await listWorkspaceWorktrees(id, settings);
+  const target = listed.worktrees.find((item) => sameResolvedPath(item.path, targetPath));
+  if (!target) {
+    const error = new Error("Path is not a worktree of this repository.");
+    error.status = 404;
+    error.code = "WORKTREE_NOT_FOUND";
+    throw error;
+  }
+  if (target.isMain && action === "remove") {
+    const error = new Error("The main worktree cannot be removed.");
+    error.status = 409;
+    error.code = "WORKTREE_MAIN_PROTECTED";
+    throw error;
+  }
+
+  const args = ["worktree", action];
+  if (action === "remove" && body.force === true) args.push("--force");
+  if (action === "lock") {
+    const reason = String(body.reason || "").trim().slice(0, 500);
+    if (reason) args.push("--reason", reason);
+  }
+  args.push(target.path);
+  const result = await gitRequired(args, cwd, `Failed to ${action} git worktree.`);
+  if (action === "remove") deleteWorkspaceByPath(target.path);
+  touchWorkspace(workspace.id);
+  return {
+    ok: true,
+    action,
+    path: target.path,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    worktrees: (await listWorkspaceWorktrees(id, settings)).worktrees
   };
 }
 

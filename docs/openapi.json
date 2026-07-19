@@ -3637,6 +3637,71 @@
       }
     },
     "/api/workspaces/{id}/worktrees": {
+      "get": {
+        "summary": "List Git worktrees",
+        "description": "Lists the main and linked worktrees, including branch, lock, prune, and workspace registration state.",
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated field selector"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "worktrees": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitError"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "summary": "Create Git worktree",
         "description": "Create a permanent Git worktree for a workspace and register it as a new workspace.",
@@ -3729,6 +3794,146 @@
           },
           "201": {
             "description": "Created"
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Approval required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequired"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/worktrees/action": {
+      "post": {
+        "summary": "Manage Git worktree",
+        "description": "Remove, prune, lock, or unlock worktrees belonging to the workspace repository.",
+        "parameters": [
+          {
+            "name": "dryRun",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ]
+            },
+            "description": "Preview without side effects"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "action"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "remove",
+                      "prune",
+                      "lock",
+                      "unlock"
+                    ]
+                  },
+                  "path": {
+                    "type": "string",
+                    "description": "Required except for prune"
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "description": "Force removal of a dirty worktree"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Optional lock reason"
+                  },
+                  "expire": {
+                    "type": "string",
+                    "description": "Git expiry expression used by prune"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "action": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "worktrees": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "toolRunId": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
           },
           "400": {
             "description": "Validation error",
@@ -5304,7 +5509,7 @@
     "/api/reviews": {
       "get": {
         "summary": "List review sessions",
-        "description": "Returns local and GitHub-backed review sessions.",
+        "description": "Returns local, GitHub-backed, and GitLab-backed review sessions.",
         "parameters": [
           {
             "name": "fields",
@@ -5358,7 +5563,7 @@
       },
       "post": {
         "summary": "Create review session",
-        "description": "Creates a local session, or imports a GitHub pull request when pullRequest or number is provided.",
+        "description": "Creates a local session, or imports a GitHub pull request or GitLab merge request.",
         "parameters": [
           {
             "name": "dryRun",
@@ -5391,6 +5596,13 @@
                   },
                   "branch": {
                     "type": "string"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "github",
+                      "gitlab"
+                    ]
                   },
                   "pullRequest": {
                     "oneOf": [
@@ -5842,8 +6054,8 @@
     },
     "/api/reviews/{id}/sync": {
       "post": {
-        "summary": "Sync GitHub review session",
-        "description": "Refreshes PR metadata, changed files, diff, review threads, and remote comment status while preserving local comments.",
+        "summary": "Sync remote review session",
+        "description": "Refreshes GitHub PR or GitLab MR metadata, changed files, diff, review threads, and remote comment status while preserving local comments.",
         "parameters": [
           {
             "name": "dryRun",
@@ -5873,6 +6085,13 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "github",
+                      "gitlab"
+                    ]
+                  },
                   "pullRequest": {
                     "oneOf": [
                       {
@@ -5947,8 +6166,8 @@
     },
     "/api/reviews/{id}/submit": {
       "post": {
-        "summary": "Submit GitHub review",
-        "description": "Submits the decision and open local comments after verifying the PR head SHA has not changed.",
+        "summary": "Submit remote review",
+        "description": "Submits the decision and open local comments after verifying the PR or MR head SHA has not changed.",
         "parameters": [
           {
             "name": "dryRun",
@@ -7159,7 +7378,8 @@
             "type": "string",
             "enum": [
               "local",
-              "github"
+              "github",
+              "gitlab"
             ]
           },
           "remote": {
@@ -7168,7 +7388,8 @@
               "provider": {
                 "type": "string",
                 "enum": [
-                  "github"
+                  "github",
+                  "gitlab"
                 ]
               },
               "repository": {
@@ -7184,6 +7405,9 @@
                 "type": "string"
               },
               "baseSha": {
+                "type": "string"
+              },
+              "startSha": {
                 "type": "string"
               },
               "syncedAt": {

@@ -236,16 +236,17 @@ const schemas = {
       branch: { type: "string" },
       title: { type: "string" },
       status: { type: "string", enum: ["open", "submitted", "resolved"] },
-      source: { type: "string", enum: ["local", "github"] },
+      source: { type: "string", enum: ["local", "github", "gitlab"] },
       remote: {
         type: "object",
         properties: {
-          provider: { type: "string", enum: ["github"] },
+          provider: { type: "string", enum: ["github", "gitlab"] },
           repository: { type: "string" },
           number: { type: "integer" },
           url: { type: "string" },
           headSha: { type: "string" },
           baseSha: { type: "string" },
+          startSha: { type: "string" },
           syncedAt: { type: "string", format: "date-time" }
         }
       },
@@ -877,33 +878,57 @@ const paths = {
     },
     { type: "object" }
   )),
-  ...path("/api/workspaces/{id}/worktrees", post("Create Git worktree",
-    "Create a permanent Git worktree for a workspace and register it as a new workspace.",
-    {
-      type: "object",
-      properties: {
-        branchName: { type: "string", description: "Branch to create or attach to the worktree" },
-        baseRef: { type: "string", description: "Base ref used when creating a new branch", default: "HEAD" },
-        title: { type: "string", description: "Workspace title for the new worktree" },
-        path: { type: "string", description: "Optional explicit worktree path; must be inside allowed roots" },
-        root: { type: "string", description: "Optional explicit worktree root; must be inside allowed roots" }
+  ...path("/api/workspaces/{id}/worktrees", {
+    ...get("List Git worktrees",
+      "Lists the main and linked worktrees, including branch, lock, prune, and workspace registration state.",
+      { type: "object", properties: { ok: { type: "boolean" }, worktrees: { type: "array", items: { type: "object" } } } },
+      [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+    ),
+    ...post("Create Git worktree",
+      "Create a permanent Git worktree for a workspace and register it as a new workspace.",
+      {
+        type: "object",
+        properties: {
+          branchName: { type: "string", description: "Branch to create or attach to the worktree" },
+          baseRef: { type: "string", description: "Base ref used when creating a new branch", default: "HEAD" },
+          title: { type: "string", description: "Workspace title for the new worktree" },
+          path: { type: "string", description: "Optional explicit worktree path; must be inside allowed roots" },
+          root: { type: "string", description: "Optional explicit worktree root; must be inside allowed roots" }
+        },
+        required: ["branchName"]
       },
-      required: ["branchName"]
-    },
+      {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          workspace: { type: "object" },
+          sourceWorkspace: { type: "object" },
+          path: { type: "string" },
+          branchName: { type: "string" },
+          baseRef: { type: "string" },
+          branchExisted: { type: "boolean" },
+          toolRunId: { type: "string" }
+        }
+      },
+      { "201": { description: "Created" } }
+    )
+  }),
+  ...path("/api/workspaces/{id}/worktrees/action", post("Manage Git worktree",
+    "Remove, prune, lock, or unlock worktrees belonging to the workspace repository.",
     {
       type: "object",
+      required: ["action"],
       properties: {
-        ok: { type: "boolean" },
-        workspace: { type: "object" },
-        sourceWorkspace: { type: "object" },
-        path: { type: "string" },
-        branchName: { type: "string" },
-        baseRef: { type: "string" },
-        branchExisted: { type: "boolean" },
-        toolRunId: { type: "string" }
+        action: { type: "string", enum: ["remove", "prune", "lock", "unlock"] },
+        path: { type: "string", description: "Required except for prune" },
+        force: { type: "boolean", description: "Force removal of a dirty worktree" },
+        reason: { type: "string", description: "Optional lock reason" },
+        expire: { type: "string", description: "Git expiry expression used by prune" }
       }
     },
-    { "201": { description: "Created" } }
+    { type: "object", properties: { ok: { type: "boolean" }, action: { type: "string" }, path: { type: "string" }, worktrees: { type: "array", items: { type: "object" } }, toolRunId: { type: "string" } } },
+    {},
+    [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
   )),
 
   // Tools and events
@@ -1095,11 +1120,11 @@ const paths = {
   // Pull request reviews
   ...path("/api/reviews", {
     ...get("List review sessions",
-      "Returns local and GitHub-backed review sessions.",
+      "Returns local, GitHub-backed, and GitLab-backed review sessions.",
       { type: "object", properties: { items: { type: "array", items: { $ref: "#/components/schemas/ReviewSession" } } } }
     ),
     ...post("Create review session",
-      "Creates a local session, or imports a GitHub pull request when pullRequest or number is provided.",
+      "Creates a local session, or imports a GitHub pull request or GitLab merge request.",
       {
         type: "object",
         required: ["workspaceId"],
@@ -1107,6 +1132,7 @@ const paths = {
           workspaceId: { type: "string" },
           title: { type: "string" },
           branch: { type: "string" },
+          provider: { type: "string", enum: ["github", "gitlab"] },
           pullRequest: { oneOf: [{ type: "integer" }, { type: "string" }] },
           number: { type: "integer" },
           repository: { type: "string" }
@@ -1148,15 +1174,15 @@ const paths = {
       { name: "commentId", in: "path", required: true, schema: { type: "string" } }
     ]
   )),
-  ...path("/api/reviews/{id}/sync", post("Sync GitHub review session",
-    "Refreshes PR metadata, changed files, diff, review threads, and remote comment status while preserving local comments.",
-    { type: "object", properties: { pullRequest: { oneOf: [{ type: "integer" }, { type: "string" }] }, repository: { type: "string" } } },
+  ...path("/api/reviews/{id}/sync", post("Sync remote review session",
+    "Refreshes GitHub PR or GitLab MR metadata, changed files, diff, review threads, and remote comment status while preserving local comments.",
+    { type: "object", properties: { provider: { type: "string", enum: ["github", "gitlab"] }, pullRequest: { oneOf: [{ type: "integer" }, { type: "string" }] }, repository: { type: "string" } } },
     { $ref: "#/components/schemas/ReviewSession" },
     {},
     [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
   )),
-  ...path("/api/reviews/{id}/submit", post("Submit GitHub review",
-    "Submits the decision and open local comments after verifying the PR head SHA has not changed.",
+  ...path("/api/reviews/{id}/submit", post("Submit remote review",
+    "Submits the decision and open local comments after verifying the PR or MR head SHA has not changed.",
     {
       type: "object",
       required: ["decision", "expectedHeadSha"],

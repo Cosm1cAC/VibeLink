@@ -187,6 +187,35 @@ const TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "workspace.git_worktree_action",
+    kind: "git",
+    label: "Git worktree lifecycle",
+    permission: "workspace.git",
+    risk: "medium",
+    description: "Remove, prune, lock, or unlock a Git worktree.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: { type: "string" },
+        action: { type: "string", enum: ["remove", "prune", "lock", "unlock"] },
+        path: { type: "string" },
+        force: { type: "boolean" },
+        reason: { type: "string" },
+        expire: { type: "string" }
+      },
+      required: ["workspaceId", "action"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string" },
+        path: { type: "string" },
+        worktrees: { type: "array", items: { type: "object" } },
+        toolRunId: { type: "string" }
+      }
+    }
+  },
+  {
     name: "system.doctor",
     kind: "system",
     label: "Doctor",

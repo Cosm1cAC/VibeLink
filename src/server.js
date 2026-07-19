@@ -148,7 +148,7 @@ import { configureTerminalSessionRecovery, getTerminalSession, listTerminalSessi
 import { createThreadFork, getThreadState, threadStateEtag, updateThreadState, updateThreadStateBatch } from "./threadState.js";
 import { createTaskQueuePersistence } from "./taskQueuePersistence.js";
 import { createTaskScheduler } from "./taskScheduler.js";
-import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
+import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, applyWorkspaceWorktreeAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, listWorkspaceWorktrees, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
@@ -1457,10 +1457,11 @@ function sandboxDoctorStatus(settingsValue = settings) {
 
 async function buildDoctorReport(request) {
   const publicSettingsValue = await publicSettings(settings);
-  const [desktop, git, gh, agentReach, providerRegistry] = await Promise.all([
+  const [desktop, git, gh, glab, agentReach, providerRegistry] = await Promise.all([
     getCodexDesktopStatus().catch((error) => ({ ok: false, error: error.message })),
     commandProbe("git"),
     commandProbe("gh"),
+    commandProbe("glab"),
     commandProbe("agent-reach", ["version"]),
     providerRegistryPayload({ freshHealth: true })
   ]);
@@ -1488,6 +1489,7 @@ async function buildDoctorReport(request) {
     doctorCheck("zhipu-key", Boolean(publicSettingsValue.hasZhipuKey), "Zhipu/GLM key", publicSettingsValue.hasZhipuKey ? "configured" : "missing", "warn"),
     doctorCheck("git", git.ok, "Git", git.version || git.error),
     doctorCheck("gh", gh.ok, "GitHub CLI", gh.version || gh.error, "warn"),
+    doctorCheck("glab", glab.ok, "GitLab CLI", glab.version || glab.error, "warn"),
     doctorCheck("codex", Boolean(codex?.available), "Codex provider", codex?.health?.version || codex?.reason || codex?.health?.error || "unavailable", settings.codexCommand && settings.codexCommand !== "auto" ? "error" : "warn"),
     doctorCheck("claude", Boolean(claude?.available), "Claude provider", claude?.health?.version || claude?.reason || claude?.health?.error || "unavailable", "warn"),
     doctorCheck("agent-reach", agentReach.ok, "Agent Reach", agentReach.version || agentReach.error, "warn"),
@@ -3199,6 +3201,11 @@ async function routeApi(request, response, url) {
   }
 
   const workspaceWorktreeMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/worktrees$/);
+  if (workspaceWorktreeMatch && request.method === "GET") {
+    sendJson(response, 200, await listWorkspaceWorktrees(workspaceWorktreeMatch[1], settings));
+    return;
+  }
+
   if (workspaceWorktreeMatch && request.method === "POST") {
     const body = await readBody(request);
     const workspaceId = workspaceWorktreeMatch[1];
@@ -3738,6 +3745,62 @@ async function routeApi(request, response, url) {
 
   if (url.pathname === "/api/histories" && request.method === "GET") {
     sendJson(response, 200, { items: applyFields(listHistories({ fresh: url.searchParams.get("fresh") === "1" }), url) });
+    return;
+  }
+
+  const workspaceWorktreeActionMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/worktrees\/action$/);
+  if (workspaceWorktreeActionMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceWorktreeActionMatch[1];
+    const action = String(body.action || "").trim().toLowerCase();
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        workspaceId,
+        action,
+        path: body.path || "",
+        force: body.force === true,
+        wouldExecute: true
+      });
+      return;
+    }
+    const toolRun = createWorkspaceActionToolRun({
+      workspaceId,
+      toolName: "workspace.git_worktree_action",
+      title: `${action || "worktree action"} ${body.path || ""}`.trim(),
+      input: {
+        action,
+        path: body.path || "",
+        force: body.force === true,
+        reason: body.reason || "",
+        expire: body.expire || ""
+      }
+    });
+    try {
+      const result = await runWorkspaceToolAction({
+        toolRunId: toolRun.id,
+        startedText: `git worktree ${action || "action"}`,
+        completedText: "Git worktree action completed.",
+        failedText: "Git worktree action failed.",
+        execute: () => applyWorkspaceWorktreeAction(workspaceId, settings, body)
+      });
+      audit(request, url, auth, {
+        type: "workspace.git_worktree_action",
+        success: true,
+        target: result.path || workspaceId,
+        meta: { action, toolRunId: toolRun.id }
+      });
+      sendJson(response, 200, { ...result, toolRunId: toolRun.id });
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.git_worktree_action",
+        success: false,
+        target: body.path || workspaceId,
+        reason: error.message,
+        meta: { action, toolRunId: toolRun.id }
+      });
+      sendError(response, error.status || 500, error.message, error.code ? { code: error.code } : {});
+    }
     return;
   }
 

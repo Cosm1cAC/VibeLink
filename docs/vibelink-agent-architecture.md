@@ -139,7 +139,7 @@ Windows 手工启动 `codex app-server --listen ws://127.0.0.1:<port>` 可工作
 | A. Execution reliability | Bridge/execd/worker crash canary、长时 spool/ack、故障指标与告警 | `tools/`、execution canary/tests、Rust host | 可立即独立推进；其结论是 approval restart 集成的验收门槛 |
 | B. Codex app-server adapter | JSON-RPC connection owner、schema gate、approval request/decision adapter mock | `src/codexAppServer*`、独立 adapter/tests | mock 与 A 可并行；接入 worker protocol 和生产 dispatcher 时应在 A 的 host 接口稳定后串行合并 |
 | C. Event ack/retention | OpenAPI 契约、HTTP ack、Web/Android ack、retention executor、compaction marker 展示 | `eventStore*`、客户端 API、OpenAPI | 契约冻结后，服务端 executor 与 Web/Android 客户端可并行；`db.js`/`server.js` 集成集中由一个 owner 合并 |
-| D. Persistent search expansion | session/task/message 增量索引、规模基准、查询迁移 | `search*`、search tests | 可与 A、B、F 并行；与 C 都会触碰 SQLite/schema/server，迁移和路由提交需错开 |
+| D. Persistent search expansion | session/task/message 索引规模基准、查询调优和客户端消费 | `search*`、search tests | 持久增量索引与查询迁移已完成；后续规模验证可与 A、B、F 并行 |
 | E. Provider scheduler | 持久任务队列、并发配额、retry/backoff、调度状态 API | `agents.js`、scheduler、Provider runtime | 设计与测试可并行；execution spawn、`server.js` 和 `db.js` 接线与 B/D/C 有共享热点，需单 owner 集成 |
 | F. Product-side isolated work | Live Call 生产 ASR/弱网 QA、结构化测试结果树与单测重跑客户端接入 | 各自 runtime、tools 和客户端页面 | 各项彼此及与 A-E 基本独立，适合作为并行吞吐泳道 |
 

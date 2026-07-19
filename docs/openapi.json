@@ -2964,7 +2964,7 @@
     "/api/workspaces/{id}/file": {
       "get": {
         "summary": "Read workspace file",
-        "description": "Returns a text preview, SHA-256 revision, and ETag for a workspace file.",
+        "description": "Returns a bounded UTF-8 page, byte cursor, SHA-256 revision, and ETag for a workspace file.",
         "parameters": [
           {
             "name": "fields",
@@ -2989,6 +2989,27 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "UTF-8 byte cursor returned by nextOffset"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 1048576,
+              "default": 524288
+            },
+            "description": "Maximum bytes in one text page"
           }
         ],
         "responses": {
@@ -3010,6 +3031,21 @@
                     },
                     "etag": {
                       "type": "string"
+                    },
+                    "offset": {
+                      "type": "integer"
+                    },
+                    "bytesRead": {
+                      "type": "integer"
+                    },
+                    "nextOffset": {
+                      "type": "integer"
+                    },
+                    "eof": {
+                      "type": "boolean"
+                    },
+                    "binary": {
+                      "type": "boolean"
                     }
                   }
                 }
@@ -3163,6 +3199,283 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RevisionConflict"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Approval required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequired"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/file/preview": {
+      "get": {
+        "summary": "Preview workspace file",
+        "description": "Returns the bounded, redacted structured preview used for PDF, Office, CSV/TSV, Notebook, and text artifacts.",
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated field selector"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxRows",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "maxColumns",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "maxTextChars",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 262144
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": "string"
+                    },
+                    "etag": {
+                      "type": "string"
+                    },
+                    "preview": {
+                      "$ref": "#/components/schemas/ArtifactPreview"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Current resource revision tag.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/files/batch": {
+      "post": {
+        "summary": "Batch mutate workspace files",
+        "description": "Applies up to 100 writes, renames, and deletes. Atomic mode preflights every revision and rolls back execution failures; best-effort returns per-operation results.",
+        "parameters": [
+          {
+            "name": "dryRun",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ]
+            },
+            "description": "Preview without side effects"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "operations"
+                ],
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "atomic",
+                      "best-effort"
+                    ],
+                    "default": "atomic"
+                  },
+                  "operations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "action",
+                        "path"
+                      ],
+                      "properties": {
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "write",
+                            "rename",
+                            "delete"
+                          ]
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "nextPath": {
+                          "type": "string"
+                        },
+                        "text": {
+                          "type": "string"
+                        },
+                        "expectedRevision": {
+                          "type": "string"
+                        },
+                        "requireAbsent": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "mode": {
+                      "type": "string"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "One or more atomic batch conflicts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceBatchConflict"
                 }
               }
             }
@@ -7473,6 +7786,57 @@
           },
           "current": {
             "type": "object"
+          }
+        }
+      },
+      "WorkspaceBatchConflict": {
+        "type": "object",
+        "required": [
+          "error",
+          "code",
+          "conflicts"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "WORKSPACE_BATCH_CONFLICT"
+            ]
+          },
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "action": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "expectedRevision": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "actualRevision": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "current": {
+                  "type": "object",
+                  "nullable": true
+                }
+              }
+            }
           }
         }
       },

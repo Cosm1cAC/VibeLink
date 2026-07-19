@@ -148,7 +148,7 @@ import { configureTerminalSessionRecovery, getTerminalSession, listTerminalSessi
 import { createThreadFork, getThreadState, threadStateEtag, updateThreadState, updateThreadStateBatch } from "./threadState.js";
 import { createTaskQueuePersistence } from "./taskQueuePersistence.js";
 import { createTaskScheduler } from "./taskScheduler.js";
-import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, applyWorkspaceWorktreeAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, listWorkspaceWorktrees, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
+import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, applyWorkspaceWorktreeAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, listWorkspaceWorktrees, mutateWorkspaceFile, mutateWorkspaceFilesBatch, openWorkspaceInExplorer, previewWorkspaceFile, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
 import {
@@ -3136,7 +3136,10 @@ async function routeApi(request, response, url) {
 
   const workspaceFileMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file$/);
   if (workspaceFileMatch && request.method === "GET") {
-    const result = await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || "");
+    const result = await getWorkspaceFile(workspaceFileMatch[1], settings, url.searchParams.get("path") || "", {
+      offset: url.searchParams.get("offset") || 0,
+      limit: url.searchParams.get("limit") || undefined
+    });
     sendJson(response, 200, result, { ETag: result.etag });
     return;
   }
@@ -3190,6 +3193,59 @@ async function routeApi(request, response, url) {
       } else {
         sendError(response, error.status || 500, error.message);
       }
+    }
+    return;
+  }
+
+  const workspaceFilePreviewMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/file\/preview$/);
+  if (workspaceFilePreviewMatch && request.method === "GET") {
+    const result = await previewWorkspaceFile(workspaceFilePreviewMatch[1], settings, url.searchParams.get("path") || "", {
+      maxRows: url.searchParams.get("maxRows") || undefined,
+      maxColumns: url.searchParams.get("maxColumns") || undefined,
+      maxTextChars: url.searchParams.get("maxTextChars") || undefined
+    });
+    sendJson(response, 200, result, { ETag: result.etag });
+    return;
+  }
+
+  const workspaceFileBatchMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/files\/batch$/);
+  if (workspaceFileBatchMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const workspaceId = workspaceFileBatchMatch[1];
+    if (isDryRun(url)) {
+      sendJson(response, 200, {
+        dryRun: true,
+        workspaceId,
+        mode: body.mode === "best-effort" ? "best-effort" : "atomic",
+        operationCount: Array.isArray(body.operations) ? body.operations.length : 0,
+        wouldExecute: true
+      });
+      return;
+    }
+    try {
+      const result = await mutateWorkspaceFilesBatch(workspaceId, settings, body);
+      const workspace = getWorkspaces(settings).find((item) => item.id === workspaceId);
+      const changedPaths = result.items.flatMap((item) => [item.previousPath || "", item.path || ""]).filter(Boolean);
+      if (workspace && changedPaths.length) await refreshWorkspaceSearchPaths(workspace, changedPaths);
+      audit(request, url, auth, {
+        type: "workspace.file_batch",
+        success: result.ok,
+        target: workspaceId,
+        meta: { mode: result.mode, operationCount: result.items.length, failureCount: result.items.filter((item) => !item.ok).length }
+      });
+      sendJson(response, 200, result);
+    } catch (error) {
+      audit(request, url, auth, {
+        type: "workspace.file_batch",
+        success: false,
+        target: workspaceId,
+        reason: error.message,
+        meta: { mode: body.mode || "atomic", operationCount: body.operations?.length || 0 }
+      });
+      sendError(response, error.status || 500, error.message, {
+        code: error.code || "WORKSPACE_BATCH_ERROR",
+        ...(error.conflicts ? { conflicts: error.conflicts } : {})
+      });
     }
     return;
   }
@@ -3902,8 +3958,6 @@ async function routeApi(request, response, url) {
         : Boolean(saved?.favorite),
       sort: parameter("sort", saved?.sort || "relevance"),
       order: parameter("order", saved?.order || ""),
-      histories: listHistories({ fresh: false }),
-      tasks: conversationTasks(),
       workspaces: getWorkspaces(settings),
       threadState: getThreadState()
     });

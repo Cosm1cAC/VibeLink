@@ -269,6 +269,29 @@ const schemas = {
       current: { type: "object" }
     }
   },
+  WorkspaceBatchConflict: {
+    type: "object",
+    required: ["error", "code", "conflicts"],
+    properties: {
+      error: { type: "string" },
+      code: { type: "string", enum: ["WORKSPACE_BATCH_CONFLICT"] },
+      conflicts: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            index: { type: "integer" },
+            action: { type: "string" },
+            path: { type: "string" },
+            code: { type: "string" },
+            expectedRevision: { type: "string", nullable: true },
+            actualRevision: { type: "string", nullable: true },
+            current: { type: "object", nullable: true }
+          }
+        }
+      }
+    }
+  },
   PaginationParams: {
     type: "object",
     properties: {
@@ -788,11 +811,13 @@ const paths = {
   )),
   ...path("/api/workspaces/{id}/file", {
     ...withEtag(get("Read workspace file",
-      "Returns a text preview, SHA-256 revision, and ETag for a workspace file.",
-      { type: "object", properties: { path: { type: "string" }, text: { type: "string" }, revision: { type: "string" }, etag: { type: "string" } } },
+      "Returns a bounded UTF-8 page, byte cursor, SHA-256 revision, and ETag for a workspace file.",
+      { type: "object", properties: { path: { type: "string" }, text: { type: "string" }, revision: { type: "string" }, etag: { type: "string" }, offset: { type: "integer" }, bytesRead: { type: "integer" }, nextOffset: { type: "integer" }, eof: { type: "boolean" }, binary: { type: "boolean" } } },
       [
         { name: "id", in: "path", required: true, schema: { type: "string" } },
-        { name: "path", in: "query", required: true, schema: { type: "string" } }
+        { name: "path", in: "query", required: true, schema: { type: "string" } },
+        { name: "offset", in: "query", schema: { type: "integer", minimum: 0, default: 0 }, description: "UTF-8 byte cursor returned by nextOffset" },
+        { name: "limit", in: "query", schema: { type: "integer", minimum: 1024, maximum: 1048576, default: 524288 }, description: "Maximum bytes in one text page" }
       ]
     )),
     ...withEtag(post("Mutate workspace file",
@@ -812,6 +837,47 @@ const paths = {
       { "409": { description: "Revision conflict", content: { "application/json": { schema: { $ref: "#/components/schemas/RevisionConflict" } } } } }
     ), { ifMatch: true, ifNoneMatch: true })
   }),
+  ...path("/api/workspaces/{id}/file/preview", withEtag(get("Preview workspace file",
+    "Returns the bounded, redacted structured preview used for PDF, Office, CSV/TSV, Notebook, and text artifacts.",
+    { type: "object", properties: { path: { type: "string" }, revision: { type: "string" }, etag: { type: "string" }, preview: { $ref: "#/components/schemas/ArtifactPreview" } } },
+    [
+      { name: "id", in: "path", required: true, schema: { type: "string" } },
+      { name: "path", in: "query", required: true, schema: { type: "string" } },
+      { name: "maxRows", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
+      { name: "maxColumns", in: "query", schema: { type: "integer", minimum: 1, maximum: 100 } },
+      { name: "maxTextChars", in: "query", schema: { type: "integer", minimum: 1024, maximum: 262144 } }
+    ]
+  ))),
+  ...path("/api/workspaces/{id}/files/batch", post("Batch mutate workspace files",
+    "Applies up to 100 writes, renames, and deletes. Atomic mode preflights every revision and rolls back execution failures; best-effort returns per-operation results.",
+    {
+      type: "object",
+      required: ["operations"],
+      properties: {
+        mode: { type: "string", enum: ["atomic", "best-effort"], default: "atomic" },
+        operations: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: "object",
+            required: ["action", "path"],
+            properties: {
+              action: { type: "string", enum: ["write", "rename", "delete"] },
+              path: { type: "string" },
+              nextPath: { type: "string" },
+              text: { type: "string" },
+              expectedRevision: { type: "string" },
+              requireAbsent: { type: "boolean" }
+            }
+          }
+        }
+      }
+    },
+    { type: "object", properties: { ok: { type: "boolean" }, mode: { type: "string" }, items: { type: "array", items: { type: "object" } } } },
+    { "409": { description: "One or more atomic batch conflicts", content: { "application/json": { schema: { $ref: "#/components/schemas/WorkspaceBatchConflict" } } } } },
+    [{ name: "id", in: "path", required: true, schema: { type: "string" } }]
+  )),
   ...path("/api/workspaces/{id}/command", post("Execute workspace command",
     "Run a non-interactive command in a workspace. Returns approval request for high-risk commands.",
     {

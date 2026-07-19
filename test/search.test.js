@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
 import { searchContent } from "../src/search.js";
 
 test("unified search returns sessions, tasks, messages, files with scope and cursor", () => {
@@ -41,4 +42,13 @@ test("unified search sorts results without changing cursor pagination", () => {
   assert.equal(first.total, 2);
   assert.equal(first.sort, "title");
   assert.equal(first.order, "asc");
+});
+
+test("search HTTP route does not aggregate native histories or running tasks per request", () => {
+  const source = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+  const start = source.indexOf('if (url.pathname === "/api/search"');
+  const route = source.slice(start, source.indexOf('if (url.pathname === "/api/reviews"', start));
+  assert.match(route, /searchAll\s*\(/);
+  assert.doesNotMatch(route, /listHistories\s*\(/);
+  assert.doesNotMatch(route, /conversationTasks\s*\(/);
 });

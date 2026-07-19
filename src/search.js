@@ -165,7 +165,7 @@ export function searchContent({
   };
 }
 
-export async function searchAll({ query, scope, limit, cursor, tag, favorite, sort, order, histories, tasks, workspaces, threadState }) {
+export async function searchAll({ query, scope, limit, cursor, tag, favorite, sort, order, workspaces, threadState }) {
   const normalizedScope = searchValues.normalizeScope(scope);
   const kinds = normalizedScope === "all" ? ["history", "task", "message"]
     : normalizedScope === "sessions" ? ["history"]

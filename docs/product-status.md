@@ -16,6 +16,8 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ## 最近已落地
 
+- 统一搜索已将 session/task/message 纳入 SQLite FTS5 持久索引：Agent JSONL 按 byte offset 增量 tail，task event 按 cursor 追读并自动处理截断、缺失源和 FTS 损坏重建；`/api/search` 只查询持久索引，不再按请求聚合原生 history 与运行中 task。
+- Workspace 文件读取已支持最大 1 MiB 的 UTF-8 byte cursor 分页；PDF、Office、CSV/TSV、Notebook 和文本复用 artifact runtime 提供有界、脱敏的结构化 preview。批量 mutation 支持最多 100 个 write/rename/delete，提供 atomic 预检、冲突汇总、失败回滚和 best-effort 逐项结果，并用 Workspace 级串行队列保护 revision 检查。
 - `/api/search` 统一搜索 session、task、message 和 Workspace 文件，Workspace 已改用 SQLite FTS5 持久索引，通过启动增量校验、文件监听和定时补偿更新；API 支持 scope、cursor、tag、favorite、排序、保存搜索和去重搜索历史，Android 已接入条件恢复、结果跳转及管理入口。
 - Thread metadata 已迁入 SQLite，支持标签、收藏、批量编辑和 revision/field revision 冲突检测；旧 `thread-state.json` 仅做一次兼容导入。
 - 全局 command registry 已接入 Web 命令面板，并向 Android 暴露导航、搜索、会话、Workspace、Live Call、Review、Settings 和 Approval 动作。
@@ -41,8 +43,6 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 ### P1 产品缺口
 
 - Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
-- Workspace 全文搜索已不再在请求内扫描文件；索引器最多跟踪每个 Workspace 100,000 个文件，单文件正文索引上限 1 MiB，超限或二进制文件仍索引路径。session/task/message 仍在请求内聚合原生 history 与运行状态，尚未进入同一持久全文索引。
-- Workspace 仍缺大文件分页、富二进制预览、更完整的批量操作和成熟冲突处理。
 - Git 已支持常用状态、diff、stage、commit、push、pull、PR 创建、branch、stash、per-hunk 和冲突动作；worktree 已覆盖创建、列表、删除、prune、lock/unlock，并保护主 worktree、校验仓库归属。PR review 工作台已接入 GitHub/GitLab 远端同步、冲突检测和 review 提交。
 - Live Call 已支持 pause/resume、本地 PCM 文件列表/删除、ASR provider 诊断、可选 whisper.cpp、默认生产配置、真实 PCM/弱网长时 QA，以及按天数、单文件和总容量约束的录音生命周期策略。缺少真实 provider 时会明确报错，deterministic mock 仅允许显式选择。
 - 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；仍缺客户端 ack API、实际 retention/compaction 执行、spool quota marker 和多设备冲突策略。
@@ -89,4 +89,4 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 1. 用发布二进制执行一小时 `execution-host:soak` 并归档 JSON 报告，签发 durable execution host 生产可靠性门槛。
 2. 在 Web/Android 完整展示 approval delivery/attach/fidelity 状态。
 4. 在发布流水线持续执行 Live Call 一小时真实音频/弱网门禁并归档质量基线。
-5. 将 session/task/message 纳入持久搜索索引，并完成客户端事件 ack、实际 retention/compaction、Workspace 结构化结果和多设备冲突处理。
+5. 完成客户端事件 ack、实际 retention/compaction、Workspace 结构化结果的客户端消费和跨设备合并体验。

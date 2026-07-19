@@ -253,6 +253,25 @@
       "nextAction": "本地 unit、clippy、12 项单路由及 44 项累计 release canary 已覆盖认证、过滤、cursor、fields、拒绝审计、Node SSE 所有权和零回退；等待远端 CI、包内及受控公网认证证据。"
     },
     {
+      "id": "event-sync-http-route",
+      "title": "统一事件同步原生 HTTP 路由",
+      "priority": "P1",
+      "status": "opt-in",
+      "featureFlags": ["--rust-http-canary", "--rust-event-sync-http"],
+      "nodeEntry": "src/server.js#/api/events/*",
+      "rustEntry": "apps/windows/src/event_sync_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-event-sync-http bridge",
+      "fallback": "关闭独立开关后统一事件请求透明转发 Node；只读请求在响应前失败可回放，mutation body 由 Rust 有界读取后即认领，后续失败返回 Rust 4xx/500 且绝不重放",
+      "tests": [
+        "apps/windows/src/event_sync_http.rs",
+        "apps/windows/src/event_store_sidecar.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "test/eventStoreAckRetention.test.js",
+        "test/eventSyncHttp.test.js"
+      ],
+      "nextAction": "本地 Rust 110 项与 Node event-store 契约已覆盖认证设备绑定、CAS 冲突、多设备安全游标、task/live-call/tool-event 压缩、quota marker、限流与审计；等待远端 CI、便携包及受控公网认证证据。"
+    },
+    {
       "id": "workspace-http",
       "title": "Workspace 文件写操作原生 HTTP 路由",
       "priority": "P1",

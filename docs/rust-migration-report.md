@@ -28,6 +28,7 @@
 | Settings 原生 HTTP 路由 | `opt-in` | Rust 校验/dry-run/导入导出/原子写入/DPAPI/审计；Node 仅做受保护内存重载 | 公网拒绝路径已通过；等待远端 CI、便携包与受控公网认证成功路径 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
 | Workspace 文件写操作原生 HTTP 路由 | `opt-in` | Rust allowed-root 文件操作，Node 回退 | 继续迁移 Git/command/approval |
+| 统一事件同步原生 HTTP 路由 | `opt-in` | Rust unified replay、设备 ack、retention/compaction 与 marker | 远端 CI、便携包和受控公网认证 canary |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |
 | 事件存储 append/replay sidecar | `canary` | `auto`/显式开启，可回退 Worker/同步 SQLite | 有限真人运行会话并采集统计 |
 | 实时音频低延迟管线 | `contract` | 无 | 仅在新证据表明 Node 成为瓶颈时重评 |
@@ -126,6 +127,12 @@ Windows API key 与 FCM 服务账号继续使用当前用户 DPAPI，Rust 显式
 Host 与设备鉴权继续复用 Rust 控制面前置检查，`host.blocked`/`auth.failed` 拒绝审计在返回 `403`/`401` 前写入。设置、鉴权存储、审计、schema 或查询失败均发生在响应所有权之前，前门会逐字节回放原请求。`stream=1` 在匹配前排除，因此 SSE 订阅、live append 通知和断开清理仍由 Node 负责；关闭独立开关后所有 Tool Events 请求恢复 Node 所有权。
 
 2026-07-16 的隔离 release 单路由 canary 为 12/12；累计开启 Status、Doctor、Devices、Pairing、Audit、Settings 与 Tool Events 的 canary 为 44/44。验证覆盖 Rust 匿名拒绝、真实 SQLite fixture 的认证过滤/投影、严格 after 空页、Node `text/event-stream` 所有权、拒绝审计、与其他路由的组合顺序和受控关闭。默认 release 二进制正被公网服务占用，因此验证使用独立 `CARGO_TARGET_DIR`，没有停止或替换公网进程。该 slice 当前为 `opt-in`：正常 JSON replay 少经过 Node HTTP、Worker 选择和 JSONL 跳数，但 Node 仍因 SSE 与其他路由常驻，单独启用不会显著降低整机常驻内存。
+
+### 统一事件同步原生 HTTP 路由
+
+`--rust-event-sync-http` 接管 `/api/events/unified`、ack/retention-plan/compaction-marker 读取，以及 ack/compact 写操作。ack 的设备身份只取认证结果，忽略 body 中的 `deviceId`；`expectedCursor` 提供设备内 CAS 冲突检测。retention 的安全游标取所有未撤销、未过期设备的最小 ack，任何未 ack 的有效设备都会阻止删除；task、live-call 与 tool-event 压缩和 marker 写入共享 Rust event-store core。
+
+Rust 对 ack 与 compact 分别执行每分钟 240/20 次的设备级限流并返回标准限流头，成功写和限流拒绝均进入审计。mutation body 被 Rust 有界读取后即认领，后续存储或审计失败返回 Rust 4xx/500 且绝不重放 Node。quota 超限仍受安全游标约束，并写入 `spool_quota` marker；关闭开关后请求恢复 Node 所有权。2026-07-20 本地 110 项 Rust 测试和 Node event-store 契约通过，当前保持 `opt-in` 等待远端、包内与公网 canary 证据。
 
 ## Workspace Tree
 

@@ -38,6 +38,9 @@ It describes the protocol conventions, key endpoints, and interaction patterns.
 | Pairing sessions | `GET` | `/api/pairing-sessions?status=&fields=` | none |
 | Audit log | `GET` | `/api/audit-log?after=&limit=&fields=` | cursor, default 200 |
 | Unified events | `GET` | `/api/events/unified?after=&limit=&fields=` | cursor, default 200 |
+| Event acknowledgements | `GET` | `/api/events/acks?streamId=` | none |
+| Event retention plan | `GET` | `/api/events/retention-plan?streamId=&retentionDays=&keepLatest=` | none |
+| Event compaction markers | `GET` | `/api/events/compaction-markers?streamId=&after=&limit=` | cursor, default 100 |
 | Live calls | `GET` | `/api/live-calls?fields=` | none |
 | Terminal sessions | `GET` | `/api/terminal-sessions?fields=` | none |
 | Desktop observations | `GET` | `/api/desktop-remote/observations?after=&limit=&fields=` | cursor, default 100 |
@@ -59,6 +62,8 @@ It describes the protocol conventions, key endpoints, and interaction patterns.
 | Git action | `POST` | `/api/workspaces/:id/git/action?dryRun=1` | ✅ |
 | Create workspace | `POST` | `/api/workspaces?dryRun=1` | ✅ |
 | Prune tool events | `POST` | `/api/tool-events/prune` (body `dryRun: true`) | ✅ |
+| Acknowledge event stream | `POST` | `/api/events/ack` | n/a |
+| Compact event stream | `POST` | `/api/events/compact` (body `dryRun: true`) | ✅ |
 
 When `?dryRun=1` is set, the endpoint runs validation and risk assessment but performs no side effects.  
 Response format: `{ dryRun: true, wouldValidate: {...}, approvalRequired: bool }`.

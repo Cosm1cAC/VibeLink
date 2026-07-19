@@ -4,6 +4,9 @@ use crate::device_http::{
     DeviceRouteConfig,
 };
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
+use crate::event_sync_http::{
+    event_sync_request_requires_body, route_event_sync_request, EventSyncRouteConfig,
+};
 use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
@@ -13,12 +16,14 @@ use crate::settings_http::{
     SettingsRouteConfig,
 };
 use crate::status_http::{
-    parse_request, route_status_request, StatusRouteConfig, MAX_HEADER_BYTES,
+    parse_request, route_status_request, HttpRouteResponse, StatusRouteConfig, MAX_HEADER_BYTES,
 };
 use crate::tool_events_http::{
     route_tool_events_request, stream_tool_events_request, ToolEventsRouteConfig,
 };
-use crate::workspace_http::{route_workspace_request, workspace_request_requires_body, WorkspaceRouteConfig};
+use crate::workspace_http::{
+    route_workspace_request, workspace_request_requires_body, WorkspaceRouteConfig,
+};
 use anyhow::{bail, Context, Result};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -44,6 +49,7 @@ pub struct FrontdoorRoutes {
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
     workspace: Option<WorkspaceRouteConfig>,
+    event_sync: Option<EventSyncRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -97,6 +103,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_event_sync(mut self, route: Option<EventSyncRouteConfig>) -> Self {
+        self.event_sync = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -108,6 +119,7 @@ impl FrontdoorRoutes {
             && self.settings.is_none()
             && self.pairing.is_none()
             && self.workspace.is_none()
+            && self.event_sync.is_none()
     }
 }
 
@@ -288,6 +300,30 @@ fn handle_connection(
                 Err(error) => {
                     pairing_route.record_fallback();
                     eprintln!("Rust Pairing route falling back before ownership: {error:#}");
+                }
+            }
+        }
+        if let Some(event_sync_route) = routes.event_sync.as_ref() {
+            let body = if event_sync_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let rust_owned_mutation = body.is_some();
+            match route_event_sync_request(&request, &peer_ip, body.as_deref(), event_sync_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    event_sync_route.record_fallback();
+                    if rust_owned_mutation {
+                        eprintln!("Rust Event Sync mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Event sync mutation failed.")
+                            .write_to(&mut client);
+                    }
+                    eprintln!("Rust Event Sync route falling back before ownership: {error:#}");
                 }
             }
         }

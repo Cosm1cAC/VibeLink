@@ -58,6 +58,7 @@ import {
   X
 } from "lucide-react";
 import "./styles.css";
+import { BrowserWorkspace } from "./BrowserWorkspace.jsx";
 import { selectionStartState } from "./chatSelection.js";
 import { remoteTranscriptItems } from "./remoteTranscript.js";
 import {
@@ -4292,10 +4293,6 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
   const [mcpBusy, setMcpBusy] = useState("");
   const [mcpError, setMcpError] = useState("");
   const [mcpResult, setMcpResult] = useState(null);
-  const [browserFetchUrl, setBrowserFetchUrl] = useState("");
-  const [browserFetchBusy, setBrowserFetchBusy] = useState(false);
-  const [browserFetchError, setBrowserFetchError] = useState("");
-  const [browserFetchResult, setBrowserFetchResult] = useState(null);
   const [settingsRevision, setSettingsRevision] = useState(Number(settings?.revision || 0));
   const [settingsSaveError, setSettingsSaveError] = useState("");
   const [schedulerState, setSchedulerState] = useState(null);
@@ -4632,30 +4629,6 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
     }
   }
 
-  async function runBrowserFetch() {
-    const targetUrl = browserFetchUrl.trim();
-    if (!targetUrl) return;
-    setBrowserFetchBusy(true);
-    setBrowserFetchError("");
-    setBrowserFetchResult(null);
-    try {
-      const result = await request(
-        "/api/browser/fetch",
-        { method: "POST", body: JSON.stringify({ url: targetUrl, timeoutMs: 15000 }) },
-        token
-      );
-      setBrowserFetchResult(result);
-    } catch (err) {
-      if (err.status === 428 && err.data?.approvalId) {
-        setBrowserFetchResult(err.data);
-        setBrowserFetchError(err.data.error || err.message);
-      } else {
-        setBrowserFetchError(err.message);
-      }
-    } finally {
-      setBrowserFetchBusy(false);
-    }
-  }
 
   async function submit(event) {
     event.preventDefault();
@@ -5172,47 +5145,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
             </div>
           ) : null}
         </section>
-        <section className="probe-panel">
-          <div>
-            <h3>Browser runtime</h3>
-            <p>Fetch a page through VibeLink runtime, with network policy, approvals, audit, and tool event replay.</p>
-          </div>
-          <label>
-            <span>URL</span>
-            <input value={browserFetchUrl} onChange={(event) => setBrowserFetchUrl(event.target.value)} placeholder="https://example.com" />
-          </label>
-          <button className="primary-button" type="button" onClick={runBrowserFetch} disabled={browserFetchBusy || !browserFetchUrl.trim()}>
-            {browserFetchBusy ? "Fetching..." : "Fetch page"}
-          </button>
-          {browserFetchError ? <p className="form-error">{browserFetchError}</p> : null}
-          {browserFetchResult ? (
-            <div className={cx("probe-result", browserFetchResult.ok ? "ok" : browserFetchResult.approvalId ? "warn" : "failed")}>
-              <div className="probe-result-title">
-                {browserFetchResult.approvalId ? "Approval required" : browserFetchResult.ok ? "Fetched" : "Failed"}
-                {browserFetchResult.toolRunId ? <small> · run {browserFetchResult.toolRunId.slice(0, 8)}</small> : null}
-              </div>
-              <dl>
-                <div>
-                  <dt>Status</dt>
-                  <dd>{browserFetchResult.status || browserFetchResult.error || "-"}</dd>
-                </div>
-                <div>
-                  <dt>Title</dt>
-                  <dd>{browserFetchResult.title || "-"}</dd>
-                </div>
-                <div>
-                  <dt>Bytes</dt>
-                  <dd>{browserFetchResult.bytes ?? "-"}</dd>
-                </div>
-                <div>
-                  <dt>URL</dt>
-                  <dd>{browserFetchResult.finalUrl || browserFetchResult.url || browserFetchResult.approval?.request?.url || "-"}</dd>
-                </div>
-              </dl>
-              {browserFetchResult.textSample ? <p className="tool-event-range">{browserFetchResult.textSample.slice(0, 500)}</p> : null}
-            </div>
-          ) : null}
-        </section>
+        <BrowserWorkspace request={request} token={token} />
         <section className="probe-panel">
           <div>
             <h3>Codex app-server probe</h3>
@@ -5894,7 +5827,7 @@ function App() {
   }, [token]);
 
   useEffect(() => {
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+    if (import.meta.env.PROD && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   }, []);
 
   function sameMessageForOperation(item, target) {

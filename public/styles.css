@@ -341,6 +341,210 @@ textarea:focus {
   padding: 3px;
 }
 
+.browser-workspace {
+  display: grid;
+  gap: 12px;
+  padding-block: 8px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.browser-workspace-heading,
+.browser-session-controls,
+.browser-address,
+.browser-trace-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browser-workspace-heading {
+  justify-content: space-between;
+}
+
+.browser-workspace-heading > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.browser-icon-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.browser-icon-actions button,
+.browser-session-controls > button,
+.browser-address > button:not(.primary-button) {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  flex: 0 0 34px;
+  color: var(--ink);
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.browser-icon-actions button:focus-visible,
+.browser-session-controls > button:focus-visible,
+.browser-address > button:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+.browser-icon-actions button:disabled,
+.browser-session-controls > button:disabled,
+.browser-address > button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.browser-session-controls label {
+  display: grid;
+  flex: 1 1 0;
+  min-width: 0;
+  gap: 4px;
+}
+
+.browser-session-controls label span {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.browser-session-controls select,
+.browser-address input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.browser-address input {
+  flex: 1 1 auto;
+}
+
+.browser-address .primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.browser-stage {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  place-items: center;
+  overflow: hidden;
+  color: var(--ink-soft);
+  background: #edf1f0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.browser-stage img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #ffffff;
+}
+
+.browser-trace {
+  display: grid;
+  max-height: 220px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+
+.browser-trace-heading {
+  position: sticky;
+  top: 0;
+  justify-content: space-between;
+  padding: 8px 0;
+  background: var(--paper);
+}
+
+.browser-trace-heading span,
+.browser-trace-row small {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.browser-trace-row {
+  display: grid;
+  grid-template-columns: minmax(128px, 0.4fr) minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.browser-trace-row > span {
+  overflow-wrap: anywhere;
+}
+
+.browser-trace-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-empty {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  text-align: center;
+  border-block: 1px solid var(--line);
+}
+
+.browser-empty span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+@media (max-width: 620px) {
+  .browser-workspace-heading,
+  .browser-session-controls {
+    align-items: stretch;
+  }
+
+  .browser-session-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 34px;
+  }
+
+  .browser-session-controls label:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .browser-address {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 34px;
+  }
+
+  .browser-address input {
+    grid-column: 1 / -1;
+  }
+
+  .browser-address .primary-button {
+    justify-content: center;
+  }
+
+  .browser-trace-row {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+}
+
 .session-origin-switch button {
   display: flex;
   align-items: center;

@@ -16,8 +16,8 @@
 
 ## Phase 3: Browser Workspace
 
-- [ ] P2.9 Specify and test browser session/control/trace contracts.
-- [ ] P2.10 Build the Web browser workspace.
+- [x] P2.9 Specify and test browser session/control/trace contracts.
+- [x] P2.10 Build the Web browser workspace.
 - [ ] P2.11 Build Android browser session, navigation, trace, and remote-control views.
 - [ ] P2.12 Verify redaction, pagination, reconnect, cleanup, and desktop/phone E2E.
 

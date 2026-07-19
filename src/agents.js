@@ -17,6 +17,7 @@ import { zhipuAgentArgs, zhipuCliPath } from "./zhipuRuntime.js";
 const tasks = new Map();
 const MAX_RESTORED_TASKS = 80;
 let notificationHandler = null;
+let taskScheduler = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -319,6 +320,7 @@ function resolveWorkingDir(payload, settings) {
 export const __testInternals = {
   agentLaunchPlan,
   claudeArgs,
+  persistentLaunchPayload,
   resolveWorkingDir,
   createOutputNormalizer: (...args) => createOutputNormalizer(...args)
 };
@@ -530,6 +532,13 @@ function normalizeOutput(data) {
   });
 }
 
+function persistentLaunchPayload(payload = {}) {
+  return Object.fromEntries([
+    "agent", "title", "prompt", "cwd", "model", "mode", "sessionId", "reasoningEffort",
+    "permissionMode", "security", "template", "name"
+  ].filter((key) => payload[key] !== undefined).map((key) => [key, payload[key]]));
+}
+
 function createOutputNormalizer(onEvent) {
   let buffered = "";
   const decoder = new StringDecoder("utf8");
@@ -692,7 +701,7 @@ async function monitorProviderTurn(task, execution, runtimeSettings) {
       const prompt = task.inputQueue.shift();
       appendTaskEvent(task, { type: "system", text: "Turn completed; starting queued resume." });
       await startProviderTurn(task, queuedResumePayload(task, prompt), runtimeSettings, crypto.randomUUID());
-      return;
+      return { status: task.status, exitCode: task.exitCode };
     }
     task.status = exitCode === 0 ? "done" : "failed";
     task.exitCode = exitCode;
@@ -711,6 +720,8 @@ async function monitorProviderTurn(task, execution, runtimeSettings) {
       url: "/",
       meta: { taskId: task.id, status: task.status, exitCode, signal: exit?.signal || "" }
     });
+    taskScheduler?.settleTask?.(task.id, { status: task.status, exitCode });
+    return { status: task.status, exitCode };
   } catch (error) {
     normalizer.end();
     const trailingStderr = stderrDecoder.end();
@@ -720,6 +731,8 @@ async function monitorProviderTurn(task, execution, runtimeSettings) {
     task.execution = null;
     upsertTask(task);
     appendTaskEvent(task, { type: "error", text: error.message });
+    taskScheduler?.settleTask?.(task.id, { status: "failed", error: error.message });
+    return { status: "failed", error: error.message };
   }
 }
 
@@ -790,7 +803,7 @@ async function startProviderTurn(task, payload, runtimeSettings, executionId) {
   task.updatedAt = nowIso();
   upsertTask(task);
   appendTaskEvent(task, { type: "system", text: task.commandLabel });
-  void monitorProviderTurn(task, task.execution, runtimeSettings);
+  return monitorProviderTurn(task, task.execution, runtimeSettings);
 }
 
 export async function restoreTaskExecution(binding, snapshot, settings) {
@@ -831,6 +844,81 @@ export function getTasks() {
       eventCount: task.events.length
     }))
     .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+}
+
+export function configureTaskScheduler(scheduler) {
+  taskScheduler = scheduler || null;
+}
+
+export async function executeQueuedTask(job, settings) {
+  const payload = job.payload || {};
+  const runtimeSettings = await settingsWithSecrets(settings);
+  let task = tasks.get(job.taskId);
+  if (!task) {
+    const agent = taskAgent(payload.agent);
+    const { cwd } = resolveWorkingDir(payload, runtimeSettings);
+    const launch = agentLaunchPlan({ ...payload, cwd, agent }, runtimeSettings);
+    task = {
+      id: job.taskId,
+      agent,
+      title: (payload.title || payload.prompt || `${agent} task`).slice(0, 96),
+      cwd,
+      status: "queued",
+      createdAt: job.createdAt || nowIso(),
+      updatedAt: nowIso(),
+      exitCode: null,
+      sessionId: payload.sessionId || "",
+      commandLabel: commandLabel(launch.base.command, launch.args),
+      security: securityPolicy(payload, runtimeSettings),
+      execution: null,
+      listeners: new Set(),
+      events: [],
+      logPath: path.join(tasksDir, `${job.taskId}.jsonl`)
+    };
+    tasks.set(task.id, task);
+    upsertTask(task);
+    appendTaskEvent(task, { type: "system", text: "Restored queued task from SQLite." });
+  }
+  task.executionFacade = payload.executionHost || getExecutionHostFacade();
+  task.launchPayload = { ...payload, executionHost: undefined };
+  task.inputQueue ||= [];
+  task.stopRequested = false;
+  task.status = "starting";
+  task.exitCode = null;
+  task.updatedAt = nowIso();
+  upsertTask(task);
+  appendTaskEvent(task, {
+    type: "system",
+    text: job.attempts > 1 ? `Retry attempt ${job.attempts} of ${job.maxAttempts}.` : "Task claimed by background scheduler."
+  });
+  try {
+    return await startProviderTurn(task, payload, runtimeSettings, crypto.randomUUID());
+  } catch (error) {
+    task.status = "failed";
+    task.updatedAt = nowIso();
+    task.execution = null;
+    upsertTask(task);
+    appendTaskEvent(task, { type: "error", text: error.message });
+    return { status: "failed", error: error.message };
+  }
+}
+
+export function applyTaskQueueTransition(job, detail = {}) {
+  const task = tasks.get(job?.taskId);
+  if (!task) return;
+  if (job.status === "queued") {
+    task.status = "queued";
+    task.updatedAt = nowIso();
+    upsertTask(task);
+    if (detail.type === "retry_scheduled") {
+      appendTaskEvent(task, { type: "system", text: `Attempt ${job.attempts} failed; retry scheduled for ${job.nextAttemptAt}.` });
+    }
+  } else if (job.status === "cancelled" && !task.execution) {
+    task.status = "cancelled";
+    task.updatedAt = nowIso();
+    upsertTask(task);
+    appendTaskEvent(task, { type: "system", text: "Queued task cancelled." });
+  }
 }
 
 export function getTask(id) {
@@ -896,7 +984,7 @@ export async function createTask(payload, settings) {
     agent,
     title,
     cwd,
-    status: "starting",
+    status: "queued",
     createdAt: nowIso(),
     updatedAt: nowIso(),
     exitCode: null,
@@ -905,7 +993,7 @@ export async function createTask(payload, settings) {
     security: policy,
     execution: null,
     executionFacade: payload.executionHost || getExecutionHostFacade(),
-    launchPayload: { ...payload, executionHost: undefined },
+    launchPayload: persistentLaunchPayload(payload),
     inputQueue: [],
     stopRequested: false,
     listeners: new Set(),
@@ -959,13 +1047,16 @@ export async function createTask(payload, settings) {
     return task;
   }
 
-  try {
-    await startProviderTurn(task, payload, runtimeSettings, id);
-  } catch (error) {
-    task.status = "failed";
-    task.updatedAt = nowIso();
-    upsertTask(task);
-    appendTaskEvent(task, { type: "error", text: error.message });
+  if (taskScheduler) {
+    taskScheduler.enqueue({ taskId: task.id, payload: task.launchPayload, priority: payload.priority, maxAttempts: payload.maxAttempts });
+    appendTaskEvent(task, { type: "system", text: "Task added to the persistent execution queue." });
+  } else {
+    void startProviderTurn(task, payload, runtimeSettings, id).catch((error) => {
+      task.status = "failed";
+      task.updatedAt = nowIso();
+      upsertTask(task);
+      appendTaskEvent(task, { type: "error", text: error.message });
+    });
   }
 
   return task;
@@ -984,9 +1075,13 @@ export function writeTaskInput(id, text) {
 
 export async function stopTask(id) {
   const task = tasks.get(id);
+  if (task?.status === "queued" && taskScheduler) {
+    return taskScheduler.cancel(id)?.status === "cancelled";
+  }
   if (!task || !task.execution || task.status !== "running") return false;
   task.stopRequested = true;
   task.inputQueue.length = 0;
+  taskScheduler?.cancelRunning?.(id);
   try {
     await task.execution.facade.signalProvider(task.execution.id, "stop", "task stopped by user");
   } catch (error) {

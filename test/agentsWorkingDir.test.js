@@ -110,6 +110,19 @@ test("codex resume launch plan keeps global options before exec resume", () => {
   assert.equal(plan.args.at(-1), "continue");
 });
 
+test("persistent queue payload excludes runtime objects and environment secrets", () => {
+  assert.deepEqual(
+    __testInternals.persistentLaunchPayload({
+      agent: "codex",
+      prompt: "hello",
+      env: { OPENAI_API_KEY: "secret" },
+      executionHost: { startProvider() {} },
+      security: { sandboxMode: "workspace-write" }
+    }),
+    { agent: "codex", prompt: "hello", security: { sandboxMode: "workspace-write" } }
+  );
+});
+
 test("agent output normalizer preserves split UTF-8 JSONL", () => {
   const events = [];
   const normalizer = __testInternals.createOutputNormalizer((event) => events.push(event));

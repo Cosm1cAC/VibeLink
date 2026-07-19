@@ -683,12 +683,14 @@ const paths = {
       type: "object",
       properties: {
         prompt: { type: "string", description: "Agent prompt" },
-        agent: { type: "string", enum: ["codex", "claude", "doubao"] },
+        agent: { type: "string", enum: ["codex", "claude", "doubao", "zhipu"] },
         cwd: { type: "string" },
         model: { type: "string" },
         mode: { type: "string", enum: ["new", "continue", "resume"] },
         sessionId: { type: "string" },
-        title: { type: "string" }
+        title: { type: "string" },
+        priority: { type: "integer", minimum: -100, maximum: 100 },
+        maxAttempts: { type: "integer", minimum: 1, maximum: 10, default: 3 }
       },
       required: ["prompt"]
     },
@@ -703,6 +705,13 @@ const paths = {
     },
     { "201": { description: "Created" } }
   )),
+  ...path("/api/task-scheduler", get("Get background scheduler", "Returns persistent queue state, concurrency usage, retries, and recent jobs.", { type: "object" })),
+  ...path("/api/task-scheduler/{id}/retry", mutation("post", "Retry queued task", "Resets a failed or cancelled queue item and schedules it again.", { type: "object" }, { type: "object" }, [
+    { name: "id", in: "path", required: true, schema: { type: "string" } }
+  ])),
+  ...path("/api/task-scheduler/{id}/cancel", mutation("post", "Cancel queued task", "Cancels a queued task before it starts.", { type: "object" }, { type: "object" }, [
+    { name: "id", in: "path", required: true, schema: { type: "string" } }
+  ])),
 
   // Budget and compact metrics
   ...path("/api/context-budget/metrics", get("Context budget metrics",

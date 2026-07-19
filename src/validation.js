@@ -27,6 +27,8 @@ export const TaskInputSchema = z.object({
   mode: z.enum(["new", "continue", "resume"]).optional(),
   sessionId: z.string().optional(),
   reasoningEffort: z.string().optional(),
+  priority: z.number().int().min(-100).max(100).optional(),
+  maxAttempts: z.number().int().min(1).max(10).optional(),
   security: z.object({
     dangerouslyFullAccess: z.boolean().optional(),
     sandboxMode: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional(),

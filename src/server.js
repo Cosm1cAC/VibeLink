@@ -56,7 +56,7 @@ import {
   upsertNativePushToken,
   upsertPushSubscription
 } from "./db.js";
-import { appendExternalTaskEvent, createTask, getTask, getTasks, restoreTaskExecution, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
+import { applyTaskQueueTransition, appendExternalTaskEvent, configureTaskScheduler, createTask, executeQueuedTask, getTask, getTasks, restoreTaskExecution, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
 import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
 import { artifactMetadata, artifactPreview, readArtifactRange } from "./artifactRuntime.js";
@@ -146,6 +146,8 @@ import { buildSettingsExport, importSettingsSnapshot, loadSettings, prepareSetti
 import { writeApiKeys, writeSecret } from "./credentialStore.js";
 import { configureTerminalSessionRecovery, getTerminalSession, listTerminalSessions, resizeTerminalSession, startTerminalSession, stopTerminalSession, terminalCapabilityReport, writeTerminalSession } from "./terminalRuntime.js";
 import { createThreadFork, getThreadState, threadStateEtag, updateThreadState, updateThreadStateBatch } from "./threadState.js";
+import { createTaskQueuePersistence } from "./taskQueuePersistence.js";
+import { createTaskScheduler } from "./taskScheduler.js";
 import { applyWorkspaceGitAction, applyWorkspaceGitFileAction, createPermanentWorktree, createWorkspace, getTaskChanges, getWorkspaceContext, getWorkspaceFile, getWorkspaceGitDiff, getWorkspaceGitStatus, getWorkspaces, getWorkspaceRuntimeStats, getWorkspaceTree, mutateWorkspaceFile, openWorkspaceInExplorer, resolveWorkspacePath, runWorkspaceCommand } from "./workspaces.js";
 import { callMcpTool, closePersistentMcpSessions, mcpStatus, probeMcpServers } from "./mcpRuntime.js";
 import { mcpCallApprovalRisk } from "./mcpCallRisk.js";
@@ -193,6 +195,15 @@ if (process.env.VIBELINK_SEARCH_INDEX_STARTUP !== "0") startSearchIndex({
     console.error(`[search-index] startup refresh failed: ${error.message}`);
   });
 restoreTasks();
+const taskScheduler = createTaskScheduler({
+  store: createTaskQueuePersistence({ database: initDb }),
+  execute: (job) => executeQueuedTask(job, settings),
+  concurrency: Number(process.env.VIBELINK_TASK_CONCURRENCY || 2),
+  pollIntervalMs: Number(process.env.VIBELINK_TASK_SCHEDULER_MS || 250),
+  retryBaseMs: Number(process.env.VIBELINK_TASK_RETRY_BASE_MS || 1000),
+  onTransition: applyTaskQueueTransition
+});
+configureTaskScheduler(taskScheduler);
 const approvalDispatcher = createApprovalDispatcher({
   resolveApproval: (command) => getExecutionHostFacade().resolveProviderApproval(command)
 });
@@ -3960,6 +3971,24 @@ async function routeApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/task-scheduler" && request.method === "GET") {
+    sendJson(response, 200, taskScheduler.status());
+    return;
+  }
+
+  const schedulerActionMatch = url.pathname.match(/^\/api\/task-scheduler\/([^/]+)\/(retry|cancel)$/);
+  if (schedulerActionMatch && request.method === "POST") {
+    if (!enforceRateLimit(request, response, url, `task.scheduler.${schedulerActionMatch[2]}`, { limit: 60, windowMs: 60 * 1000 }, auth)) return;
+    const id = decodeURIComponent(schedulerActionMatch[1]);
+    const job = schedulerActionMatch[2] === "retry" ? taskScheduler.retry(id) : taskScheduler.cancel(id);
+    if (!job) {
+      sendError(response, 404, "Queue item not found");
+      return;
+    }
+    sendJson(response, 200, { ok: true, job });
+    return;
+  }
+
   if (url.pathname === "/api/tasks" && request.method === "POST") {
     if (!enforceRateLimit(request, response, url, "task.create", { limit: 30, windowMs: 60 * 1000 }, auth)) return;
     const body = await readBody(request);
@@ -4230,6 +4259,7 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(approvalDispatchTimer);
+  taskScheduler.stop();
   console.log(`Received ${signal}; draining event store runtime...`);
   const forceExit = setTimeout(() => process.exit(1), 5000);
   forceExit.unref?.();
@@ -4334,6 +4364,11 @@ if (typeof executionFacade?.getExecution === "function") {
     });
   }
 }
+
+const attachedTaskIds = listExecutionBindings({ activeOnly: true })
+  .filter((binding) => binding.taskId && binding.attachState === "attached")
+  .map((binding) => binding.taskId);
+taskScheduler.start({ preserveTaskIds: attachedTaskIds });
 
 server.listen(settings.port, settings.host, () => {
   const local = `http://localhost:${settings.port}`;

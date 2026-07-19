@@ -29,10 +29,12 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ## 仍然存在的优先问题
 
+本节只收录能够通过后续工程工作关闭的事项；外部协议限制和明确不建设的产品范围单独列在“已知且不计划消除的边界”。
+
 ### P0 阻塞项
 
-- tool-call 级审批 continuation 尚未闭环。当前高风险 VibeLink 工具可在批准后重跑受支持动作，transactional outbox 到 execution host 的通用投递链已接入，但现有 CLI adapter 没有可恢复的 upstream request connection；真正的 Codex request/tool-call continuation 仍需 app-server adapter。
-- durable execution host 已进入产品运行链，但尚缺 Bridge/execd/worker crash canary、长时 spool/ack 和故障告警证据。在这些验证完成前，不能把跨重启恢复视为已达到生产可靠性门槛。
+- **未闭环：Provider tool-call 审批 continuation。** 当前高风险 VibeLink 工具可在批准后重跑受支持动作，transactional outbox 到 execution host 的通用投递链已接入，但现有 CLI adapter 没有可恢复的 upstream request connection；真正的 Codex request/tool-call continuation 仍需 app-server adapter。
+- **待验证：durable execution host 生产可靠性。** execution host 已进入产品运行链，但尚缺 Bridge/execd/worker crash canary、长时 spool/ack 和故障告警证据。在这些验证完成前，不能把跨重启恢复视为已达到生产可靠性门槛。
 
 ### P1 产品缺口
 

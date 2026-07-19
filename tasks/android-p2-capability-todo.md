@@ -1,4 +1,4 @@
-# Android P2 Capability Checklist
+# P2 Capability Checklist
 
 ## Phase 1: Global Discovery And Search
 
@@ -9,26 +9,28 @@
 
 ## Phase 2: Capability Center
 
-- [ ] P2.5 Specify and test capability-resource list/detail/mutation contracts.
-- [ ] P2.6 Build Plugins/Hooks/Automations/Subagents/AGENTS/config Android views.
-- [ ] P2.7 Verify approval, audit, offline, empty, and denied states.
+- [ ] P2.5 Specify and test capability-resource list/detail/mutation contracts and SQLite Automation persistence.
+- [ ] P2.6 Build Plugins/Hooks/Automations/Subagents/AGENTS/config Web views.
+- [ ] P2.7 Build Plugins/Hooks/Automations/Subagents/AGENTS/config Android views.
+- [ ] P2.8 Verify approval, audit, offline, empty, and denied states.
 
 ## Phase 3: Browser Workspace
 
-- [ ] P2.8 Specify and test browser session/control/trace contracts.
-- [ ] P2.9 Build Android browser session, navigation, trace, and remote-control views.
-- [ ] P2.10 Verify redaction, pagination, reconnect, cleanup, and phone E2E.
+- [ ] P2.9 Specify and test browser session/control/trace contracts.
+- [ ] P2.10 Build the Web browser workspace.
+- [ ] P2.11 Build Android browser session, navigation, trace, and remote-control views.
+- [ ] P2.12 Verify redaction, pagination, reconnect, cleanup, and desktop/phone E2E.
 
 ## Phase 4: Artifact Workbench
 
-- [ ] P2.11 Specify authenticated metadata/range/save contracts.
-- [ ] P2.12 Add table/workbook, Office/PDF, and Notebook viewers.
-- [ ] P2.13 Add format-safe editing only after conflict and round-trip tests pass.
+- [ ] P2.13 Specify authenticated metadata/range/revision-save contracts.
+- [ ] P2.14 Add Web table/workbook, Office/PDF, and Notebook viewers.
+- [ ] P2.15 Add Android table/workbook, Office/PDF, and Notebook viewers.
+- [ ] P2.16 Add revision-safe CSV/TSV and Notebook editing with round-trip tests.
 
 ## Final Gate
 
 - [ ] Android unit tests, instrumentation, lint, and debug build pass.
 - [ ] Bridge contract tests and security redaction tests pass.
-- [ ] Runtime screenshots/logs cover phone and tablet states.
+- [ ] Runtime screenshots/logs cover desktop, phone, and tablet states.
 - [ ] `android-capability-matrix.md` records evidence and residual risks.
-

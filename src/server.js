@@ -58,7 +58,8 @@ import {
 } from "./db.js";
 import { applyTaskQueueTransition, appendExternalTaskEvent, configureTaskScheduler, createTask, executeQueuedTask, getTask, getTasks, restoreTaskExecution, restoreTasks, setTaskNotificationHandler, stopTask, subscribeTask, writeTaskInput } from "./agents.js";
 import { runCodexAppServerProbe } from "./codexAppServerProbe.js";
-import { browserFetchRisk, fetchBrowserPage } from "./browserRuntime.js";
+import { browserFetchRisk, createBrowserSessionRuntime, fetchBrowserPage } from "./browserRuntime.js";
+import { routeBrowserSessionRequest } from "./browserSessionHttp.js";
 import { artifactMetadata, artifactPreview, readArtifactRange } from "./artifactRuntime.js";
 import { createApprovalDispatcher } from "./approvalDispatcher.js";
 import { getCompactServiceMetrics } from "./compactService.js";
@@ -172,6 +173,7 @@ import { validate, CommandInputSchema, TaskInputSchema, SettingsPatchSchema, Bro
 
 let settings = ensureNotificationSettings(await loadSettings());
 await saveSettings(settings);
+const browserSessionRuntime = createBrowserSessionRuntime();
 const providerRuntimeLoaders = createProviderRuntimeLoaders({
   getSettings: () => settingsWithSecrets(settings)
 });
@@ -1988,6 +1990,15 @@ async function routeApi(request, response, url) {
     sendError(response, 401, "Unauthorized");
     return;
   }
+
+  if (await routeBrowserSessionRequest(request, response, url, auth, {
+    runtime: browserSessionRuntime,
+    readBody,
+    sendJson,
+    sendError,
+    enforceRateLimit,
+    audit
+  })) return;
 
   if (url.pathname === "/api/files" && request.method === "GET") {
     if (!enforceRateLimit(request, response, url, "file.download", { limit: 120, windowMs: 60 * 1000 }, auth)) return;
@@ -4429,6 +4440,7 @@ async function shutdown(signal) {
   forceExit.unref?.();
   try {
     await drainEventStoreRuntime();
+    await browserSessionRuntime.closeAll("server shutdown");
     await closePersistentMcpSessions();
     await closeStatusRuntime();
     await stopSearchIndex();

@@ -1,21 +1,24 @@
-# Android P2 Capability Plan
+# P2 Capability Plan
 
 ## Objective
 
-Close the Android product gaps for discovery/management, browser control, global
-navigation/search, and rich artifact handling without presenting unsupported
-backend behavior as working controls. The target user is an engineer operating a
-local VibeLink bridge from a phone. Success means each surface loads real bridge
-state, exposes only actions backed by an audited contract, and remains usable when
-the bridge is offline or denies an operation.
+Close the Web and Android product gaps for capability management, browser control,
+and rich artifact handling without presenting unsupported backend behavior as
+working controls. The target user is an engineer operating a local VibeLink bridge
+from a desktop browser or phone. Success means both clients load the same real
+bridge state, expose only actions backed by an authenticated and audited contract,
+and remain usable when the bridge is offline or denies an operation.
 
 ## Tech Stack And Commands
 
 - Android: Kotlin, Jetpack Compose, Navigation Compose, OkHttp/Gson.
+- Web: React 19, Vite, lucide-react, and the existing VibeLink design tokens.
 - Bridge: Node.js HTTP server with JSON-only contracts.
 - JVM tests: `cd apps/android; .\gradlew.bat testDebugUnitTest --no-daemon`.
 - Focused JVM tests: `cd apps/android; .\gradlew.bat testDebugUnitTest --tests "*SessionList*" --tests "*ApiClientSearchTest" --no-daemon`.
 - Bridge tests: `node --test test/search.test.js test/commandRegistry.test.js test/commandPaletteModel.test.js`.
+- Web tests: `node --test test/*Model.test.js`.
+- Web build: `npm run build`.
 - Debug build: `cd apps/android; .\gradlew.bat assembleDebug --no-daemon`.
 - Lint: `cd apps/android; .\gradlew.bat lintDebug --no-daemon`.
 
@@ -84,6 +87,12 @@ Keep operational layouts compact and avoid nested cards.
 5. Dispatch artifacts by detected kind. CSV/XLSX, DOCX, PPTX/PDF, and Notebook get
    dedicated viewers; unsupported formats fall back to metadata/download, not raw
    binary text.
+6. Use bridge-managed Chromium as the only initial browser engine. Web and Android
+   remotely control bridge-owned sessions; neither client takes over a local browser.
+7. Persist Automations in SQLite with one-shot, interval, and cron schedules. Skip
+   missed runs and allow at most one active run per Automation.
+8. Limit initial artifact editing to CSV/TSV and Notebook JSON. XLSX, PDF, DOCX, and
+   PPTX remain read-only until a format-preserving writer and dependency review exist.
 
 ## Delivery Plan
 
@@ -104,6 +113,8 @@ search, filtering, command navigation, and offline behavior.
   AGENTS/config sources with capability flags for supported actions.
 - Add a compact Android capability center with category tabs, status, source,
   last-run/error metadata, and safe edit/run/enable controls only where supported.
+- Add the same capability resources to the Web settings/workbench surface using the
+  shared schemas and action availability reasons.
 - Record approval and audit results in the same interaction flow.
 
 Checkpoint: contract tests cover every resource category and rejected mutation;
@@ -116,6 +127,8 @@ Android device smoke covers loaded, empty, offline, and denied states.
   and test steps.
 - Add Android browser view, address/navigation toolbar, session switcher, trace
   timeline, and remote-control state.
+- Add a Web browser workspace with the same session, navigation, screenshot, trace,
+  reconnect, and close behavior.
 
 Checkpoint: localhost E2E proves phone navigation/control, trace pagination, redaction,
 reconnect, and session cleanup with no privileged data in logs.
@@ -125,8 +138,8 @@ reconnect, and session cleanup with no privileged data in logs.
 - Add authenticated byte/range retrieval plus kind/size metadata.
 - Implement dedicated read-only viewers first: delimited tables, workbook sheets,
   Office/PDF pages, and Notebook cells/outputs.
-- Add constrained editing only after format-preserving save contracts and conflict
-  handling are proven.
+- Add revision-checked CSV/TSV cell editing and Notebook source-cell editing. Keep
+  workbook, Office, and PDF controls read-only with an explicit reason.
 
 Checkpoint: representative fixtures render on phone/tablet, large files stay bounded,
 unsupported/corrupt files show recoverable fallback, and edits survive reload.
@@ -146,17 +159,17 @@ unsupported/corrupt files show recoverable fallback, and edits survive reload.
 - Search, tags, favorites, and commands are globally usable and persist correctly.
 - Android can inspect and safely operate every supported capability resource; unsupported
   actions are visibly unavailable with a reason.
+- Web can inspect and operate the same resources through the same contracts.
 - A phone can create/control a browser session and inspect a redacted test trace.
 - Office, spreadsheet, PDF, and Notebook artifacts use dedicated previews with bounded
   memory and clear fallback states.
 - Focused tests, full Android JVM tests, lint, debug build, runtime navigation, and
   accessibility checks pass; the capability matrix links to evidence.
 
-## Open Decisions
+## Confirmed Scope
 
-- Browser engine ownership (bridge-managed Chromium vs. attached browser) must be
-  selected before Phase 3 implementation.
-- Office editing library and licensing must be approved before Phase 4 editing.
-- Automation scheduling semantics and persistence need a backend contract before an
-  Android enable/disable control is exposed.
-
+- Browser ownership: bridge-managed Chromium only.
+- Artifact mutation: CSV/TSV and Notebook only; other structured formats remain read-only.
+- Automation scheduling: SQLite-backed one-shot, interval, and cron; skip missed runs;
+  single active run per Automation.
+- Clients: production HTTP contracts and dedicated experiences in both Web and Android.

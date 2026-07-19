@@ -1,6 +1,6 @@
 # VibeLink 产品状态与剩余差距
 
-最后更新：2026-07-19
+最后更新：2026-07-20
 
 本文只记录当前产品边界和仍值得追踪的差距。设计方案和 contract fixture 不等于可用能力；只有已经接入产品运行链路的实现才计入“当前能力”。
 
@@ -43,10 +43,10 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ### P1 产品缺口
 
+核查结论（2026-07-20）：**尚未全部补齐**。Git/worktree/远端 Review 与 Live Call/ASR/录音生命周期已形成产品闭环，不再作为 P1 缺口；当前仍有以下两项：
+
 - Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
-- Git 已支持常用状态、diff、stage、commit、push、pull、PR 创建、branch、stash、per-hunk 和冲突动作；worktree 已覆盖创建、列表、删除、prune、lock/unlock，并保护主 worktree、校验仓库归属。PR review 工作台已接入 GitHub/GitLab 远端同步、冲突检测和 review 提交。
-- Live Call 已支持 pause/resume、本地 PCM 文件列表/删除、ASR provider 诊断、可选 whisper.cpp、默认生产配置、真实 PCM/弱网长时 QA，以及按天数、单文件和总容量约束的录音生命周期策略。缺少真实 provider 时会明确报错，deterministic mock 仅允许显式选择。
-- 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；仍缺客户端 ack API、实际 retention/compaction 执行、spool quota marker 和多设备冲突策略。
+- 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；Tool Events 已按时间与保留条数自动清理，但统一事件链路仍缺客户端 ack API、面向 task/live call/tool event 的 ack-aware retention/compaction 执行、spool quota marker 和多设备冲突策略。
 
 ### P2 后续能力
 

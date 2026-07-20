@@ -33,8 +33,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Stop
@@ -125,7 +126,8 @@ fun MessageListScreen(
     apiClient: ApiClient,
     viewModel: MessageListViewModel,
     conversation: ConversationItem?,
-    onBack: () -> Unit,
+    onOpenDrawer: () -> Unit,
+    onNewConversation: () -> Unit,
     onOpenApprovals: () -> Unit = {},
     onOpenLiveCall: () -> Unit = {},
     onOpenFileReference: (String) -> Unit = {},
@@ -161,6 +163,7 @@ fun MessageListScreen(
     var attachmentStatus by remember(conversation?.key) { mutableStateOf("") }
     var attachmentUploading by remember(conversation?.key) { mutableStateOf(false) }
     var workspaceContext by remember(conversation?.key, workspaceId) { mutableStateOf("") }
+    var runtimeMenuOpen by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -252,25 +255,36 @@ fun MessageListScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(Icons.Default.Menu, contentDescription = strings.text("打开导航", "Open navigation"))
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.refresh(apiClient) }) {
-                        Icon(Icons.Default.Refresh, contentDescription = strings.refresh)
+                    IconButton(onClick = onNewConversation) {
+                        Icon(Icons.Default.Add, contentDescription = strings.newChat)
                     }
-                    if (isDesktopRemote) {
-                        IconButton(onClick = { viewModel.retryDesktop(apiClient) }) {
-                            Icon(Icons.Default.Replay, contentDescription = strings.retryRemoteQueue)
+                    Box {
+                        IconButton(onClick = { runtimeMenuOpen = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = strings.more)
                         }
-                        IconButton(onClick = { viewModel.clearDesktopQueue(apiClient) }) {
-                            Icon(Icons.Default.Clear, contentDescription = strings.clearRemoteQueue)
-                        }
-                    }
-                    if (running) {
-                        IconButton(onClick = { viewModel.stopCurrentTask(apiClient) }) {
-                            Icon(Icons.Default.Stop, contentDescription = strings.stopTask)
+                        DropdownMenu(expanded = runtimeMenuOpen, onDismissRequest = { runtimeMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(strings.refresh) },
+                                leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                onClick = { runtimeMenuOpen = false; viewModel.refresh(apiClient) },
+                            )
+                            if (isDesktopRemote) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.retryRemoteQueue) },
+                                    leadingIcon = { Icon(Icons.Default.Replay, contentDescription = null) },
+                                    onClick = { runtimeMenuOpen = false; viewModel.retryDesktop(apiClient) },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(strings.clearRemoteQueue) },
+                                    leadingIcon = { Icon(Icons.Default.Clear, contentDescription = null) },
+                                    onClick = { runtimeMenuOpen = false; viewModel.clearDesktopQueue(apiClient) },
+                                )
+                            }
                         }
                     }
                 },

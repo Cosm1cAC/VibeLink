@@ -31,7 +31,7 @@ import kotlinx.coroutines.withContext
 
 /**
  * Root composable for VibeLink Android.
- * Navigation: login 鈫?sessionList 鈫?messageList / call
+ * Navigation: login -> conversation-first agent shell -> supporting tools.
  */
 @Composable
 fun VibeLinkApp(
@@ -82,6 +82,13 @@ fun VibeLinkApp(
     val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
     val appStrings = remember(appLanguage) { appStringsFor(appLanguage) }
     val appScope = rememberCoroutineScope()
+    fun newConversation(): ConversationItem = ConversationItem(
+        key = "new:${System.currentTimeMillis()}",
+        kind = "new",
+        provider = "codex",
+        title = appStrings.newChat,
+        status = "new",
+    )
 
     LaunchedEffect(resilienceRuntime) {
         resilienceRuntime?.policy?.collect { policy ->
@@ -102,46 +109,22 @@ fun VibeLinkApp(
                 initialPairingUri = initialPairingUri,
                 onLoginSuccess = {
                     authenticated = true
-                    navController.navigate("sessionList") {
+                    pendingConversation = newConversation()
+                    navController.navigate("agent") {
                         popUpTo("login") { inclusive = true }
                     }
                 }
             )
         }
 
-        // 鈹€鈹€ Session List 鈹€鈹€
-        composable("sessionList") {
-            SessionListScreen(
+        composable("agent") {
+            AgentShell(
                 apiClient = apiClient,
                 viewModel = sessionListViewModel,
-                onSelectConversation = { conversation ->
-                    pendingConversation = conversation
-                    navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
-                },
-                onOpenSearchResult = { result ->
-                    when (val target = resolveSearchResultTarget(result)) {
-                        is SearchResultTarget.Conversation -> {
-                            pendingConversation = target.item
-                            val targetQuery = if (target.targetTurnId.isBlank()) "" else "?targetTurnId=${ConversationRoute.encodeQueryValue(target.targetTurnId)}"
-                            navController.navigate("messageList/${ConversationRoute.encodeKey(target.item.key)}$targetQuery")
-                        }
-                        is SearchResultTarget.WorkspaceFile -> {
-                            workspaceViewModel.openSearchFile(apiClient, target.workspaceId, target.path)
-                            navController.navigate("workspace")
-                        }
-                        is SearchResultTarget.Unsupported -> Unit
-                    }
-                },
+                activeConversation = pendingConversation,
+                onSelectConversation = { pendingConversation = it },
                 onNewConversation = {
-                    val conversation = ConversationItem(
-                        key = "new:${System.currentTimeMillis()}",
-                        kind = "new",
-                        provider = "codex",
-                        title = appStrings.newChat,
-                        status = "new",
-                    )
-                    pendingConversation = conversation
-                    navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
+                    pendingConversation = newConversation()
                 },
                 onLogout = {
                     appScope.launch {
@@ -151,73 +134,38 @@ fun VibeLinkApp(
                             authenticated = false
                             pendingConversation = null
                             navController.navigate("login") {
-                                popUpTo("sessionList") { inclusive = true }
+                                popUpTo("agent") { inclusive = true }
                             }
                         }
                     }
                 },
-                onOpenLiveCall = {
-                    navController.navigate("call")
-                },
-                onOpenWorkspace = {
-                    navController.navigate("workspace")
-                },
-                onOpenReview = {
-                    navController.navigate("review")
-                },
+                onOpenLiveCall = { navController.navigate("call") },
+                onOpenWorkspace = { navController.navigate("workspace") },
+                onOpenReview = { navController.navigate("review") },
                 onOpenSettings = { section ->
                     navController.navigate(if (section.isBlank()) "settings" else "settings?section=$section")
                 },
-            )
-        }
-
-        // 鈹€鈹€ Message List (detail) 鈹€鈹€
-        composable(
-            route = "messageList/{conversationKey}?targetTurnId={targetTurnId}",
-            arguments = listOf(
-                navArgument("conversationKey") { type = NavType.StringType },
-                navArgument("targetTurnId") {
-                    type = NavType.StringType
-                    defaultValue = ""
-                },
-            ),
-        ) { backStackEntry ->
-            val routeKey = backStackEntry.arguments?.getString("conversationKey") ?: ""
-            val targetTurnId = backStackEntry.arguments?.getString("targetTurnId").orEmpty()
-            val conversation = ConversationRoute.restoreConversation(
-                routeKey = routeKey,
-                pending = pendingConversation,
-                conversations = conversations,
-            )
-
-            LaunchedEffect(routeKey, conversation?.key, conversations.size) {
-                if (conversation == null && routeKey.isNotBlank() && conversations.isEmpty()) {
-                    sessionListViewModel.load(apiClient, isRefresh = true)
-                }
+            ) { openDrawer ->
+                MessageListScreen(
+                    apiClient = apiClient,
+                    viewModel = messageListViewModel,
+                    conversation = pendingConversation,
+                    onOpenDrawer = openDrawer,
+                    onNewConversation = { pendingConversation = newConversation() },
+                    onOpenApprovals = { navController.navigate("settings?section=approvals") },
+                    onOpenLiveCall = { navController.navigate("call") },
+                    onOpenFileReference = { reference ->
+                        workspaceViewModel.openFileReference(apiClient, reference)
+                        navController.navigate("workspace")
+                    },
+                    promptHistory = promptHistory,
+                    onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
+                    onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
+                    initialAttachmentUris = if (pendingConversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
+                    onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
+                    workspaceId = workspaceViewModel.selectedWorkspaceId.collectAsState().value,
+                )
             }
-
-            MessageListScreen(
-                apiClient = apiClient,
-                viewModel = messageListViewModel,
-                conversation = conversation,
-                onBack = {
-                    pendingConversation = null
-                    navController.popBackStack()
-                },
-                onOpenApprovals = { navController.navigate("settings?section=approvals") },
-                onOpenLiveCall = { navController.navigate("call") },
-                onOpenFileReference = { reference ->
-                    workspaceViewModel.openFileReference(apiClient, reference)
-                    navController.navigate("workspace")
-                },
-                promptHistory = promptHistory,
-                onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
-                onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
-                initialAttachmentUris = if (conversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
-                onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
-                workspaceId = workspaceViewModel.selectedWorkspaceId.collectAsState().value,
-                targetTurnId = targetTurnId,
-            )
         }
 
         // 鈹€鈹€ Live Call 鈹€鈹€
@@ -289,7 +237,7 @@ fun VibeLinkApp(
         )
         pendingConversation = conversation
         pendingSharedAttachments = initialSharedContent.streamUris
-        navController.navigate("messageList/${ConversationRoute.encodeKey(conversation.key)}")
+        navController.navigate("agent") { launchSingleTop = true }
         onSharedContentConsumed()
     }
     }

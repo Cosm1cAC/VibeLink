@@ -12,10 +12,10 @@
         "rustTarget": "apps/windows/src/workspace_http.rs",
         "completedRoutes": [
           "POST /api/workspaces/:id/file",
-          "GET /api/workspaces/:id/git/status"
+          "GET /api/workspaces/:id/git/status",
+          "GET /api/workspaces/:id/git/diff"
         ],
         "remainingRoutes": [
-          "GET /api/workspaces/:id/git/diff",
           "POST /api/workspaces/:id/git/file-action",
           "POST /api/workspaces/:id/git/action",
           "worktree routes",
@@ -335,16 +335,16 @@
     },
     {
       "id": "workspace-http",
-      "title": "Workspace 文件与 Git Status 原生 HTTP 路由",
+      "title": "Workspace 文件与 Git 只读原生 HTTP 路由",
       "priority": "P1",
       "status": "default-on",
       "featureFlags": ["--rust-http-canary", "--rust-workspace-http"],
-      "nodeEntry": "src/server.js#/api/workspaces/:id/(file|git/status)",
+      "nodeEntry": "src/server.js#/api/workspaces/:id/(file|git/status|git/diff)",
       "rustEntry": "apps/windows/src/workspace_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
       "fallback": "Rust 鉴权、workspace root、body 或文件操作失败时逐字节回放 Node；关闭 --rust-workspace-http 后恢复 Node 所有权",
       "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
-      "nextAction": "文件 mutation 与 Git status 已默认开启；继续迁移 Git diff/file-action/action、worktree 和 command/approval。"
+      "nextAction": "文件 mutation 与 Git status/diff 已默认开启；继续迁移 Git file-action/action、worktree 和 command/approval。"
     },
     {
       "id": "mcp-session-sidecar",

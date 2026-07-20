@@ -16,6 +16,14 @@ use std::time::SystemTime;
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_UNTRACKED_PREVIEWS: usize = 6;
+const MAX_UNTRACKED_PREVIEW_BYTES: u64 = 512 * 1024;
+
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "md", "json", "jsonl", "js", "jsx", "ts", "tsx", "css", "scss", "html", "xml", "yaml",
+    "yml", "toml", "py", "ps1", "sh", "bat", "cmd", "java", "go", "rs", "php", "rb", "c", "cpp",
+    "h", "hpp", "cs", "sql",
+];
 
 #[derive(Clone)]
 pub struct WorkspaceRouteConfig {
@@ -61,7 +69,8 @@ pub fn route_workspace_request(
     };
     let file_mutation = request.method == "POST" && action_path == "file";
     let git_status = request.method == "GET" && action_path == "git/status";
-    if !file_mutation && !git_status {
+    let git_diff = request.method == "GET" && action_path == "git/diff";
+    if !file_mutation && !git_status && !git_diff {
         return Ok(None);
     }
     let auth = authenticate_route_request(request, &config.data_dir)?;
@@ -81,6 +90,11 @@ pub fn route_workspace_request(
     }
     if git_status {
         let result = workspace_git_status(&config.data_dir, &workspace_id)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
+    if git_diff {
+        let result = workspace_git_diff(&config.data_dir, &workspace_id)?;
         config.metrics.responses.fetch_add(1, Ordering::SeqCst);
         return Ok(Some(HttpRouteResponse::json(200, result)));
     }
@@ -125,7 +139,17 @@ pub fn route_workspace_request(
     Ok(Some(response))
 }
 
-fn workspace_git_status(data_dir: &Path, workspace_id: &str) -> Result<Value> {
+struct WorkspaceGitContext {
+    cwd: String,
+    title: String,
+    allowed_root: String,
+    created_at: String,
+    updated_at: String,
+    last_used_at: String,
+    root: PathBuf,
+}
+
+fn load_workspace_git_context(data_dir: &Path, workspace_id: &str) -> Result<WorkspaceGitContext> {
     let db_path = data_dir.join("mobile-agent.sqlite");
     let connection = Connection::open_with_flags(
         &db_path,
@@ -150,29 +174,198 @@ fn workspace_git_status(data_dir: &Path, workspace_id: &str) -> Result<Value> {
         )
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("Workspace not found."))?;
+    let root = canonical_root(Path::new(&cwd))?;
     let now: DateTime<Utc> = SystemTime::now().into();
     let now = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     connection.execute(
         "UPDATE workspaces SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
         params![now, workspace_id],
     )?;
-    let root = canonical_root(Path::new(&cwd))?;
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-b"])
-        .current_dir(&root)
-        .output()
-        .context("Failed to run git status")?;
-    if output.stdout.len().saturating_add(output.stderr.len()) > MAX_GIT_OUTPUT_BYTES {
-        bail!("Git status output exceeds 10 MiB.");
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let branch = stdout
+    Ok(WorkspaceGitContext {
+        cwd,
+        title,
+        allowed_root,
+        created_at,
+        updated_at,
+        last_used_at,
+        root,
+    })
+}
+
+fn workspace_git_status(data_dir: &Path, workspace_id: &str) -> Result<Value> {
+    let workspace = load_workspace_git_context(data_dir, workspace_id)?;
+    let status = run_git(&workspace.root, &["status", "--porcelain=v1", "-b"])?;
+    let branch = status
+        .stdout
         .lines()
         .find_map(|line| line.strip_prefix("## "))
         .unwrap_or("")
         .to_string();
-    let files = stdout
+    let files = parse_git_status_files(&status.stdout)
+        .into_iter()
+        .map(|(status, path)| {
+            json!({
+                "status": status,
+                "path": path
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "ok": status.ok,
+        "branch": branch,
+        "changedCount": files.len(),
+        "files": files,
+        "stdout": status.stdout,
+        "stderr": status.stderr,
+        "exitCode": status.exit_code,
+        "workspace": {
+            "id": workspace_id,
+            "title": workspace.title,
+            "path": workspace.cwd,
+            "allowedRoot": workspace.allowed_root,
+            "createdAt": workspace.created_at,
+            "updatedAt": workspace.updated_at,
+            "lastUsedAt": workspace.last_used_at
+        },
+        "cwd": workspace.cwd
+    }))
+}
+
+fn workspace_git_diff(data_dir: &Path, workspace_id: &str) -> Result<Value> {
+    let workspace = load_workspace_git_context(data_dir, workspace_id)?;
+    let status = run_git(&workspace.root, &["status", "--porcelain=v1", "-b"])?;
+    let mut diff = run_git(
+        &workspace.root,
+        &["diff", "HEAD", "--stat", "--patch", "--find-renames"],
+    )?;
+    let diff_error = diff.stderr.to_ascii_lowercase();
+    if !diff.ok
+        && ["bad revision", "ambiguous argument", "unknown revision"]
+            .iter()
+            .any(|needle| diff_error.contains(needle))
+    {
+        diff = run_git(
+            &workspace.root,
+            &["diff", "--stat", "--patch", "--find-renames"],
+        )?;
+    }
+
+    let status_files = parse_git_status_files(&status.stdout);
+    let mut untracked_previews = Vec::new();
+    let mut untracked_preview_errors = Vec::new();
+    for (_, path) in status_files
+        .iter()
+        .filter(|(status, _)| status == "??")
+        .take(MAX_UNTRACKED_PREVIEWS)
+    {
+        match pseudo_diff_for_untracked(&workspace.root, path) {
+            Ok(Some(preview)) => untracked_previews.push(preview),
+            Ok(None) => {}
+            Err(error) => untracked_preview_errors.push(json!({
+                "path": path,
+                "error": error.to_string()
+            })),
+        }
+    }
+
+    let mut combined_diff = diff.stdout.clone();
+    for preview in untracked_previews {
+        if !combined_diff.is_empty() {
+            combined_diff.push('\n');
+        }
+        combined_diff.push_str(&preview);
+    }
+    let mut files = parse_git_diff_files(&combined_diff);
+    for (status_value, path) in &status_files {
+        if let Some(existing) = files.iter_mut().find(|file| file["path"] == *path) {
+            existing["status"] = json!(if status_value == "??" {
+                "A"
+            } else {
+                status_value
+            });
+        } else {
+            files.push(json!({
+                "status": status_value,
+                "path": path,
+                "oldPath": path,
+                "additions": 0,
+                "deletions": 0
+            }));
+        }
+    }
+    let branch = status
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("## "))
+        .unwrap_or("")
+        .to_string();
+    let stderr = [status.stderr.as_str(), diff.stderr.as_str()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let exit_code = if status.exit_code != 0 {
+        status.exit_code
+    } else {
+        diff.exit_code
+    };
+    let changed_count = if status_files.is_empty() {
+        files.len()
+    } else {
+        status_files.len()
+    };
+    Ok(json!({
+        "ok": status.ok && diff.ok,
+        "branch": branch,
+        "files": files,
+        "changedCount": changed_count,
+        "fileCount": files.len(),
+        "lineCount": combined_diff.lines().filter(|line| !line.is_empty()).count(),
+        "diff": combined_diff,
+        "statusStdout": status.stdout,
+        "stdout": diff.stdout,
+        "stderr": stderr,
+        "exitCode": exit_code,
+        "untrackedPreviewErrors": untracked_preview_errors,
+        "workspace": {
+            "id": workspace_id,
+            "title": workspace.title,
+            "path": workspace.cwd,
+            "allowedRoot": workspace.allowed_root,
+            "createdAt": workspace.created_at,
+            "updatedAt": workspace.updated_at,
+            "lastUsedAt": workspace.last_used_at
+        },
+        "cwd": workspace.cwd
+    }))
+}
+
+struct GitCommandResult {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<GitCommandResult> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
+    if output.stdout.len().saturating_add(output.stderr.len()) > MAX_GIT_OUTPUT_BYTES {
+        bail!("Git output exceeds 10 MiB.");
+    }
+    Ok(GitCommandResult {
+        ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(1),
+    })
+}
+
+fn parse_git_status_files(stdout: &str) -> Vec<(String, String)> {
+    stdout
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with("##"))
         .filter_map(|line| {
@@ -181,32 +374,93 @@ fn workspace_git_status(data_dir: &Path, workspace_id: &str) -> Result<Value> {
                 return None;
             }
             let status = line.get(..2).unwrap_or("").trim();
-            Some(json!({
-                "status": if status.is_empty() { "??" } else { status },
-                "path": path
-            }))
+            Some((
+                if status.is_empty() { "??" } else { status }.to_string(),
+                path.to_string(),
+            ))
         })
+        .collect()
+}
+
+fn parse_git_diff_files(diff: &str) -> Vec<Value> {
+    let mut files = Vec::new();
+    let mut current = None;
+    for line in diff.lines() {
+        if let Some(paths) = line.strip_prefix("diff --git a/") {
+            if let Some((old_path, path)) = paths.split_once(" b/") {
+                files.push(json!({
+                    "oldPath": old_path,
+                    "path": path,
+                    "status": "M",
+                    "additions": 0,
+                    "deletions": 0
+                }));
+                current = Some(files.len() - 1);
+                continue;
+            }
+        }
+        let Some(index) = current else {
+            continue;
+        };
+        if line.starts_with("new file mode") {
+            files[index]["status"] = json!("A");
+        } else if line.starts_with("deleted file mode") {
+            files[index]["status"] = json!("D");
+        } else if line.starts_with("rename from") {
+            files[index]["status"] = json!("R");
+        }
+        if line.starts_with('+') && !line.starts_with("+++") {
+            let additions = files[index]["additions"].as_u64().unwrap_or(0) + 1;
+            files[index]["additions"] = json!(additions);
+        }
+        if line.starts_with('-') && !line.starts_with("---") {
+            let deletions = files[index]["deletions"].as_u64().unwrap_or(0) + 1;
+            files[index]["deletions"] = json!(deletions);
+        }
+    }
+    files
+}
+
+fn pseudo_diff_for_untracked(root: &Path, rel_path: &str) -> Result<Option<String>> {
+    let target = safe_child(root, rel_path)?;
+    let metadata = fs::metadata(&target)?;
+    let extension = target
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !metadata.is_file()
+        || metadata.len() > MAX_UNTRACKED_PREVIEW_BYTES
+        || !TEXT_EXTENSIONS.contains(&extension.as_str())
+    {
+        return Ok(None);
+    }
+    let raw = fs::read(&target)?;
+    if raw.contains(&0) {
+        return Ok(None);
+    }
+    let content = String::from_utf8_lossy(&raw);
+    if content.is_empty() {
+        return Ok(None);
+    }
+    let all_lines = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
         .collect::<Vec<_>>();
-    let exit_code = output.status.code().unwrap_or(1);
-    Ok(json!({
-        "ok": output.status.success(),
-        "branch": branch,
-        "changedCount": files.len(),
-        "files": files,
-        "stdout": stdout,
-        "stderr": stderr,
-        "exitCode": exit_code,
-        "workspace": {
-            "id": workspace_id,
-            "title": title,
-            "path": cwd,
-            "allowedRoot": allowed_root,
-            "createdAt": created_at,
-            "updatedAt": updated_at,
-            "lastUsedAt": last_used_at
-        },
-        "cwd": cwd
-    }))
+    let lines = all_lines.iter().take(420).copied().collect::<Vec<_>>();
+    let path = rel_path.replace('\\', "/");
+    let mut preview = vec![
+        format!("diff --git a/{path} b/{path}"),
+        "new file mode 100644".to_string(),
+        "--- /dev/null".to_string(),
+        format!("+++ b/{path}"),
+        format!("@@ -0,0 +1,{} @@", lines.len().max(1)),
+    ];
+    preview.extend(lines.into_iter().map(|line| format!("+{line}")));
+    if all_lines.len() > 420 {
+        preview.push("+...".to_string());
+    }
+    Ok(Some(preview.join("\n")))
 }
 
 fn workspace_path_parts(path: &str) -> Option<(String, &str)> {
@@ -609,6 +863,94 @@ mod tests {
             .unwrap();
         assert_ne!(updated_at, "now");
         assert_eq!(last_used_at, updated_at);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_workspace_git_diff_with_tracked_and_untracked_previews() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "VibeLink Test"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+        fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        fs::write(root.join("new.txt"), "new\n").unwrap();
+
+        let request = parse_request(b"GET /api/workspaces/w/git/diff HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let response = route_workspace_request(&request, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], true);
+        assert_eq!(response.body["changedCount"], 2);
+        assert_eq!(response.body["fileCount"], 2);
+        assert_eq!(response.body["workspace"]["updatedAt"], "now");
+        assert!(response.body["lineCount"].as_u64().unwrap() > 0);
+        let diff = response.body["diff"].as_str().unwrap();
+        assert!(diff.contains("-base"));
+        assert!(diff.contains("+changed"));
+        assert!(diff.contains("diff --git a/new.txt b/new.txt"));
+        assert!(diff.contains("+new"));
+        let files = response.body["files"].as_array().unwrap();
+        assert!(files.iter().any(|file| {
+            file["path"] == "tracked.txt"
+                && file["status"] == "M"
+                && file["additions"] == 1
+                && file["deletions"] == 1
+        }));
+        assert!(files.iter().any(|file| {
+            file["path"] == "new.txt"
+                && file["status"] == "A"
+                && file["additions"].as_u64().unwrap() >= 1
+        }));
+        assert_eq!(
+            response.body["untrackedPreviewErrors"],
+            json!([]),
+            "text previews should not report errors"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_workspace_git_diff_before_the_first_commit() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let output = Command::new("git")
+            .arg("init")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        fs::write(root.join("first.txt"), "first\n").unwrap();
+
+        let request = parse_request(b"GET /api/workspaces/w/git/diff HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let response = route_workspace_request(&request, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], true);
+        assert_eq!(response.body["changedCount"], 1);
+        assert_eq!(response.body["files"][0]["path"], "first.txt");
+        assert_eq!(response.body["files"][0]["status"], "A");
+        assert!(response.body["diff"]
+            .as_str()
+            .unwrap()
+            .contains("diff --git a/first.txt b/first.txt"));
         let _ = fs::remove_dir_all(dir);
     }
 }

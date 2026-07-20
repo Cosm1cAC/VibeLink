@@ -2015,7 +2015,9 @@ async function routeApi(request, response, url) {
     if (!enforceRateLimit(request, response, url, "pairing.claim", { limit: 12, windowMs: 10 * 60 * 1000 }, null, pairingClaimMatch[1])) return;
     const body = await readBody(request);
     let result;
+    let pairingSettings;
     try {
+      pairingSettings = await publicSettings(settings);
       result = claimPairingSession({
         id: pairingClaimMatch[1],
         code: body.code || url.searchParams.get("code") || "",
@@ -2028,7 +2030,7 @@ async function routeApi(request, response, url) {
       return;
     }
     audit(request, url, { device: result.device }, { type: "pairing.claim", success: true, target: result.session.id });
-    sendJson(response, 200, { ok: true, token: result.device.token, device: { id: result.device.id, label: result.device.label }, session: result.session, settings: await publicSettings(settings) });
+    sendJson(response, 200, { ok: true, token: result.device.token, device: { id: result.device.id, label: result.device.label }, session: result.session, settings: pairingSettings });
     return;
   }
 

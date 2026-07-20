@@ -16,6 +16,7 @@ import { createExecutionPersistence, ensureExecutionPersistenceSchema } from "./
 const dbPath = path.join(dataDir, "mobile-agent.sqlite");
 
 let db = null;
+const retryablePairingClaims = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -1130,18 +1131,34 @@ export function claimPairingSession({ id, code, label = "Browser", meta = {} } =
     throw error;
   }
   if (new Date(row.expires_at).getTime() <= Date.now()) {
+    retryablePairingClaims.delete(id);
     const error = new Error("Pairing session expired.");
     error.status = 410;
-    throw error;
-  }
-  if (row.status !== "approved") {
-    const error = new Error(row.status === "pending" ? "Pairing session is waiting for confirmation." : `Pairing session is ${row.status}.`);
-    error.status = 409;
     throw error;
   }
   if (row.code_hash !== pairingCodeHash(id, code)) {
     const error = new Error("Pairing code mismatch.");
     error.status = 401;
+    throw error;
+  }
+  if (row.status === "claimed") {
+    const previousClaim = retryablePairingClaims.get(id);
+    if (previousClaim?.device?.id === row.device_id) {
+      const activeDevice = database()
+        .prepare("SELECT id FROM devices WHERE id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)")
+        .get(row.device_id, nowIso());
+      if (activeDevice) {
+        return {
+          device: previousClaim.device,
+          session: publicPairingSession(row)
+        };
+      }
+      retryablePairingClaims.delete(id);
+    }
+  }
+  if (row.status !== "approved") {
+    const error = new Error(row.status === "pending" ? "Pairing session is waiting for confirmation." : `Pairing session is ${row.status}.`);
+    error.status = 409;
     throw error;
   }
 
@@ -1157,6 +1174,12 @@ export function claimPairingSession({ id, code, label = "Browser", meta = {} } =
   database()
     .prepare("UPDATE pairing_sessions SET status = 'claimed', claimed_at = ?, device_id = ? WHERE id = ?")
     .run(nowIso(), device.id, id);
+  retryablePairingClaims.set(id, { device });
+  const retryWindowMs = Math.max(0, new Date(row.expires_at).getTime() - Date.now());
+  const cleanupTimer = setTimeout(() => {
+    if (retryablePairingClaims.get(id)?.device?.id === device.id) retryablePairingClaims.delete(id);
+  }, retryWindowMs);
+  cleanupTimer.unref?.();
   return {
     device,
     session: getPairingSession(id)

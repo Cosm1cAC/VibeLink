@@ -51,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Devices
 import androidx.compose.ui.tooling.preview.Preview
@@ -430,7 +431,7 @@ private fun ConversationHistoryRow(conversation: ConversationItem, selected: Boo
     var menuOpen by remember { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        color = if (selected) MaterialTheme.colorScheme.surface else androidx.compose.ui.graphics.Color.Transparent,
+        color = androidx.compose.ui.graphics.Color.Transparent,
         shape = RoundedCornerShape(8.dp),
     ) {
         Row(
@@ -440,7 +441,9 @@ private fun ConversationHistoryRow(conversation: ConversationItem, selected: Boo
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     conversation.title.ifBlank { LocalAppStrings.current.untitledChat },
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )

@@ -130,7 +130,7 @@ fun LoginScreen(
                 val current = apiClient.getPairingSession(pairingSessionId).session
                 val currentStatus = current?.status ?: "unknown"
                 status = strings.pairingStatus(currentStatus, pairingCode)
-                if (current?.status == "approved") {
+                if (PairingRecoveryPolicy.shouldClaim(currentStatus)) {
                     val claim = apiClient.claimPairingSession(pairingSessionId, pairingCode, "VibeLink Android")
                     if (claim.token.isNotBlank()) {
                         persistLogin(bridgeUrl.trim(), claim.token)

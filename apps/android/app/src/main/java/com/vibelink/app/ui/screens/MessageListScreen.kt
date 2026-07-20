@@ -8,6 +8,8 @@ import android.provider.OpenableColumns
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
 import android.widget.Toast
+import java.io.File
+import java.io.FileOutputStream
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -26,12 +28,15 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -44,6 +49,8 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
@@ -82,6 +89,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -159,7 +167,6 @@ fun MessageListScreen(
     var model by remember(conversation?.key) { mutableStateOf("") }
     var reasoningEffort by remember(conversation?.key) { mutableStateOf("") }
     var cwd by remember(conversation?.key) { mutableStateOf(conversation?.cwd.orEmpty()) }
-    var showOptions by remember { mutableStateOf(false) }
     var attachmentStatus by remember(conversation?.key) { mutableStateOf("") }
     var attachmentUploading by remember(conversation?.key) { mutableStateOf(false) }
     var workspaceContext by remember(conversation?.key, workspaceId) { mutableStateOf("") }
@@ -199,6 +206,19 @@ fun MessageListScreen(
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) uploadAttachment(uri)
     }
+    val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        if (bitmap != null) {
+            scope.launch {
+                val capture = File(context.cacheDir, "vibelink-capture-${System.currentTimeMillis()}.jpg")
+                withContext(Dispatchers.IO) {
+                    FileOutputStream(capture).use { output ->
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, output)
+                    }
+                }
+                uploadAttachmentNow(Uri.fromFile(capture))
+            }
+        }
+    }
 
     LaunchedEffect(conversation?.key) {
         if (conversation != null) viewModel.ensureConversationLoaded(apiClient, conversation)
@@ -207,10 +227,6 @@ fun MessageListScreen(
     LaunchedEffect(workspaceId) {
         if (workspaceId.isBlank()) return@LaunchedEffect
         workspaceContext = runCatching { apiClient.getWorkspaceContext(workspaceId).context }.getOrDefault("")
-    }
-
-    LaunchedEffect(workspaceContext, conversation?.key) {
-        if (workspaceContext.isNotBlank() && prompt.isBlank()) prompt = workspaceContext
     }
 
     LaunchedEffect(conversation?.key, initialAttachmentUris) {
@@ -304,18 +320,18 @@ fun MessageListScreen(
                     onReasoningEffortChange = { reasoningEffort = it },
                     cwd = cwd,
                     onCwdChange = { cwd = it },
-                    showOptions = showOptions,
                     providerRegistry = providerRegistry,
                     providers = selectableProviders,
-                    onToggleOptions = { showOptions = !showOptions },
                     onOpenLiveCall = onOpenLiveCall,
-                    promptHistory = promptHistory,
-                    onUseHistoryPrompt = { prompt = it },
-                    onClearPromptHistory = onClearPromptHistory,
                     attachmentUploading = attachmentUploading,
                     attachmentStatus = attachmentStatus,
+                    onTakePhoto = { cameraPicker.launch(null) },
                     onPickImage = { imagePicker.launch("image/*") },
                     onPickFile = { filePicker.launch("*/*") },
+                    workspaceContextAvailable = workspaceContext.isNotBlank(),
+                    onAttachWorkspaceContext = {
+                        prompt = listOf(prompt.trim(), workspaceContext.trim()).filter { it.isNotBlank() }.joinToString("\n\n")
+                    },
                     running = running,
                     sending = sending,
                     canSend = canSend,
@@ -431,18 +447,16 @@ private fun ComposerBar(
     onReasoningEffortChange: (String) -> Unit,
     cwd: String,
     onCwdChange: (String) -> Unit,
-    showOptions: Boolean,
     providerRegistry: ProviderRegistryResponse,
     providers: List<ProviderDefinition>,
-    onToggleOptions: () -> Unit,
     onOpenLiveCall: () -> Unit,
-    promptHistory: List<String>,
-    onUseHistoryPrompt: (String) -> Unit,
-    onClearPromptHistory: () -> Unit,
     attachmentUploading: Boolean,
     attachmentStatus: String,
+    onTakePhoto: () -> Unit,
     onPickImage: () -> Unit,
     onPickFile: () -> Unit,
+    workspaceContextAvailable: Boolean,
+    onAttachWorkspaceContext: () -> Unit,
     running: Boolean,
     sending: Boolean,
     canSend: Boolean,
@@ -450,152 +464,175 @@ private fun ComposerBar(
     onStop: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    val density = LocalDensity.current
-    val imeVisible = WindowInsets.ime.getBottom(density) > 0
-    val showSupplementalContent = ComposerLayoutPolicy.showSupplementalContent(imeVisible)
-    Surface(modifier = Modifier.imePadding(), tonalElevation = 3.dp) {
+    var attachmentMenuOpen by remember { mutableStateOf(false) }
+    var modeMenuOpen by remember { mutableStateOf(false) }
+    val provider = providerRegistry.providers.firstOrNull { it.id == activeAgent }
+    val models = provider?.models.orEmpty()
+    val efforts = provider?.reasoningEfforts.orEmpty().ifEmpty { listOf("", "low", "medium", "high", "xhigh") }
+    val modeLabel = listOf(
+        providers.firstOrNull { it.id == activeAgent }?.label?.ifBlank { activeAgent } ?: activeAgent,
+        reasoningEffort.ifBlank { strings.defaultEffort },
+    ).joinToString(" · ")
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 8.dp,
+    ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (showSupplementalContent && !isDesktopRemote) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(providers, key = { it.id }) { option ->
-                        FilterChip(
-                            selected = activeAgent == option.id,
-                            onClick = { onAgentChange(option.id) },
-                            enabled = option.available,
-                            label = { Text(option.label.ifBlank { option.id }) },
-                        )
-                    }
-                }
-            } else if (showSupplementalContent) {
-                AssistChip(onClick = {}, label = { Text(strings.codexRemoteCurrentSettings) })
-            }
-
-            if (showSupplementalContent && !isDesktopRemote) {
-                Text(strings.quickCommands, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(PromptCommandCatalog.commands, key = { it.id }) { command ->
-                        AssistChip(
-                            onClick = { onPromptChange(PromptCommandCatalog.applyCommand(prompt, command)) },
-                            label = { Text(command.label) },
-                        )
-                    }
-                }
-            }
-
-            if (showSupplementalContent && !isDesktopRemote && promptHistory.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(strings.recentPrompts, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = onClearPromptHistory) { Text(strings.clear) }
-                }
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(promptHistory.take(6), key = { it }) { item ->
-                        AssistChip(
-                            onClick = { onUseHistoryPrompt(item) },
-                            label = { Text(item, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        )
-                    }
-                }
-            }
-
-            if (showSupplementalContent && showOptions && !isDesktopRemote) {
-                val provider = providerRegistry.providers.firstOrNull { it.id == activeAgent }
-                val models = provider?.models.orEmpty()
-                val efforts = provider?.reasoningEfforts.orEmpty().ifEmpty { listOf("", "low", "medium", "high", "xhigh") }
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (provider?.capabilities?.modelOverride == false) {
-                        AssistChip(onClick = {}, label = { Text(strings.model(models.firstOrNull()?.label ?: strings.providerDefault)) })
-                    } else {
-                        if (models.isNotEmpty()) {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(models, key = { it.id.ifBlank { "default" } }) { option ->
-                                    FilterChip(
-                                        selected = model == option.id || (model.isBlank() && option.default),
-                                        onClick = { onModelChange(option.id) },
-                                        label = { Text(option.label.ifBlank { option.id.ifBlank { strings.defaultOption } }) },
-                                    )
-                                }
-                            }
+            BasicTextField(
+                value = prompt,
+                onValueChange = onPromptChange,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 132.dp).padding(horizontal = 6.dp, vertical = 4.dp),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                minLines = 1,
+                maxLines = 5,
+                decorationBox = { innerTextField ->
+                    Box {
+                        if (prompt.isBlank()) {
+                            Text(
+                                if (isDesktopRemote) strings.sendToCodexDesktop else strings.messageVibeLinkAgent,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
-                        OutlinedTextField(
-                            value = model,
-                            onValueChange = onModelChange,
-                            modifier = Modifier.fillMaxWidth(),
-                            label = { Text(strings.modelOverride) },
-                            singleLine = true,
-                        )
+                        innerTextField()
                     }
-                    if (provider?.capabilities?.reasoningEffort != false) {
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(efforts, key = { it.ifBlank { "default" } }) { effort ->
-                                FilterChip(
-                                    selected = reasoningEffort == effort || (reasoningEffort.isBlank() && effort.isBlank()),
-                                    onClick = { onReasoningEffortChange(effort) },
-                                    label = { Text(effort.ifBlank { strings.defaultEffort }) },
-                                )
-                            }
-                        }
-                    }
-                    OutlinedTextField(
-                        value = cwd,
-                        onValueChange = onCwdChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text(strings.workingDirectory) },
-                        singleLine = true,
-                    )
-                }
-            }
-
-            if (showSupplementalContent && !isDesktopRemote) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onPickImage, enabled = !attachmentUploading) {
-                        Icon(Icons.Default.Image, contentDescription = strings.attachImage)
-                    }
-                    IconButton(onClick = onPickFile, enabled = !attachmentUploading) {
-                        Icon(Icons.Default.AttachFile, contentDescription = strings.attachFile)
-                    }
-                    IconButton(onClick = onToggleOptions) {
-                        Icon(Icons.Default.Tune, contentDescription = strings.composerOptions)
-                    }
-                    IconButton(onClick = onOpenLiveCall) {
-                        Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)
-                    }
-                }
-            }
+                },
+            )
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedTextField(
-                    value = prompt,
-                    onValueChange = onPromptChange,
-                    modifier = Modifier.weight(1f).heightIn(min = 56.dp, max = 140.dp),
-                    placeholder = { Text(if (isDesktopRemote) strings.sendToCodexDesktop else strings.messageVibeLinkAgent) },
-                    minLines = 1,
-                    maxLines = 5,
-                )
-                Button(
-                    onClick = onSend,
-                    enabled = canSend,
-                    modifier = Modifier.size(56.dp),
-                    contentPadding = PaddingValues(0.dp),
+                if (!isDesktopRemote) {
+                    Box {
+                        Surface(
+                            onClick = { attachmentMenuOpen = true },
+                            modifier = Modifier.size(42.dp),
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            enabled = !attachmentUploading,
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Add, contentDescription = strings.text("添加附件", "Add attachment"))
+                            }
+                        }
+                        DropdownMenu(expanded = attachmentMenuOpen, onDismissRequest = { attachmentMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(strings.text("相机", "Camera")) },
+                                leadingIcon = { Icon(Icons.Default.CameraAlt, contentDescription = null) },
+                                onClick = { attachmentMenuOpen = false; onTakePhoto() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(strings.text("图库", "Gallery")) },
+                                leadingIcon = { Icon(Icons.Default.Image, contentDescription = null) },
+                                onClick = { attachmentMenuOpen = false; onPickImage() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(strings.file) },
+                                leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null) },
+                                onClick = { attachmentMenuOpen = false; onPickFile() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(strings.text("工作区上下文", "Workspace context")) },
+                                leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                                enabled = workspaceContextAvailable,
+                                onClick = { attachmentMenuOpen = false; onAttachWorkspaceContext() },
+                            )
+                        }
+                    }
+                }
+                Box(modifier = Modifier.padding(start = 6.dp)) {
+                    Surface(
+                        onClick = { modeMenuOpen = true },
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (isDesktopRemote) strings.codexRemoteCurrentSettings else modeLabel,
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = modeMenuOpen,
+                        onDismissRequest = { modeMenuOpen = false },
+                        modifier = Modifier.widthIn(min = 280.dp, max = 340.dp),
+                    ) {
+                        if (!isDesktopRemote) {
+                            Text(strings.text("Agent", "Agent"), modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
+                            providers.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label.ifBlank { option.id }) },
+                                    enabled = option.available,
+                                    onClick = { onAgentChange(option.id) },
+                                    trailingIcon = { if (activeAgent == option.id) Text("✓") },
+                                )
+                            }
+                            if (provider?.capabilities?.modelOverride != false && models.isNotEmpty()) {
+                                Text(strings.text("模型", "Model"), modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
+                                models.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.label.ifBlank { option.id.ifBlank { strings.defaultOption } }) },
+                                        onClick = { onModelChange(option.id) },
+                                        trailingIcon = { if (model == option.id || (model.isBlank() && option.default)) Text("✓") },
+                                    )
+                                }
+                            }
+                            if (provider?.capabilities?.reasoningEffort != false) {
+                                Text(strings.text("推理强度", "Reasoning effort"), modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
+                                efforts.forEach { effort ->
+                                    DropdownMenuItem(
+                                        text = { Text(effort.ifBlank { strings.defaultEffort }) },
+                                        onClick = { onReasoningEffortChange(effort) },
+                                        trailingIcon = { if (reasoningEffort == effort) Text("✓") },
+                                    )
+                                }
+                            }
+                            OutlinedTextField(
+                                value = cwd,
+                                onValueChange = onCwdChange,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                label = { Text(strings.workingDirectory) },
+                                singleLine = true,
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.weight(1f))
+                if (!isDesktopRemote) {
+                    IconButton(onClick = onOpenLiveCall, modifier = Modifier.size(42.dp)) {
+                        Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)
+                    }
+                }
+                Surface(
+                    onClick = if (running) onStop else onSend,
+                    modifier = Modifier.size(44.dp),
+                    shape = CircleShape,
+                    color = if (running || canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (running || canSend) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    enabled = running || canSend,
                 ) {
-                    if (sending) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = strings.send)
+                    Box(contentAlignment = Alignment.Center) {
+                        when {
+                            sending -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                            running -> Icon(Icons.Default.Stop, contentDescription = strings.stopTask, modifier = Modifier.size(20.dp))
+                            else -> Icon(Icons.AutoMirrored.Filled.Send, contentDescription = strings.send, modifier = Modifier.size(20.dp))
+                        }
                     }
                 }
             }
@@ -603,19 +640,12 @@ private fun ComposerBar(
             if (attachmentStatus.isNotBlank()) {
                 Text(
                     text = attachmentStatus,
+                    modifier = Modifier.padding(horizontal = 6.dp),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (attachmentUploading) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-            }
-
-            if (running && !isDesktopRemote) {
-                OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Stop, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(strings.stopCurrentTask)
-                }
             }
         }
     }

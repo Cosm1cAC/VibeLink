@@ -6,6 +6,39 @@ import kotlin.test.assertEquals
 
 class AgentDrawerPolicyTest {
     @Test
+    fun separatesDesktopRemoteFromAgentConversations() {
+        val conversations = listOf(
+            ConversationItem(key = "desktop", kind = "desktop", title = "Codex Desktop remote"),
+            ConversationItem(key = "task", kind = "task", title = "Agent task"),
+            ConversationItem(key = "history", kind = "history", title = "Agent history"),
+        )
+
+        assertEquals(
+            listOf("desktop"),
+            AgentDrawerPolicy.filterAndSort(conversations, "", ConversationSpace.Remote).map { it.key },
+        )
+        assertEquals(
+            listOf("task", "history"),
+            AgentDrawerPolicy.filterAndSort(conversations, "", ConversationSpace.Agent).map { it.key },
+        )
+    }
+
+    @Test
+    fun keepsSelectionsIndependentWhenSwitchingSpaces() {
+        val remote = ConversationItem(key = "desktop", kind = "desktop")
+        val agent = ConversationItem(key = "task", kind = "task")
+
+        val state = ConversationSpaceState()
+            .select(ConversationSpace.Remote, remote, "remote-turn")
+            .select(ConversationSpace.Agent, agent, "agent-turn")
+
+        assertEquals(remote, state.selectionFor(ConversationSpace.Remote).conversation)
+        assertEquals("remote-turn", state.selectionFor(ConversationSpace.Remote).targetTurnId)
+        assertEquals(agent, state.selectionFor(ConversationSpace.Agent).conversation)
+        assertEquals("agent-turn", state.selectionFor(ConversationSpace.Agent).targetTurnId)
+    }
+
+    @Test
     fun putsPinnedConversationsBeforeRecentConversations() {
         val conversations = listOf(
             ConversationItem(key = "older", title = "Older", updatedAt = "2026-07-18T08:00:00Z"),

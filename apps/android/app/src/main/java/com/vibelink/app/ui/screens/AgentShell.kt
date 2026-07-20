@@ -61,12 +61,57 @@ import com.vibelink.app.ui.i18n.LocalAppStrings
 import com.vibelink.app.ui.theme.VibeLinkTheme
 import kotlinx.coroutines.launch
 
+enum class ConversationSpace {
+    Remote,
+    Agent,
+}
+
+data class ConversationSelection(
+    val conversation: ConversationItem? = null,
+    val targetTurnId: String = "",
+)
+
+data class ConversationSpaceState(
+    val activeSpace: ConversationSpace = ConversationSpace.Agent,
+    val remoteSelection: ConversationSelection = ConversationSelection(),
+    val agentSelection: ConversationSelection = ConversationSelection(),
+) {
+    fun selectionFor(space: ConversationSpace): ConversationSelection = when (space) {
+        ConversationSpace.Remote -> remoteSelection
+        ConversationSpace.Agent -> agentSelection
+    }
+
+    fun select(
+        space: ConversationSpace,
+        conversation: ConversationItem?,
+        targetTurnId: String = "",
+    ): ConversationSpaceState {
+        val selection = ConversationSelection(conversation, targetTurnId)
+        return when (space) {
+            ConversationSpace.Remote -> copy(remoteSelection = selection)
+            ConversationSpace.Agent -> copy(agentSelection = selection)
+        }
+    }
+
+    fun activate(space: ConversationSpace): ConversationSpaceState = copy(activeSpace = space)
+}
+
 object AgentDrawerPolicy {
-    fun filterAndSort(conversations: List<ConversationItem>, query: String): List<ConversationItem> {
+    fun filterAndSort(
+        conversations: List<ConversationItem>,
+        query: String,
+        space: ConversationSpace = ConversationSpace.Agent,
+    ): List<ConversationItem> {
         val needle = query.trim()
         return conversations
             .asSequence()
             .filterNot { it.archived }
+            .filter { item ->
+                when (space) {
+                    ConversationSpace.Remote -> item.kind == "desktop"
+                    ConversationSpace.Agent -> item.kind != "desktop"
+                }
+            }
             .filter { item ->
                 needle.isBlank() || listOf(item.title, item.provider, item.cwd, item.preview, item.group)
                     .any { value -> value.contains(needle, ignoreCase = true) }

@@ -69,19 +69,24 @@ fun VibeLinkApp(
 
     // Activity-scoped ViewModels survive configuration changes and clear with their owner.
     val sessionListViewModel: SessionListViewModel = viewModel()
-    val messageListViewModel: MessageListViewModel = viewModel()
+    val agentMessageListViewModel: MessageListViewModel = viewModel(key = "agent-messages")
+    val remoteMessageListViewModel: MessageListViewModel = viewModel(key = "remote-messages")
     val workspaceViewModel: WorkspaceViewModel = viewModel()
     val callViewModel: CallViewModel = viewModel()
     val settingsViewModel: SettingsViewModel = viewModel()
 
-    // Currently selected conversation (pass through navigation)
-    var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
-    var pendingTargetTurnId by remember { mutableStateOf("") }
+    var conversationSpaces by remember { mutableStateOf(ConversationSpaceState()) }
     var pendingSharedAttachments by remember { mutableStateOf<List<String>>(emptyList()) }
     val promptHistory by settingsStore.promptHistory.collectAsState(initial = emptyList())
     val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
     val appStrings = remember(appLanguage) { appStringsFor(appLanguage) }
     val appScope = rememberCoroutineScope()
+    val activeSelection = conversationSpaces.selectionFor(conversationSpaces.activeSpace)
+    val activeConversation = activeSelection.conversation
+    val activeMessageListViewModel = when (conversationSpaces.activeSpace) {
+        ConversationSpace.Remote -> remoteMessageListViewModel
+        ConversationSpace.Agent -> agentMessageListViewModel
+    }
     fun newConversation(): ConversationItem = ConversationItem(
         key = "new:${System.currentTimeMillis()}",
         kind = "new",
@@ -93,7 +98,8 @@ fun VibeLinkApp(
     LaunchedEffect(resilienceRuntime) {
         resilienceRuntime?.policy?.collect { policy ->
             val paused = policy.suspendRealtimeStreams
-            messageListViewModel.setResiliencePaused(paused)
+            agentMessageListViewModel.setResiliencePaused(paused)
+            remoteMessageListViewModel.setResiliencePaused(paused)
             workspaceViewModel.setResiliencePaused(paused)
             callViewModel.setResiliencePaused(paused)
         }
@@ -109,7 +115,8 @@ fun VibeLinkApp(
                 initialPairingUri = initialPairingUri,
                 onLoginSuccess = {
                     authenticated = true
-                    pendingConversation = newConversation()
+                    conversationSpaces = ConversationSpaceState()
+                        .select(ConversationSpace.Agent, newConversation())
                     navController.navigate("agent") {
                         popUpTo("login") { inclusive = true }
                     }
@@ -121,16 +128,17 @@ fun VibeLinkApp(
             AgentShell(
                 apiClient = apiClient,
                 viewModel = sessionListViewModel,
-                activeConversation = pendingConversation,
-                onSelectConversation = {
-                    pendingConversation = it
-                    pendingTargetTurnId = ""
+                activeSpace = conversationSpaces.activeSpace,
+                activeConversation = activeConversation,
+                onSelectConversation = { space, conversation ->
+                    conversationSpaces = conversationSpaces.select(space, conversation)
                 },
                 onOpenSearchResult = { result ->
                     when (val target = resolveSearchResultTarget(result)) {
                         is SearchResultTarget.Conversation -> {
-                            pendingConversation = target.item
-                            pendingTargetTurnId = target.targetTurnId
+                            conversationSpaces = conversationSpaces
+                                .activate(ConversationSpace.Agent)
+                                .select(ConversationSpace.Agent, target.item, target.targetTurnId)
                         }
                         is SearchResultTarget.WorkspaceFile -> {
                             workspaceViewModel.openSearchFile(apiClient, target.workspaceId, target.path)
@@ -140,8 +148,9 @@ fun VibeLinkApp(
                     }
                 },
                 onNewConversation = {
-                    pendingConversation = newConversation()
-                    pendingTargetTurnId = ""
+                    conversationSpaces = conversationSpaces
+                        .activate(ConversationSpace.Agent)
+                        .select(ConversationSpace.Agent, newConversation())
                 },
                 onLogout = {
                     appScope.launch {
@@ -149,7 +158,7 @@ fun VibeLinkApp(
                         withContext(Dispatchers.Main.immediate) {
                             apiClient.token = ""
                             authenticated = false
-                            pendingConversation = null
+                            conversationSpaces = ConversationSpaceState()
                             navController.navigate("login") {
                                 popUpTo("agent") { inclusive = true }
                             }
@@ -165,12 +174,17 @@ fun VibeLinkApp(
             ) { openDrawer ->
                 MessageListScreen(
                     apiClient = apiClient,
-                    viewModel = messageListViewModel,
-                    conversation = pendingConversation,
+                    viewModel = activeMessageListViewModel,
+                    conversation = activeConversation,
+                    conversationSpace = conversationSpaces.activeSpace,
+                    onConversationSpaceChange = { space ->
+                        conversationSpaces = conversationSpaces.activate(space)
+                    },
                     onOpenDrawer = openDrawer,
                     onNewConversation = {
-                        pendingConversation = newConversation()
-                        pendingTargetTurnId = ""
+                        conversationSpaces = conversationSpaces
+                            .activate(ConversationSpace.Agent)
+                            .select(ConversationSpace.Agent, newConversation())
                     },
                     onOpenApprovals = { navController.navigate("settings?section=approvals") },
                     onOpenLiveCall = { navController.navigate("call") },
@@ -181,10 +195,12 @@ fun VibeLinkApp(
                     promptHistory = promptHistory,
                     onRememberPrompt = { prompt -> appScope.launch { settingsStore.addPromptHistory(prompt) } },
                     onClearPromptHistory = { appScope.launch { settingsStore.clearPromptHistory() } },
-                    initialAttachmentUris = if (pendingConversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
+                    initialAttachmentUris = if (
+                        conversationSpaces.activeSpace == ConversationSpace.Agent && activeConversation?.key?.startsWith("share:") == true
+                    ) pendingSharedAttachments else emptyList(),
                     onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
                     workspaceId = workspaceViewModel.selectedWorkspaceId.collectAsState().value,
-                    targetTurnId = pendingTargetTurnId,
+                    targetTurnId = activeSelection.targetTurnId,
                 )
             }
         }
@@ -230,7 +246,9 @@ fun VibeLinkApp(
                 language = appLanguage,
                 initialSection = backStackEntry.arguments?.getString("section").orEmpty(),
                 onApprovalDecision = { response ->
-                    val messageHandled = messageListViewModel.applyApprovalDecision(apiClient, response)
+                    val agentMessageHandled = agentMessageListViewModel.applyApprovalDecision(apiClient, response)
+                    val remoteMessageHandled = remoteMessageListViewModel.applyApprovalDecision(apiClient, response)
+                    val messageHandled = agentMessageHandled || remoteMessageHandled
                     val workspaceHandled = workspaceViewModel.applyApprovalDecision(apiClient, response)
                     val handled = messageHandled || workspaceHandled
                     if (handled && (response.approval?.status == "approved" || response.approval?.status == "denied")) {
@@ -256,8 +274,9 @@ fun VibeLinkApp(
             status = "new",
             preview = text.take(160),
         )
-        pendingConversation = conversation
-        pendingTargetTurnId = ""
+        conversationSpaces = conversationSpaces
+            .activate(ConversationSpace.Agent)
+            .select(ConversationSpace.Agent, conversation)
         pendingSharedAttachments = initialSharedContent.streamUris
         navController.navigate("agent") { launchSingleTop = true }
         onSharedContentConsumed()

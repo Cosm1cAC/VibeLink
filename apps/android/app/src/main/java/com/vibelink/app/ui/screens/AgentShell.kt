@@ -126,8 +126,9 @@ object AgentDrawerPolicy {
 fun AgentShell(
     apiClient: ApiClient,
     viewModel: SessionListViewModel,
+    activeSpace: ConversationSpace,
     activeConversation: ConversationItem?,
-    onSelectConversation: (ConversationItem) -> Unit,
+    onSelectConversation: (ConversationSpace, ConversationItem) -> Unit,
     onOpenSearchResult: (SearchResult) -> Unit,
     onNewConversation: () -> Unit,
     onOpenWorkspace: () -> Unit,
@@ -148,6 +149,19 @@ fun AgentShell(
         viewModel.load(apiClient)
     }
 
+    val remoteConversations = remember(conversations) {
+        AgentDrawerPolicy.filterAndSort(conversations, "", ConversationSpace.Remote)
+    }
+    LaunchedEffect(activeSpace, activeConversation?.key, remoteConversations) {
+        if (activeSpace == ConversationSpace.Remote && activeConversation == null) {
+            remoteConversations.firstOrNull()?.let { onSelectConversation(ConversationSpace.Remote, it) }
+        }
+    }
+
+    LaunchedEffect(activeSpace) {
+        if (activeSpace == ConversationSpace.Remote) viewModel.setQuery("")
+    }
+
     fun closeDrawer() {
         scope.launch { drawerState.close() }
     }
@@ -158,6 +172,7 @@ fun AgentShell(
         drawerContent = {
             AgentDrawer(
                 conversations = conversations,
+                activeSpace = activeSpace,
                 activeConversation = activeConversation,
                 loading = loading,
                 searchResults = searchResults,
@@ -168,7 +183,7 @@ fun AgentShell(
                     closeDrawer()
                 },
                 onSelectConversation = {
-                    onSelectConversation(it)
+                    onSelectConversation(activeSpace, it)
                     closeDrawer()
                 },
                 onNewConversation = {
@@ -190,6 +205,7 @@ fun AgentShell(
 @Composable
 private fun AgentDrawer(
     conversations: List<ConversationItem>,
+    activeSpace: ConversationSpace,
     activeConversation: ConversationItem?,
     loading: Boolean,
     searchResults: List<SearchResult>,
@@ -205,10 +221,10 @@ private fun AgentDrawer(
     onLogout: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    var query by remember { mutableStateOf("") }
+    var query by remember(activeSpace) { mutableStateOf("") }
     var accountMenuOpen by remember { mutableStateOf(false) }
-    val visibleConversations = remember(conversations, query) {
-        AgentDrawerPolicy.filterAndSort(conversations, query)
+    val visibleConversations = remember(conversations, query, activeSpace) {
+        AgentDrawerPolicy.filterAndSort(conversations, query, activeSpace)
     }
 
     ModalDrawerSheet(
@@ -229,7 +245,10 @@ private fun AgentDrawer(
                 Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
                     Text(strings.brandName, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        strings.text("本地 Agent 控制台", "Local agent console"),
+                        when (activeSpace) {
+                            ConversationSpace.Remote -> strings.text("Codex Desktop 远程操控", "Codex Desktop remote")
+                            ConversationSpace.Agent -> strings.text("本地 Agent 控制台", "Local agent console")
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -256,7 +275,10 @@ private fun AgentDrawer(
             )
 
             Text(
-                strings.text("对话", "Conversations"),
+                when (activeSpace) {
+                    ConversationSpace.Remote -> strings.text("远程会话", "Remote sessions")
+                    ConversationSpace.Agent -> strings.text("Agent 对话", "Agent conversations")
+                },
                 modifier = Modifier.padding(top = 20.dp, bottom = 8.dp),
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -264,11 +286,11 @@ private fun AgentDrawer(
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
-                    searchLoading && query.length >= 2 -> CircularProgressIndicator(
+                    activeSpace == ConversationSpace.Agent && searchLoading && query.length >= 2 -> CircularProgressIndicator(
                         modifier = Modifier.size(24.dp).align(Alignment.Center),
                         strokeWidth = 2.dp,
                     )
-                    query.length >= 2 && searchResults.isNotEmpty() -> UnifiedDrawerResults(
+                    activeSpace == ConversationSpace.Agent && query.length >= 2 && searchResults.isNotEmpty() -> UnifiedDrawerResults(
                         results = searchResults,
                         onOpenSearchResult = onOpenSearchResult,
                     )
@@ -294,7 +316,7 @@ private fun AgentDrawer(
                 query = query,
                 onQueryChange = {
                     query = it
-                    onSearchQueryChange(it)
+                    if (activeSpace == ConversationSpace.Agent) onSearchQueryChange(it)
                 },
             )
             Spacer(Modifier.height(8.dp))
@@ -308,13 +330,15 @@ private fun AgentDrawer(
                     onClick = { onOpenSettings("") },
                     modifier = Modifier.weight(1f),
                 )
-                DrawerBottomAction(
-                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                    label = strings.newChat,
-                    onClick = onNewConversation,
-                    modifier = Modifier.weight(1f),
-                    emphasized = true,
-                )
+                if (activeSpace == ConversationSpace.Agent) {
+                    DrawerBottomAction(
+                        icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                        label = strings.newChat,
+                        onClick = onNewConversation,
+                        modifier = Modifier.weight(1f),
+                        emphasized = true,
+                    )
+                }
             }
         }
     }
@@ -480,9 +504,10 @@ private fun AgentDrawerPreview() {
     VibeLinkTheme(darkTheme = false) {
         AgentDrawer(
             conversations = listOf(
-                ConversationItem(key = "1", title = "Android UI shell", provider = "codex", updatedAt = "2026-07-20T08:00:00Z", pinned = true),
+                ConversationItem(key = "1", kind = "task", title = "Android UI shell", provider = "codex", updatedAt = "2026-07-20T08:00:00Z", pinned = true),
                 ConversationItem(key = "2", title = "Review workspace changes", provider = "claude", updatedAt = "2026-07-19T08:00:00Z"),
             ),
+            activeSpace = ConversationSpace.Agent,
             activeConversation = ConversationItem(key = "1"),
             loading = false,
             searchResults = emptyList(),

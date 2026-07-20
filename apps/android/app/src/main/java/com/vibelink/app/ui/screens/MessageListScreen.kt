@@ -66,6 +66,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -141,6 +142,8 @@ fun MessageListScreen(
     apiClient: ApiClient,
     viewModel: MessageListViewModel,
     conversation: ConversationItem?,
+    conversationSpace: ConversationSpace,
+    onConversationSpaceChange: (ConversationSpace) -> Unit,
     onOpenDrawer: () -> Unit,
     onNewConversation: () -> Unit,
     onOpenApprovals: () -> Unit = {},
@@ -157,26 +160,23 @@ fun MessageListScreen(
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
     val error by viewModel.error.collectAsState()
-    val title by viewModel.title.collectAsState()
     val running by viewModel.running.collectAsState()
     val sending by viewModel.sending.collectAsState()
-    val currentTaskId by viewModel.currentTaskId.collectAsState()
-    val remoteStatus by viewModel.remoteStatus.collectAsState()
     val providerRegistry by viewModel.providerRegistry.collectAsState()
     val pendingApproval by viewModel.pendingApproval.collectAsState()
     val taskChanges by viewModel.taskChanges.collectAsState()
     val strings = LocalAppStrings.current
 
-    var prompt by remember(conversation?.key) {
+    var prompt by remember(conversationSpace, conversation?.key) {
         mutableStateOf(if (conversation?.key?.startsWith("share:") == true) conversation.preview else "")
     }
-    var activeAgent by remember(conversation?.key) { mutableStateOf(conversation?.provider?.takeIf { it.isNotBlank() } ?: "codex") }
-    var model by remember(conversation?.key) { mutableStateOf("") }
-    var reasoningEffort by remember(conversation?.key) { mutableStateOf("") }
-    var cwd by remember(conversation?.key) { mutableStateOf(conversation?.cwd.orEmpty()) }
-    var attachmentStatus by remember(conversation?.key) { mutableStateOf("") }
-    var attachmentUploading by remember(conversation?.key) { mutableStateOf(false) }
-    var workspaceContext by remember(conversation?.key, workspaceId) { mutableStateOf("") }
+    var activeAgent by remember(conversationSpace, conversation?.key) { mutableStateOf(conversation?.provider?.takeIf { it.isNotBlank() } ?: "codex") }
+    var model by remember(conversationSpace, conversation?.key) { mutableStateOf("") }
+    var reasoningEffort by remember(conversationSpace, conversation?.key) { mutableStateOf("") }
+    var cwd by remember(conversationSpace, conversation?.key) { mutableStateOf(conversation?.cwd.orEmpty()) }
+    var attachmentStatus by remember(conversationSpace, conversation?.key) { mutableStateOf("") }
+    var attachmentUploading by remember(conversationSpace, conversation?.key) { mutableStateOf(false) }
+    var workspaceContext by remember(conversationSpace, conversation?.key, workspaceId) { mutableStateOf("") }
     var runtimeMenuOpen by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
@@ -194,8 +194,8 @@ fun MessageListScreen(
     }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    var consumedTargetTurnId by remember(conversation?.key, targetTurnId) { mutableStateOf("") }
-    val isDesktopRemote = conversation?.kind == "desktop"
+    var consumedTargetTurnId by remember(conversationSpace, conversation?.key, targetTurnId) { mutableStateOf("") }
+    val isDesktopRemote = conversationSpace == ConversationSpace.Remote
     val selectableProviders = remember(providerRegistry) { providersForComposer(providerRegistry) }
     val canSend = prompt.trim().isNotBlank() && !sending && conversation != null
     suspend fun uploadAttachmentNow(uri: Uri) {
@@ -243,7 +243,7 @@ fun MessageListScreen(
         }
     }
 
-    LaunchedEffect(conversation?.key) {
+    LaunchedEffect(viewModel, conversationSpace, conversation?.key) {
         if (conversation != null) viewModel.ensureConversationLoaded(apiClient, conversation)
     }
 
@@ -252,7 +252,7 @@ fun MessageListScreen(
         workspaceContext = runCatching { apiClient.getWorkspaceContext(workspaceId).context }.getOrDefault("")
     }
 
-    LaunchedEffect(conversation?.key, initialAttachmentUris) {
+    LaunchedEffect(conversationSpace, conversation?.key, initialAttachmentUris) {
         if (conversation == null || initialAttachmentUris.isEmpty()) return@LaunchedEffect
         initialAttachmentUris.forEach { rawUri -> uploadAttachmentNow(Uri.parse(rawUri)) }
         onInitialAttachmentsConsumed()
@@ -271,27 +271,12 @@ fun MessageListScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            CenterAlignedTopAppBar(
                 title = {
-                    Column {
-                        Text(title.ifBlank { strings.chat }, style = MaterialTheme.typography.titleMedium, maxLines = 1)
-                        val subtitle = when {
-                            isDesktopRemote && remoteStatus.isNotBlank() -> remoteStatus
-                            running && currentTaskId.isNotBlank() -> "running · ${currentTaskId.take(8)}"
-                            running -> strings.running
-                            conversation?.kind == "new" -> strings.vibelinkAgent
-                            else -> conversation?.provider.orEmpty()
-                        }
-                        if (subtitle.isNotBlank()) {
-                            Text(
-                                subtitle,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
+                    ConversationSpaceSwitcher(
+                        activeSpace = conversationSpace,
+                        onSpaceChange = onConversationSpaceChange,
+                    )
                 },
                 navigationIcon = {
                     IconButton(onClick = onOpenDrawer) {
@@ -299,8 +284,10 @@ fun MessageListScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onNewConversation) {
-                        Icon(Icons.Default.Add, contentDescription = strings.newChat)
+                    if (conversationSpace == ConversationSpace.Agent) {
+                        IconButton(onClick = onNewConversation) {
+                            Icon(Icons.Default.Add, contentDescription = strings.newChat)
+                        }
                     }
                     Box {
                         IconButton(onClick = { runtimeMenuOpen = true }) {
@@ -390,6 +377,7 @@ fun MessageListScreen(
                 }
                 messages.isEmpty() -> {
                     ChatEmptyState(
+                        conversationSpace = conversationSpace,
                         conversation = conversation,
                         onUseSuggestion = { prompt = it },
                         modifier = Modifier.align(Alignment.Center),
@@ -672,6 +660,42 @@ private fun ComposerBar(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConversationSpaceSwitcher(
+    activeSpace: ConversationSpace,
+    onSpaceChange: (ConversationSpace) -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        listOf(
+            ConversationSpace.Remote to strings.text("远程操控", "Remote"),
+            ConversationSpace.Agent to "VibeLink Agent",
+        ).forEach { (space, label) ->
+            Surface(
+                onClick = { onSpaceChange(space) },
+                color = androidx.compose.ui.graphics.Color.Transparent,
+                contentColor = if (activeSpace == space) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            ) {
+                Column(
+                    modifier = Modifier.widthIn(min = 82.dp).padding(horizontal = 6.dp, vertical = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                    Surface(
+                        modifier = Modifier.width(30.dp).height(3.dp),
+                        shape = RoundedCornerShape(2.dp),
+                        color = if (activeSpace == space) MaterialTheme.colorScheme.onSurface else androidx.compose.ui.graphics.Color.Transparent,
+                    ) {}
+                }
             }
         }
     }
@@ -996,6 +1020,7 @@ private fun StreamingPlaceholderBubble() {
 
 @Composable
 private fun ChatEmptyState(
+    conversationSpace: ConversationSpace,
     conversation: ConversationItem?,
     onUseSuggestion: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -1007,11 +1032,17 @@ private fun ChatEmptyState(
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         Text(
-            text = strings.brandName,
+            text = if (conversationSpace == ConversationSpace.Remote) strings.text("远程操控", "Remote control") else strings.brandName,
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f),
         )
-        if (conversation != null) {
+        if (conversationSpace == ConversationSpace.Remote) {
+            Text(
+                strings.text("未发现可用的 Codex Desktop 远程会话", "No Codex Desktop remote session is available"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (conversation != null) {
             val suggestion = strings.suggestionPlanNextStep
             AssistChip(onClick = { onUseSuggestion(suggestion) }, label = { Text(suggestion) })
         } else {

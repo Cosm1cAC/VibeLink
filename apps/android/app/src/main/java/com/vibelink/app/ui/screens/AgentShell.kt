@@ -51,10 +51,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Devices
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.vibelink.app.network.ApiClient
 import com.vibelink.app.network.ConversationItem
+import com.vibelink.app.network.SearchResult
 import com.vibelink.app.ui.i18n.LocalAppStrings
+import com.vibelink.app.ui.theme.VibeLinkTheme
 import kotlinx.coroutines.launch
 
 object AgentDrawerPolicy {
@@ -79,6 +83,7 @@ fun AgentShell(
     viewModel: SessionListViewModel,
     activeConversation: ConversationItem?,
     onSelectConversation: (ConversationItem) -> Unit,
+    onOpenSearchResult: (SearchResult) -> Unit,
     onNewConversation: () -> Unit,
     onOpenWorkspace: () -> Unit,
     onOpenLiveCall: () -> Unit,
@@ -89,6 +94,8 @@ fun AgentShell(
 ) {
     val conversations by viewModel.conversations.collectAsState()
     val loading by viewModel.loading.collectAsState()
+    val searchResults by viewModel.searchResults.collectAsState()
+    val searchLoading by viewModel.searchLoading.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
@@ -108,6 +115,13 @@ fun AgentShell(
                 conversations = conversations,
                 activeConversation = activeConversation,
                 loading = loading,
+                searchResults = searchResults,
+                searchLoading = searchLoading,
+                onSearchQueryChange = viewModel::setQuery,
+                onOpenSearchResult = {
+                    onOpenSearchResult(it)
+                    closeDrawer()
+                },
                 onSelectConversation = {
                     onSelectConversation(it)
                     closeDrawer()
@@ -133,6 +147,10 @@ private fun AgentDrawer(
     conversations: List<ConversationItem>,
     activeConversation: ConversationItem?,
     loading: Boolean,
+    searchResults: List<SearchResult>,
+    searchLoading: Boolean,
+    onSearchQueryChange: (String) -> Unit,
+    onOpenSearchResult: (SearchResult) -> Unit,
     onSelectConversation: (ConversationItem) -> Unit,
     onNewConversation: () -> Unit,
     onOpenWorkspace: () -> Unit,
@@ -201,6 +219,14 @@ private fun AgentDrawer(
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
+                    searchLoading && query.length >= 2 -> CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp).align(Alignment.Center),
+                        strokeWidth = 2.dp,
+                    )
+                    query.length >= 2 && searchResults.isNotEmpty() -> UnifiedDrawerResults(
+                        results = searchResults,
+                        onOpenSearchResult = onOpenSearchResult,
+                    )
                     loading && visibleConversations.isEmpty() -> CircularProgressIndicator(
                         modifier = Modifier.size(24.dp).align(Alignment.Center),
                         strokeWidth = 2.dp,
@@ -219,7 +245,13 @@ private fun AgentDrawer(
                 }
             }
 
-            DrawerSearchBar(query = query, onQueryChange = { query = it })
+            DrawerSearchBar(
+                query = query,
+                onQueryChange = {
+                    query = it
+                    onSearchQueryChange(it)
+                },
+            )
             Spacer(Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -254,7 +286,7 @@ private fun DrawerUtilityActions(
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         DrawerUtilityRow(Icons.Default.Folder, strings.workspace, onOpenWorkspace)
         DrawerUtilityRow(Icons.Default.Call, strings.liveCall, onOpenLiveCall)
-        DrawerUtilityRow(Icons.Default.Checklist, strings.text("Review 与审批", "Review and approvals"), onOpenReview)
+        DrawerUtilityRow(Icons.Default.Checklist, "Review", onOpenReview)
         DrawerUtilityRow(Icons.Default.Settings, strings.text("待处理权限", "Pending permissions"), onOpenApprovals)
     }
 }
@@ -284,6 +316,26 @@ private fun ConversationHistory(
                 selected = conversation.key == activeKey,
                 onClick = { onSelectConversation(conversation) },
             )
+        }
+    }
+}
+
+@Composable
+private fun UnifiedDrawerResults(results: List<SearchResult>, onOpenSearchResult: (SearchResult) -> Unit) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        items(results, key = { "${it.kind}:${it.id}:${it.turnId}:${it.path}" }) { result ->
+            Column(
+                modifier = Modifier.fillMaxWidth().clickable { onOpenSearchResult(result) }.padding(horizontal = 10.dp, vertical = 11.dp),
+            ) {
+                Text(result.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    result.snippet.ifBlank { result.kind },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -373,4 +425,32 @@ private fun DrawerBottomAction(
 private fun drawerTimestamp(value: String): String {
     if (value.length < 10) return value
     return value.substring(5, 10).replace('-', '/')
+}
+
+@Preview(name = "Phone", device = Devices.PHONE, showBackground = true)
+@Preview(name = "Foldable", device = Devices.FOLDABLE, showBackground = true)
+@Preview(name = "Tablet", device = Devices.TABLET, showBackground = true)
+@Composable
+private fun AgentDrawerPreview() {
+    VibeLinkTheme(darkTheme = false) {
+        AgentDrawer(
+            conversations = listOf(
+                ConversationItem(key = "1", title = "Android UI shell", provider = "codex", updatedAt = "2026-07-20T08:00:00Z", pinned = true),
+                ConversationItem(key = "2", title = "Review workspace changes", provider = "claude", updatedAt = "2026-07-19T08:00:00Z"),
+            ),
+            activeConversation = ConversationItem(key = "1"),
+            loading = false,
+            searchResults = emptyList(),
+            searchLoading = false,
+            onSearchQueryChange = {},
+            onOpenSearchResult = {},
+            onSelectConversation = {},
+            onNewConversation = {},
+            onOpenWorkspace = {},
+            onOpenLiveCall = {},
+            onOpenReview = {},
+            onOpenSettings = {},
+            onLogout = {},
+        )
+    }
 }

@@ -76,8 +76,8 @@ fun VibeLinkApp(
 
     // Currently selected conversation (pass through navigation)
     var pendingConversation by remember { mutableStateOf<ConversationItem?>(null) }
+    var pendingTargetTurnId by remember { mutableStateOf("") }
     var pendingSharedAttachments by remember { mutableStateOf<List<String>>(emptyList()) }
-    val conversations by sessionListViewModel.conversations.collectAsState()
     val promptHistory by settingsStore.promptHistory.collectAsState(initial = emptyList())
     val appLanguage by settingsStore.appLanguage.collectAsState(initial = AppLanguage.Default)
     val appStrings = remember(appLanguage) { appStringsFor(appLanguage) }
@@ -122,9 +122,26 @@ fun VibeLinkApp(
                 apiClient = apiClient,
                 viewModel = sessionListViewModel,
                 activeConversation = pendingConversation,
-                onSelectConversation = { pendingConversation = it },
+                onSelectConversation = {
+                    pendingConversation = it
+                    pendingTargetTurnId = ""
+                },
+                onOpenSearchResult = { result ->
+                    when (val target = resolveSearchResultTarget(result)) {
+                        is SearchResultTarget.Conversation -> {
+                            pendingConversation = target.item
+                            pendingTargetTurnId = target.targetTurnId
+                        }
+                        is SearchResultTarget.WorkspaceFile -> {
+                            workspaceViewModel.openSearchFile(apiClient, target.workspaceId, target.path)
+                            navController.navigate("workspace")
+                        }
+                        is SearchResultTarget.Unsupported -> Unit
+                    }
+                },
                 onNewConversation = {
                     pendingConversation = newConversation()
+                    pendingTargetTurnId = ""
                 },
                 onLogout = {
                     appScope.launch {
@@ -151,7 +168,10 @@ fun VibeLinkApp(
                     viewModel = messageListViewModel,
                     conversation = pendingConversation,
                     onOpenDrawer = openDrawer,
-                    onNewConversation = { pendingConversation = newConversation() },
+                    onNewConversation = {
+                        pendingConversation = newConversation()
+                        pendingTargetTurnId = ""
+                    },
                     onOpenApprovals = { navController.navigate("settings?section=approvals") },
                     onOpenLiveCall = { navController.navigate("call") },
                     onOpenFileReference = { reference ->
@@ -164,6 +184,7 @@ fun VibeLinkApp(
                     initialAttachmentUris = if (pendingConversation?.key?.startsWith("share:") == true) pendingSharedAttachments else emptyList(),
                     onInitialAttachmentsConsumed = { pendingSharedAttachments = emptyList() },
                     workspaceId = workspaceViewModel.selectedWorkspaceId.collectAsState().value,
+                    targetTurnId = pendingTargetTurnId,
                 )
             }
         }
@@ -236,6 +257,7 @@ fun VibeLinkApp(
             preview = text.take(160),
         )
         pendingConversation = conversation
+        pendingTargetTurnId = ""
         pendingSharedAttachments = initialSharedContent.streamUris
         navController.navigate("agent") { launchSingleTop = true }
         onSharedContentConsumed()

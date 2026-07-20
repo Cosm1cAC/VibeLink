@@ -6,6 +6,16 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+
+object AndroidUiTokens {
+    val ComposerShape = 28.dp
+    val PopupShape = 24.dp
+    val ContentHorizontalPadding = 20.dp
+    val DrawerSurface = Color(0xFFF4F4F3)
+    val Canvas = Color(0xFFFBFBFA)
+    val PrimaryAction = Color(0xFF111315)
+}
 
 private val LightColorScheme = lightColorScheme(
     primary = Command,

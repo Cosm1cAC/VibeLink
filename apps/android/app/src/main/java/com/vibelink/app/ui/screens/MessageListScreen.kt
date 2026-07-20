@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.speech.tts.TextToSpeech
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
 import android.widget.Toast
@@ -39,6 +40,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Code
@@ -57,6 +59,8 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -79,6 +83,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -107,12 +112,14 @@ import com.vibelink.app.network.ProviderDefinition
 import com.vibelink.app.network.ProviderRegistryResponse
 import com.vibelink.app.ui.components.ToolCallCardList
 import com.vibelink.app.ui.i18n.LocalAppStrings
+import com.vibelink.app.ui.theme.AndroidUiTokens
 import coil.compose.AsyncImage
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 object ComposerLayoutPolicy {
     fun showSupplementalContent(imeVisible: Boolean): Boolean = !imeVisible
@@ -173,6 +180,18 @@ fun MessageListScreen(
     var runtimeMenuOpen by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
+    var speech by remember(context) { mutableStateOf<TextToSpeech?>(null) }
+    DisposableEffect(context) {
+        lateinit var engine: TextToSpeech
+        engine = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) engine.language = Locale.getDefault()
+        }
+        speech = engine
+        onDispose {
+            engine.shutdown()
+            speech = null
+        }
+    }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var consumedTargetTurnId by remember(conversation?.key, targetTurnId) { mutableStateOf("") }
@@ -215,7 +234,11 @@ fun MessageListScreen(
                         bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, output)
                     }
                 }
-                uploadAttachmentNow(Uri.fromFile(capture))
+                try {
+                    uploadAttachmentNow(Uri.fromFile(capture))
+                } finally {
+                    capture.delete()
+                }
             }
         }
     }
@@ -376,8 +399,8 @@ fun MessageListScreen(
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = AndroidUiTokens.ContentHorizontalPadding, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         pendingApproval?.let { approval ->
                             item {
@@ -414,6 +437,9 @@ fun MessageListScreen(
                                         reasoningEffort = reasoningEffort,
                                         cwd = cwd,
                                     )
+                                },
+                                onSpeak = { target ->
+                                    speech?.speak(target.text, TextToSpeech.QUEUE_FLUSH, null, "vibelink-message")
                                 },
                                 onOpenFileReference = onOpenFileReference,
                             )
@@ -476,7 +502,7 @@ private fun ComposerBar(
 
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(28.dp),
+        shape = RoundedCornerShape(AndroidUiTokens.ComposerShape),
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 8.dp,
     ) {
@@ -623,8 +649,8 @@ private fun ComposerBar(
                     onClick = if (running) onStop else onSend,
                     modifier = Modifier.size(44.dp),
                     shape = CircleShape,
-                    color = if (running || canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (running || canSend) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (running || canSend) AndroidUiTokens.PrimaryAction else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (running || canSend) androidx.compose.ui.graphics.Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                     enabled = running || canSend,
                 ) {
                     Box(contentAlignment = Alignment.Center) {
@@ -660,13 +686,13 @@ private fun MessageBubble(
     onEdit: (ChatMessage, String) -> Unit,
     onDelete: (ChatMessage) -> Unit,
     onRegenerate: (ChatMessage) -> Unit,
+    onSpeak: (ChatMessage) -> Unit,
     onOpenFileReference: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val strings = LocalAppStrings.current
-    var expanded by remember(message.role, message.text, message.toolCalls.size) { mutableStateOf(true) }
     var menuOpen by remember { mutableStateOf(false) }
     var editing by remember(message.role, message.text, message.turnId, message.id) { mutableStateOf(false) }
     var editDraft by remember(message.role, message.text, message.turnId, message.id) { mutableStateOf(message.text) }
@@ -678,12 +704,6 @@ private fun MessageBubble(
     val canEdit = isUser && message.text.isNotBlank()
     val canRegenerate = message.role == "assistant" && message.text.isNotBlank()
     val canDelete = !isSystem && !isError
-    val containerColor = when {
-        isError -> MaterialTheme.colorScheme.errorContainer
-        isSystem -> MaterialTheme.colorScheme.surfaceVariant
-        isUser -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.18f)
-        else -> MaterialTheme.colorScheme.surface
-    }
     val roleLabel = when (message.role) {
         "user" -> strings.you
         "assistant" -> strings.agent
@@ -696,165 +716,152 @@ private fun MessageBubble(
     val imageLinks = remember(message.text) { MessageContentUtils.extractImageLinks(message.text) }
     val artifactLinks = remember(message.text) { MessageContentUtils.extractArtifactLinks(message.text) }
 
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(if (compact) 8.dp else 10.dp),
-        colors = CardDefaults.cardColors(containerColor = containerColor),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-            if (!compact || isError || isSystem || message.text.isNotBlank()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = roleLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row {
-                        if (codeBlocks.isNotEmpty()) {
-                            IconButton(
-                                onClick = { copyMessage(context, codeBlocks.joinToString("\n\n"), strings.codeCopied) },
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(Icons.Default.Code, contentDescription = strings.copyCodeBlocks, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        if (fileReferences.isNotEmpty()) {
-                            IconButton(
-                                onClick = { copyMessage(context, fileReferences.joinToString("\n"), strings.fileReferencesCopied) },
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = strings.copyFileReferences, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        if (message.text.isNotBlank()) {
-                            IconButton(
-                                onClick = { copyMessage(context, message.text, strings.copied) },
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = strings.copyMessage, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        IconButton(
-                            onClick = { expanded = !expanded },
-                            modifier = Modifier.size(40.dp),
-                        ) {
-                            Icon(
-                                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                contentDescription = if (expanded) strings.collapseMessage else strings.expandMessage,
-                            )
-                        }
-                        if (canEdit || canRegenerate || canDelete) {
-                            Box {
-                                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = strings.messageActions)
-                                }
-                                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                                    if (canEdit) {
-                                        DropdownMenuItem(
-                                            text = { Text(strings.edit) },
-                                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                                            onClick = {
-                                                editDraft = message.text
-                                                editing = true
-                                                expanded = true
-                                                menuOpen = false
-                                            },
-                                        )
-                                    }
-                                    if (canRegenerate) {
-                                        DropdownMenuItem(
-                                            text = { Text(strings.regenerate) },
-                                            leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
-                                            onClick = {
-                                                menuOpen = false
-                                                onRegenerate(message)
-                                            },
-                                        )
-                                    }
-                                    if (canDelete) {
-                                        DropdownMenuItem(
-                                            text = { Text(strings.delete) },
-                                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
-                                            onClick = {
-                                                menuOpen = false
-                                                onDelete(message)
-                                            },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    val displayText = message.text.trim()
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
+        if (isError || isSystem) {
+            Text(
+                text = roleLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+        }
+        if (editing) {
+            OutlinedTextField(
+                value = editDraft,
+                onValueChange = { editDraft = it },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2,
+                maxLines = 8,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { editing = false }) { Text(strings.cancel) }
+                Button(
+                    onClick = { onEdit(message, editDraft); editing = false },
+                    enabled = editDraft.trim().isNotBlank(),
+                ) { Text(strings.save) }
             }
-            val displayText = message.text.trim()
-            if (expanded) {
-                if (editing) {
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = editDraft,
-                        onValueChange = { editDraft = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
-                        maxLines = 8,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { editing = false }) { Text(strings.cancel) }
-                        Button(
-                            onClick = {
-                                onEdit(message, editDraft)
-                                editing = false
-                            },
-                            enabled = editDraft.trim().isNotBlank(),
-                        ) { Text(strings.save) }
+        } else if (displayText.isNotBlank()) {
+            if (isUser || compact || isError) {
+                Text(text = displayText, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
+            } else {
+                MarkdownText(text = displayText)
+            }
+        }
+        if (message.toolCalls.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            ToolCallCardList(toolCalls = message.toolCalls, toolCallCount = message.toolCallCount)
+        }
+        if (fileReferences.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            FileReferenceChips(
+                fileReferences = fileReferences,
+                onCopy = { reference -> copyMessage(context, reference, strings.fileReferenceCopied) },
+                onOpen = onOpenFileReference,
+            )
+        }
+        if (imageLinks.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            ImagePreviewGallery(
+                apiBaseUrl = apiBaseUrl,
+                authToken = authToken,
+                links = imageLinks,
+                onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url, authToken)) },
+            )
+        }
+        if (artifactLinks.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            ArtifactChips(links = artifactLinks, onOpen = { link -> artifactPreview = link })
+        }
+
+        if (!isSystem && !isError && message.text.isNotBlank()) {
+            Row(
+                modifier = Modifier.padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = { copyMessage(context, message.text, strings.copied) }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = strings.copyMessage, modifier = Modifier.size(18.dp))
+                }
+                if (!isUser) {
+                    IconButton(
+                        onClick = { Toast.makeText(context, strings.text("感谢反馈", "Thanks for the feedback"), Toast.LENGTH_SHORT).show() },
+                        modifier = Modifier.size(40.dp),
+                    ) { Icon(Icons.Default.ThumbUp, contentDescription = strings.text("回答有帮助", "Helpful response"), modifier = Modifier.size(18.dp)) }
+                    IconButton(
+                        onClick = { Toast.makeText(context, strings.text("已记录反馈", "Feedback recorded"), Toast.LENGTH_SHORT).show() },
+                        modifier = Modifier.size(40.dp),
+                    ) { Icon(Icons.Default.ThumbDown, contentDescription = strings.text("回答需要改进", "Response needs improvement"), modifier = Modifier.size(18.dp)) }
+                    IconButton(onClick = { onSpeak(message) }, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = strings.text("朗读回答", "Read response aloud"), modifier = Modifier.size(18.dp))
                     }
-                } else if (displayText.isNotBlank()) {
-                    if (!compact || isError || isSystem) Spacer(Modifier.height(4.dp))
-                    if (compact || isError) {
-                        Text(
-                            text = displayText,
-                            style = MaterialTheme.typography.bodyMedium,
-                            lineHeight = 20.sp,
-                        )
-                    } else {
-                        MarkdownText(text = displayText)
+                    IconButton(onClick = { onRegenerate(message) }, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Default.Refresh, contentDescription = strings.regenerate, modifier = Modifier.size(18.dp))
                     }
                 }
-                if (message.toolCalls.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    ToolCallCardList(toolCalls = message.toolCalls, toolCallCount = message.toolCallCount)
-                }
-                if (fileReferences.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    FileReferenceChips(
-                        fileReferences = fileReferences,
-                        onCopy = { reference -> copyMessage(context, reference, strings.fileReferenceCopied) },
-                        onOpen = onOpenFileReference,
-                    )
-                }
-                if (imageLinks.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    ImagePreviewGallery(
-                        apiBaseUrl = apiBaseUrl,
-                        authToken = authToken,
-                        links = imageLinks,
-                        onOpen = { link -> uriHandler.openUri(resolveContentUrl(apiBaseUrl, link.url, authToken)) },
-                    )
-                }
-                if (artifactLinks.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    ArtifactChips(
-                        links = artifactLinks,
-                        onOpen = { link -> artifactPreview = link },
-                    )
+                if (canEdit || canDelete || codeBlocks.isNotEmpty() || fileReferences.isNotEmpty()) {
+                    Box {
+                        IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Default.MoreVert, contentDescription = strings.messageActions, modifier = Modifier.size(18.dp))
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            if (canEdit) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.edit) },
+                                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                    onClick = { editDraft = message.text; editing = true; menuOpen = false },
+                                )
+                            }
+                            if (codeBlocks.isNotEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.copyCodeBlocks) },
+                                    leadingIcon = { Icon(Icons.Default.Code, contentDescription = null) },
+                                    onClick = { menuOpen = false; copyMessage(context, codeBlocks.joinToString("\n\n"), strings.codeCopied) },
+                                )
+                            }
+                            if (fileReferences.isNotEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.copyFileReferences) },
+                                    leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
+                                    onClick = { menuOpen = false; copyMessage(context, fileReferences.joinToString("\n"), strings.fileReferencesCopied) },
+                                )
+                            }
+                            if (canDelete) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.delete) },
+                                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                    onClick = { menuOpen = false; onDelete(message) },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+
+    when {
+        isUser -> Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Surface(
+                modifier = Modifier.widthIn(max = 340.dp),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp), content = body)
+            }
+        }
+        isError || isSystem -> Card(
+            modifier = modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
+            ),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(12.dp), content = body)
+        }
+        else -> Column(
+            modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+            content = body,
+        )
     }
     artifactPreview?.let { link ->
         ArtifactWorkbenchDialog(link = link, apiClient = artifactApiClient, onDismiss = { artifactPreview = null })
@@ -977,19 +984,13 @@ private fun MarkdownText(text: String) {
 @Composable
 private fun StreamingPlaceholderBubble() {
     val strings = LocalAppStrings.current
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            Text(strings.agentTyping, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+        Text(strings.agentTyping, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -1003,21 +1004,18 @@ private fun ChatEmptyState(
     Column(
         modifier = modifier.padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         Text(
-            text = if (conversation == null) strings.restoringChat else strings.startWithContext,
-            style = MaterialTheme.typography.titleSmall,
+            text = strings.brandName,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f),
         )
         if (conversation != null) {
-            val suggestions = listOf(
-                strings.suggestionSummarizeWorkspace,
-                strings.suggestionReviewChanges,
-                strings.suggestionPlanNextStep,
-            )
-            suggestions.forEach { suggestion ->
-                AssistChip(onClick = { onUseSuggestion(suggestion) }, label = { Text(suggestion) })
-            }
+            val suggestion = strings.suggestionPlanNextStep
+            AssistChip(onClick = { onUseSuggestion(suggestion) }, label = { Text(suggestion) })
+        } else {
+            Text(strings.restoringChat, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

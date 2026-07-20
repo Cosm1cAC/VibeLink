@@ -34,7 +34,7 @@ Use `--rust-devices-http` with the front-door flag to let Rust own the read-only
 
 Use `--rust-settings-http` with the front-door flag, or run `start-vibelink-settings-http-canary.cmd`, to let Rust own Settings update, export, and import. Rust performs validation, dry runs, atomic file replacement, DPAPI credential writes, public projection, and audit records. During the hybrid phase, a protected loopback reload keeps the remaining Node routes on the same in-memory settings; disabling the flag restores Node ownership for subsequent requests.
 
-Use `--rust-workspace-http` with the front-door flag to let Rust own authenticated `POST /api/workspaces/:id/file` write, delete, and rename operations. The route enforces SQLite workspace roots, bounded JSON bodies, path traversal checks, and audit records; unsupported workspace and tool routes continue to fall back to Node.
+Use `--rust-workspace-http` with the front-door flag to let Rust own authenticated `POST /api/workspaces/:id/file` write, delete, and rename operations plus `GET /api/workspaces/:id/git/status`. The routes enforce SQLite workspace roots, bounded bodies/Git output, path traversal checks, and audit/update contracts; unsupported workspace and tool routes continue to fall back to Node.
 
 The normal `vibelink.exe` user entry enables the Rust front door and all currently migrated route flags by default. Run `vibelink.exe bridge` to use the direct Node bridge as an emergency rollback path.
 

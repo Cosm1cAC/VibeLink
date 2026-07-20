@@ -2,16 +2,20 @@ use crate::status_http::{
     authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication,
 };
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::SystemTime;
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_GIT_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct WorkspaceRouteConfig {
@@ -55,7 +59,9 @@ pub fn route_workspace_request(
     let Some((workspace_id, action_path)) = workspace_path_parts(request.path()) else {
         return Ok(None);
     };
-    if request.method != "POST" || action_path != "file" {
+    let file_mutation = request.method == "POST" && action_path == "file";
+    let git_status = request.method == "GET" && action_path == "git/status";
+    if !file_mutation && !git_status {
         return Ok(None);
     }
     let auth = authenticate_route_request(request, &config.data_dir)?;
@@ -72,6 +78,11 @@ pub fn route_workspace_request(
         }
         RouteAuthentication::Device(_) => {}
         RouteAuthentication::Pending => unreachable!(),
+    }
+    if git_status {
+        let result = workspace_git_status(&config.data_dir, &workspace_id)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
     }
     let body = body.ok_or_else(|| anyhow::anyhow!("Workspace file body is required"))?;
     if body.len() > MAX_BODY_BYTES {
@@ -112,6 +123,90 @@ pub fn route_workspace_request(
         }
     };
     Ok(Some(response))
+}
+
+fn workspace_git_status(data_dir: &Path, workspace_id: &str) -> Result<Value> {
+    let db_path = data_dir.join("mobile-agent.sqlite");
+    let connection = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Cannot open {}", db_path.display()))?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    let (cwd, title, allowed_root, created_at, updated_at, last_used_at) = connection
+        .query_row(
+            "SELECT path, title, allowed_root, created_at, updated_at, last_used_at FROM workspaces WHERE id = ?1",
+            params![workspace_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("Workspace not found."))?;
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let now = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    connection.execute(
+        "UPDATE workspaces SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now, workspace_id],
+    )?;
+    let root = canonical_root(Path::new(&cwd))?;
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "-b"])
+        .current_dir(&root)
+        .output()
+        .context("Failed to run git status")?;
+    if output.stdout.len().saturating_add(output.stderr.len()) > MAX_GIT_OUTPUT_BYTES {
+        bail!("Git status output exceeds 10 MiB.");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let branch = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("## "))
+        .unwrap_or("")
+        .to_string();
+    let files = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with("##"))
+        .filter_map(|line| {
+            let path = line.get(3..)?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            let status = line.get(..2).unwrap_or("").trim();
+            Some(json!({
+                "status": if status.is_empty() { "??" } else { status },
+                "path": path
+            }))
+        })
+        .collect::<Vec<_>>();
+    let exit_code = output.status.code().unwrap_or(1);
+    Ok(json!({
+        "ok": output.status.success(),
+        "branch": branch,
+        "changedCount": files.len(),
+        "files": files,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exitCode": exit_code,
+        "workspace": {
+            "id": workspace_id,
+            "title": title,
+            "path": cwd,
+            "allowedRoot": allowed_root,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "lastUsedAt": last_used_at
+        },
+        "cwd": cwd
+    }))
 }
 
 fn workspace_path_parts(path: &str) -> Option<(String, &str)> {
@@ -161,7 +256,7 @@ fn mutate_workspace(
     let result = match action {
         "write" => {
             let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
-            if text.as_bytes().len() > MAX_BODY_BYTES {
+            if text.len() > MAX_BODY_BYTES {
                 bail!("Workspace file text is too large.");
             }
             if target.exists() && !target.is_file() {
@@ -458,6 +553,62 @@ mod tests {
         assert_eq!(stale.status, 409);
         assert_eq!(stale.body["code"], "WORKSPACE_FILE_CONFLICT");
         assert_eq!(stale.body["current"]["text"], "device A\n");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_workspace_git_status_with_the_node_response_contract() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "VibeLink Test"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+        fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        fs::write(root.join("new.txt"), "new\n").unwrap();
+
+        let request = parse_request(b"GET /api/workspaces/w/git/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let response = route_workspace_request(&request, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], true);
+        assert_eq!(response.body["changedCount"], 2);
+        assert_eq!(response.body["workspace"]["id"], "w");
+        assert_eq!(response.body["workspace"]["updatedAt"], "now");
+        assert_eq!(response.body["workspace"]["lastUsedAt"], "");
+        assert_eq!(response.body["cwd"], root.to_string_lossy().as_ref());
+        let files = response.body["files"].as_array().unwrap();
+        assert!(files
+            .iter()
+            .any(|file| file["path"] == "tracked.txt" && file["status"] == "M"));
+        assert!(files
+            .iter()
+            .any(|file| file["path"] == "new.txt" && file["status"] == "??"));
+        let db = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
+        let (updated_at, last_used_at): (String, String) = db
+            .query_row(
+                "SELECT updated_at, last_used_at FROM workspaces WHERE id = 'w'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_ne!(updated_at, "now");
+        assert_eq!(last_used_at, updated_at);
         let _ = fs::remove_dir_all(dir);
     }
 }

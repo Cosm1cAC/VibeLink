@@ -100,6 +100,24 @@ class MessageListViewModel : ViewModel() {
     private val seenTaskEvents = mutableSetOf<String>()
     private val seenToolEvents = mutableSetOf<String>()
     private val toolEventsByRun = linkedMapOf<String, MutableList<ToolEvent>>()
+    private val eventAckCursors = mutableMapOf<String, Int>()
+
+    private fun acknowledgeConsumedEvent(apiClient: ApiClient, streamId: String, cursor: Int, eventId: String = "") {
+        if (streamId.isBlank() || cursor <= (eventAckCursors[streamId] ?: 0)) return
+        viewModelScope.launch {
+            var expected = eventAckCursors[streamId] ?: 0
+            runCatching { apiClient.acknowledgeEvent(streamId, cursor, expected, eventId) }
+                .recoverCatching { error ->
+                    if (error !is ApiException || error.statusCode != 409) throw error
+                    expected = runCatching {
+                        JsonParser.parseString(error.body).asJsonObject.getAsJsonObject("current")?.get("cursor")?.asInt ?: 0
+                    }.getOrDefault(0)
+                    eventAckCursors[streamId] = expected
+                    if (cursor <= expected) null else apiClient.acknowledgeEvent(streamId, cursor, expected, eventId)
+                }
+                .onSuccess { ack -> eventAckCursors[streamId] = ack?.cursor ?: maxOf(expected, cursor) }
+        }
+    }
 
     fun loadConversation(apiClient: ApiClient, conversation: ConversationItem) {
         stopStreaming()
@@ -659,6 +677,10 @@ class MessageListViewModel : ViewModel() {
         val fresh = events.filter { seenTaskEvents.add(taskEventKey(it)) }
         val newMessages = messagesFromEvents(fresh)
         if (newMessages.isNotEmpty()) _messages.value = mergeMessages(_messages.value, newMessages)
+        val taskId = _currentTaskId.value.ifBlank { activeConversation?.id.orEmpty() }
+        events.maxByOrNull { it.cursor }?.takeIf { taskId.isNotBlank() }?.let { event ->
+            persistenceApiClient?.let { acknowledgeConsumedEvent(it, "task:$taskId", taskCursor, event.id) }
+        }
     }
 
     private fun appendToolEvent(event: ToolEvent) {
@@ -669,6 +691,7 @@ class MessageListViewModel : ViewModel() {
         val events = toolEventsByRun.getOrPut(runId) { mutableListOf() }
         events.add(event)
         events.sortBy { it.cursor }
+        persistenceApiClient?.let { acknowledgeConsumedEvent(it, "tool-event:$runId", event.cursor, event.id) }
         renderToolEvents()
     }
 

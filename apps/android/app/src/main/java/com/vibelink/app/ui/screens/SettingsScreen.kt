@@ -62,6 +62,9 @@ import com.vibelink.app.network.BrowserTraceEvent
 import com.vibelink.app.network.CloudflareGuideResponse
 import com.vibelink.app.network.DeviceAdminItem
 import com.vibelink.app.network.DoctorResponse
+import com.vibelink.app.network.EventAcknowledgement
+import com.vibelink.app.network.EventCompactionMarker
+import com.vibelink.app.network.EventRetentionPlan
 import com.vibelink.app.network.McpProbeResponse
 import com.vibelink.app.network.McpStatusResponse
 import com.vibelink.app.network.NativePushSettingsPatch
@@ -95,6 +98,9 @@ data class SettingsUiState(
     val pushSubscriptions: List<PushSubscriptionItem> = emptyList(),
     val toolEventStats: ToolEventStatsResponse = ToolEventStatsResponse(),
     val toolEventPrune: ToolEventsPruneResponse? = null,
+    val eventAcks: List<EventAcknowledgement> = emptyList(),
+    val eventRetentionPlans: List<EventRetentionPlan> = emptyList(),
+    val eventCompactionMarkers: List<EventCompactionMarker> = emptyList(),
     val settingsExportText: String = "",
     val settingsImportPreview: List<String> = emptyList(),
     val doctor: DoctorResponse = DoctorResponse(),
@@ -120,7 +126,7 @@ class SettingsViewModel : ViewModel() {
             _uiState.update { it.copy(loading = true, error = "", notice = "") }
             try {
                 val status = apiClient.checkStatus()
-                val approvals = runCatching { apiClient.listApprovals(status = "pending", limit = 50) }.getOrDefault(emptyList())
+                val approvals = runCatching { apiClient.listApprovals(status = "", limit = 50) }.getOrDefault(emptyList())
                 val devices = runCatching { apiClient.listDevices() }.getOrDefault(com.vibelink.app.network.DeviceListResponse())
                 val pairings = runCatching { apiClient.listPairingSessions(status = "pending") }.getOrDefault(emptyList())
                 val auditLogs = runCatching { apiClient.listAuditLogs(limit = 20) }.getOrDefault(emptyList())
@@ -128,6 +134,11 @@ class SettingsViewModel : ViewModel() {
                 val cloudflare = runCatching { apiClient.getCloudflareGuide() }.getOrDefault(CloudflareGuideResponse())
                 val pushSubscriptions = runCatching { apiClient.listPushSubscriptions() }.getOrDefault(emptyList())
                 val toolEventStats = runCatching { apiClient.getToolEventStats() }.getOrDefault(ToolEventStatsResponse())
+                val eventAcks = runCatching { apiClient.listEventAcks() }.getOrDefault(emptyList())
+                val eventRetentionPlans = eventAcks.map { it.streamId }.filter { it.isNotBlank() }.distinct().mapNotNull { streamId ->
+                    runCatching { apiClient.getEventRetentionPlan(streamId) }.getOrNull()
+                }
+                val eventCompactionMarkers = runCatching { apiClient.listEventCompactionMarkers(limit = 20) }.getOrDefault(emptyList())
                 val doctor = runCatching { apiClient.getDoctor() }.getOrDefault(DoctorResponse())
                 val browserSessions = runCatching { apiClient.listBrowserSessions() }.getOrDefault(emptyList())
                 val browserSelection = browserSelection(browserSessions)
@@ -146,6 +157,9 @@ class SettingsViewModel : ViewModel() {
                         cloudflare = cloudflare,
                         pushSubscriptions = pushSubscriptions,
                         toolEventStats = toolEventStats,
+                        eventAcks = eventAcks,
+                        eventRetentionPlans = eventRetentionPlans,
+                        eventCompactionMarkers = eventCompactionMarkers,
                         doctor = doctor,
                         browser = BrowserWorkspaceUiState(
                             sessions = browserSessions,
@@ -208,7 +222,7 @@ class SettingsViewModel : ViewModel() {
                     approve = approve,
                     reason = if (approve) strings.androidApprovalApprovedReason else strings.androidApprovalDeniedReason,
                 )
-                val approvals = apiClient.listApprovals(status = "pending", limit = 50)
+                val approvals = apiClient.listApprovals(status = "", limit = 50)
                 _uiState.update {
                     it.copy(
                         approvals = approvals,
@@ -903,10 +917,10 @@ fun SettingsScreen(
                     }
 
                     item {
-                        SectionCard(title = strings.text("待审批", "Pending Approvals")) {
+                        SectionCard(title = strings.text("审批送达状态", "Approval Delivery")) {
                             if (state.approvals.isEmpty()) {
                                 Text(
-                                    strings.text("暂无待审批请求。", "No pending approvals."),
+                                    strings.text("暂无审批活动。", "No approval activity."),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -922,6 +936,41 @@ fun SettingsScreen(
                                                 viewModel.decideApproval(apiClient, approval.id, approve = false, onResolved = onApprovalDecision)
                                             },
                                         )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionCard(title = strings.text("事件同步", "Event Sync")) {
+                            if (state.eventAcks.isEmpty()) {
+                                MutedText(strings.text("本设备尚未确认任何事件流。", "This device has not acknowledged an event stream yet."))
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    state.eventAcks.groupBy { it.streamId }.forEach { (streamId, acks) ->
+                                        val plan = state.eventRetentionPlans.firstOrNull { it.streamId == streamId }
+                                        val marker = state.eventCompactionMarkers.firstOrNull { it.streamId == streamId }
+                                        Card(
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                        ) {
+                                            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                Text(streamId, style = MaterialTheme.typography.bodyMedium)
+                                                Text(
+                                                    strings.text(
+                                                        "${acks.size} 台设备已确认${plan?.safeCursor?.takeIf { it > 0 }?.let { "，可安全压缩至 $it" }.orEmpty()}",
+                                                        "${acks.size} device ack${if (acks.size == 1) "" else "s"}${plan?.safeCursor?.takeIf { it > 0 }?.let { "; safe through $it" }.orEmpty()}",
+                                                    ),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                                if (!plan?.blockedByDeviceIds.isNullOrEmpty()) {
+                                                    Text(strings.text("等待设备：", "Waiting for devices: ") + plan!!.blockedByDeviceIds.joinToString(), style = MaterialTheme.typography.bodySmall)
+                                                }
+                                                marker?.let { Text(strings.text("最近压缩：", "Last compaction: ") + (it.reason.ifBlank { it.kind.ifBlank { it.metadata["reason"]?.toString().orEmpty() } }), style = MaterialTheme.typography.bodySmall) }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1196,7 +1245,18 @@ private fun ApprovalCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val deliveryStatus = approval.deliveryStatus.ifBlank { approval.status }
+            Text(
+                listOfNotNull(
+                    deliveryStatus.replace('_', ' ').ifBlank { null },
+                    approval.execution?.attachState?.takeIf { it.isNotBlank() }?.let { strings.text("运行时 $it", "Runtime $it") },
+                    approval.providerFidelity?.get("executionState")?.toString()?.takeIf { it.isNotBlank() }?.let { "execution $it" },
+                    approval.providerFidelity?.get("toolOutput")?.toString()?.takeIf { it.isNotBlank() }?.let { "output $it" },
+                ).joinToString(" · "),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            if (approval.status == "pending") Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onApprove) {
                     Icon(Icons.Default.Check, contentDescription = null)
                     Text(strings.text("批准", "Approve"))

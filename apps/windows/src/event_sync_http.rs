@@ -156,7 +156,7 @@ pub fn route_event_sync_request(
         ("GET", "/api/events/acks") => {
             let items = store.handle(
                 "listEventAcks",
-                &[json!({ "deviceId": device_id, "streamId": query(request, "streamId") })],
+                &[json!({ "streamId": query(request, "streamId") })],
             )?;
             HttpRouteResponse::json(200, json!({ "items": items }))
         }
@@ -561,6 +561,16 @@ mod tests {
         let data_dir = ready_data_dir();
         let db = Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
         db.execute(
+            "INSERT INTO event_acks VALUES ('device-2', 'task:task-1', 7, '', '2026-07-20T00:00:00.000Z', '{}')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO event_acks VALUES ('device-current', 'task:task-1', 9, '', '2026-07-20T00:00:00.000Z', '{}')",
+            [],
+        )
+        .unwrap();
+        db.execute(
             "INSERT INTO compaction_markers VALUES ('m1', 'task:task-1', 1, 2, '2026-07-20T00:00:00.000Z', '{}')",
             [],
         )
@@ -581,6 +591,14 @@ mod tests {
             "toCursor": 2, "compactedAt": "2026-07-20T00:00:00.000Z", "metadata": {}
         }] })
         );
+        let ack_request = parse_request(
+            b"GET /api/events/acks?streamId=task%3Atask-1 HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer active-token\r\n\r\n",
+        )
+        .unwrap();
+        let ack_response = route_event_sync_request(&ack_request, "127.0.0.1", None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ack_response.body["items"].as_array().unwrap().len(), 2);
         fs::remove_dir_all(data_dir).unwrap();
     }
 

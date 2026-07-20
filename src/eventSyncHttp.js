@@ -52,9 +52,8 @@ export function createEventSyncHttpHandler({
     }
 
     if (url.pathname === "/api/events/acks" && request.method === "GET") {
-      const deviceId = String(auth?.device?.id || "").trim();
       const streamId = url.searchParams.get("streamId") || "";
-      sendJson(response, 200, { items: listEventAcks({ deviceId, streamId }) });
+      sendJson(response, 200, { items: listEventAcks({ streamId }) });
       return true;
     }
 

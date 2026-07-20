@@ -5,6 +5,12 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import {
+  approvalDeliveryPresentation,
+  buildEventAck,
+  eventStreamId,
+  retentionPresentation
+} from "./eventSyncModel.js";
 import "katex/dist/katex.min.css";
 import {
   ArrowUp,
@@ -157,6 +163,57 @@ async function request(path, options = {}, token = savedToken) {
     throw error;
   }
   return data;
+}
+
+const eventAckQueues = new Map();
+const EVENT_SYNC_STREAMS_KEY = "mat.event-sync.streams";
+
+function knownEventStreams() {
+  try {
+    return JSON.parse(localStorage.getItem(EVENT_SYNC_STREAMS_KEY) || "[]").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function rememberEventStream(streamId) {
+  const streams = [...new Set([...knownEventStreams(), streamId])].slice(-50);
+  localStorage.setItem(EVENT_SYNC_STREAMS_KEY, JSON.stringify(streams));
+}
+
+function ackStorageKey(streamId) {
+  return `mat.event-sync.ack.${streamId}`;
+}
+
+function ackEventCursor(token, streamId, cursor, eventId = "") {
+  if (!streamId || !Number(cursor)) return Promise.resolve(null);
+  const previous = eventAckQueues.get(streamId) || Promise.resolve();
+  const queued = previous.catch(() => {}).then(async () => {
+    let expectedCursor = Number(localStorage.getItem(ackStorageKey(streamId)) || 0);
+    let payload = buildEventAck(streamId, Number(cursor), expectedCursor, eventId);
+    if (!payload) return null;
+    try {
+      const result = await request("/api/events/ack", { method: "POST", body: JSON.stringify(payload) }, token);
+      const acknowledged = Number(result.ack?.cursor ?? result.cursor ?? payload.cursor);
+      localStorage.setItem(ackStorageKey(streamId), String(acknowledged));
+      rememberEventStream(streamId);
+      return result;
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      expectedCursor = Number(error.data?.current?.cursor || 0);
+      localStorage.setItem(ackStorageKey(streamId), String(expectedCursor));
+      payload = buildEventAck(streamId, Number(cursor), expectedCursor, eventId);
+      if (!payload) return error.data?.current || null;
+      const result = await request("/api/events/ack", { method: "POST", body: JSON.stringify(payload) }, token);
+      localStorage.setItem(ackStorageKey(streamId), String(Number(result.ack?.cursor ?? result.cursor ?? payload.cursor)));
+      rememberEventStream(streamId);
+      return result;
+    }
+  });
+  eventAckQueues.set(streamId, queued);
+  return queued.finally(() => {
+    if (eventAckQueues.get(streamId) === queued) eventAckQueues.delete(streamId);
+  });
 }
 
 function formatTime(value) {
@@ -4254,6 +4311,8 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
   const [toolEventError, setToolEventError] = useState("");
   const [toolEventNotice, setToolEventNotice] = useState("");
   const [toolEventPreview, setToolEventPreview] = useState(null);
+  const [eventSyncRows, setEventSyncRows] = useState([]);
+  const [eventSyncError, setEventSyncError] = useState("");
   const [mcpConfig, setMcpConfig] = useState(JSON.stringify(settings?.mcp?.servers || [], null, 2));
   const [mcpTimeoutMs, setMcpTimeoutMs] = useState(settings?.mcp?.probeTimeoutMs || 10000);
   const [mcpBusy, setMcpBusy] = useState("");
@@ -4307,7 +4366,7 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
       const [deviceResult, pairingResult, approvalResult, auditResult, cloudflareResult] = await Promise.all([
         request("/api/devices", {}, token),
         request("/api/pairing-sessions", {}, token),
-        request("/api/approvals?status=pending&limit=20", {}, token),
+        request("/api/approvals?limit=50", {}, token),
         request("/api/audit-log?limit=12", {}, token),
         request("/api/cloudflare/guide", {}, token)
       ]);
@@ -4322,9 +4381,29 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
     }
   }
 
+  async function refreshEventSync() {
+    setEventSyncError("");
+    const streams = knownEventStreams().slice(-12);
+    try {
+      const rows = await Promise.all(streams.map(async (streamId) => {
+        const encoded = encodeURIComponent(streamId);
+        const [acks, plan, markers] = await Promise.all([
+          request(`/api/events/acks?streamId=${encoded}`, {}, token),
+          request(`/api/events/retention-plan?streamId=${encoded}`, {}, token),
+          request(`/api/events/compaction-markers?streamId=${encoded}&limit=1`, {}, token)
+        ]);
+        return { streamId, acks: acks.items || [], plan, marker: (markers.items || [])[0] || null };
+      }));
+      setEventSyncRows(rows);
+    } catch (error) {
+      setEventSyncError(error.message);
+    }
+  }
+
   useEffect(() => {
     refreshSecurity().catch((err) => setSecurityError(err.message));
     refreshToolEventsStats().catch((err) => setToolEventError(err.message));
+    refreshEventSync().catch((err) => setEventSyncError(err.message));
   }, [token]);
 
   async function refreshScheduler() {
@@ -4887,27 +4966,45 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
         </div>
         {pushState ? <p className="form-success">{pushState}</p> : null}
         <div className="security-section">
-          <h3>Pending approvals</h3>
+          <h3>Approval delivery</h3>
           {approvals.length ? approvals.map((approval) => {
             const command = approval.request?.command || approval.request?.input?.command || approval.title || approval.kind;
+            const delivery = approvalDeliveryPresentation(approval);
             return (
-              <div className="security-row approval-row" key={approval.id}>
+              <div className={cx("security-row", "approval-row", delivery.tone)} key={approval.id}>
                 <div>
                   <strong>{approval.kind || "tool approval"}</strong>
                   <small>{approval.reason || "Approval required"} · expires {formatTime(approval.expiresAt)}</small>
+                  <small>{delivery.label}{delivery.detail ? ` · ${delivery.detail}` : ""}{approval.providerFidelity?.executionState ? ` · execution ${approval.providerFidelity.executionState}` : ""}{approval.providerFidelity?.toolOutput ? ` · output ${approval.providerFidelity.toolOutput}` : ""}</small>
                   <code>{command}</code>
                 </div>
-                <div className="security-row-actions">
+                {approval.status === "pending" ? <div className="security-row-actions">
                   <button className="secondary-button" type="button" onClick={() => decideApproval(approval.id, "approve")} disabled={Boolean(securityBusy)}>
                     Approve
                   </button>
                   <button className="secondary-button danger" type="button" onClick={() => decideApproval(approval.id, "deny")} disabled={Boolean(securityBusy)}>
                     Deny
                   </button>
-                </div>
+                </div> : null}
               </div>
             );
-          }) : <p>No pending approvals.</p>}
+          }) : <p>No approval activity.</p>}
+        </div>
+        <div className="security-section">
+          <h3>Event sync</h3>
+          {eventSyncRows.length ? eventSyncRows.map((row) => {
+            const retention = retentionPresentation(row.plan);
+            return <div className={cx("security-row", retention.tone)} key={row.streamId}>
+              <div>
+                <strong>{row.streamId}</strong>
+                <small>{retention.label} · {row.acks.length} device ack{row.acks.length === 1 ? "" : "s"}</small>
+                {retention.blockedByDeviceIds.length ? <small>Waiting for {retention.blockedByDeviceIds.join(", ")}</small> : null}
+                {row.marker ? <small>Last compaction {formatTime(row.marker.compactedAt || row.marker.createdAt || row.marker.at)} · {row.marker.reason || row.marker.kind || row.marker.metadata?.reason || "retention"}</small> : null}
+              </div>
+            </div>;
+          }) : <p>No consumed event streams on this browser yet.</p>}
+          {eventSyncError ? <p className="form-error">{eventSyncError}</p> : null}
+          <button className="secondary-button" type="button" onClick={refreshEventSync}>Refresh event sync</button>
         </div>
         <div className="security-section">
           <h3>Pending pairing</h3>
@@ -5229,6 +5326,11 @@ function LiveCallPanel({ onClose, token }) {
 
     const cursorKey = `mat.live-call.${session.id}.cursor`;
     const cursor = parseInt(localStorage.getItem(cursorKey) || "0", 10);
+    const consumeCursor = (data) => {
+      if (!data?.cursor) return;
+      rememberStreamCursor(cursorKey, data.cursor);
+      ackEventCursor(token, eventStreamId("live-call", session.id), data.cursor, data.id || "").catch(() => {});
+    };
     const es = new EventSource(`/api/live-calls/${session.id}/events?after=${cursor}`);
     eventSourceRef.current = es;
 
@@ -5236,25 +5338,25 @@ function LiveCallPanel({ onClose, token }) {
       const data = JSON.parse(event.data);
       if (data.channel === "remote") setRemoteLevel(data.level?.rms || 0);
       if (data.channel === "local") setLocalLevel(data.level?.rms || 0);
-      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+      consumeCursor(data);
     });
 
     es.addEventListener("live_call.transcript.partial", (event) => {
       const data = JSON.parse(event.data);
       setTranscripts((prev) => [...prev, { ...data, id: data.cursor, at: data.at }]);
-      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+      consumeCursor(data);
     });
 
     es.addEventListener("live_call.transcript.final", (event) => {
       const data = JSON.parse(event.data);
       setTranscripts((prev) => [...prev, { ...data, id: data.cursor, at: data.at, final: true }]);
-      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+      consumeCursor(data);
     });
 
     es.addEventListener("live_call.question.detected", (event) => {
       const data = JSON.parse(event.data);
       setQaPairs((prev) => [...prev, { question: data.text, answer: "", id: data.cursor, agentState: "idle" }]);
-      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+      consumeCursor(data);
     });
 
     es.addEventListener("live_call.agent.done", (event) => {
@@ -5271,7 +5373,7 @@ function LiveCallPanel({ onClose, token }) {
         }
         return next;
       });
-      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+      consumeCursor(data);
     });
 
     es.addEventListener("live_call.agent.thinking", (event) => {
@@ -5288,7 +5390,7 @@ function LiveCallPanel({ onClose, token }) {
         }
         return next;
       });
-      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+      consumeCursor(data);
     });
 
     es.addEventListener("live_call.agent.delta", (event) => {
@@ -5311,7 +5413,7 @@ function LiveCallPanel({ onClose, token }) {
         }
         return next;
       });
-      if (data.cursor) rememberStreamCursor(cursorKey, data.cursor);
+      consumeCursor(data);
     });
 
     es.addEventListener("live_call.agent.error", (event) => {
@@ -5907,6 +6009,15 @@ function App() {
     }
     const nextCursor = cursorFromEvents(events);
     if (nextCursor) cursorRef.current = Math.max(Number(cursorRef.current || 0), nextCursor);
+    const consumedByRun = new Map();
+    for (const event of events) {
+      if (!event.toolRunId || !event.cursor) continue;
+      const previous = consumedByRun.get(event.toolRunId);
+      if (!previous || Number(event.cursor) > Number(previous.cursor)) consumedByRun.set(event.toolRunId, event);
+    }
+    for (const event of consumedByRun.values()) {
+      ackEventCursor(token, eventStreamId("tool-event", event.toolRunId), event.cursor, event.id || "").catch(() => {});
+    }
     if (next.length) {
       setToolEvents((items) => {
         const existing = new Set(items.map((event) => event.id || `${event.toolRunId}:${event.cursor || event.at || ""}`));
@@ -5990,6 +6101,7 @@ function App() {
     if (nextCursor) {
       seenCountRef.cursor = Math.max(Number(seenCountRef.cursor || 0), nextCursor);
       if (options.cursorKey) rememberStreamCursor(options.cursorKey, seenCountRef.cursor);
+      if (options.streamId) ackEventCursor(token, options.streamId, seenCountRef.cursor, events.at(-1)?.id || "").catch(() => {});
     }
     const nextMessages = messagesFromEvents(nextEvents, options);
     if (nextMessages.length) setMessages((items) => appendDisplayMessages(items, nextMessages));
@@ -5999,7 +6111,8 @@ function App() {
     const taskId = task?.id || task;
     const eventOptions = {
       animateAssistant: false,
-      cursorKey: streamCursorKey("task", taskId)
+      cursorKey: streamCursorKey("task", taskId),
+      streamId: eventStreamId("task", taskId)
     };
     if (pollRef.current) clearInterval(pollRef.current);
     const poll = async () => {
@@ -6048,7 +6161,8 @@ function App() {
       );
       appendTaskEvents(catchUp.items || [], seenCountRef, {
         animateAssistant: false,
-        cursorKey
+        cursorKey,
+        streamId: eventStreamId("task", task.id)
       });
 
       const source = new EventSource(`/api/tasks/${task.id}/events?token=${encodeURIComponent(token)}&after=${Number(seenCountRef.cursor || 0)}`);
@@ -6073,6 +6187,7 @@ function App() {
         if (eventCursor) {
           seenCountRef.cursor = Math.max(Number(seenCountRef.cursor || 0), eventCursor);
           rememberStreamCursor(cursorKey, seenCountRef.cursor);
+          ackEventCursor(token, eventStreamId("task", task.id), seenCountRef.cursor, event.id || "").catch(() => {});
         }
         const role = taskEventRole(event);
         const text = taskEventText(event);

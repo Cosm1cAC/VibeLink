@@ -69,6 +69,7 @@ import { browserFetchRisk, createBrowserSessionRuntime, fetchBrowserPage } from 
 import { routeBrowserSessionRequest } from "./browserSessionHttp.js";
 import { artifactMetadata, artifactPreview, mutateArtifact, readArtifactRange } from "./artifactRuntime.js";
 import { createApprovalDispatcher } from "./approvalDispatcher.js";
+import { enrichApprovalProductState } from "./approvalProductState.js";
 import { getCompactServiceMetrics } from "./compactService.js";
 import { getContextBudgetMetrics } from "./contextBudget.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
@@ -2224,8 +2225,13 @@ async function routeApi(request, response, url) {
       workspaceId: url.searchParams.get("workspaceId") || "",
       limit: Number(url.searchParams.get("limit") || 100)
     }).map((approval) => (approval?.status === "expired" ? expireToolApproval(approval.id) : approval));
+    const enriched = enrichApprovalProductState(
+      approvals,
+      listExecutionBindings(),
+      await providerRegistryPayload({ backgroundRefresh: true })
+    );
     sendJson(response, 200, {
-      items: applyFields(approvals, url)
+      items: applyFields(enriched, url)
     });
     return;
   }

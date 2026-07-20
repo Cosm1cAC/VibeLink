@@ -858,12 +858,32 @@ class ApiClient(
         return gson.fromJson(json, ToolEventListResponse::class.java).items
     }
 
+    suspend fun acknowledgeEvent(streamId: String, cursor: Int, expectedCursor: Int = 0, eventId: String = ""): EventAcknowledgement? {
+        val json = post("/api/events/ack", EventAckRequest(streamId, cursor, expectedCursor, eventId))
+        return gson.fromJson(json, EventAckResponse::class.java).ack
+    }
+
+    suspend fun listEventAcks(streamId: String = ""): List<EventAcknowledgement> {
+        val json = get("/api/events/acks?streamId=${encode(streamId)}")
+        return gson.fromJson(json, EventAckListResponse::class.java).items
+    }
+
+    suspend fun getEventRetentionPlan(streamId: String): EventRetentionPlan {
+        val json = get("/api/events/retention-plan?streamId=${encode(streamId)}")
+        return gson.fromJson(json, EventRetentionPlan::class.java)
+    }
+
+    suspend fun listEventCompactionMarkers(streamId: String = "", limit: Int = 20): List<EventCompactionMarker> {
+        val json = get("/api/events/compaction-markers?streamId=${encode(streamId)}&limit=$limit")
+        return gson.fromJson(json, EventCompactionMarkerListResponse::class.java).items
+    }
+
     suspend fun getToolRun(toolRunId: String, after: Int = 0, limit: Int = 1000): ToolRunDetailResponse {
         val json = get("/api/tool-runs/${encode(toolRunId)}?after=$after&limit=$limit")
         return gson.fromJson(json, ToolRunDetailResponse::class.java)
     }
 
-    suspend fun listApprovals(status: String = "pending", limit: Int = 50): List<ApprovalRequestItem> {
+    suspend fun listApprovals(status: String = "", limit: Int = 50): List<ApprovalRequestItem> {
         val json = get("/api/approvals?status=${encode(status)}&limit=$limit")
         return gson.fromJson(json, ApprovalListResponse::class.java).items
     }

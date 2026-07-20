@@ -1219,16 +1219,30 @@ data class ApprovalListResponse(
     val items: List<ApprovalRequestItem> = emptyList(),
 )
 
+data class ExecutionBindingSummary(
+    val id: String = "",
+    val owner: String = "",
+    val status: String = "",
+    @SerializedName("attachState") val attachState: String = "",
+)
+
 data class ApprovalRequestItem(
     val id: String = "",
     val kind: String = "",
     val title: String = "",
     val reason: String = "",
     val status: String = "",
+    val provider: String = "",
+    @SerializedName("deliveryStatus") val deliveryStatus: String = "",
+    @SerializedName("continuationRef") val continuationRef: String = "",
+    @SerializedName("decisionVersion") val decisionVersion: Int = 0,
+    @SerializedName("expectedVersion") val expectedVersion: Int = 0,
     @SerializedName("toolRunId") val toolRunId: String = "",
     @SerializedName("workspaceId") val workspaceId: String = "",
     val request: Map<String, Any?>? = null,
     val risk: Map<String, Any?>? = null,
+    val execution: ExecutionBindingSummary? = null,
+    @SerializedName("providerFidelity") val providerFidelity: Map<String, Any?>? = null,
     @SerializedName("createdAt") val createdAt: String = "",
     @SerializedName("updatedAt") val updatedAt: String = "",
 )
@@ -1300,6 +1314,44 @@ data class SettingsPatchResponse(
     val settings: PublicSettings? = null,
     val error: String = "",
 )
+
+data class EventAckRequest(
+    @SerializedName("streamId") val streamId: String,
+    val cursor: Int,
+    @SerializedName("expectedCursor") val expectedCursor: Int = 0,
+    @SerializedName("eventId") val eventId: String = "",
+)
+
+data class EventAcknowledgement(
+    @SerializedName("deviceId") val deviceId: String = "",
+    @SerializedName("streamId") val streamId: String = "",
+    val cursor: Int = 0,
+    @SerializedName("eventId") val eventId: String = "",
+    @SerializedName("updatedAt") val updatedAt: String = "",
+)
+
+data class EventAckResponse(val ok: Boolean = false, val ack: EventAcknowledgement? = null)
+data class EventAckListResponse(val items: List<EventAcknowledgement> = emptyList())
+
+data class EventRetentionPlan(
+    @SerializedName("streamId") val streamId: String = "",
+    val safe: Boolean = false,
+    @SerializedName("compactThroughCursor") val compactThroughCursor: Int = 0,
+    @SerializedName("safeCursor") val safeCursor: Int = 0,
+    @SerializedName("blockedByDeviceIds") val blockedByDeviceIds: List<String> = emptyList(),
+)
+
+data class EventCompactionMarker(
+    val id: String = "",
+    @SerializedName("streamId") val streamId: String = "",
+    val reason: String = "",
+    val kind: String = "",
+    @SerializedName("createdAt") val createdAt: String = "",
+    @SerializedName("compactedAt") val compactedAt: String = "",
+    val metadata: Map<String, Any?> = emptyMap(),
+)
+
+data class EventCompactionMarkerListResponse(val items: List<EventCompactionMarker> = emptyList())
 
 data class BrowserPageInfo(
     val id: String = "",

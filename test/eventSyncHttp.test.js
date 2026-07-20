@@ -92,3 +92,29 @@ test("event mutations are rate limited and audited", async () => {
   assert.equal(audits[0][3].type, "events.compact");
   assert.equal(audits[0][3].meta.deleted, 2);
 });
+
+test("ack list exposes every device for multi-device retention visibility", async () => {
+  let filters = null;
+  const handler = createEventSyncHttpHandler({
+    readBody: async () => ({}),
+    sendJson: (response, status, payload) => Object.assign(response, { status, payload }),
+    getEventAck: () => null,
+    upsertEventAck: () => ({}),
+    listEventAcks: (value) => {
+      filters = value;
+      return [{ deviceId: "browser" }, { deviceId: "phone" }];
+    },
+    planRetention: () => ({}),
+    compactEvents: () => ({}),
+    listCompactionMarkers: () => []
+  });
+  const response = responseRecorder();
+  await handler(
+    { method: "GET" },
+    response,
+    new URL("http://bridge/api/events/acks?streamId=task:task-1"),
+    { device: { id: "browser" } }
+  );
+  assert.deepEqual(filters, { streamId: "task:task-1" });
+  assert.equal(response.payload.items.length, 2);
+});

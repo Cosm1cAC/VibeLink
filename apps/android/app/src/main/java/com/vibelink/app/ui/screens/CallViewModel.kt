@@ -5,11 +5,13 @@ import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import com.vibelink.app.audio.AudioLevel
 import com.vibelink.app.audio.LiveCallAudioService
 import com.vibelink.app.audio.LiveCallAudioStreamer
 import com.vibelink.app.mobile.EventStreamRecoveryPolicy
 import com.vibelink.app.network.ApiClient
+import com.vibelink.app.network.ApiException
 import com.vibelink.app.network.AsrCheckpointInfo
 import com.vibelink.app.network.AsrProviderInfo
 import com.vibelink.app.network.LiveCallEvent
@@ -186,6 +188,8 @@ class CallViewModel : ViewModel() {
     private var eventReconnectJob: Job? = null
     private var eventStreamGeneration = 0L
     private var lastEventCursor = 0
+    private var eventAckCursor = 0
+    private var eventSyncApiClient: ApiClient? = null
     private var reconnectAttempt = 0
     private var audioStreamer: LiveCallAudioStreamer? = null
     private var appContext: Context? = null
@@ -248,6 +252,7 @@ class CallViewModel : ViewModel() {
             cancelEventStream()
             seenEvents.clear()
             lastEventCursor = 0
+            eventAckCursor = 0
             _uiState.update { state ->
                 val selected = state.sessions.firstOrNull { it.id == sessionId }
                 state.copy(
@@ -288,6 +293,7 @@ class CallViewModel : ViewModel() {
             cancelEventStream()
             seenEvents.clear()
             lastEventCursor = 0
+            eventAckCursor = 0
             _uiState.update {
                 it.copy(
                     loading = true,
@@ -514,6 +520,7 @@ class CallViewModel : ViewModel() {
         generation: Long = eventStreamGeneration,
     ) {
         if (generation != eventStreamGeneration || !_uiState.value.sessionActive) return
+        eventSyncApiClient = apiClient
         lastEventCursor = EventStreamRecoveryPolicy.nextCursor(lastEventCursor, after)
         val previous = eventSource
         eventSource = null
@@ -588,6 +595,23 @@ class CallViewModel : ViewModel() {
 
     private fun applyEvent(event: LiveCallEvent) {
         lastEventCursor = EventStreamRecoveryPolicy.nextCursor(lastEventCursor, event.cursor)
+        val sessionId = _uiState.value.sessionId
+        val apiClient = eventSyncApiClient
+        if (apiClient != null && sessionId.isNotBlank() && lastEventCursor > eventAckCursor) {
+            viewModelScope.launch {
+                var expected = eventAckCursor
+                runCatching { apiClient.acknowledgeEvent("live-call:$sessionId", lastEventCursor, expected, event.id) }
+                    .recoverCatching { error ->
+                        if (error !is ApiException || error.statusCode != 409) throw error
+                        expected = runCatching {
+                            JsonParser.parseString(error.body).asJsonObject.getAsJsonObject("current")?.get("cursor")?.asInt ?: 0
+                        }.getOrDefault(0)
+                        eventAckCursor = expected
+                        if (lastEventCursor <= expected) null else apiClient.acknowledgeEvent("live-call:$sessionId", lastEventCursor, expected, event.id)
+                    }
+                    .onSuccess { ack -> eventAckCursor = ack?.cursor ?: maxOf(expected, lastEventCursor) }
+            }
+        }
         if (!seenEvents.add(eventKey(event))) return
         _uiState.update { state ->
             val events = (state.events + event).takeLast(MAX_EVENTS)

@@ -34,11 +34,12 @@ export async function routeBrowserSessionRequest(request, response, url, auth, d
     if (url.pathname === "/api/browser-sessions" && request.method === "POST") {
       if (rateLimited("browser.session.create", { limit: 12, windowMs: 60_000 })) return true;
       const body = await readBody(request);
+      const executablePath = String(process.env.VIBELINK_CHROMIUM_EXECUTABLE || "").trim();
       const session = await runtime.createSession({
         browserType: "chromium",
         timeoutMs: number(body.timeoutMs, undefined),
         maxTraceEvents: number(body.maxTraceEvents, undefined),
-        launchOptions: { headless: true }
+        launchOptions: { headless: true, ...(executablePath ? { executablePath } : {}) }
       });
       record({ type: "browser.session.create", success: true, target: session.id });
       sendJson(response, 201, { session });

@@ -1,6 +1,6 @@
 # VibeLink Android Capability Matrix / VibeLink Android 能力矩阵
 
-Status updated on 2026-07-19.  更新日期：2026-07-19。
+Status updated on 2026-07-20.  更新日期：2026-07-20。
 
 | Capability | Implementation | Existing automation | Audit result |
 | --- | --- | --- | --- |
@@ -19,27 +19,26 @@ Status updated on 2026-07-19.  更新日期：2026-07-19。
 | Settings/security/devices | Status, doctor, MCP, import/export, push, device revoke, audit | Section-target unit test plus visible real-bridge load smoke | Implemented; save/revoke/import mutations still lack device-level regression coverage. |
 | Approvals | Pending list, approve/deny, task and terminal handoff | JVM handoff tests | Implemented; tool-call continuation semantics remain a documented product P0 gap. |
 | Tool events/SSE/recovery | Task/tool SSE, catch-up, polling policies | Reducer/resilience unit tests | Implemented; no long-running disconnect/reconnect instrumentation test. |
-| Live Call | Session restore, events, ASR selection/checkpoints, pause/resume, mic service, local PCM list/delete, QA cards | QA reducer/resilience unit tests plus visible real-bridge smoke | UI/client implemented; real ASR and long-duration PCM stability/quality validation remain incomplete. |
-| Notifications | Android 13+ permission policy and native token registration | JVM policy test | Implemented; no device-level permission regression. |
+| Live Call | Session restore, events, ASR selection/checkpoints, pause/resume, mic service, local PCM list/delete, QA cards | QA reducer/resilience tests; weekly one-hour mock-ASR weak-network baseline in `release-quality-evidence.yml` | Continuous reconnect/PCM evidence is archived. Physical-device mic, notification and real-ASR quality remain release gates. |
+| Notifications | Android 13+ permission policy and native token registration | JVM policy test plus connected-device regression workflow | Implemented; physical-device vendor permission variants remain unverified. |
 | Localization | Chinese/English string provider and setting; session search, Workspace, Review, pairing, and operational status copy use the provider | JVM source/string-selection gate | Implemented for runtime copy; protocol identifiers, user content, and fixed data formats remain untranslated by design. |
 | Accessibility and UI automation | Explicit login heading, pane, polite live-region, password, and IME traversal semantics; bounded adaptive login form | Existing auth/intent device suite plus phone/tablet, 200% font, TalkBack-tree, keyboard, and rotation regressions | Test sources compile. Device execution remains pending because no emulator/device was connected during the 2026-07-19 verification run. |
-| Browser control and test traces | None in Android | None | Missing product capability by design/status. |
-| Plugins/Hooks/Automations/Subagents/AGENTS/config UI | None | None | Missing product capability. |
+| Managed browser control and test traces | `BrowserWorkspaceSection`, managed session/page/navigation/screenshot/trace APIs | Runtime/HTTP tests plus real-Bridge Chromium evidence script; connected-device workflow archives Android results | Implemented. Release evidence asserts trace redaction, pagination, new-client reconnect and cleanup; physical-phone remote-control smoke remains pending. |
+| Plugins/Hooks/Automations/Subagents/AGENTS/config UI | `CapabilityCenterSection`, typed `ApiClient` lifecycle mutations and approval/error feedback | JVM HTTP contract tests plus connected-device workflow | Web/Android lifecycle parity implemented for install/remove/toggle/create/run/stop/edit. Physical-device approval decision flow remains pending. |
+| Artifact workbench | Native table/Notebook editing and Office/PDF/XLSX read-only renderers | Bridge round-trip/corruption/limit tests, Android display policy tests, connected-device workflow | Digest-safe editing implemented. Large tables are bounded by phone/tablet width and failed previews expose retry; physical-device corrupt/rotation smoke remains pending. |
 | Global command palette/full-text search/tags/favorites | Limited prompt command catalog and session search | Prompt catalog unit tests | Partial/missing product capability. |
 
-## Repair Scope For This Audit / 本次审计修复范围
+## Current Release Evidence / 当前发布证据
 
-1. Make logout actually clear both persisted and in-memory authentication state.
-2. Prevent shared content from bypassing login and process new VIEW/SEND intents while the activity remains alive.
-3. Mask the pairing-token field.
-4. Add repeatable device-level smoke automation for the login and intent-routing boundary.
-
-The larger product gaps above require separate feature work and are not represented as completed by this audit.
+1. `tools/release/browser-session-evidence.mjs` exercises a real isolated Bridge and Chromium, validates redaction/pagination/reconnect/cleanup, and captures desktop/phone Web screenshots.
+2. `.github/workflows/release-quality-evidence.yml` runs the browser evidence, Android connected tests, diagnostics capture, and scheduled one-hour weak-network Live Call baseline with artifact retention.
+3. JVM/Node tests cover Capability Center lifecycle contracts, approval/error formatting, Artifact editing limits/corruption, and adaptive table bounds.
+4. Physical Android phone/tablet execution is intentionally recorded as pending until a real device run produces artifacts; emulator CI is not treated as equivalent evidence.
 
 ## Automated Verification / 自动化验证
 
 - JVM tests and debug APK build passed.
-- Six Compose instrumentation tests passed on the visible `Codex_API_36` emulator.
+- Existing Compose instrumentation tests previously passed on the visible `Codex_API_36` emulator; the new release workflow reruns and archives them on API 35.
 - Temporary deep-link pairing against the real local bridge succeeded.
 - Session list, Workspace, Live Call, and fully loaded Settings rendered without blank pages or incoherent overlap.
 - Filtered runtime logs contained no VibeLink fatal exception or ANR.
@@ -63,10 +62,11 @@ The larger product gaps above require separate feature work and are not represen
 | 设置、安全、设备 | 加载已经真实 Bridge 验证，保存、撤销、导入变更仍缺设备回归。 |
 | 审批 | 已实现，工具调用续接语义仍是 P0 产品缺口。 |
 | SSE、工具事件、恢复 | 已实现，缺长时断线/重连仪器测试。 |
-| Live Call | UI 与客户端已实现，本地 PCM 列表/删除已有；真实 ASR 与长时稳定性仍未完成验证。 |
+| Live Call | UI 与客户端已实现；每周持续执行并归档一小时 mock-ASR 弱网/重连基线，真实 ASR 与物理设备麦克风质量仍待验证。 |
 | 通知 | 已实现，缺 Android 权限设备回归。 |
 | 本地化 | 部分实现，部分运行时状态文案仍硬编码为中文。 |
 | 无障碍与 UI 自动化 | 关键认证/意图边界已覆盖，键盘、旋转、TalkBack 与更广导航仍缺覆盖。 |
-| 浏览器控制与测试追踪 | Android 端尚缺失。 |
-| 插件、Hook、自动化、Subagent、AGENTS 与配置 UI | Android 端尚缺失。 |
+| 浏览器控制与测试追踪 | 已实现 Bridge 托管浏览器遥控；真实 Bridge 证据覆盖脱敏、分页、重连和清理，物理手机 smoke 待执行。 |
+| 插件、Hook、自动化、Subagent、AGENTS 与配置 UI | Web/Android 生命周期动作已对齐，错误与审批待办统一呈现；物理设备审批决策回归待执行。 |
+| Artifact workbench | 已实现双端 renderer 与 CSV/TSV、Notebook 编辑；Android 大表有界渲染和失败重试已加入，物理手机/平板旋转证据待执行。 |
 | 全局命令面板、全文搜索、标签、收藏 | 只有有限命令目录与会话搜索，整体仍属部分/缺失。 |

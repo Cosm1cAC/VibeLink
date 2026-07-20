@@ -70,7 +70,8 @@ pub fn route_workspace_request(
     let file_mutation = request.method == "POST" && action_path == "file";
     let git_status = request.method == "GET" && action_path == "git/status";
     let git_diff = request.method == "GET" && action_path == "git/diff";
-    if !file_mutation && !git_status && !git_diff {
+    let worktree_list = request.method == "GET" && action_path == "worktrees";
+    if !file_mutation && !git_status && !git_diff && !worktree_list {
         return Ok(None);
     }
     let auth = authenticate_route_request(request, &config.data_dir)?;
@@ -95,6 +96,11 @@ pub fn route_workspace_request(
     }
     if git_diff {
         let result = workspace_git_diff(&config.data_dir, &workspace_id)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
+    if worktree_list {
+        let result = list_workspace_worktrees(&config.data_dir, &workspace_id)?;
         config.metrics.responses.fetch_add(1, Ordering::SeqCst);
         return Ok(Some(HttpRouteResponse::json(200, result)));
     }
@@ -340,6 +346,77 @@ fn workspace_git_diff(data_dir: &Path, workspace_id: &str) -> Result<Value> {
     }))
 }
 
+fn list_workspace_worktrees(data_dir: &Path, workspace_id: &str) -> Result<Value> {
+    let db_path = data_dir.join("mobile-agent.sqlite");
+    let connection = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Cannot open {}", db_path.display()))?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    let cwd = connection
+        .query_row(
+            "SELECT path FROM workspaces WHERE id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("Workspace not found."))?;
+    let root = canonical_root(Path::new(&cwd))?;
+    let result = run_git(&root, &["worktree", "list", "--porcelain"])?;
+    if !result.ok {
+        bail!(
+            "{}",
+            if result.stderr.is_empty() {
+                "Failed to list git worktrees."
+            } else {
+                result.stderr.trim()
+            }
+        );
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT id, path, title, allowed_root, created_at, updated_at, last_used_at FROM workspaces",
+    )?;
+    let registered = statement
+        .query_map([], |row| {
+            let path = row.get::<_, String>(1)?;
+            let workspace = json!({
+                "id": row.get::<_, String>(0)?,
+                "path": path,
+                "title": row.get::<_, String>(2)?,
+                "allowedRoot": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                "createdAt": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                "updatedAt": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                "lastUsedAt": row.get::<_, Option<String>>(6)?.unwrap_or_default()
+            });
+            Ok((normalized_path_key(Path::new(&path)), workspace))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    let mut worktrees = parse_worktree_list(&result.stdout);
+    for worktree in &mut worktrees {
+        let path = worktree["path"].as_str().unwrap_or("");
+        worktree["workspace"] = registered
+            .iter()
+            .find(|(key, _)| key == &normalized_path_key(Path::new(path)))
+            .map(|(_, workspace)| workspace.clone())
+            .unwrap_or(Value::Null);
+    }
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let now = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    connection.execute(
+        "UPDATE workspaces SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now, workspace_id],
+    )?;
+    Ok(json!({
+        "ok": true,
+        "workspaceId": workspace_id,
+        "worktrees": worktrees
+    }))
+}
+
 struct GitCommandResult {
     ok: bool,
     stdout: String,
@@ -419,6 +496,67 @@ fn parse_git_diff_files(diff: &str) -> Vec<Value> {
         }
     }
     files
+}
+
+fn parse_worktree_list(stdout: &str) -> Vec<Value> {
+    let mut entries = Vec::new();
+    let mut current = None;
+    for line in stdout.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            continue;
+        }
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        if key == "worktree" {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            current = Some(json!({
+                "path": Path::new(value).to_string_lossy(),
+                "headSha": "",
+                "branch": "",
+                "detached": false,
+                "bare": false,
+                "locked": false,
+                "lockReason": "",
+                "prunable": false,
+                "pruneReason": ""
+            }));
+            continue;
+        }
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        match key {
+            "HEAD" => entry["headSha"] = json!(value),
+            "branch" => entry["branch"] = json!(value.strip_prefix("refs/heads/").unwrap_or(value)),
+            "detached" => entry["detached"] = json!(true),
+            "bare" => entry["bare"] = json!(true),
+            "locked" => {
+                entry["locked"] = json!(true);
+                entry["lockReason"] = json!(value);
+            }
+            "prunable" => {
+                entry["prunable"] = json!(true);
+                entry["pruneReason"] = json!(value);
+            }
+            _ => {}
+        }
+    }
+    for (index, entry) in entries.iter_mut().enumerate() {
+        entry["isMain"] = json!(index == 0);
+    }
+    entries
+}
+
+fn normalized_path_key(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .to_ascii_lowercase()
 }
 
 fn pseudo_diff_for_untracked(root: &Path, rel_path: &str) -> Result<Option<String>> {
@@ -952,5 +1090,85 @@ mod tests {
             .unwrap()
             .contains("diff --git a/first.txt b/first.txt"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lists_registered_locked_workspace_worktrees() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let linked = dir.join("linked");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "VibeLink Test"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feature/worktree",
+            linked.to_string_lossy().as_ref(),
+        ]);
+        git(&[
+            "worktree",
+            "lock",
+            "--reason",
+            "device handoff",
+            linked.to_string_lossy().as_ref(),
+        ]);
+        let db = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
+        db.execute(
+            "INSERT INTO workspaces VALUES ('linked',?1,'Linked',?1,'created','updated',NULL)",
+            params![linked.to_string_lossy()],
+        )
+        .unwrap();
+
+        let request = parse_request(b"GET /api/workspaces/w/worktrees HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let response = route_workspace_request(&request, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], true);
+        assert_eq!(response.body["workspaceId"], "w");
+        let worktrees = response.body["worktrees"].as_array().unwrap();
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0]["isMain"], true);
+        assert_eq!(worktrees[0]["workspace"]["id"], "w");
+        let linked_item = worktrees
+            .iter()
+            .find(|item| item["branch"] == "feature/worktree")
+            .unwrap();
+        assert_eq!(linked_item["locked"], true);
+        assert_eq!(linked_item["lockReason"], "device handoff");
+        assert_eq!(linked_item["workspace"]["id"], "linked");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parses_detached_bare_and_prunable_worktree_metadata() {
+        let worktrees = parse_worktree_list(
+            "worktree C:/repo\nHEAD abc\nbare\n\nworktree C:/linked\nHEAD def\ndetached\nlocked handoff\nprunable stale metadata\n",
+        );
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0]["isMain"], true);
+        assert_eq!(worktrees[0]["bare"], true);
+        assert_eq!(worktrees[1]["detached"], true);
+        assert_eq!(worktrees[1]["locked"], true);
+        assert_eq!(worktrees[1]["lockReason"], "handoff");
+        assert_eq!(worktrees[1]["prunable"], true);
+        assert_eq!(worktrees[1]["pruneReason"], "stale metadata");
     }
 }

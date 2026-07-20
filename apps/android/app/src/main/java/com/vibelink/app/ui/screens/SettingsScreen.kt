@@ -958,10 +958,7 @@ fun SettingsScreen(
                                             Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                                 Text(streamId, style = MaterialTheme.typography.bodyMedium)
                                                 Text(
-                                                    strings.text(
-                                                        "${acks.size} 台设备已确认${plan?.safeCursor?.takeIf { it > 0 }?.let { "，可安全压缩至 $it" }.orEmpty()}",
-                                                        "${acks.size} device ack${if (acks.size == 1) "" else "s"}${plan?.safeCursor?.takeIf { it > 0 }?.let { "; safe through $it" }.orEmpty()}",
-                                                    ),
+                                                    strings.eventAcknowledgementSummary(acks.size, plan?.safeCursor ?: 0),
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 )

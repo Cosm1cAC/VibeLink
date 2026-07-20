@@ -23,6 +23,22 @@ class AppLanguageTest {
     }
 
     @Test
+    fun localizesEventAcknowledgementSummaryWithOptionalSafeCursor() {
+        assertEquals(
+            "2 台设备已确认，可安全压缩至 42",
+            appStringsFor(AppLanguage.Chinese).eventAcknowledgementSummary(2, 42),
+        )
+        assertEquals(
+            "1 device ack",
+            appStringsFor(AppLanguage.English).eventAcknowledgementSummary(1, 0),
+        )
+        assertEquals(
+            "2 device acks; safe through 42",
+            appStringsFor(AppLanguage.English).eventAcknowledgementSummary(2, 42),
+        )
+    }
+
+    @Test
     fun runtimeSourceDoesNotHardcodeChineseOutsideLocalizationProvider() {
         val sourceRoot = Path.of("src/main/java/com/vibelink/app")
         val allowedFiles = setOf(sourceRoot.resolve("ui/i18n/AppStrings.kt"))

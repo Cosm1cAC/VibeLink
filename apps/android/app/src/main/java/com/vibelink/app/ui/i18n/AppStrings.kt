@@ -272,6 +272,10 @@ class AppStrings(private val appLanguage: AppLanguage) {
     val nativePushRegistrationFailed: String = select("原生推送注册失败", "Native push registration failed")
     val currentDeviceTokenRotated: String = select("当前设备 token 已轮换，请重新连接。", "Current device token rotated; reconnect.")
     val rotateDeviceTokenFailed: String = select("轮换设备 token 失败", "Failed to rotate device token")
+    fun eventAcknowledgementSummary(deviceCount: Int, safeCursor: Int): String = select(
+        "$deviceCount 台设备已确认${safeCursor.takeIf { it > 0 }?.let { "，可安全压缩至 $it" }.orEmpty()}",
+        "$deviceCount device ack${if (deviceCount == 1) "" else "s"}${safeCursor.takeIf { it > 0 }?.let { "; safe through $it" }.orEmpty()}",
+    )
 
     val legacyDisconnect: String = select("断开", "Disconnect")
     val legacyQuestionPlaceholder: String = select("请介绍一下你自己", "Please introduce yourself")

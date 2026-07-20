@@ -12,7 +12,7 @@ VibeLink 已形成三个清晰层次：
 - **VibeLink Agent**：通过 Codex、Claude、豆包、GLM 等 Provider 执行任务，统一 Workspace、工具事件、审批、恢复和审计。
 - **Live Call Assistant**：负责音频采集、转写和问题检测；问题形成后交给 VibeLink Agent。
 
-Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/Test/PTY、Settings、Approvals、Devices、Tool events、附件/系统分享、通知和 Live Call。Windows portable 当前是 Rust 前门 + loopback Node 后端的混合包：普通 `vibelink.exe` 会启用已迁移的 Rust 路由，未迁移流量继续转发给 Node；`vibelink.exe bridge` 和 `npm start` 保留直接 Node 路径。
+Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/Test/PTY、Settings、Approvals、Devices、Tool events、受管浏览器、结构化 artifact、Capability Center、附件/系统分享、通知和 Live Call。Windows portable 当前是 Rust 前门 + loopback Node 后端的混合包：普通 `vibelink.exe` 会启用已迁移的 Rust 路由，未迁移流量继续转发给 Node；`vibelink.exe bridge` 和 `npm start` 保留直接 Node 路径。
 
 ## 最近已落地
 
@@ -27,10 +27,12 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 - SQLite 已增加 `execution_bindings`、host event cursor 和 approval outbox；Rust `execd`、独立 worker、Job Object、ConPTY/stdio/app-server、分段 spool/replay/ack 和启动身份校验已实现。Bridge 启动会统一读取 binding、查询 execd、补 ingest/ack，并恢复 Terminal、Workspace command 与 Agent task/tool 订阅。通用 approval dispatcher 已轮询 transactional outbox 并向 execution host 投递，worker 事件可回写 delivered/applied/stale；Codex 新任务和恢复任务均走 durable app-server adapter。
 - Durable execution host release canary 已覆盖 Bridge 重连、execd 重启、downtime replay、ack/prune、worker crash 和 durable `execution.lost` 告警。长时验证定位并修复了 worker named-pipe instance 切换时 `ERROR_FILE_NOT_FOUND` 被误判为永久失败的竞态；修复后的 release 样本完成 10 分钟高频 6021 轮 ack（`hostSeq 17597`），随后标准间隔样本继续运行约 18 分钟无异常。canary 失败报告现在保留实时 ack、最后快照、事件尾部和 spool inventory。
 - Agent 任务统一进入 SQLite `task_queue`；后台调度器提供可配置并发上限、优先级认领、指数退避失败重试、重启恢复，以及 Settings 内的运行/等待/失败队列面板和手动重试、取消操作。
-- Event Store 已增加单调 device/stream ack、ack-aware retention plan 和 compaction marker repository，并同步覆盖 SQLite、Worker client 与 Rust sidecar contract；客户端 ack API、实际 compaction 执行和 spool quota 仍未接入。
+- Event Store 已提供认证设备绑定的单调 ack、CAS 冲突、多设备安全游标，以及 task/live-call/tool-event 的 ack-aware compaction；Node 与 Rust 均暴露 unified replay、ack、retention plan、compaction 和 marker API，实际压缩会在同一事务中写入 retention/spool-quota marker。
 - Workspace 测试命令已接入 Jest、Vitest 和 Pytest 结构化 adapter；Web 与 Android 均展示 suite/case 结果树、状态、耗时、文件位置和失败文本，并可从失败 case 直接执行后端生成的 rerun command。重跑仍经过 Workspace test 风险评估与审批链，Android 可在批准后回填结果。
-- 只读 artifact runtime 已支持鉴权 metadata、bounded range，以及 PDF、CSV/TSV、XLSX、Notebook 和 OpenXML 文档的有界 best-effort preview；Web 目前只有 PDF/Text 基础内联，Android 主要提供附件识别与打开，尚未消费完整结构化 preview。
-- Windows Rust 前门已覆盖 Status、Doctor、Devices、设备写操作、Pairing、Audit、Settings、Tool Events REST/SSE 和 Workspace 文件写入；其余 HTTP/SSE/WebSocket 仍透明转发 Node，并保留逐 slice 回退。
+- artifact runtime 已支持鉴权 metadata、bounded range，以及 PDF、CSV/TSV、XLSX、Notebook 和 OpenXML 文档的有界、脱敏 preview；Web/Android 已接入专用 workbench，CSV/TSV 与 Notebook 支持 digest 冲突保护的编辑，Office/PDF/XLSX 保持只读。
+- Playwright bridge-owned Chromium 已接入生产 HTTP 契约；Web/Android 均提供 session/page、导航、截图、trace 与移动视口控制，trace 在写入前脱敏并有界分页。
+- Capability Center 已提供 Plugins、Hooks、SQLite Automations、Subagents 和 AGENTS/config 的生产 HTTP 契约及 Web/Android 入口；当前客户端操作深度仍不完全对等。
+- Windows Rust 前门已覆盖 Status、Doctor、Devices、设备写操作、Pairing、Audit、Settings、Tool Events REST/SSE、统一事件同步和 Workspace 文件写入；其余 HTTP/SSE/WebSocket 仍透明转发 Node，并保留逐 slice 回退。
 - Android 补齐了凭据加密、鉴权附件流、原生 push 注册、前后台实时流挂起/恢复、音频流有界重试、中英文运行文案，以及搜索、标签/收藏、命令发现和 PR review 入口。
 
 ## 仍然存在的优先问题
@@ -43,16 +45,18 @@ Web 与 Android 已覆盖会话和任务、Codex Remote、Workspace 文件/Git/T
 
 ### P1 产品缺口
 
-核查结论（2026-07-20）：**尚未全部补齐**。Git/worktree/远端 Review 与 Live Call/ASR/录音生命周期已形成产品闭环，不再作为 P1 缺口；当前仍有以下两项：
+全面复核结论（2026-07-20）：旧 P1 中“客户端 ack API、实际 compaction 与 quota marker”对应的服务端和 Rust 能力已经补齐，但产品级闭环仍未全部关闭：
 
-- Rust 前门已成为 Windows 默认入口，但产品仍捆绑 Node；Workspace/Git/command/approval、task/history/terminal、Provider 和 Live Call 等职责尚未完成 Rust 所有权迁移。
-- 事件已有 cursor catch-up、Rust/Node replay、单调 ack repository、ack-aware retention plan 和 compaction marker；Tool Events 已按时间与保留条数自动清理，但统一事件链路仍缺客户端 ack API、面向 task/live call/tool event 的 ack-aware retention/compaction 执行、spool quota marker 和多设备冲突策略。
+- Windows 发布包仍捆绑 Node；Rust route family 仍处于 `opt-in`/`canary`，没有 slice 达到 `default-on`。Workspace Git/command/approval、task/history/terminal、Provider 和 Live Call 等所有权迁移及最终移除 Node runtime 仍未完成。
+- Web/Android 尚未调用 `/api/events/ack`、ack 列表、retention plan 或 compaction marker API。服务端可以安全压缩，但真实客户端没有持续上报各自消费游标，也没有多设备同步/冲突可见性，ack-aware compaction 尚未形成端到端产品链路。
+- 后端已持久化 approval outbox 的 delivered/applied/stale/outcome-unknown、execution `attachState` 和 Provider fidelity，但 Web/Android 审批界面没有展示这些状态；用户仍无法确认决定是否真正送达、应用或因重连失效。
 
 ### P2 后续能力
 
-- 已补齐受管插件生命周期、Hooks 安全开关、SQLite Automations、Subagents，以及 AGENTS/config 的 Web/Android 可视化管理，并统一暴露生产 HTTP 契约。
-- Playwright bridge-owned Chromium 已接入生产 HTTP 契约，Web/Android 均提供 session/page、导航、截图、trace 与移动视口遥控；不接管用户本地浏览器。
-- artifact 已提供 Web/Android 专门 renderer；CSV/TSV 与 Notebook 支持带 digest 冲突保护的交互式编辑，Office/PDF/XLSX 保持只读结构化 preview。
+- Capability Center 的双端生命周期仍不对等：Web 缺 Hook 开关和 Subagent 操作，Android 缺插件安装/删除、Automation 创建/删除、AGENTS 编辑等已经有后端契约的动作；错误与审批结果也尚未在所有操作流中一致呈现。
+- 受管浏览器已有 runtime 级脱敏、分页、重连清理测试，但仍缺真实 Bridge + Web/Android 的桌面/手机 E2E，尚未形成 trace 脱敏、分页、断线恢复和 session cleanup 的发布证据。
+- artifact workbench 的合同与编辑 round-trip 已通过，仍缺大文件、损坏文件、手机/平板布局和恢复性 fallback 的真实设备验证；Android capability matrix 仍停留在功能落地前状态，需要以本轮实现和证据重建。
+- Live Call 已有一小时真实 PCM/弱网工具，但发布流水线没有持续执行并归档质量基线；Android 的长时断线恢复、通知权限、设置写操作和大内容/旋转等设备回归仍是发布质量缺口。
 
 ## 已知边界与当前非目标
 
@@ -73,6 +77,9 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 - Workspace 文件编辑、Git、测试、PTY terminal 和本地 PR review 工作台。
 - Settings、Security、Approvals、Devices、Audit、Doctor 和 Provider/command registry 发现。
 - Tool event 生命周期、SSE catch-up、弱网 polling、前后台流控制和恢复策略。
+- 受管浏览器 session/page、导航、截图、trace 和移动视口控制。
+- PDF/Office/表格/Notebook 专用 artifact workbench，以及 CSV/TSV/Notebook 冲突保护编辑。
+- Capability Center 的资源查看与部分插件、Hook、Automation 操作；完整双端生命周期仍列在 P2。
 - Live Call 会话恢复、事件回放、pause/resume、助手与 ASR 选择、转录、麦克风推流、电平、PCM 文件管理和问答卡片。
 - 原生 push capability 注册、中英文选择和主要运行时状态本地化。
 
@@ -87,6 +94,6 @@ Android 已不再是 MVP 壳层，主要闭环包括：
 
 ## 下一批优先级
 
-1. 在 Web/Android 完整展示 approval delivery/attach/fidelity 状态。
-2. 在发布流水线持续执行 Live Call 一小时真实音频/弱网门禁并归档质量基线。
-3. 完成客户端事件 ack、实际 retention/compaction、Workspace 结构化结果的客户端消费和跨设备合并体验。
+1. 让 Web/Android 持续上报 event ack，并展示多设备游标、retention/compaction marker 与冲突状态，完成事件同步端到端闭环。
+2. 在 Web/Android 完整展示 approval delivery/attach/fidelity 状态，并覆盖断线重连后的 applied/stale/outcome-unknown 流程。
+3. 补齐 Capability Center 双端操作对等和浏览器/artifact/Live Call 的真实设备、弱网、长时发布门禁；随后按 Rust migration gate 推进 route family `default-on` 和移除捆绑 Node。

@@ -924,6 +924,14 @@ mod tests {
         let effective = default_rust_profile(&cli);
         assert!(effective.rust_canary);
         assert!(effective.rust_http_canary);
+        assert!(effective.rust_status_http);
+        assert!(effective.rust_doctor_http);
+        assert!(effective.rust_devices_http);
+        assert!(effective.rust_device_mutations_http);
+        assert!(effective.rust_pairing_http);
+        assert!(effective.rust_audit_http);
+        assert!(effective.rust_settings_http);
+        assert!(effective.rust_tool_events_http);
         assert!(effective.rust_workspace_http);
         assert!(effective.rust_tool_events_sse);
         assert!(effective.rust_event_sync_http);

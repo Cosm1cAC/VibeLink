@@ -83,7 +83,9 @@ Create the portable Windows package:
 npm run package:windows
 ```
 
-The ZIP under `artifacts/windows/` contains the Rust launcher, Node LTS runtime, production-only server dependencies, current Web build, and cloudflared. Its adjacent `.sha256` file verifies the archive.
+The default `hybrid` ZIP under `artifacts/windows/` contains the Rust launcher, Node LTS runtime, production-only server dependencies, current Web build, and cloudflared. Its adjacent `.sha256` file verifies the archive.
+
+`package-portable.ps1 -RuntimeFlavor rust-only` is reserved for the final native package. It runs `tools/check-node-removal-readiness.mjs` before downloading or building anything and currently fails with the remaining product ownership and native-entry blockers; it cannot silently produce a partial package.
 
 The bridge is still a hybrid package while HTTP routes migrate incrementally from Node to Rust. API compatibility and fallback are required before any Node route is removed.
 

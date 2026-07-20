@@ -4,6 +4,8 @@ param(
   [string]$NodeSha256 = "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
   [string]$CloudflaredVersion = "2026.7.1",
   [string]$CloudflaredSha256 = "ccb0756de288d3c2c076d19764ca53e0849a10f2dd9c23f8656ac42bdeb45001",
+  [ValidateSet("hybrid", "rust-only")]
+  [string]$RuntimeFlavor = "hybrid",
   [string]$OutputDir = ""
 )
 
@@ -47,6 +49,10 @@ function Reset-Directory([string]$Path, [string]$AllowedRoot) {
   New-Item -ItemType Directory -Path $resolvedPath -Force | Out-Null
 }
 
+if ($RuntimeFlavor -eq "rust-only") {
+  Invoke-Checked "node.exe" @((Join-Path $root "tools\check-node-removal-readiness.mjs"))
+}
+
 New-Item -ItemType Directory -Path $tempRoot, $cacheRoot, $outputRoot -Force | Out-Null
 Reset-Directory -Path $stageRoot -AllowedRoot $tempRoot
 New-Item -ItemType Directory -Path (Join-Path $stageRoot "runtime") -Force | Out-Null
@@ -73,11 +79,13 @@ try {
   $env:CARGO_TARGET_DIR = $originalCargoTargetDir
 }
 Copy-Item -LiteralPath (Join-Path $cargoTargetRoot "release\vibelink.exe") -Destination (Join-Path $stageRoot "vibelink.exe")
-Copy-Item -LiteralPath (Join-Path $root "src") -Destination (Join-Path $stageRoot "src") -Recurse
-New-Item -ItemType Directory -Path (Join-Path $stageRoot "packages") -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $root "packages\doubao-cli") -Destination (Join-Path $stageRoot "packages\doubao-cli") -Recurse
 New-Item -ItemType Directory -Path (Join-Path $stageRoot "tools") -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $root "tools\doubao-cli.mjs") -Destination (Join-Path $stageRoot "tools\doubao-cli.mjs")
+if ($RuntimeFlavor -eq "hybrid") {
+  Copy-Item -LiteralPath (Join-Path $root "src") -Destination (Join-Path $stageRoot "src") -Recurse
+  New-Item -ItemType Directory -Path (Join-Path $stageRoot "packages") -Force | Out-Null
+  Copy-Item -LiteralPath (Join-Path $root "packages\doubao-cli") -Destination (Join-Path $stageRoot "packages\doubao-cli") -Recurse
+  Copy-Item -LiteralPath (Join-Path $root "tools\doubao-cli.mjs") -Destination (Join-Path $stageRoot "tools\doubao-cli.mjs")
+}
 New-Item -ItemType Directory -Path (Join-Path $stageRoot "tools\whisper-cpp") -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "tools\whisper-cpp\production.json") -Destination (Join-Path $stageRoot "tools\whisper-cpp\production.json")
 foreach ($whisperDir in @("bin", "models")) {
@@ -91,19 +99,21 @@ New-Item -ItemType Directory -Path (Join-Path $stageRoot "docs") -Force | Out-Nu
 Copy-Item -LiteralPath (Join-Path $root "docs\openapi.json") -Destination (Join-Path $stageRoot "docs\openapi.json")
 Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination (Join-Path $stageRoot "README.md")
 
-$nodeArchive = Join-Path $cacheRoot "node-v$NodeVersion-win-x64.zip"
-if (-not (Test-Path -LiteralPath $nodeArchive)) {
-  Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" -OutFile $nodeArchive
+if ($RuntimeFlavor -eq "hybrid") {
+  $nodeArchive = Join-Path $cacheRoot "node-v$NodeVersion-win-x64.zip"
+  if (-not (Test-Path -LiteralPath $nodeArchive)) {
+    Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" -OutFile $nodeArchive
+  }
+  if ((Get-Sha256 $nodeArchive) -ne $NodeSha256.ToLowerInvariant()) {
+    throw "Node archive SHA256 does not match the pinned release digest."
+  }
+  $nodeExtract = Join-Path $tempRoot "node"
+  Reset-Directory -Path $nodeExtract -AllowedRoot $tempRoot
+  Expand-Archive -LiteralPath $nodeArchive -DestinationPath $nodeExtract -Force
+  $nodeRoot = Join-Path $nodeExtract "node-v$NodeVersion-win-x64"
+  Copy-Item -LiteralPath (Join-Path $nodeRoot "node.exe") -Destination (Join-Path $stageRoot "runtime\node.exe")
+  Copy-Item -LiteralPath (Join-Path $nodeRoot "LICENSE") -Destination (Join-Path $stageRoot "runtime\NODE-LICENSE")
 }
-if ((Get-Sha256 $nodeArchive) -ne $NodeSha256.ToLowerInvariant()) {
-  throw "Node archive SHA256 does not match the pinned release digest."
-}
-$nodeExtract = Join-Path $tempRoot "node"
-Reset-Directory -Path $nodeExtract -AllowedRoot $tempRoot
-Expand-Archive -LiteralPath $nodeArchive -DestinationPath $nodeExtract -Force
-$nodeRoot = Join-Path $nodeExtract "node-v$NodeVersion-win-x64"
-Copy-Item -LiteralPath (Join-Path $nodeRoot "node.exe") -Destination (Join-Path $stageRoot "runtime\node.exe")
-Copy-Item -LiteralPath (Join-Path $nodeRoot "LICENSE") -Destination (Join-Path $stageRoot "runtime\NODE-LICENSE")
 
 $cloudflaredCache = Join-Path $cacheRoot "cloudflared-$CloudflaredVersion-windows-amd64.exe"
 if (-not (Test-Path -LiteralPath $cloudflaredCache)) {
@@ -135,16 +145,18 @@ $runtimePackage = [ordered]@{
   engines = @{ node = ">=22.5.0" }
   dependencies = $runtimeDependencies
 }
-[IO.File]::WriteAllText(
-  (Join-Path $stageRoot "package.json"),
-  (($runtimePackage | ConvertTo-Json -Depth 5) + "`n"),
-  (New-Object Text.UTF8Encoding($false))
-)
-Push-Location $stageRoot
-try {
-  Invoke-Checked "npm.cmd" @("install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false")
-} finally {
-  Pop-Location
+if ($RuntimeFlavor -eq "hybrid") {
+  [IO.File]::WriteAllText(
+    (Join-Path $stageRoot "package.json"),
+    (($runtimePackage | ConvertTo-Json -Depth 5) + "`n"),
+    (New-Object Text.UTF8Encoding($false))
+  )
+  Push-Location $stageRoot
+  try {
+    Invoke-Checked "npm.cmd" @("install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false")
+  } finally {
+    Pop-Location
+  }
 }
 
 $commit = (git -C $root rev-parse HEAD).Trim()
@@ -152,7 +164,8 @@ $manifest = [ordered]@{
   product = "VibeLink"
   version = $sourcePackage.version
   commit = $commit
-  node = $NodeVersion
+  runtimeFlavor = $RuntimeFlavor
+  node = $(if ($RuntimeFlavor -eq "hybrid") { $NodeVersion } else { $null })
   cloudflared = $CloudflaredVersion
   builtAt = [DateTime]::UtcNow.ToString("o")
   entry = "vibelink.exe"
@@ -228,7 +241,12 @@ $manifest = [ordered]@{
   [Text.Encoding]::ASCII
 )
 
-$archive = Join-Path $outputRoot "VibeLink-$($sourcePackage.version)-windows-x64.zip"
+$archiveName = if ($RuntimeFlavor -eq "hybrid") {
+  "VibeLink-$($sourcePackage.version)-windows-x64.zip"
+} else {
+  "VibeLink-$($sourcePackage.version)-windows-x64-rust-only.zip"
+}
+$archive = Join-Path $outputRoot $archiveName
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 Compress-Archive -LiteralPath $stageRoot -DestinationPath $archive -CompressionLevel Optimal
 $hash = Get-Sha256 $archive

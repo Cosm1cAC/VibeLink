@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { defaultOnPolicyErrors, nodeRuntimeReadiness } from "./rust-migration-policy.mjs";
 
 const root = process.cwd();
 const manifestPath = path.join(root, "docs", "rust-migration-status.json");
@@ -100,6 +101,23 @@ const requiredIds = new Set([
 
 if (!statuses.length) fail("Manifest must define a non-empty statusOrder array.");
 if (!slices.length) fail("Manifest must define a non-empty slices array.");
+
+for (const message of defaultOnPolicyErrors(
+  manifest,
+  fs.readFileSync(path.join(root, "apps", "windows", "src", "main.rs"), "utf8")
+)) {
+  fail(message);
+}
+
+const nodeReadiness = nodeRuntimeReadiness(manifest);
+if (!manifest.nodeRuntime || !Array.isArray(manifest.nodeRuntime.blockers)) {
+  fail("Manifest must define nodeRuntime.blockers for the rust-only packaging gate.");
+}
+for (const blocker of nodeReadiness.blockers) {
+  if (!blocker.id || !blocker.title || !blocker.status || !Array.isArray(blocker.nodeEntries) || !blocker.rustTarget) {
+    fail(`Node runtime blocker '${blocker.id || "unknown"}' is incomplete.`);
+  }
+}
 
 const seenIds = new Set();
 for (const slice of slices) {

@@ -1,13 +1,46 @@
 {
   "schemaVersion": 2,
   "report": "docs/rust-migration-report.md",
+  "nodeRuntime": {
+    "packaging": "required",
+    "blockers": [
+      {
+        "id": "workspace-git-command-approval",
+        "title": "Workspace Git、command 与 approval 所有权",
+        "status": "planned",
+        "nodeEntries": ["src/workspaces.js", "src/toolRuntime.js"],
+        "rustTarget": "apps/windows/src/workspace_http.rs"
+      },
+      {
+        "id": "task-history-terminal",
+        "title": "Task、history 与 terminal 所有权",
+        "status": "planned",
+        "nodeEntries": ["src/agents.js", "src/history.js", "src/terminalRuntime.js"],
+        "rustTarget": "apps/windows/src/execution_host"
+      },
+      {
+        "id": "provider-runtime",
+        "title": "Provider registry 与执行所有权",
+        "status": "planned",
+        "nodeEntries": ["src/providerRegistry.js", "src/providerRuntimeLoaders.js"],
+        "rustTarget": "apps/windows/src/execution_host"
+      },
+      {
+        "id": "live-call-runtime",
+        "title": "Live Call、ASR 与录音生命周期所有权",
+        "status": "planned",
+        "nodeEntries": ["src/liveCall.js", "src/liveCallAsr.js", "src/liveCallAudio.js"],
+        "rustTarget": "apps/windows/src/live_call"
+      }
+    ]
+  },
   "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
   "slices": [
     {
       "id": "rust-http-frontdoor",
       "title": "Rust HTTP 前门",
       "priority": "P0",
-      "status": "canary",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "VIBELINK_RUNTIME_HOST",
@@ -24,7 +57,7 @@
         "test/supervisorMonitor.test.js",
         "test/statusPublicCanary.test.js"
       ],
-      "nextAction": "保持公网透明转发 canary 稳定，并验证独立 Status/Doctor/Devices 原生路由 opt-in 不影响其他 HTTP/SSE/WebSocket 流量。"
+      "nextAction": "默认用户入口已启用 Rust 前门；继续以显式 bridge 子命令保留 Node 直连回滚，直到 Node runtime blocker 清零。"
     },
     {
       "id": "status-response-sidecar",
@@ -54,7 +87,7 @@
       "id": "status-http-route",
       "title": "Status 原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-status-http",
@@ -70,13 +103,13 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "远端 CI 已通过；公网认证 canary 保持零失败/零回退后晋级 canary。"
+      "nextAction": "保持默认开启；迁移 Node 动态快照后删除内部 Status 端点。"
     },
     {
       "id": "doctor-http-route",
       "title": "Doctor 原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-doctor-http",
@@ -92,13 +125,13 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "本地 release 已通过；远端 CI 与公网认证 canary 保持 24 项检查、tool run、审计和零失败/零回退后晋级 canary。"
+      "nextAction": "保持默认开启；迁移 Node 诊断执行器、tool run 与审计写入。"
     },
     {
       "id": "devices-http-route",
       "title": "Devices 只读原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-devices-http"
@@ -112,13 +145,13 @@
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "本地认证 release canary、远端 CI 与公网拒绝路径已通过；设备写操作已在独立 slice 迁移，两个 slice 都等待受控公网认证证据后晋级。"
+      "nextAction": "保持默认开启并监测认证读取、字段投影与 SQLite 故障回退。"
     },
     {
       "id": "device-mutations-http-route",
       "title": "Devices 审计化写操作原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-device-mutations-http"
@@ -133,7 +166,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0005-rust-device-mutation-http-routes.md"
       ],
-      "nextAction": "本地、包内和远端 CI canary 已通过，提交 43e03fc 已部署且公网拒绝路径归 Rust；没有生产明文 token，保持 opt-in，待受控公网认证证据后晋级。"
+      "nextAction": "保持默认开启并持续覆盖令牌轮换、吊销、限流和事务回滚。"
     },
     {
       "id": "workspace-tree",
@@ -166,7 +199,7 @@
       "id": "pairing-http-route",
       "title": "Pairing 原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-pairing-http"
@@ -181,13 +214,13 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0006-rust-pairing-http-routes.md"
       ],
-      "nextAction": "完整本地/包内 canary、6 条远端 CI 和公网只读拒绝路径均已通过；保持 opt-in 观察，继续迁移 workspace/registry/MCP/tool-events。"
+      "nextAction": "保持默认开启；移除提交前 Node settings 快照依赖。"
     },
     {
       "id": "audit-http-route",
       "title": "Audit Log 原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-audit-http"
@@ -202,13 +235,13 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0007-rust-audit-http-route.md"
       ],
-      "nextAction": "本地/包内 canary、6 条远端 CI、自动回滚和公网拒绝路径均已通过；保持 opt-in 观察，继续迁移 workspace/registry/MCP/tool-events。"
+      "nextAction": "保持默认开启并监测拒绝审计、分页与字段投影。"
     },
     {
       "id": "settings-http-route",
       "title": "Settings 原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-settings-http",
@@ -227,13 +260,13 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0008-rust-settings-http-routes.md"
       ],
-      "nextAction": "本地 unit/release canary 已覆盖导出、dry-run、并发写、DPAPI、回滚、导入和审计；等待远端 CI、包内 canary 与公网拒绝路径证据。"
+      "nextAction": "保持默认开启；Node 设置内存副本移除后删除内部 reload 端点。"
     },
     {
       "id": "tool-events-http-route",
       "title": "Tool Events 非流式原生 HTTP 路由",
       "priority": "P0",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": [
         "--rust-http-canary",
         "--rust-tool-events-http"
@@ -250,13 +283,30 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0009-rust-tool-events-http-route.md"
       ],
-      "nextAction": "本地 unit、clippy、12 项单路由及 44 项累计 release canary 已覆盖认证、过滤、cursor、fields、拒绝审计、Node SSE 所有权和零回退；等待远端 CI、包内及受控公网认证证据。"
+      "nextAction": "保持默认开启并监测过滤、cursor、fields 与存储故障回退。"
+    },
+    {
+      "id": "tool-events-sse-http-route",
+      "title": "Tool Events SSE 原生 HTTP 路由",
+      "priority": "P0",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary", "--rust-tool-events-sse"],
+      "nodeEntry": "src/server.js#/api/tool-events?stream=1",
+      "rustEntry": "apps/windows/src/tool_events_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-tool-events-sse bridge",
+      "fallback": "默认用户入口由 Rust 提供 catch-up 与 SSE；显式 bridge 子命令恢复 Node 直连，Rust 在认领流后不回放请求。",
+      "tests": [
+        "apps/windows/src/tool_events_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "tools/status/http-canary.mjs"
+      ],
+      "nextAction": "保持默认开启并监测断线重连、Last-Event-ID 与慢消费者行为，Node runtime 移除由独立 blocker gate 控制。"
     },
     {
       "id": "event-sync-http-route",
       "title": "统一事件同步原生 HTTP 路由",
       "priority": "P1",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": ["--rust-http-canary", "--rust-event-sync-http"],
       "nodeEntry": "src/server.js#/api/events/*",
       "rustEntry": "apps/windows/src/event_sync_http.rs",
@@ -269,20 +319,20 @@
         "test/eventStoreAckRetention.test.js",
         "test/eventSyncHttp.test.js"
       ],
-      "nextAction": "本地 Rust 110 项与 Node event-store 契约已覆盖认证设备绑定、CAS 冲突、多设备安全游标、task/live-call/tool-event 压缩、quota marker、限流与审计；等待远端 CI、便携包及受控公网认证证据。"
+      "nextAction": "保持默认开启并持续观测客户端 ack、CAS 冲突、多设备安全游标与 compaction marker。"
     },
     {
       "id": "workspace-http",
       "title": "Workspace 文件写操作原生 HTTP 路由",
       "priority": "P1",
-      "status": "opt-in",
+      "status": "default-on",
       "featureFlags": ["--rust-http-canary", "--rust-workspace-http"],
       "nodeEntry": "src/server.js#/api/workspaces/:id/file",
       "rustEntry": "apps/windows/src/workspace_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
       "fallback": "Rust 鉴权、workspace root、body 或文件操作失败时逐字节回放 Node；关闭 --rust-workspace-http 后恢复 Node 所有权",
       "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
-      "nextAction": "完成 Git file-action、Git action、worktree 和 command/approval 路由后再扩大默认 Rust 所有权。"
+      "nextAction": "文件 mutation 已默认开启；继续迁移 Git file-action、Git action、worktree 和 command/approval。"
     },
     {
       "id": "mcp-session-sidecar",

@@ -7,8 +7,9 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -56,7 +57,7 @@ impl WorkspaceRouteConfig {
 pub fn workspace_request_requires_body(request: &ParsedRequest) -> bool {
     request.method == "POST"
         && request.path().starts_with("/api/workspaces/")
-        && request.path().ends_with("/file")
+        && (request.path().ends_with("/file") || request.path().ends_with("/git/file-action"))
 }
 
 pub fn route_workspace_request(
@@ -71,7 +72,8 @@ pub fn route_workspace_request(
     let git_status = request.method == "GET" && action_path == "git/status";
     let git_diff = request.method == "GET" && action_path == "git/diff";
     let worktree_list = request.method == "GET" && action_path == "worktrees";
-    if !file_mutation && !git_status && !git_diff && !worktree_list {
+    let git_file_action = request.method == "POST" && action_path == "git/file-action";
+    if !file_mutation && !git_status && !git_diff && !worktree_list && !git_file_action {
         return Ok(None);
     }
     let auth = authenticate_route_request(request, &config.data_dir)?;
@@ -104,14 +106,32 @@ pub fn route_workspace_request(
         config.metrics.responses.fetch_add(1, Ordering::SeqCst);
         return Ok(Some(HttpRouteResponse::json(200, result)));
     }
-    let body = body.ok_or_else(|| anyhow::anyhow!("Workspace file body is required"))?;
+    let body = body.ok_or_else(|| anyhow::anyhow!("Workspace request body is required"))?;
     if body.len() > MAX_BODY_BYTES {
         return Ok(Some(HttpRouteResponse::error(
             413,
             "Request body is too large.",
         )));
     }
-    let payload: Value = serde_json::from_slice(body).context("Invalid workspace file JSON")?;
+    let payload: Value = match serde_json::from_slice(body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return Ok(Some(HttpRouteResponse::error(
+                400,
+                "Invalid workspace request JSON.",
+            )))
+        }
+    };
+    if git_file_action {
+        let _mutation_guard = config
+            .mutation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace mutation lock is poisoned"))?;
+        let response =
+            apply_workspace_git_file_action(&config.data_dir, &workspace_id, &payload, request);
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(response));
+    }
     let action = payload
         .get("action")
         .and_then(Value::as_str)
@@ -601,6 +621,450 @@ fn pseudo_diff_for_untracked(root: &Path, rel_path: &str) -> Result<Option<Strin
     Ok(Some(preview.join("\n")))
 }
 
+type GitFileActionResult<T> = std::result::Result<T, (u16, String)>;
+
+fn apply_workspace_git_file_action(
+    data_dir: &Path,
+    workspace_id: &str,
+    payload: &Value,
+    request: &ParsedRequest,
+) -> HttpRouteResponse {
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let rel_path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .replace('\\', "/");
+    let context = match load_workspace_git_context(data_dir, workspace_id) {
+        Ok(context) => context,
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message == "Workspace not found." {
+                404
+            } else {
+                500
+            };
+            return HttpRouteResponse::error(status, &message);
+        }
+    };
+    let db_path = data_dir.join("mobile-agent.sqlite");
+    let connection = match Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(connection) => connection,
+        Err(error) => return HttpRouteResponse::error(500, &error.to_string()),
+    };
+    if let Err(error) = connection.busy_timeout(Duration::from_secs(5)) {
+        return HttpRouteResponse::error(500, &error.to_string());
+    }
+    let tool_run_id = uuid::Uuid::new_v4().to_string();
+    let title = format!(
+        "{} {}",
+        if action.is_empty() {
+            "file-action"
+        } else {
+            &action
+        },
+        rel_path
+    );
+    let input = json!({
+        "workspaceId": workspace_id,
+        "action": action,
+        "path": rel_path
+    });
+    let created_at = now_iso();
+    if let Err(error) = connection.execute(
+        "INSERT INTO tool_runs (id,task_id,workspace_id,tool_name,status,title,input_json,result_json,error,created_at,updated_at,started_at,completed_at) VALUES (?1,'',?2,'workspace.git_file_action','pending',?3,?4,'null','',?5,?5,'','')",
+        params![tool_run_id, workspace_id, title, input.to_string(), created_at],
+    ) {
+        return HttpRouteResponse::error(500, &error.to_string());
+    }
+    if let Err(error) = insert_workspace_tool_event(
+        &connection,
+        &tool_run_id,
+        workspace_id,
+        "tool.created",
+        &title,
+        json!({
+            "toolName": "workspace.git_file_action",
+            "tool": {
+                "name": "workspace.git_file_action",
+                "kind": "git",
+                "label": "Git file action",
+                "permission": "workspace.git",
+                "risk": "medium"
+            },
+            "taskId": "",
+            "workspaceId": workspace_id,
+            "kind": "git",
+            "input": input
+        }),
+    ) {
+        return HttpRouteResponse::error(500, &error.to_string());
+    }
+    let started_at = now_iso();
+    if let Err(error) = connection.execute(
+        "UPDATE tool_runs SET status = 'running', updated_at = ?1, started_at = ?1 WHERE id = ?2",
+        params![started_at, tool_run_id],
+    ) {
+        return HttpRouteResponse::error(500, &error.to_string());
+    }
+    if let Err(error) = insert_workspace_tool_event(
+        &connection,
+        &tool_run_id,
+        workspace_id,
+        "tool.started",
+        &title,
+        json!({"input": input}),
+    ) {
+        return HttpRouteResponse::error(500, &error.to_string());
+    }
+
+    let execution = perform_workspace_git_file_action(&context.root, &action, &rel_path, payload)
+        .and_then(|_| {
+            let mut summary = workspace_git_diff(data_dir, workspace_id)
+                .map_err(|error| (500, error.to_string()))?;
+            if let Some(object) = summary.as_object_mut() {
+                object.remove("workspace");
+                object.remove("cwd");
+            }
+            Ok(json!({
+                "ok": true,
+                "action": action,
+                "path": rel_path,
+                "workspace": {
+                    "id": workspace_id,
+                    "title": context.title,
+                    "path": context.cwd,
+                    "allowedRoot": context.allowed_root,
+                    "createdAt": context.created_at,
+                    "updatedAt": context.updated_at,
+                    "lastUsedAt": context.last_used_at
+                },
+                "cwd": context.cwd,
+                "summary": summary
+            }))
+        });
+
+    match execution {
+        Ok(result) => {
+            let completed_at = now_iso();
+            if let Err(error) = connection.execute(
+                "UPDATE tool_runs SET status = 'completed', result_json = ?1, error = '', updated_at = ?2, completed_at = ?2 WHERE id = ?3",
+                params![result.to_string(), completed_at, tool_run_id],
+            ) {
+                return HttpRouteResponse::error(500, &error.to_string());
+            }
+            if let Err(error) = insert_workspace_tool_event(
+                &connection,
+                &tool_run_id,
+                workspace_id,
+                "tool.completed",
+                "Git file action completed.",
+                json!({
+                    "exitCode": 0,
+                    "ok": true,
+                    "cancelled": false,
+                    "timedOut": false,
+                    "stdout": "",
+                    "stderr": "",
+                    "result": result
+                }),
+            ) {
+                return HttpRouteResponse::error(500, &error.to_string());
+            }
+            if let Err(error) = audit_workspace_git_file_action(
+                &connection,
+                request,
+                &rel_path,
+                &action,
+                &tool_run_id,
+                true,
+                "",
+            ) {
+                return HttpRouteResponse::error(500, &error.to_string());
+            }
+            let mut response = result;
+            response["toolRunId"] = json!(tool_run_id);
+            HttpRouteResponse::json(200, response)
+        }
+        Err((status, message)) => {
+            let completed_at = now_iso();
+            let _ = connection.execute(
+                "UPDATE tool_runs SET status = 'failed', error = ?1, updated_at = ?2, completed_at = ?2 WHERE id = ?3",
+                params![message, completed_at, tool_run_id],
+            );
+            let _ = insert_workspace_tool_event(
+                &connection,
+                &tool_run_id,
+                workspace_id,
+                "tool.error",
+                &message,
+                json!({"error": message}),
+            );
+            let _ = audit_workspace_git_file_action(
+                &connection,
+                request,
+                &rel_path,
+                &action,
+                &tool_run_id,
+                false,
+                &message,
+            );
+            HttpRouteResponse::error(status, &message)
+        }
+    }
+}
+
+fn perform_workspace_git_file_action(
+    root: &Path,
+    action: &str,
+    rel_path: &str,
+    payload: &Value,
+) -> GitFileActionResult<()> {
+    if rel_path.is_empty() || rel_path == "." {
+        return Err((400, "File path is required.".to_string()));
+    }
+    if Path::new(rel_path).is_absolute()
+        || Path::new(rel_path)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err((403, "Path is outside workspace.".to_string()));
+    }
+    let target = safe_child(root, rel_path).map_err(|error| (403, error.to_string()))?;
+    match action {
+        "stage" | "accept" => {
+            require_git_success(
+                run_git(root, &["add", "--", rel_path]),
+                "Failed to stage file.",
+            )?;
+        }
+        "mark-resolved" => {
+            require_git_success(
+                run_git(root, &["add", "--", rel_path]),
+                "Failed to mark the conflict as resolved.",
+            )?;
+        }
+        "restore" | "reject" => {
+            let status = run_git(root, &["status", "--porcelain=v1", "-b"])
+                .map_err(|error| (409, error.to_string()))?;
+            let file_status = parse_git_status_files(&status.stdout)
+                .into_iter()
+                .find(|(_, path)| path == rel_path)
+                .map(|(status, _)| status)
+                .unwrap_or_default();
+            if file_status == "??" {
+                if target.exists() {
+                    let metadata =
+                        fs::symlink_metadata(&target).map_err(|error| (409, error.to_string()))?;
+                    if metadata.is_dir() {
+                        fs::remove_dir_all(&target).map_err(|error| (409, error.to_string()))?;
+                    } else {
+                        fs::remove_file(&target).map_err(|error| (409, error.to_string()))?;
+                    }
+                }
+            } else {
+                require_git_success(
+                    run_git(root, &["restore", "--staged", "--worktree", "--", rel_path]),
+                    "Failed to restore file.",
+                )?;
+            }
+        }
+        "unstage" => {
+            require_git_success(
+                run_git(root, &["restore", "--staged", "--", rel_path]),
+                "Failed to unstage file.",
+            )?;
+        }
+        "use-ours" | "use-theirs" => {
+            let side = if action == "use-ours" {
+                "--ours"
+            } else {
+                "--theirs"
+            };
+            require_git_success(
+                run_git(root, &["checkout", side, "--", rel_path]),
+                "Failed to select the conflict side.",
+            )?;
+            require_git_success(
+                run_git(root, &["add", "--", rel_path]),
+                "Failed to mark the conflict as resolved.",
+            )?;
+        }
+        "stage-hunk" | "unstage-hunk" => {
+            let patch = validated_git_hunk_patch(
+                payload.get("patch").and_then(Value::as_str).unwrap_or(""),
+                rel_path,
+            )?;
+            let mut args = vec!["apply", "--cached", "--unidiff-zero"];
+            if action == "unstage-hunk" {
+                args.push("--reverse");
+            }
+            args.push("-");
+            require_git_success(
+                run_git_with_input(root, &args, patch.as_bytes()),
+                "Failed to apply git hunk.",
+            )?;
+        }
+        _ => return Err((400, "Unsupported git file action.".to_string())),
+    }
+    Ok(())
+}
+
+fn require_git_success(
+    result: Result<GitCommandResult>,
+    fallback: &str,
+) -> GitFileActionResult<()> {
+    let result = result.map_err(|error| (409, error.to_string()))?;
+    if result.ok {
+        Ok(())
+    } else {
+        Err((
+            409,
+            if result.stderr.is_empty() {
+                fallback.to_string()
+            } else {
+                result.stderr.trim().to_string()
+            },
+        ))
+    }
+}
+
+fn run_git_with_input(cwd: &Path, args: &[&str], input: &[u8]) -> Result<GitCommandResult> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Git stdin is unavailable."))?
+        .write_all(input)?;
+    let output = child.wait_with_output()?;
+    if output.stdout.len().saturating_add(output.stderr.len()) > MAX_GIT_OUTPUT_BYTES {
+        bail!("Git output exceeds 10 MiB.");
+    }
+    Ok(GitCommandResult {
+        ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(1),
+    })
+}
+
+fn validated_git_hunk_patch(patch: &str, rel_path: &str) -> GitFileActionResult<String> {
+    if patch.trim().is_empty() {
+        return Err((400, "Git hunk patch is required.".to_string()));
+    }
+    if patch.len() > MAX_UNTRACKED_PREVIEW_BYTES as usize {
+        return Err((413, "Git hunk patch is too large.".to_string()));
+    }
+    let normalized = rel_path.replace('\\', "/");
+    let plain = format!("diff --git a/{normalized} b/{normalized}");
+    let quoted_a = serde_json::to_string(&format!("a/{normalized}")).unwrap_or_default();
+    let quoted_b = serde_json::to_string(&format!("b/{normalized}")).unwrap_or_default();
+    let quoted = format!("diff --git {quoted_a} {quoted_b}");
+    let headers = patch
+        .lines()
+        .filter(|line| line.starts_with("diff --git "))
+        .collect::<Vec<_>>();
+    if headers.len() != 1 || (headers[0] != plain && headers[0] != quoted) {
+        return Err((
+            400,
+            "Git hunk patch must target exactly the requested file.".to_string(),
+        ));
+    }
+    Ok(if patch.ends_with('\n') {
+        patch.to_string()
+    } else {
+        format!("{patch}\n")
+    })
+}
+
+fn insert_workspace_tool_event(
+    connection: &Connection,
+    tool_run_id: &str,
+    workspace_id: &str,
+    event_type: &str,
+    text: &str,
+    payload: Value,
+) -> Result<()> {
+    let event_id = uuid::Uuid::new_v4().to_string();
+    let at = now_iso();
+    let lifecycle = match event_type {
+        "tool.created" => "created",
+        "tool.started" => "running",
+        "tool.completed" => "completed",
+        "tool.failed" | "tool.error" => "failed",
+        _ => "event",
+    };
+    let event = json!({
+        "id": event_id,
+        "at": at,
+        "type": event_type,
+        "text": text,
+        "payload": payload,
+        "lifecycle": lifecycle,
+        "sourceConfidence": "authoritative",
+        "toolRunId": tool_run_id,
+        "taskId": "",
+        "workspaceId": workspace_id
+    });
+    connection.execute(
+        "INSERT OR IGNORE INTO tool_events (tool_run_id,task_id,workspace_id,event_id,event_type,event_at,text,payload_json,event_json,created_at) VALUES (?1,'',?2,?3,?4,?5,?6,?7,?8,?5)",
+        params![
+            tool_run_id,
+            workspace_id,
+            event_id,
+            event_type,
+            at,
+            text,
+            payload.to_string(),
+            event.to_string()
+        ],
+    )?;
+    Ok(())
+}
+
+fn audit_workspace_git_file_action(
+    connection: &Connection,
+    request: &ParsedRequest,
+    rel_path: &str,
+    action: &str,
+    tool_run_id: &str,
+    success: bool,
+    reason: &str,
+) -> Result<()> {
+    let at = now_iso();
+    let meta = json!({
+        "action": action,
+        "toolRunId": tool_run_id,
+        "reason": reason
+    });
+    connection.execute(
+        "INSERT INTO audit_log (event_type,event_at,method,path,success,target,meta_json,created_at) VALUES ('workspace.git_file_action',?1,'POST',?2,?3,?4,?5,?1)",
+        params![at, request.path(), if success { 1 } else { 0 }, rel_path, meta.to_string()],
+    )?;
+    Ok(())
+}
+
+fn now_iso() -> String {
+    let now: DateTime<Utc> = SystemTime::now().into();
+    now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 fn workspace_path_parts(path: &str) -> Option<(String, &str)> {
     let rest = path.strip_prefix("/api/workspaces/")?;
     let (id, suffix) = rest.split_once('/')?;
@@ -856,7 +1320,7 @@ mod tests {
         )
         .unwrap();
         let db = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
-        db.execute_batch("CREATE TABLE devices(id TEXT PRIMARY KEY,label TEXT,token_hash TEXT UNIQUE,created_at TEXT,last_seen_at TEXT,revoked_at TEXT,expires_at TEXT,rotated_at TEXT,meta_json TEXT); CREATE TABLE workspaces(id TEXT PRIMARY KEY,path TEXT,title TEXT,allowed_root TEXT,created_at TEXT,updated_at TEXT,last_used_at TEXT); CREATE TABLE audit_log(cursor INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT,event_at TEXT,method TEXT,path TEXT,success INTEGER,target TEXT,meta_json TEXT,created_at TEXT);").unwrap();
+        db.execute_batch("CREATE TABLE devices(id TEXT PRIMARY KEY,label TEXT,token_hash TEXT UNIQUE,created_at TEXT,last_seen_at TEXT,revoked_at TEXT,expires_at TEXT,rotated_at TEXT,meta_json TEXT); CREATE TABLE workspaces(id TEXT PRIMARY KEY,path TEXT,title TEXT,allowed_root TEXT,created_at TEXT,updated_at TEXT,last_used_at TEXT); CREATE TABLE audit_log(cursor INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT,event_at TEXT,method TEXT,path TEXT,success INTEGER,target TEXT,meta_json TEXT,created_at TEXT); CREATE TABLE tool_runs(id TEXT PRIMARY KEY,task_id TEXT,workspace_id TEXT,tool_name TEXT NOT NULL,status TEXT NOT NULL,title TEXT,input_json TEXT,result_json TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,started_at TEXT,completed_at TEXT); CREATE TABLE tool_events(cursor INTEGER PRIMARY KEY AUTOINCREMENT,tool_run_id TEXT NOT NULL,task_id TEXT,workspace_id TEXT,event_id TEXT NOT NULL,event_type TEXT NOT NULL,event_at TEXT NOT NULL,text TEXT,payload_json TEXT,event_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(tool_run_id,event_id));").unwrap();
         db.execute(
             "INSERT INTO devices VALUES ('d','Device',?1,'now',NULL,NULL,NULL,NULL,NULL)",
             params![hash_token("token")],
@@ -1170,5 +1634,211 @@ mod tests {
         assert_eq!(worktrees[1]["lockReason"], "handoff");
         assert_eq!(worktrees[1]["prunable"], true);
         assert_eq!(worktrees[1]["pruneReason"], "stale metadata");
+    }
+
+    #[test]
+    fn stages_a_workspace_file_with_tool_events_and_audit() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).to_string()
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "VibeLink Test"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+        fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+        let request = parse_request(b"POST /api/workspaces/w/git/file-action HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 39\r\n\r\n").unwrap();
+        let response = route_workspace_request(
+            &request,
+            Some(br#"{"action":"stage","path":"tracked.txt"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], true);
+        assert_eq!(response.body["action"], "stage");
+        assert_eq!(response.body["path"], "tracked.txt");
+        let tool_run_id = response.body["toolRunId"].as_str().unwrap();
+        assert!(!tool_run_id.is_empty());
+        assert!(!git(&["diff", "--cached", "--", "tracked.txt"]).is_empty());
+
+        let db = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
+        let (status, tool_name): (String, String) = db
+            .query_row(
+                "SELECT status, tool_name FROM tool_runs WHERE id = ?1",
+                params![tool_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(tool_name, "workspace.git_file_action");
+        let event_types = db
+            .prepare("SELECT event_type FROM tool_events WHERE tool_run_id = ?1 ORDER BY cursor")
+            .unwrap()
+            .query_map(params![tool_run_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            event_types,
+            vec!["tool.created", "tool.started", "tool.completed"]
+        );
+        let audited: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE event_type = 'workspace.git_file_action' AND success = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audited, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stages_and_unstages_only_the_requested_git_hunk() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).to_string()
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "VibeLink Test"]);
+        fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+        fs::write(root.join("tracked.txt"), "changed\ntwo\n").unwrap();
+        let patch = git(&["diff", "--unified=0", "--", "tracked.txt"]);
+        let request = parse_request(b"POST /api/workspaces/w/git/file-action HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 1\r\n\r\n").unwrap();
+        let stage_body =
+            json!({"action":"stage-hunk","path":"tracked.txt","patch":patch}).to_string();
+        let staged = route_workspace_request(&request, Some(stage_body.as_bytes()), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(staged.status, 200);
+        assert!(git(&["diff", "--cached", "--", "tracked.txt"]).contains("+changed"));
+
+        let unstage_body =
+            json!({"action":"unstage-hunk","path":"tracked.txt","patch":patch}).to_string();
+        let unstaged = route_workspace_request(&request, Some(unstage_body.as_bytes()), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unstaged.status, 200);
+        assert!(git(&["diff", "--cached", "--", "tracked.txt"]).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_cross_file_hunk_and_records_the_failed_tool_run() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "VibeLink Test"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+        fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        let patch = "diff --git a/other.txt b/other.txt\n--- a/other.txt\n+++ b/other.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let request = parse_request(b"POST /api/workspaces/w/git/file-action HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 1\r\n\r\n").unwrap();
+        assert!(workspace_request_requires_body(&request));
+        let body = json!({"action":"stage-hunk","path":"tracked.txt","patch":patch}).to_string();
+        let response = route_workspace_request(&request, Some(body.as_bytes()), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response.body["error"],
+            "Git hunk patch must target exactly the requested file."
+        );
+        let db = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
+        let (tool_run_id, status): (String, String) = db
+            .query_row(
+                "SELECT id, status FROM tool_runs ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        let failed_event: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM tool_events WHERE tool_run_id = ?1 AND event_type = 'tool.error'",
+                params![tool_run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed_event, 1);
+        let failed_audit: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE event_type = 'workspace.git_file_action' AND success = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed_audit, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_an_untracked_file_without_touching_its_sibling() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let output = Command::new("git")
+            .arg("init")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        fs::write(root.join("reject.txt"), "remove\n").unwrap();
+        fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        let request = parse_request(b"POST /api/workspaces/w/git/file-action HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 1\r\n\r\n").unwrap();
+        let response = route_workspace_request(
+            &request,
+            Some(br#"{"action":"reject","path":"reject.txt"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert!(!root.join("reject.txt").exists());
+        assert_eq!(fs::read_to_string(root.join("keep.txt")).unwrap(), "keep\n");
+        let _ = fs::remove_dir_all(dir);
     }
 }

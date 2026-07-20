@@ -1,5 +1,6 @@
 package com.vibelink.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -66,6 +67,12 @@ enum class ConversationSpace {
     Agent,
 }
 
+val ConversationSpace.topBarLabel: String
+    get() = when (this) {
+        ConversationSpace.Remote -> "Remote"
+        ConversationSpace.Agent -> "Agent"
+    }
+
 data class ConversationSelection(
     val conversation: ConversationItem? = null,
     val targetTurnId: String = "",
@@ -97,6 +104,10 @@ data class ConversationSpaceState(
 }
 
 object AgentDrawerPolicy {
+    fun showsAgentUtilities(space: ConversationSpace): Boolean = space == ConversationSpace.Agent
+
+    fun consumesBackPress(drawerOpen: Boolean): Boolean = drawerOpen
+
     fun filterAndSort(
         conversations: List<ConversationItem>,
         query: String,
@@ -144,6 +155,9 @@ fun AgentShell(
     val searchLoading by viewModel.searchLoading.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    BackHandler(enabled = AgentDrawerPolicy.consumesBackPress(drawerState.isOpen)) {
+        scope.launch { drawerState.close() }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.load(apiClient)
@@ -267,12 +281,14 @@ private fun AgentDrawer(
                 }
             }
 
-            DrawerUtilityActions(
-                onOpenWorkspace = onOpenWorkspace,
-                onOpenLiveCall = onOpenLiveCall,
-                onOpenReview = onOpenReview,
-                onOpenApprovals = { onOpenSettings("approvals") },
-            )
+            if (AgentDrawerPolicy.showsAgentUtilities(activeSpace)) {
+                DrawerUtilityActions(
+                    onOpenWorkspace = onOpenWorkspace,
+                    onOpenLiveCall = onOpenLiveCall,
+                    onOpenReview = onOpenReview,
+                    onOpenApprovals = { onOpenSettings("approvals") },
+                )
+            }
 
             Text(
                 when (activeSpace) {

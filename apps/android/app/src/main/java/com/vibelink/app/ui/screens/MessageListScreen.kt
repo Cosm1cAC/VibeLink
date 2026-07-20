@@ -670,15 +670,11 @@ private fun ConversationSpaceSwitcher(
     activeSpace: ConversationSpace,
     onSpaceChange: (ConversationSpace) -> Unit,
 ) {
-    val strings = LocalAppStrings.current
     Row(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        listOf(
-            ConversationSpace.Remote to strings.text("远程操控", "Remote"),
-            ConversationSpace.Agent to "VibeLink Agent",
-        ).forEach { (space, label) ->
+        ConversationSpace.entries.forEach { space ->
             Surface(
                 onClick = { onSpaceChange(space) },
                 color = androidx.compose.ui.graphics.Color.Transparent,
@@ -689,7 +685,7 @@ private fun ConversationSpaceSwitcher(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                    Text(space.topBarLabel, style = MaterialTheme.typography.labelLarge, maxLines = 1)
                     Surface(
                         modifier = Modifier.width(30.dp).height(3.dp),
                         shape = RoundedCornerShape(2.dp),

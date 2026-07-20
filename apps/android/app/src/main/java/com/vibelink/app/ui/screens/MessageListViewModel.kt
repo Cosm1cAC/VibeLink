@@ -44,6 +44,10 @@ private fun messageOperationKey(message: ChatMessage): String = when {
     else -> "text:${message.role}:${message.text.trim()}"
 }
 
+object DesktopRemoteLoadPolicy {
+    fun freshObservation(manualRefresh: Boolean): Boolean = manualRefresh
+}
+
 class MessageListViewModel : ViewModel() {
     private var resiliencePaused = false
 
@@ -119,7 +123,11 @@ class MessageListViewModel : ViewModel() {
         }
     }
 
-    fun loadConversation(apiClient: ApiClient, conversation: ConversationItem) {
+    fun loadConversation(
+        apiClient: ApiClient,
+        conversation: ConversationItem,
+        freshDesktopObservation: Boolean = false,
+    ) {
         stopStreaming()
         persistenceApiClient = apiClient
         activeConversation = conversation
@@ -149,7 +157,11 @@ class MessageListViewModel : ViewModel() {
                     "new" -> {
                         _messages.value = emptyList()
                     }
-                    "desktop" -> loadDesktopRemote(apiClient, seq, fresh = true)
+                    "desktop" -> loadDesktopRemote(
+                        apiClient,
+                        seq,
+                        fresh = DesktopRemoteLoadPolicy.freshObservation(freshDesktopObservation),
+                    )
                     "task" -> loadTask(apiClient, conversation, seq)
                     "fork" -> loadFork(apiClient, conversation, seq)
                     else -> loadHistory(apiClient, conversation, seq)
@@ -171,7 +183,7 @@ class MessageListViewModel : ViewModel() {
 
     fun refresh(apiClient: ApiClient) {
         val conversation = activeConversation ?: return
-        loadConversation(apiClient, conversation)
+        loadConversation(apiClient, conversation, freshDesktopObservation = true)
     }
 
     fun setResiliencePaused(paused: Boolean) {

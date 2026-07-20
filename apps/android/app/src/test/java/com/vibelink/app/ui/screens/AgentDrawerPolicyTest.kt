@@ -6,6 +6,24 @@ import kotlin.test.assertEquals
 
 class AgentDrawerPolicyTest {
     @Test
+    fun usesCompactLabelsForTopLevelSpaceSwitching() {
+        assertEquals("Remote", ConversationSpace.Remote.topBarLabel)
+        assertEquals("Agent", ConversationSpace.Agent.topBarLabel)
+    }
+
+    @Test
+    fun keepsAgentUtilitiesOutOfTheRemoteDrawer() {
+        assertEquals(false, AgentDrawerPolicy.showsAgentUtilities(ConversationSpace.Remote))
+        assertEquals(true, AgentDrawerPolicy.showsAgentUtilities(ConversationSpace.Agent))
+    }
+
+    @Test
+    fun consumesBackPressWhileTheDrawerIsOpen() {
+        assertEquals(true, AgentDrawerPolicy.consumesBackPress(drawerOpen = true))
+        assertEquals(false, AgentDrawerPolicy.consumesBackPress(drawerOpen = false))
+    }
+
+    @Test
     fun separatesDesktopRemoteFromAgentConversations() {
         val conversations = listOf(
             ConversationItem(key = "desktop", kind = "desktop", title = "Codex Desktop remote"),

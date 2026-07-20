@@ -3,6 +3,7 @@ package com.vibelink.app.ui.screens
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,6 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,8 +55,11 @@ fun ArtifactWorkbenchDialog(
     var loading by remember(link.url) { mutableStateOf(true) }
     var saving by remember(link.url) { mutableStateOf(false) }
     var error by remember(link.url) { mutableStateOf("") }
+    var loadAttempt by remember(link.url) { mutableStateOf(0) }
 
-    LaunchedEffect(artifactId) {
+    LaunchedEffect(artifactId, loadAttempt) {
+        loading = true
+        error = ""
         runCatching { apiClient.previewArtifact(artifactId) }
             .onSuccess { preview = it; document = it.document }
             .onFailure { error = it.message.orEmpty() }
@@ -90,7 +95,7 @@ fun ArtifactWorkbenchDialog(
                     if (preview?.capabilities?.mutation == true) IconButton(onClick = ::save, enabled = !saving) { Icon(Icons.Default.Save, strings.save) }
                     IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, strings.close) }
                 }
-                if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error)
+                if (error.isNotBlank()) { Text(ArtifactDisplayPolicy.fallbackMessage(error), color = MaterialTheme.colorScheme.error); OutlinedButton(onClick = { loadAttempt += 1 }) { Text(strings.text("重试", "Retry")) } }
                 if (loading) CircularProgressIndicator()
                 else document?.let { ArtifactDocumentView(it, preview?.capabilities?.mutation == true, onChange = { value -> document = value }) }
             }
@@ -101,10 +106,12 @@ fun ArtifactWorkbenchDialog(
 @Composable
 private fun ArtifactDocumentView(document: ArtifactDocument, editable: Boolean, onChange: (ArtifactDocument) -> Unit) {
     when (document.type) {
-        "table" -> Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+        "table" -> BoxWithConstraints(Modifier.fillMaxWidth()) {
+          val visibleRows = ArtifactDisplayPolicy.visibleRows(maxWidth.value.toInt(), document.rows.size)
+          Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
             Column {
                 Row { document.columns.forEach { Text(it, Modifier.widthIn(min = 120.dp).padding(8.dp), style = MaterialTheme.typography.labelMedium) } }
-                document.rows.forEachIndexed { rowIndex, row ->
+                document.rows.take(visibleRows).forEachIndexed { rowIndex, row ->
                     Row { row.forEachIndexed { columnIndex, cell ->
                         if (editable) OutlinedTextField(
                             value = cell,
@@ -114,7 +121,9 @@ private fun ArtifactDocumentView(document: ArtifactDocument, editable: Boolean, 
                         ) else Text(cell, Modifier.widthIn(min = 120.dp).padding(8.dp))
                     } }
                 }
+                if (visibleRows < document.rows.size) Text("Showing $visibleRows of ${document.rows.size} rows", Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
             }
+          }
         }
         "notebook" -> Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             document.cells.forEach { cell ->
@@ -135,6 +144,11 @@ private fun ArtifactDocumentView(document: ArtifactDocument, editable: Boolean, 
         "pdf", "text" -> Text(document.text, Modifier.verticalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace)
         else -> Text(document.reason.ifBlank { "No structured preview is available." })
     }
+}
+
+object ArtifactDisplayPolicy {
+    fun visibleRows(widthDp: Int, total: Int): Int = minOf(total, if (widthDp >= 600) 120 else 40)
+    fun fallbackMessage(error: String): String = error.ifBlank { "Preview unavailable. Retry after checking the file." }
 }
 
 private fun artifactId(value: String): String {

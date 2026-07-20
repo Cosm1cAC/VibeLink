@@ -614,6 +614,36 @@ class ApiClient(
         return gson.fromJson(json, SimpleOk::class.java)
     }
 
+    suspend fun installPlugin(id: String, name: String, version: String): SimpleOk {
+        val json = post("/api/capabilities/plugins", mapOf("id" to id, "manifest" to mapOf("name" to name, "version" to version)))
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun removePlugin(id: String): SimpleOk {
+        val json = delete("/api/capabilities/plugins/${encode(id)}")
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun createAutomation(title: String, type: String, value: String, prompt: String): SimpleOk {
+        val json = post("/api/automations", mapOf("title" to title, "enabled" to true, "schedule" to mapOf("type" to type, "value" to value), "payload" to mapOf("prompt" to prompt)))
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun removeAutomation(id: String): SimpleOk {
+        val json = delete("/api/automations/${encode(id)}")
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun updateCapabilityConfig(id: String, expectedDigest: String, text: String): SimpleOk {
+        val json = patch("/api/capabilities/config/${encode(id)}", mapOf("expectedDigest" to expectedDigest, "text" to text))
+        return gson.fromJson(json, SimpleOk::class.java)
+    }
+
+    suspend fun createSubagent(parentTaskId: String, prompt: String, agent: String): TaskCreateResponse {
+        val json = post("/api/subagents", mapOf("parentTaskId" to parentTaskId, "prompt" to prompt, "agent" to agent))
+        return gson.fromJson(json, TaskCreateResponse::class.java)
+    }
+
     // ── Histories (session list + detail) ──
 
     suspend fun listHistories(): List<HistoryItem> {

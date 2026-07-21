@@ -21,7 +21,7 @@
     { "id": "mcp", "owner": "node", "status": "node-owned", "prefixes": ["/api/mcp"] },
     { "id": "histories", "owner": "node", "status": "node-owned", "prefixes": ["/api/histories"] },
     { "id": "search", "owner": "node", "status": "node-owned", "prefixes": ["/api/search"] },
-    { "id": "tasks", "owner": "node", "status": "node-owned", "prefixes": ["/api/tasks", "/api/task-scheduler", "/api/context-budget", "/api/compact"] },
+    { "id": "tasks", "owner": "mixed", "status": "phase-3-projection", "prefixes": ["/api/tasks", "/api/task-scheduler", "/api/context-budget", "/api/compact"] },
     { "id": "workspaces", "owner": "rust", "status": "default-on", "prefixes": ["/api/workspaces"] },
     { "id": "tool-runs", "owner": "rust", "status": "phase-2-persisted", "prefixes": ["/api/tool-runs"] },
     { "id": "tool-events", "owner": "mixed", "status": "in-progress", "prefixes": ["/api/tool-events"] },
@@ -51,7 +51,7 @@
   "responsibilities": [
     { "id": "workspace-command-execution", "owner": "rust", "status": "phase-2-persisted" },
     { "id": "approval-continuation", "owner": "rust", "status": "phase-2-persisted" },
-    { "id": "task-history-terminal-runtime", "owner": "node", "status": "node-owned" },
+    { "id": "task-history-terminal-runtime", "owner": "mixed", "status": "phase-3-task-projection" },
     { "id": "provider-registry-runtime", "owner": "node", "status": "node-owned" },
     { "id": "live-call-asr-audio-runtime", "owner": "node", "status": "node-owned" },
     { "id": "search-index-runtime", "owner": "node", "status": "node-owned" },

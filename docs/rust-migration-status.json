@@ -24,9 +24,25 @@
       {
         "id": "task-history-terminal",
         "title": "Task、history 与 terminal 所有权",
-        "status": "planned",
+        "status": "in-progress",
         "nodeEntries": ["src/agents.js", "src/history.js", "src/terminalRuntime.js"],
-        "rustTarget": "apps/windows/src/execution_host"
+        "rustTarget": "apps/windows/src/task_http.rs",
+        "completedRoutes": [
+          "GET /api/tasks",
+          "POST /api/tasks",
+          "GET /api/tasks/:id/events/catch-up",
+          "POST /api/tasks/:id/input",
+          "POST /api/tasks/:id/stop",
+          "GET /api/task-scheduler"
+        ],
+        "remainingRoutes": [
+          "GET /api/histories",
+          "GET /api/histories/:provider/:id",
+          "GET/POST/DELETE /api/search*",
+          "GET /api/tasks/:id/events SSE",
+          "GET /api/tasks/:id/changes",
+          "terminal input/resize over execd"
+        ]
       },
       {
         "id": "provider-runtime",
@@ -343,6 +359,23 @@
       "fallback": "Rust 鉴权、workspace root 或只读读取失败时可回放 Node；读取 body 后的文件、batch、Git 和 worktree mutation 失败返回 Rust 错误且不回放；关闭 --rust-workspace-http 后恢复 Node 所有权",
       "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
       "nextAction": "Workspace list/create/tree/context/read/preview/batch、Git status/diff/actions、worktree list/create/action、command、terminal-session 入口与 approval 持久化已默认开启；继续把 terminal input/resize 与 provider approval delivery 接到 execd 的长期会话恢复。"
+    },
+    {
+      "id": "task-http-route",
+      "title": "Task 持久投影原生 HTTP 路由",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary", "--rust-task-http"],
+      "nodeEntry": "src/server.js#/api/tasks",
+      "rustEntry": "apps/windows/src/task_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-task-http bridge",
+      "fallback": "只读请求在响应前失败可回放 Node；Rust 认领 create/input/stop body 后直接写 tasks/task_events，失败返回 Rust 500 且不回放；provider turn 启动仍由后续 execd task runner 切片接管。",
+      "tests": [
+        "apps/windows/src/task_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "apps/windows/src/main.rs"
+      ],
+      "nextAction": "将 queued task projection 接到 execd provider runner，并迁移 SSE events、changes、history/search 索引和 provider registry/cache HTTP 所有权。"
     },
     {
       "id": "execution-host",

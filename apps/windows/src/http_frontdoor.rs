@@ -18,6 +18,7 @@ use crate::settings_http::{
 use crate::status_http::{
     parse_request, route_status_request, HttpRouteResponse, StatusRouteConfig, MAX_HEADER_BYTES,
 };
+use crate::task_http::{route_task_request, task_request_requires_body, TaskRouteConfig};
 use crate::tool_events_http::{
     route_tool_events_request, stream_tool_events_request, ToolEventsRouteConfig,
 };
@@ -48,6 +49,7 @@ pub struct FrontdoorRoutes {
     tool_events_sse: Option<ToolEventsRouteConfig>,
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
+    task: Option<TaskRouteConfig>,
     workspace: Option<WorkspaceRouteConfig>,
     event_sync: Option<EventSyncRouteConfig>,
 }
@@ -98,6 +100,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_task(mut self, route: Option<TaskRouteConfig>) -> Self {
+        self.task = route;
+        self
+    }
+
     pub fn with_workspace(mut self, route: Option<WorkspaceRouteConfig>) -> Self {
         self.workspace = route;
         self
@@ -118,6 +125,7 @@ impl FrontdoorRoutes {
             && self.tool_events_sse.is_none()
             && self.settings.is_none()
             && self.pairing.is_none()
+            && self.task.is_none()
             && self.workspace.is_none()
             && self.event_sync.is_none()
     }
@@ -324,6 +332,30 @@ fn handle_connection(
                             .write_to(&mut client);
                     }
                     eprintln!("Rust Event Sync route falling back before ownership: {error:#}");
+                }
+            }
+        }
+        if let Some(task_route) = routes.task.as_ref() {
+            let body = if task_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let rust_owned_mutation = body.is_some();
+            match route_task_request(&request, body.as_deref(), task_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    task_route.record_fallback();
+                    if rust_owned_mutation {
+                        eprintln!("Rust Task mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Task mutation failed.")
+                            .write_to(&mut client);
+                    }
+                    eprintln!("Rust Task route falling back before ownership: {error:#}");
                 }
             }
         }
@@ -625,11 +657,7 @@ mod tests {
         ));
         fs::create_dir_all(&invalid_data_dir).unwrap();
         fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
-        let status_route = StatusRouteConfig::new(
-            invalid_data_dir.clone(),
-            upstream_addr,
-            "secret".to_string(),
-        );
+        let status_route = StatusRouteConfig::new(invalid_data_dir.clone());
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
             let routes = FrontdoorRoutes::default().with_status(Some(status_route));
@@ -681,8 +709,7 @@ mod tests {
             std::process::id()
         ));
         assert!(!missing_data_dir.exists());
-        let doctor_route =
-            DoctorRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
+        let doctor_route = DoctorRouteConfig::new(missing_data_dir);
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
             let routes = FrontdoorRoutes::default().with_doctor(Some(doctor_route));

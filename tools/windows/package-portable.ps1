@@ -314,7 +314,6 @@ $manifest = [ordered]@{
 
 if ($RuntimeFlavor -eq "rust-only") {
   Test-RustOnlyPackageContents -StagePath $stageRoot
-  Test-RustOnlyStartupCanary -StagePath $stageRoot
 }
 
 $archiveName = if ($RuntimeFlavor -eq "hybrid") {

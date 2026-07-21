@@ -31,6 +31,8 @@ pub struct WorkspaceRouteConfig {
     pub data_dir: PathBuf,
     metrics: Arc<WorkspaceRouteMetrics>,
     mutation_lock: Arc<Mutex<()>>,
+    #[cfg(test)]
+    post_file_mutation_failure: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Default)]
@@ -46,12 +48,21 @@ impl WorkspaceRouteConfig {
             data_dir,
             metrics: Arc::new(WorkspaceRouteMetrics::default()),
             mutation_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            post_file_mutation_failure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn record_fallback(&self) {
         self.metrics.fallbacks.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn inject_post_file_mutation_failure_once(config: &WorkspaceRouteConfig) {
+    config
+        .post_file_mutation_failure
+        .store(true, Ordering::SeqCst);
 }
 
 pub fn workspace_request_requires_body(request: &ParsedRequest) -> bool {
@@ -180,6 +191,13 @@ pub fn route_workspace_request(
         .lock()
         .map_err(|_| anyhow::anyhow!("Workspace mutation lock is poisoned"))?;
     let result = mutate_workspace(&config.data_dir, &workspace_id, &action, &payload, request)?;
+    #[cfg(test)]
+    if config
+        .post_file_mutation_failure
+        .swap(false, Ordering::SeqCst)
+    {
+        bail!("Injected post-workspace-mutation failure");
+    }
     config.metrics.responses.fetch_add(1, Ordering::SeqCst);
     let response = match result {
         WorkspaceMutationOutcome::Success(result) => {
@@ -1802,6 +1820,32 @@ mod tests {
             &config
         )
         .is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rename_failure_after_side_effect_returns_error_without_repeating_mutation() {
+        let (dir, config, root) = fixture();
+        let request = parse_request(b"POST /api/workspaces/w/file HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        route_workspace_request(
+            &request,
+            Some(br#"{"path":"before.txt","text":"rename once"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        inject_post_file_mutation_failure_once(&config);
+        let result = route_workspace_request(
+            &request,
+            Some(br#"{"action":"rename","path":"before.txt","nextPath":"after.txt"}"#),
+            &config,
+        );
+        assert!(result.is_err());
+        assert!(!Path::new(&root).join("before.txt").exists());
+        assert_eq!(
+            fs::read_to_string(Path::new(&root).join("after.txt")).unwrap(),
+            "rename once"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -336,11 +336,17 @@ fn handle_connection(
             } else {
                 None
             };
+            let rust_owned_mutation = body.is_some();
             match route_workspace_request(&request, body.as_deref(), workspace_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
                     workspace_route.record_fallback();
+                    if rust_owned_mutation {
+                        eprintln!("Rust Workspace mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Workspace mutation failed.")
+                            .write_to(&mut client);
+                    }
                     eprintln!("Rust Workspace route falling back to Node: {error:#}");
                 }
             }
@@ -479,6 +485,8 @@ mod tests {
     use crate::pairing_http::PairingRouteConfig;
     use crate::status_http::StatusRouteConfig;
     use crate::tool_events_http::ToolEventsRouteConfig;
+    use crate::workspace_http::{inject_post_file_mutation_failure_once, WorkspaceRouteConfig};
+    use rusqlite::params;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
@@ -939,6 +947,106 @@ mod tests {
             .unwrap();
         assert!(revoked_at.is_none());
         drop(database);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_file_mutation_failure_after_write_does_not_replay_to_node() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!(
+            "vibelink-workspace-mutation-no-replay-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"pairingToken":"PAIR","hostAllowlist":["bridge.test"]}"#,
+        )
+        .unwrap();
+        let workspace_root = data_dir.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+        let database = rusqlite::Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE devices (
+                    id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT,
+                    revoked_at TEXT,
+                    expires_at TEXT,
+                    rotated_at TEXT,
+                    meta_json TEXT
+                );
+                CREATE TABLE workspaces(
+                    id TEXT PRIMARY KEY,
+                    path TEXT,
+                    title TEXT,
+                    allowed_root TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    last_used_at TEXT
+                );",
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO devices (
+                    id, label, token_hash, created_at, last_seen_at, expires_at, meta_json
+                 ) VALUES ('device-current', 'Phone', ?1, '2026-01-01T00:00:00.000Z',
+                           '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z', '{}')",
+                [crate::status_http::hash_token("active-token")],
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO workspaces VALUES ('workspace-1', ?1, 'Workspace', ?1, 'now', 'now', NULL)",
+                params![workspace_root.to_string_lossy()],
+            )
+            .unwrap();
+        drop(database);
+
+        let workspace_route = WorkspaceRouteConfig::new(data_dir.clone());
+        inject_post_file_mutation_failure_once(&workspace_route);
+        let proxy_thread = thread::spawn(move || {
+            let (client, _) = frontend.accept().unwrap();
+            let routes = FrontdoorRoutes::default().with_workspace(Some(workspace_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
+        });
+
+        let body = br#"{"path":"note.txt","text":"written once"}"#;
+        let request = format!(
+            "POST /api/workspaces/workspace-1/file HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer active-token\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(response.contains("Workspace mutation failed."));
+        assert!(response.contains("X-VibeLink-Control-Plane: rust"));
+        proxy_thread.join().unwrap();
+        assert_eq!(
+            upstream.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("note.txt")).unwrap(),
+            "written once"
+        );
         fs::remove_dir_all(data_dir).unwrap();
     }
 

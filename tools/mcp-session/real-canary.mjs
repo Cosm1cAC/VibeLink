@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -47,6 +48,21 @@ function defaultRustCommand() {
 }
 
 function defaultProject() {
+  const configuredCommand = String(process.env.CODEBASE_MEMORY_MCP_COMMAND || process.env.CBM_COMMAND || "codebase-memory-mcp").trim();
+  try {
+    const listed = spawnSync(configuredCommand, ["cli", "list_projects", "--json"], {
+      cwd: rootDir,
+      encoding: "utf8",
+      timeout: 10_000,
+      windowsHide: true
+    });
+    if (listed.status === 0) {
+      const envelope = JSON.parse(String(listed.stdout || "{}"));
+      const payload = envelope.structuredContent || JSON.parse(envelope.content?.[0]?.text || "{}");
+      const current = (payload.projects || []).find((item) => path.resolve(String(item.root_path || "")) === rootDir);
+      if (current?.name) return current.name;
+    }
+  } catch {}
   try {
     const artifact = JSON.parse(fs.readFileSync(path.join(rootDir, ".codebase-memory", "artifact.json"), "utf8"));
     return String(artifact.project || "");

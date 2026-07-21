@@ -30,7 +30,7 @@ async function waitForBridge(baseUrl, child) {
   throw new Error("Bridge did not start.");
 }
 
-test("artifact HTTP contract is authenticated, bounded, redacted, and read-only", { timeout: 60_000 }, async () => {
+test("artifact HTTP contract is authenticated, bounded, redacted, and editable", { timeout: 60_000 }, async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-artifact-http-"));
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -75,7 +75,7 @@ test("artifact HTTP contract is authenticated, bounded, redacted, and read-only"
     const metadata = (await metadataResponse.json()).artifact;
     assert.equal(metadata.kind, "table");
     assert.equal(metadata.size, Buffer.byteLength(source));
-    assert.equal(metadata.capabilities.mutation, false);
+    assert.equal(metadata.capabilities.mutation, true);
 
     const missingRange = await fetch(`${baseUrl}${uploaded.artifact.contentUrl}`, { headers: authorization });
     assert.equal(missingRange.status, 416);
@@ -89,12 +89,31 @@ test("artifact HTTP contract is authenticated, bounded, redacted, and read-only"
     const previewResponse = await fetch(`${baseUrl}${uploaded.artifact.previewUrl}`, { headers: authorization });
     assert.equal(previewResponse.status, 200);
     const preview = (await previewResponse.json()).preview;
-    assert.equal(preview.readonly, true);
+    assert.equal(preview.readonly, false);
     assert.equal(JSON.stringify(preview).includes("private-value"), false);
     assert.equal(preview.redaction.applied, true);
 
-    const mutation = await fetch(`${baseUrl}${uploaded.artifact.metadataUrl}`, { method: "POST", headers: authorization });
-    assert.equal(mutation.status, 404);
+    const editedDocument = {
+      type: "table",
+      columns: ["name", "note"],
+      rows: [["Ada", "edited-value"]]
+    };
+    const mutation = await fetch(`${baseUrl}${uploaded.artifact.metadataUrl}`, {
+      method: "PATCH",
+      headers: { ...authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedDigest: metadata.digest, document: editedDocument })
+    });
+    assert.equal(mutation.status, 200);
+    const mutated = await mutation.json();
+    assert.equal(mutated.preview.document.rows[0][1], "edited-value");
+    assert.notEqual(mutated.metadata.digest, metadata.digest);
+
+    const staleMutation = await fetch(`${baseUrl}${uploaded.artifact.metadataUrl}`, {
+      method: "PATCH",
+      headers: { ...authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedDigest: metadata.digest, document: editedDocument })
+    });
+    assert.equal(staleMutation.status, 409);
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => child.once("exit", resolve));

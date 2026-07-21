@@ -7,6 +7,15 @@ on:
         description: Live Call duration in seconds
         default: "600"
         required: true
+      require_physical_android:
+        description: Require a phone/tablet evidence manifest for this release run
+        type: boolean
+        default: false
+        required: true
+      android_evidence_manifest_url:
+        description: HTTPS URL of the archived phone/tablet evidence manifest
+        type: string
+        required: false
   schedule:
     - cron: "17 2 * * 1"
   pull_request:
@@ -80,6 +89,34 @@ jobs:
             apps/android/app/build/outputs/androidTest-results
             .tmp/release-evidence/android
           if-no-files-found: warn
+
+  android-physical-device-gate:
+    if: github.event_name == 'workflow_dispatch' && inputs.require_physical_android
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Download physical device evidence manifest
+        env:
+          MANIFEST_URL: ${{ inputs.android_evidence_manifest_url }}
+        run: |
+          test -n "$MANIFEST_URL"
+          mkdir -p .tmp/release-evidence/android-physical
+          curl --fail --location --retry 3 "$MANIFEST_URL" \
+            --output .tmp/release-evidence/android-physical/manifest.json
+      - name: Validate phone and tablet evidence
+        run: npm run release:android-device-evidence -- --manifest .tmp/release-evidence/android-physical/manifest.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-physical-device-evidence-${{ github.run_id }}
+          path: .tmp/release-evidence/android-physical
+          if-no-files-found: error
 
   live-call-quality:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

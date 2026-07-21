@@ -215,7 +215,12 @@ if (process.env.VIBELINK_PROVIDER_CACHE_STARTUP !== "0") {
   });
 }
 if (process.env.VIBELINK_SEARCH_INDEX_STARTUP !== "0") startSearchIndex({
-    getWorkspaces: () => getWorkspaces(settings),
+    getWorkspaces: () => {
+      const workspaces = getWorkspaces(settings);
+      if (process.env.VIBELINK_SEARCH_INDEX_ONLY_DEFAULT_CWD !== "1") return workspaces;
+      const defaultCwd = path.resolve(String(settings.defaultCwd || ""));
+      return workspaces.filter((workspace) => path.resolve(workspace.path) === defaultCwd);
+    },
     refreshIntervalMs: Number(process.env.VIBELINK_SEARCH_INDEX_REFRESH_MS || 60_000)
   }).catch((error) => {
     console.error(`[search-index] startup refresh failed: ${error.message}`);

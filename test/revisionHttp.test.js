@@ -63,7 +63,9 @@ test("settings ETags reject a stale second-device mutation with the current snap
       VIBELINK_DATA_DIR: dataDir,
       MOBILE_AGENT_HOST: "127.0.0.1",
       MOBILE_AGENT_PORT: String(port),
-      MOBILE_AGENT_TOKEN: pairingToken
+      MOBILE_AGENT_TOKEN: pairingToken,
+      VIBELINK_SEARCH_INDEX_STARTUP: "0",
+      VIBELINK_PROVIDER_CACHE_STARTUP: "0"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -117,7 +119,7 @@ test("thread and batch mutations return ETags and roll back stale multi-device w
   }), "utf8");
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: rootDir,
-    env: { ...process.env, VIBELINK_DATA_DIR: dataDir, MOBILE_AGENT_HOST: "127.0.0.1", MOBILE_AGENT_PORT: String(port) },
+    env: { ...process.env, VIBELINK_DATA_DIR: dataDir, MOBILE_AGENT_HOST: "127.0.0.1", MOBILE_AGENT_PORT: String(port), VIBELINK_SEARCH_INDEX_STARTUP: "0", VIBELINK_PROVIDER_CACHE_STARTUP: "0" },
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -196,7 +198,7 @@ test("workspace file ETags reject a stale second-device write with refresh conte
   }), "utf8");
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: rootDir,
-    env: { ...process.env, VIBELINK_DATA_DIR: dataDir, MOBILE_AGENT_HOST: "127.0.0.1", MOBILE_AGENT_PORT: String(port) },
+    env: { ...process.env, VIBELINK_DATA_DIR: dataDir, MOBILE_AGENT_HOST: "127.0.0.1", MOBILE_AGENT_PORT: String(port), VIBELINK_SEARCH_INDEX_STARTUP: "0", VIBELINK_PROVIDER_CACHE_STARTUP: "0" },
     stdio: ["ignore", "pipe", "pipe"]
   });
 

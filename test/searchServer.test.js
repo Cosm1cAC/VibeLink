@@ -82,7 +82,9 @@ test("search HTTP routes use the persistent index, saved searches, and history",
       MOBILE_AGENT_HOST: "127.0.0.1",
       MOBILE_AGENT_PORT: String(port),
       MOBILE_AGENT_TOKEN: "SEARCH-E2E",
-      VIBELINK_SEARCH_INDEX_WATCH: "0"
+      VIBELINK_SEARCH_INDEX_WATCH: "0",
+      VIBELINK_SEARCH_INDEX_ONLY_DEFAULT_CWD: "1",
+      VIBELINK_EXECUTION_HOST: "off"
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true

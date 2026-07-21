@@ -1,0 +1,77 @@
+name: Full regression
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node tests and web build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  rust:
+    name: Full Cargo test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/windows
+      - run: cargo test --manifest-path apps/windows/Cargo.toml
+
+  android:
+    name: Android JVM tests and debug build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: cd apps/android && ./gradlew testDebugUnitTest assembleDebug
+
+  rust-only-negative:
+    name: Rust-only package negative gate
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/windows
+      - run: npm ci
+      - run: npm run package:windows:rust-only
+      - name: Verify rust-only archive exists
+        shell: pwsh
+        run: |
+          $archive = Get-Item artifacts/windows/*rust-only.zip | Select-Object -First 1
+          if (-not $archive -or $archive.Length -le 0) { throw "Rust-only archive was not produced." }

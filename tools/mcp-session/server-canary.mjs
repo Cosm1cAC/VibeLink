@@ -113,6 +113,8 @@ function startServer({ dataDir, port, pairingToken, rustCommand }) {
       MOBILE_AGENT_HOST: "127.0.0.1",
       MOBILE_AGENT_PORT: String(port),
       MOBILE_AGENT_TOKEN: pairingToken,
+      VIBELINK_SEARCH_INDEX_STARTUP: "0",
+      VIBELINK_PROVIDER_CACHE_STARTUP: "0",
       VIBELINK_MCP_RUST_SIDECAR: "auto",
       VIBELINK_MCP_RUST_SIDECAR_COMMAND: rustCommand
     },

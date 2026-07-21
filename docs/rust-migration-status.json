@@ -19,12 +19,7 @@
           "POST /api/workspaces/:id/git/file-action",
           "POST /api/workspaces/:id/git/action"
         ],
-        "remainingRoutes": [
-          "POST /api/workspaces/:id/worktrees",
-          "POST /api/workspaces/:id/worktrees/action",
-          "POST /api/workspaces/:id/command",
-          "approval continuation"
-        ]
+        "remainingRoutes": []
       },
       {
         "id": "task-history-terminal",
@@ -96,7 +91,7 @@
         "test/statusServerCanary.test.js",
         "test/serverStatusRuntime.test.js"
       ],
-      "nextAction": "继续作为 Status 动态快照的强类型契约层，并保持 Node 快照回退。"
+      "nextAction": "继续扩展 provider 与 task 动态投影，并保持 route-level 兼容。"
     },
     {
       "id": "status-http-route",
@@ -108,7 +103,7 @@
         "--rust-status-http",
         "VIBELINK_INTERNAL_CONTROL_TOKEN"
       ],
-      "nodeEntry": "src/server.js#/internal/status-snapshot",
+      "nodeEntry": "src/statusRuntime.js (Node fallback only)",
       "rustEntry": "apps/windows/src/status_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-status-http bridge",
       "fallback": "Rust 解析/快照/校验失败后逐字节重放原请求到 Node；关闭 --rust-status-http 后所有 Status 请求透明转发",
@@ -118,7 +113,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启；迁移 Node 动态快照后删除内部 Status 端点。"
+      "nextAction": "保持默认开启；继续扩展 Provider 与任务动态快照。"
     },
     {
       "id": "doctor-http-route",
@@ -130,7 +125,7 @@
         "--rust-doctor-http",
         "VIBELINK_INTERNAL_CONTROL_TOKEN"
       ],
-      "nodeEntry": "src/server.js#/internal/doctor-report",
+      "nodeEntry": "src/server.js#/api/doctor (Node fallback only)",
       "rustEntry": "apps/windows/src/doctor_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-doctor-http bridge",
       "fallback": "Rust 解析/内部诊断/契约校验失败后逐字节重放原请求到 Node；关闭 --rust-doctor-http 后所有 Doctor 请求透明转发",
@@ -140,7 +135,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启；迁移 Node 诊断执行器、tool run 与审计写入。"
+      "nextAction": "继续扩展平台探测与 tool run 投影，并保持 route-level 兼容。"
     },
     {
       "id": "devices-http-route",
@@ -222,14 +217,14 @@
       "nodeEntry": "src/server.js#/api/pairing-sessions",
       "rustEntry": "apps/windows/src/pairing_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-pairing-http bridge",
-      "fallback": "初始化、只读查询、unsupported/chunked/超限 body 或 claim 的提交前 settings 快照失败可完整回放 Node；Rust 认领写事务后 domain 与审计同事务，失败返回 Rust 500 且不回放",
+      "fallback": "初始化、只读查询、unsupported/chunked/超限 body 可完整回放 Node；Rust 认领写事务后 domain 与审计同事务，失败返回 Rust 500 且不回放",
       "tests": [
         "apps/windows/src/pairing_http.rs",
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0006-rust-pairing-http-routes.md"
       ],
-      "nextAction": "保持默认开启；移除提交前 Node settings 快照依赖。"
+      "nextAction": "保持默认开启；维持 Rust settings projection 和 claim 有界恢复。"
     },
     {
       "id": "audit-http-route",
@@ -262,7 +257,7 @@
         "--rust-settings-http",
         "VIBELINK_INTERNAL_CONTROL_TOKEN"
       ],
-      "nodeEntry": "src/server.js#/internal/reload-settings",
+      "nodeEntry": "src/store.js (Node fallback settings state)",
       "rustEntry": "apps/windows/src/settings_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-settings-http bridge",
       "fallback": "初始化、鉴权前错误或 unsupported/chunked/超限 body 可回放 Node；Rust 认领 mutation body 后设置/DPAPI/Node 内存同步/审计失败全部回滚并返回 Rust 500，绝不重放",
@@ -275,7 +270,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0008-rust-settings-http-routes.md"
       ],
-      "nextAction": "保持默认开启；Node 设置内存副本移除后删除内部 reload 端点。"
+      "nextAction": "保持默认开启；继续扩展本地 schema/default 初始化和审计回滚覆盖。"
     },
     {
       "id": "tool-events-http-route",
@@ -342,12 +337,12 @@
       "priority": "P1",
       "status": "default-on",
       "featureFlags": ["--rust-http-canary", "--rust-workspace-http"],
-      "nodeEntry": "src/server.js#/api/workspaces/:id/(file|git/status|git/diff|git/file-action|git/action|worktrees)",
+      "nodeEntry": "src/server.js#/api/workspaces",
       "rustEntry": "apps/windows/src/workspace_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
-      "fallback": "Rust 鉴权、workspace root、body 或文件操作失败时逐字节回放 Node；关闭 --rust-workspace-http 后恢复 Node 所有权",
+      "fallback": "Rust 鉴权、workspace root 或只读读取失败时可回放 Node；读取 body 后的文件、batch、Git 和 worktree mutation 失败返回 Rust 错误且不回放；关闭 --rust-workspace-http 后恢复 Node 所有权",
       "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
-      "nextAction": "文件 mutation、Git status/diff/actions 与 worktree list 已默认开启；继续迁移 worktree actions 和 command/approval。"
+      "nextAction": "Workspace list/create/tree/context/read/preview/batch、Git status/diff/actions、worktree list/create/action、command、terminal-session 入口与 approval 持久化已默认开启；继续把 terminal input/resize 与 provider approval delivery 接到 execd 的长期会话恢复。"
     },
     {
       "id": "execution-host",

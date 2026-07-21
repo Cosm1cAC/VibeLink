@@ -67,10 +67,19 @@ pub(crate) fn inject_post_file_mutation_failure_once(config: &WorkspaceRouteConf
 
 pub fn workspace_request_requires_body(request: &ParsedRequest) -> bool {
     request.method == "POST"
-        && request.path().starts_with("/api/workspaces/")
-        && (request.path().ends_with("/file")
-            || request.path().ends_with("/git/file-action")
-            || request.path().ends_with("/git/action"))
+        && (request.path() == "/api/workspaces"
+            || request.path() == "/api/approvals"
+            || request.path().ends_with("/decision")
+            || (request.path().starts_with("/api/workspaces/")
+                && (request.path().ends_with("/context")
+                    || request.path().ends_with("/file")
+                    || request.path().ends_with("/files/batch")
+                    || request.path().ends_with("/worktrees")
+                    || request.path().ends_with("/worktrees/action")
+                    || request.path().ends_with("/command")
+                    || request.path().ends_with("/terminal-session")
+                    || request.path().ends_with("/git/file-action")
+                    || request.path().ends_with("/git/action"))))
 }
 
 pub fn route_workspace_request(
@@ -78,21 +87,53 @@ pub fn route_workspace_request(
     body: Option<&[u8]>,
     config: &WorkspaceRouteConfig,
 ) -> Result<Option<HttpRouteResponse>> {
+    if let Some(response) = route_approval_request(request, body, config)? {
+        return Ok(Some(response));
+    }
+    if let Some(response) = route_tool_run_request(request, config)? {
+        return Ok(Some(response));
+    }
+    if let Some(response) = route_terminal_session_request(request, config)? {
+        return Ok(Some(response));
+    }
+    if request.path() == "/api/workspaces" {
+        return route_workspace_collection_request(request, body, config);
+    }
     let Some((workspace_id, action_path)) = workspace_path_parts(request.path()) else {
         return Ok(None);
     };
+    let file_read = request.method == "GET" && action_path == "file";
+    let file_preview = request.method == "GET" && action_path == "file/preview";
+    let file_batch = request.method == "POST" && action_path == "files/batch";
+    let tree = request.method == "GET" && action_path == "tree";
+    let context = request.method == "POST" && action_path == "context";
+    let open_explorer = request.method == "POST" && action_path == "open-explorer";
     let file_mutation = request.method == "POST" && action_path == "file";
     let git_status = request.method == "GET" && action_path == "git/status";
     let git_diff = request.method == "GET" && action_path == "git/diff";
     let worktree_list = request.method == "GET" && action_path == "worktrees";
+    let worktree_create = request.method == "POST" && action_path == "worktrees";
+    let worktree_action = request.method == "POST" && action_path == "worktrees/action";
     let git_file_action = request.method == "POST" && action_path == "git/file-action";
     let git_action = request.method == "POST" && action_path == "git/action";
+    let command = request.method == "POST" && action_path == "command";
+    let terminal_session = request.method == "POST" && action_path == "terminal-session";
     if !file_mutation
+        && !file_read
+        && !file_preview
+        && !file_batch
+        && !tree
+        && !context
+        && !open_explorer
         && !git_status
         && !git_diff
         && !worktree_list
+        && !worktree_create
+        && !worktree_action
         && !git_file_action
         && !git_action
+        && !command
+        && !terminal_session
     {
         return Ok(None);
     }
@@ -111,6 +152,35 @@ pub fn route_workspace_request(
         RouteAuthentication::Device(_) => {}
         RouteAuthentication::Pending => unreachable!(),
     }
+    if file_read {
+        let result = read_workspace_file(&config.data_dir, &workspace_id, request)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        let headers = result
+            .get("etag")
+            .and_then(Value::as_str)
+            .map(|etag| vec![("ETag".to_string(), etag.to_string())])
+            .unwrap_or_default();
+        return Ok(Some(
+            HttpRouteResponse::json(200, result).with_headers(headers),
+        ));
+    }
+    if file_preview {
+        let result = preview_workspace_file(&config.data_dir, &workspace_id, request)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        let headers = result
+            .get("etag")
+            .and_then(Value::as_str)
+            .map(|etag| vec![("ETag".to_string(), etag.to_string())])
+            .unwrap_or_default();
+        return Ok(Some(
+            HttpRouteResponse::json(200, result).with_headers(headers),
+        ));
+    }
+    if tree {
+        let result = workspace_tree(&config.data_dir, &workspace_id, request)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
     if git_status {
         let result = workspace_git_status(&config.data_dir, &workspace_id)?;
         config.metrics.responses.fetch_add(1, Ordering::SeqCst);
@@ -123,6 +193,11 @@ pub fn route_workspace_request(
     }
     if worktree_list {
         let result = list_workspace_worktrees(&config.data_dir, &workspace_id)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
+    if open_explorer {
+        let result = open_workspace_in_explorer(&config.data_dir, &workspace_id)?;
         config.metrics.responses.fetch_add(1, Ordering::SeqCst);
         return Ok(Some(HttpRouteResponse::json(200, result)));
     }
@@ -142,6 +217,49 @@ pub fn route_workspace_request(
             )))
         }
     };
+    if context {
+        let result = workspace_context(&config.data_dir, &workspace_id, &payload)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
+    if command {
+        let result = run_workspace_command(&config.data_dir, &workspace_id, &payload)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(result));
+    }
+    if terminal_session {
+        let result = start_workspace_terminal_session(&config.data_dir, &workspace_id, &payload)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(result));
+    }
+    if file_batch {
+        let _mutation_guard = config
+            .mutation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace mutation lock is poisoned"))?;
+        let response =
+            mutate_workspace_files_batch(&config.data_dir, &workspace_id, &payload, request)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, response)));
+    }
+    if worktree_create {
+        let _mutation_guard = config
+            .mutation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace mutation lock is poisoned"))?;
+        let result = create_workspace_worktree(&config.data_dir, &workspace_id, &payload)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
+    if worktree_action {
+        let _mutation_guard = config
+            .mutation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace mutation lock is poisoned"))?;
+        let result = apply_workspace_worktree_action(&config.data_dir, &workspace_id, &payload)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
     if git_file_action {
         let _mutation_guard = config
             .mutation_lock
@@ -219,6 +337,492 @@ pub fn route_workspace_request(
         }
     };
     Ok(Some(response))
+}
+
+fn route_workspace_collection_request(
+    request: &ParsedRequest,
+    body: Option<&[u8]>,
+    config: &WorkspaceRouteConfig,
+) -> Result<Option<HttpRouteResponse>> {
+    let list = request.method == "GET";
+    let create = request.method == "POST";
+    if !list && !create {
+        return Ok(None);
+    }
+    let auth = authenticate_route_request(request, &config.data_dir)?;
+    if auth == RouteAuthentication::Pending {
+        return Ok(None);
+    }
+    config.metrics.attempts.fetch_add(1, Ordering::SeqCst);
+    match auth {
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
+        RouteAuthentication::Device(_) => {}
+        RouteAuthentication::Pending => unreachable!(),
+    }
+    if list {
+        let result = list_workspaces(&config.data_dir)?;
+        config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+        return Ok(Some(HttpRouteResponse::json(200, result)));
+    }
+    let body = body.ok_or_else(|| anyhow::anyhow!("Workspace create body is required"))?;
+    if body.len() > MAX_BODY_BYTES {
+        return Ok(Some(HttpRouteResponse::error(
+            413,
+            "Request body is too large.",
+        )));
+    }
+    let payload: Value = serde_json::from_slice(body)
+        .map_err(|_| anyhow::anyhow!("Invalid workspace create JSON."))?;
+    let result = create_workspace(&config.data_dir, &payload)?;
+    config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+    Ok(Some(HttpRouteResponse::json(201, result)))
+}
+
+fn workspace_json(
+    id: String,
+    path: String,
+    title: String,
+    allowed_root: String,
+    created_at: String,
+    updated_at: String,
+    last_used_at: String,
+) -> Value {
+    json!({
+        "id": id,
+        "path": path,
+        "title": title,
+        "allowedRoot": allowed_root,
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+        "lastUsedAt": last_used_at
+    })
+}
+
+fn open_workspace_db(data_dir: &Path) -> Result<Connection> {
+    let db_path = data_dir.join("mobile-agent.sqlite");
+    let connection = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Cannot open {}", db_path.display()))?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS approval_requests (
+           id TEXT PRIMARY KEY, tool_run_id TEXT, task_id TEXT, workspace_id TEXT,
+           kind TEXT NOT NULL, status TEXT NOT NULL, title TEXT, reason TEXT,
+           request_json TEXT, risk_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+           expires_at TEXT, decided_at TEXT, decided_by_device_id TEXT,
+           decision_reason TEXT, decision_json TEXT
+         );",
+    )?;
+    Ok(connection)
+}
+
+fn route_approval_request(
+    request: &ParsedRequest,
+    body: Option<&[u8]>,
+    config: &WorkspaceRouteConfig,
+) -> Result<Option<HttpRouteResponse>> {
+    let path = request.path();
+    let is_list = path == "/api/approvals" && request.method == "GET";
+    let decision_id = path
+        .strip_prefix("/api/approvals/")
+        .and_then(|value| value.strip_suffix("/decision"))
+        .filter(|value| !value.is_empty());
+    if !is_list && !(decision_id.is_some() && request.method == "POST") {
+        return Ok(None);
+    }
+    let auth = authenticate_route_request(request, &config.data_dir)?;
+    if auth == RouteAuthentication::Pending {
+        return Ok(None);
+    }
+    match auth {
+        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
+        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::Device(_) => {}
+        RouteAuthentication::Pending => unreachable!(),
+    }
+    let connection = open_workspace_db(&config.data_dir)?;
+    if is_list {
+        let mut statement = connection.prepare(
+            "SELECT id, tool_run_id, task_id, workspace_id, kind, status, title, reason,
+                    request_json, risk_json, created_at, updated_at, expires_at
+             FROM approval_requests ORDER BY created_at DESC LIMIT 500",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "toolRunId": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    "taskId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    "workspaceId": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    "kind": row.get::<_, String>(4)?,
+                    "status": row.get::<_, String>(5)?,
+                    "title": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    "reason": row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    "request": serde_json::from_str::<Value>(&row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".into())).unwrap_or(json!({})),
+                    "risk": serde_json::from_str::<Value>(&row.get::<_, Option<String>>(9)?.unwrap_or_else(|| "{}".into())).unwrap_or(json!({})),
+                    "createdAt": row.get::<_, String>(10)?,
+                    "updatedAt": row.get::<_, String>(11)?,
+                    "expiresAt": row.get::<_, Option<String>>(12)?.unwrap_or_default()
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        return Ok(Some(HttpRouteResponse::json(200, json!({ "approvals": rows }))));
+    }
+    let approval_id = decision_id.unwrap();
+    let body = body.ok_or_else(|| anyhow::anyhow!("Approval decision body is required"))?;
+    let payload: Value = serde_json::from_slice(body).map_err(|_| anyhow::anyhow!("Invalid approval decision JSON."))?;
+    let decision = payload.get("decision").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    if !matches!(decision.as_str(), "approve" | "approved" | "deny" | "denied" | "reject" | "decline") {
+        return Ok(Some(HttpRouteResponse::error(400, "Approval decision must be approve or deny.")));
+    }
+    let status = if matches!(decision.as_str(), "approve" | "approved") { "approved" } else { "denied" };
+    let now = now_iso();
+    let changed = connection.execute(
+        "UPDATE approval_requests SET status = ?1, updated_at = ?2, decided_at = ?2,
+         decision_reason = ?3, decision_json = ?4 WHERE id = ?5 AND status = 'pending'",
+        params![status, now, payload.get("reason").and_then(Value::as_str).unwrap_or(""), payload.to_string(), approval_id],
+    )?;
+    if changed == 0 {
+        return Ok(Some(HttpRouteResponse::error(409, "Approval request is no longer pending.")));
+    }
+    let approval = json!({ "id": approval_id, "status": status, "decision": decision });
+    Ok(Some(HttpRouteResponse::json(200, json!({ "ok": status == "approved", "approval": approval }))))
+}
+
+fn route_tool_run_request(
+    request: &ParsedRequest,
+    config: &WorkspaceRouteConfig,
+) -> Result<Option<HttpRouteResponse>> {
+    if request.path() != "/api/tool-runs" || request.method != "GET" {
+        return Ok(None);
+    }
+    let auth = authenticate_route_request(request, &config.data_dir)?;
+    if auth == RouteAuthentication::Pending {
+        return Ok(None);
+    }
+    match auth {
+        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
+        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::Device(_) => {}
+        RouteAuthentication::Pending => unreachable!(),
+    }
+    let connection = open_workspace_db(&config.data_dir)?;
+    let mut statement = connection.prepare(
+        "SELECT id, task_id, workspace_id, tool_name, status, title, input_json, result_json,
+                error, created_at, updated_at, started_at, completed_at
+         FROM tool_runs ORDER BY updated_at DESC, created_at DESC LIMIT 500",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(tool_run_json(
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "{}".into()),
+                row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "null".into()),
+                row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(HttpRouteResponse::json(200, json!({ "items": rows }))))
+}
+
+fn route_terminal_session_request(
+    request: &ParsedRequest,
+    config: &WorkspaceRouteConfig,
+) -> Result<Option<HttpRouteResponse>> {
+    let list = request.path() == "/api/terminal-sessions" && request.method == "GET";
+    let session_id = request
+        .path()
+        .strip_prefix("/api/terminal-sessions/")
+        .filter(|value| !value.is_empty() && !value.contains('/'));
+    if !list && !(session_id.is_some() && request.method == "GET") {
+        return Ok(None);
+    }
+    let auth = authenticate_route_request(request, &config.data_dir)?;
+    if auth == RouteAuthentication::Pending {
+        return Ok(None);
+    }
+    match auth {
+        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
+        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::Device(_) => {}
+        RouteAuthentication::Pending => unreachable!(),
+    }
+    let connection = open_workspace_db(&config.data_dir)?;
+    if let Some(id) = session_id {
+        let session = connection
+            .query_row(
+                "SELECT id, workspace_id, status, input_json, started_at FROM tool_runs WHERE id = ?1 AND tool_name = 'workspace.terminal_session'",
+                params![id],
+                |row| Ok(terminal_session_json(row.get(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default(), row.get(2)?, row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "{}".into()), row.get::<_, Option<String>>(4)?.unwrap_or_default())),
+            )
+            .optional()?;
+        return Ok(Some(match session {
+            Some(session) => HttpRouteResponse::json(200, json!({ "session": session })),
+            None => HttpRouteResponse::error(404, "Terminal session not found."),
+        }));
+    }
+    let mut statement = connection.prepare(
+        "SELECT id, workspace_id, status, input_json, started_at FROM tool_runs
+         WHERE tool_name = 'workspace.terminal_session' ORDER BY updated_at DESC LIMIT 200",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok(terminal_session_json(row.get(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default(), row.get(2)?, row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "{}".into()), row.get::<_, Option<String>>(4)?.unwrap_or_default())))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(HttpRouteResponse::json(200, json!({ "items": rows }))))
+}
+
+fn tool_run_json(
+    id: String,
+    task_id: String,
+    workspace_id: String,
+    tool_name: String,
+    status: String,
+    title: String,
+    input_json: String,
+    result_json: String,
+    error: String,
+    created_at: String,
+    updated_at: String,
+    started_at: String,
+    completed_at: String,
+) -> Value {
+    json!({
+        "id": id,
+        "taskId": task_id,
+        "workspaceId": workspace_id,
+        "toolName": tool_name,
+        "status": status,
+        "title": title,
+        "input": serde_json::from_str::<Value>(&input_json).unwrap_or(json!({})),
+        "result": serde_json::from_str::<Value>(&result_json).unwrap_or(Value::Null),
+        "error": error,
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+        "startedAt": started_at,
+        "completedAt": completed_at
+    })
+}
+
+fn terminal_session_json(
+    id: String,
+    workspace_id: String,
+    status: String,
+    input_json: String,
+    started_at: String,
+) -> Value {
+    let input = serde_json::from_str::<Value>(&input_json).unwrap_or(json!({}));
+    json!({
+        "id": id,
+        "toolRunId": id,
+        "workspaceId": workspace_id,
+        "cwd": input.get("cwd").and_then(Value::as_str).unwrap_or(""),
+        "shell": input.get("shell").and_then(Value::as_str).unwrap_or(""),
+        "mode": input.get("mode").and_then(Value::as_str).unwrap_or("execd"),
+        "status": status,
+        "startedAt": started_at
+    })
+}
+
+fn run_workspace_command(
+    data_dir: &Path,
+    workspace_id: &str,
+    payload: &Value,
+) -> Result<HttpRouteResponse> {
+    let workspace = load_workspace_git_context(data_dir, workspace_id)?;
+    let command = payload.get("command").and_then(Value::as_str).unwrap_or("").trim();
+    if command.is_empty() {
+        return Ok(HttpRouteResponse::error(400, "Command is required."));
+    }
+    let kind = if payload.get("kind").and_then(Value::as_str) == Some("test") { "test" } else { "terminal" };
+    let connection = open_workspace_db(data_dir)?;
+    let tool_run_id = create_started_workspace_tool_run(
+        &connection,
+        workspace_id,
+        &format!("workspace.{}", if kind == "test" { "test" } else { "command" }),
+        &format!("{} {}", kind, command),
+        &json!({ "command": command, "kind": kind, "timeoutMs": payload.get("timeoutMs").cloned().unwrap_or(json!(120000)) }),
+    )?;
+    let risky = ["rm -rf", "remove-item", "format ", "shutdown", "del /s", "git reset --hard"]
+        .iter().any(|needle| command.to_ascii_lowercase().contains(needle));
+    if risky && payload.get("approved").and_then(Value::as_bool) != Some(true) {
+        let approval_id = uuid::Uuid::new_v4().to_string();
+        let now = now_iso();
+        connection.execute(
+            "INSERT INTO approval_requests (id,tool_run_id,task_id,workspace_id,kind,status,title,reason,request_json,risk_json,created_at,updated_at)
+             VALUES (?1,?2,'',?3,?4,'pending',?5,?6,?7,?8,?9,?9)",
+            params![
+                approval_id, tool_run_id, workspace_id,
+                format!("workspace.{}", if kind == "test" { "test" } else { "command" }),
+                "Approve workspace command", "dangerous command",
+                json!({ "command": command, "cwd": workspace.cwd, "kind": kind }).to_string(),
+                json!({ "reasons": ["dangerous command"], "matches": ["command policy"] }).to_string(), now
+            ],
+        )?;
+        return Ok(HttpRouteResponse::json(428, json!({
+            "error": "Command requires explicit approval: dangerous command",
+            "approvalId": approval_id,
+            "toolRunId": tool_run_id,
+            "reasons": ["dangerous command"],
+            "matches": ["command policy"],
+            "approval": { "id": approval_id, "status": "pending", "toolRunId": tool_run_id }
+        })));
+    }
+    #[cfg(windows)]
+    let mut process = Command::new("powershell.exe");
+    #[cfg(windows)]
+    process.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]);
+    #[cfg(not(windows))]
+    let mut process = Command::new("sh");
+    #[cfg(not(windows))]
+    process.args(["-lc", command]);
+    let output = process.current_dir(&workspace.root).output()?;
+    let result = json!({
+        "ok": output.status.success(),
+        "workspace": workspace_json(workspace_id.to_string(), workspace.cwd.clone(), workspace.title, workspace.allowed_root, workspace.created_at, workspace.updated_at, workspace.last_used_at),
+        "cwd": workspace.cwd,
+        "command": command,
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+        "exitCode": output.status.code().unwrap_or(1),
+        "toolRunId": tool_run_id
+    });
+    let status = if output.status.success() { "completed" } else { "failed" };
+    connection.execute("UPDATE tool_runs SET status = ?1, result_json = ?2, updated_at = ?3, completed_at = ?3 WHERE id = ?4", params![status, result.to_string(), now_iso(), tool_run_id])?;
+    insert_workspace_tool_event(&connection, &tool_run_id, workspace_id, if output.status.success() { "tool.completed" } else { "tool.error" }, if output.status.success() { "Workspace command completed." } else { "Workspace command failed." }, result.clone())?;
+    Ok(HttpRouteResponse::json(200, result))
+}
+
+fn start_workspace_terminal_session(
+    data_dir: &Path,
+    workspace_id: &str,
+    payload: &Value,
+) -> Result<HttpRouteResponse> {
+    let workspace = load_workspace_git_context(data_dir, workspace_id)?;
+    let shell = payload.get("shell").and_then(Value::as_str).unwrap_or("");
+    let shell = if shell.is_empty() {
+        if cfg!(windows) { "powershell.exe" } else { "sh" }
+    } else {
+        shell
+    };
+    let connection = open_workspace_db(data_dir)?;
+    let tool_run_id = create_started_workspace_tool_run(
+        &connection,
+        workspace_id,
+        "workspace.terminal_session",
+        "Workspace terminal session",
+        &json!({
+            "workspaceId": workspace_id,
+            "cwd": workspace.cwd,
+            "shell": shell,
+            "mode": payload.get("mode").and_then(Value::as_str).unwrap_or("auto"),
+            "cols": payload.get("cols").cloned().unwrap_or(json!(100)),
+            "rows": payload.get("rows").cloned().unwrap_or(json!(30))
+        }),
+    )?;
+    let result = json!({
+        "ok": true,
+        "status": "running",
+        "toolRunId": tool_run_id,
+        "session": {
+            "id": tool_run_id,
+            "toolRunId": tool_run_id,
+            "workspaceId": workspace_id,
+            "cwd": workspace.cwd,
+            "shell": shell,
+            "mode": "execd",
+            "status": "running"
+        }
+    });
+    Ok(HttpRouteResponse::json(202, result))
+}
+
+fn list_workspaces(data_dir: &Path) -> Result<Value> {
+    let connection = open_workspace_db(data_dir)?;
+    let mut statement = connection.prepare(
+        "SELECT id, path, title, allowed_root, created_at, updated_at, last_used_at
+         FROM workspaces ORDER BY updated_at DESC, created_at DESC, id ASC",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(workspace_json(
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(json!({ "items": rows }))
+}
+
+fn create_workspace(data_dir: &Path, payload: &Value) -> Result<Value> {
+    let raw_path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if raw_path.is_empty() {
+        bail!("Workspace path is required.");
+    }
+    let root = canonical_root(Path::new(raw_path))?;
+    let title = payload
+        .get("title")
+        .or_else(|| payload.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            root.file_name()
+                .and_then(|value| value.to_str())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| root.to_string_lossy().into_owned())
+        });
+    let now = now_iso();
+    let id = format!(
+        "workspace-{}",
+        Sha256::digest(root.to_string_lossy().as_bytes())
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let path = root.to_string_lossy().into_owned();
+    let connection = open_workspace_db(data_dir)?;
+    connection.execute(
+        "INSERT INTO workspaces (id, path, title, allowed_root, created_at, updated_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?2, ?4, ?4, ?4)
+         ON CONFLICT(id) DO UPDATE SET path = excluded.path, title = excluded.title,
+           allowed_root = excluded.allowed_root, updated_at = excluded.updated_at, last_used_at = excluded.last_used_at",
+        params![id, path, title, now],
+    )?;
+    Ok(json!({
+        "workspace": workspace_json(id, path.clone(), title, path, now.clone(), now.clone(), now)
+    }))
+}
+
+fn now_iso() -> String {
+    let now: DateTime<Utc> = SystemTime::now().into();
+    now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 struct WorkspaceGitContext {
@@ -675,6 +1279,474 @@ fn pseudo_diff_for_untracked(root: &Path, rel_path: &str) -> Result<Option<Strin
         preview.push("+...".to_string());
     }
     Ok(Some(preview.join("\n")))
+}
+
+fn load_workspace_file_context(data_dir: &Path, workspace_id: &str) -> Result<WorkspaceGitContext> {
+    load_workspace_git_context(data_dir, workspace_id)
+}
+
+fn read_workspace_file(
+    data_dir: &Path,
+    workspace_id: &str,
+    request: &ParsedRequest,
+) -> Result<Value> {
+    let workspace = load_workspace_file_context(data_dir, workspace_id)?;
+    let rel = request.query_parameter("path").unwrap_or_default();
+    let target = safe_child(&workspace.root, &rel)?;
+    if !target.is_file() {
+        bail!("Workspace file path must be a file.");
+    }
+    file_result(
+        &workspace.root,
+        &target,
+        workspace_id,
+        &workspace.title,
+        "read",
+    )
+}
+
+fn preview_workspace_file(
+    data_dir: &Path,
+    workspace_id: &str,
+    request: &ParsedRequest,
+) -> Result<Value> {
+    let workspace = load_workspace_file_context(data_dir, workspace_id)?;
+    let rel = request.query_parameter("path").unwrap_or_default();
+    let target = safe_child(&workspace.root, &rel)?;
+    if !target.is_file() {
+        bail!("Workspace file path must be a file.");
+    }
+    let mut result = file_result(
+        &workspace.root,
+        &target,
+        workspace_id,
+        &workspace.title,
+        "read",
+    )?;
+    let text = result
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .take(12_000)
+        .collect::<String>();
+    result["preview"] = json!({
+        "kind": "text",
+        "document": { "text": text },
+        "redaction": { "count": 0 }
+    });
+    result.as_object_mut().map(|object| object.remove("text"));
+    Ok(result)
+}
+
+fn workspace_tree(data_dir: &Path, workspace_id: &str, request: &ParsedRequest) -> Result<Value> {
+    let workspace = load_workspace_file_context(data_dir, workspace_id)?;
+    let dir = request.query_parameter("dir").unwrap_or_default();
+    let target = if dir.trim().is_empty() {
+        workspace.root.clone()
+    } else {
+        safe_child(&workspace.root, &dir)?
+    };
+    if !target.is_dir() {
+        bail!("Workspace tree path must be a directory.");
+    }
+    let entries = list_directory_entries(&workspace.root, &target, 240)?;
+    Ok(json!({
+        "ok": true,
+        "workspace": workspace_json(workspace_id.to_string(), workspace.cwd, workspace.title, workspace.allowed_root, workspace.created_at, workspace.updated_at, workspace.last_used_at),
+        "dir": relative(&workspace.root, &target),
+        "items": entries,
+        "entries": entries
+    }))
+}
+
+fn list_directory_entries(root: &Path, dir: &Path, max_entries: usize) -> Result<Vec<Value>> {
+    let mut entries = fs::read_dir(dir)
+        .with_context(|| format!("Cannot read {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| !matches!(name, ".git" | "node_modules" | "target"))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        let left_dir = left.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let right_dir = right.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        right_dir
+            .cmp(&left_dir)
+            .then_with(|| left.file_name().cmp(&right.file_name()))
+    });
+    let mut items = Vec::new();
+    let mut queue = entries
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    while let Some(path) = queue.first().cloned() {
+        queue.remove(0);
+        if items.len() >= max_entries {
+            break;
+        }
+        let metadata = fs::metadata(&path)?;
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let item = json!({
+            "name": name,
+            "path": relative(root, &path),
+            "type": if metadata.is_dir() { "directory" } else { "file" },
+            "size": metadata.len(),
+            "updatedAt": DateTime::<Utc>::from(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        });
+        if metadata.is_dir() {
+            let mut children = fs::read_dir(&path)?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| !matches!(name, ".git" | "node_modules" | "target"))
+                })
+                .collect::<Vec<_>>();
+            children.sort_by(|left, right| {
+                let left_dir = left.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+                let right_dir = right.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+                right_dir
+                    .cmp(&left_dir)
+                    .then_with(|| left.file_name().cmp(&right.file_name()))
+            });
+            for child in children.into_iter().rev() {
+                queue.insert(0, child.path());
+            }
+        }
+        items.push(item);
+    }
+    Ok(items)
+}
+
+fn workspace_context(data_dir: &Path, workspace_id: &str, payload: &Value) -> Result<Value> {
+    let workspace = load_workspace_file_context(data_dir, workspace_id)?;
+    let paths = payload
+        .get("paths")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut items = Vec::new();
+    let mut errors = Vec::new();
+    for path in paths.iter().take(20).filter_map(Value::as_str) {
+        match context_for_path(&workspace.root, path) {
+            Ok(item) => items.push(item),
+            Err(error) => errors.push(json!({ "path": path, "error": error.to_string() })),
+        }
+    }
+    let prompt = items
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(json!({
+        "ok": errors.is_empty(),
+        "workspace": workspace_json(workspace_id.to_string(), workspace.cwd, workspace.title, workspace.allowed_root, workspace.created_at, workspace.updated_at, workspace.last_used_at),
+        "items": items,
+        "errors": errors,
+        "prompt": prompt
+    }))
+}
+
+fn context_for_path(root: &Path, rel: &str) -> Result<Value> {
+    let target = safe_child(root, rel)?;
+    let metadata = fs::metadata(&target)?;
+    let path = relative(root, &target);
+    if metadata.is_dir() {
+        let entries = list_directory_entries(root, &target, 220)?;
+        let lines = entries
+            .iter()
+            .filter_map(|entry| {
+                Some(format!(
+                    "{} {}",
+                    if entry.get("type").and_then(Value::as_str) == Some("directory") {
+                        "dir"
+                    } else {
+                        "file"
+                    },
+                    entry.get("path")?.as_str()?
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(
+            json!({ "type": "directory", "path": path, "text": format!("<directory path=\"{path}\">\n{lines}\n</directory>") }),
+        );
+    }
+    if !metadata.is_file() || metadata.len() > 512 * 1024 {
+        return Ok(
+            json!({ "type": "file", "path": path, "text": format!("<file path=\"{path}\" size=\"{}\" binary_or_too_large=\"true\" />", metadata.len()) }),
+        );
+    }
+    let raw = fs::read(&target)?;
+    if raw.contains(&0) {
+        return Ok(
+            json!({ "type": "file", "path": path, "text": format!("<file path=\"{path}\" size=\"{}\" binary_or_too_large=\"true\" />", metadata.len()) }),
+        );
+    }
+    let text = String::from_utf8_lossy(&raw)
+        .chars()
+        .take(12_000)
+        .collect::<String>();
+    Ok(
+        json!({ "type": "file", "path": path, "text": format!("<file path=\"{path}\">\n{text}\n</file>") }),
+    )
+}
+
+fn mutate_workspace_files_batch(
+    data_dir: &Path,
+    workspace_id: &str,
+    payload: &Value,
+    request: &ParsedRequest,
+) -> Result<Value> {
+    let operations = payload
+        .get("operations")
+        .or_else(|| payload.get("files"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|value| *value == "best-effort")
+        .unwrap_or("atomic");
+    let mut items = Vec::new();
+    for (index, operation) in operations.iter().enumerate() {
+        let action = operation
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("write")
+            .to_ascii_lowercase();
+        match mutate_workspace(data_dir, workspace_id, &action, operation, request) {
+            Ok(WorkspaceMutationOutcome::Success(mut value)) => {
+                value["index"] = json!(index);
+                value["ok"] = json!(true);
+                items.push(value);
+            }
+            Ok(WorkspaceMutationOutcome::Conflict(mut value)) => {
+                value["index"] = json!(index);
+                value["ok"] = json!(false);
+                if mode != "best-effort" {
+                    bail!("Workspace batch mutation failed.");
+                }
+                items.push(value);
+            }
+            Err(error) => {
+                if mode != "best-effort" {
+                    return Err(error);
+                }
+                items.push(json!({ "ok": false, "index": index, "error": error.to_string() }));
+            }
+        }
+    }
+    Ok(json!({
+        "ok": items.iter().all(|item| item.get("ok").and_then(Value::as_bool).unwrap_or(false)),
+        "mode": mode,
+        "workspaceId": workspace_id,
+        "items": items,
+        "results": items
+    }))
+}
+
+fn open_workspace_in_explorer(data_dir: &Path, workspace_id: &str) -> Result<Value> {
+    let workspace = load_workspace_file_context(data_dir, workspace_id)?;
+    #[cfg(windows)]
+    let _ = Command::new("explorer.exe")
+        .arg(&workspace.root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    Ok(json!({
+        "ok": true,
+        "workspace": workspace_json(workspace_id.to_string(), workspace.cwd, workspace.title, workspace.allowed_root, workspace.created_at, workspace.updated_at, workspace.last_used_at),
+        "path": workspace.root.to_string_lossy()
+    }))
+}
+
+fn create_workspace_worktree(
+    data_dir: &Path,
+    workspace_id: &str,
+    payload: &Value,
+) -> Result<Value> {
+    let source = load_workspace_file_context(data_dir, workspace_id)?;
+    let repo_root = git_stdout(&source.root, &["rev-parse", "--show-toplevel"])?;
+    let repo_root = canonical_root(Path::new(repo_root.trim()))?;
+    let current_branch = git_stdout(&repo_root, &["branch", "--show-current"]).unwrap_or_default();
+    let fallback_branch = if current_branch.trim().is_empty() {
+        "worktree".to_string()
+    } else {
+        format!("{}-worktree", current_branch.trim())
+    };
+    let branch_name = clean_path_segment(
+        payload
+            .get("branchName")
+            .or_else(|| payload.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(&fallback_branch),
+        &fallback_branch,
+    );
+    let base_ref = payload
+        .get("baseRef")
+        .and_then(Value::as_str)
+        .unwrap_or("HEAD")
+        .trim();
+    let target = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            repo_root
+                .parent()
+                .unwrap_or_else(|| repo_root.as_path())
+                .join(".vibelink-worktrees")
+                .join(repo_root.file_name().unwrap_or_default())
+                .join(&branch_name)
+        });
+    if target.exists() && fs::read_dir(&target)?.next().is_some() {
+        bail!("Worktree path already exists and is not empty.");
+    }
+    let status = run_git(&repo_root, &["status", "--porcelain"])?;
+    if !status.stdout.trim().is_empty() {
+        bail!("Commit or stash local changes before creating a permanent worktree.");
+    }
+    let branch_exists = run_git(
+        &repo_root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ],
+    )?
+    .ok;
+    let target_string = target.to_string_lossy().into_owned();
+    let output = if branch_exists {
+        run_git(
+            &repo_root,
+            &["worktree", "add", &target_string, &branch_name],
+        )?
+    } else {
+        run_git(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch_name,
+                &target_string,
+                base_ref,
+            ],
+        )?
+    };
+    if !output.ok {
+        bail!("{}", output.stderr.trim());
+    }
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&branch_name);
+    let created = create_workspace(data_dir, &json!({ "path": target_string, "title": title }))?;
+    Ok(json!({
+        "ok": true,
+        "action": "create-worktree",
+        "sourceWorkspace": workspace_json(workspace_id.to_string(), source.cwd, source.title, source.allowed_root, source.created_at, source.updated_at, source.last_used_at),
+        "workspace": created["workspace"].clone(),
+        "cwd": repo_root.to_string_lossy(),
+        "path": target.to_string_lossy(),
+        "branchName": branch_name,
+        "baseRef": base_ref,
+        "branchExisted": branch_exists,
+        "stdout": output.stdout,
+        "stderr": output.stderr
+    }))
+}
+
+fn apply_workspace_worktree_action(
+    data_dir: &Path,
+    workspace_id: &str,
+    payload: &Value,
+) -> Result<Value> {
+    let source = load_workspace_file_context(data_dir, workspace_id)?;
+    let target = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Worktree path is required."))?;
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let mut args = vec!["worktree", action.as_str()];
+    match action.as_str() {
+        "lock" => {
+            args.push(target);
+            if let Some(reason) = payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                args.extend(["--reason", reason]);
+            }
+        }
+        "unlock" | "remove" => args.push(target),
+        "prune" => args.truncate(2),
+        _ => bail!("Unsupported worktree action."),
+    }
+    let output = run_git(&source.root, &args)?;
+    if !output.ok {
+        bail!("{}", output.stderr.trim());
+    }
+    Ok(json!({
+        "ok": true,
+        "action": action,
+        "workspaceId": workspace_id,
+        "path": target,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "worktrees": list_workspace_worktrees(data_dir, workspace_id)?["worktrees"].clone()
+    }))
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+    let result = run_git(root, args)?;
+    if !result.ok {
+        bail!("{}", result.stderr.trim());
+    }
+    Ok(result.stdout.trim().to_string())
+}
+
+fn clean_path_segment(value: &str, fallback: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if cleaned.is_empty() {
+        fallback.to_string()
+    } else {
+        cleaned
+    }
 }
 
 type GitFileActionResult<T> = std::result::Result<T, (u16, String)>;
@@ -1508,11 +2580,6 @@ fn audit_workspace_git_file_action(
     Ok(())
 }
 
-fn now_iso() -> String {
-    let now: DateTime<Utc> = SystemTime::now().into();
-    now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
 fn workspace_path_parts(path: &str) -> Option<(String, &str)> {
     let rest = path.strip_prefix("/api/workspaces/")?;
     let (id, suffix) = rest.split_once('/')?;
@@ -1748,16 +2815,12 @@ mod tests {
     use super::*;
     use crate::status_http::{hash_token, parse_request};
     use rusqlite::Connection;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture() -> (PathBuf, WorkspaceRouteConfig, String) {
         let dir = std::env::temp_dir().join(format!(
             "vibelink-workspace-http-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            uuid::Uuid::new_v4()
         ));
         fs::create_dir_all(&dir).unwrap();
         let root = dir.join("workspace");
@@ -1768,7 +2831,7 @@ mod tests {
         )
         .unwrap();
         let db = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
-        db.execute_batch("CREATE TABLE devices(id TEXT PRIMARY KEY,label TEXT,token_hash TEXT UNIQUE,created_at TEXT,last_seen_at TEXT,revoked_at TEXT,expires_at TEXT,rotated_at TEXT,meta_json TEXT); CREATE TABLE workspaces(id TEXT PRIMARY KEY,path TEXT,title TEXT,allowed_root TEXT,created_at TEXT,updated_at TEXT,last_used_at TEXT); CREATE TABLE audit_log(cursor INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT,event_at TEXT,method TEXT,path TEXT,success INTEGER,target TEXT,meta_json TEXT,created_at TEXT); CREATE TABLE tool_runs(id TEXT PRIMARY KEY,task_id TEXT,workspace_id TEXT,tool_name TEXT NOT NULL,status TEXT NOT NULL,title TEXT,input_json TEXT,result_json TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,started_at TEXT,completed_at TEXT); CREATE TABLE tool_events(cursor INTEGER PRIMARY KEY AUTOINCREMENT,tool_run_id TEXT NOT NULL,task_id TEXT,workspace_id TEXT,event_id TEXT NOT NULL,event_type TEXT NOT NULL,event_at TEXT NOT NULL,text TEXT,payload_json TEXT,event_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(tool_run_id,event_id));").unwrap();
+        db.execute_batch("CREATE TABLE devices(id TEXT PRIMARY KEY,label TEXT,token_hash TEXT UNIQUE,created_at TEXT,last_seen_at TEXT,revoked_at TEXT,expires_at TEXT,rotated_at TEXT,meta_json TEXT); CREATE TABLE workspaces(id TEXT PRIMARY KEY,path TEXT,title TEXT,allowed_root TEXT,created_at TEXT,updated_at TEXT,last_used_at TEXT); CREATE TABLE audit_log(cursor INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT,event_at TEXT,method TEXT,path TEXT,success INTEGER,target TEXT,meta_json TEXT,created_at TEXT); CREATE TABLE tool_runs(id TEXT PRIMARY KEY,task_id TEXT,workspace_id TEXT,tool_name TEXT NOT NULL,status TEXT NOT NULL,title TEXT,input_json TEXT,result_json TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,started_at TEXT,completed_at TEXT); CREATE TABLE tool_events(cursor INTEGER PRIMARY KEY AUTOINCREMENT,tool_run_id TEXT NOT NULL,task_id TEXT,workspace_id TEXT,event_id TEXT NOT NULL,event_type TEXT NOT NULL,event_at TEXT NOT NULL,text TEXT,payload_json TEXT,event_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(tool_run_id,event_id)); CREATE TABLE approval_requests(id TEXT PRIMARY KEY,tool_run_id TEXT,task_id TEXT,workspace_id TEXT,kind TEXT NOT NULL,status TEXT NOT NULL,title TEXT,reason TEXT,request_json TEXT,risk_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,expires_at TEXT,decided_at TEXT,decided_by_device_id TEXT,decision_reason TEXT,decision_json TEXT);").unwrap();
         db.execute(
             "INSERT INTO devices VALUES ('d','Device',?1,'now',NULL,NULL,NULL,NULL,NULL)",
             params![hash_token("token")],
@@ -1784,6 +2847,226 @@ mod tests {
             WorkspaceRouteConfig::new(dir),
             root.to_string_lossy().to_string(),
         )
+    }
+
+    #[test]
+    fn lists_creates_reads_trees_previews_and_batches_workspace_files_in_rust() {
+        let (dir, config, root) = fixture();
+        let list = parse_request(
+            b"GET /api/workspaces HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let listed = route_workspace_request(&list, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(listed.status, 200);
+        assert_eq!(listed.body["items"][0]["id"], "w");
+
+        let new_root = Path::new(&root).parent().unwrap().join("created");
+        fs::create_dir_all(&new_root).unwrap();
+        let create = parse_request(
+            b"POST /api/workspaces HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let create_body = format!(
+            r#"{{"path":"{}","title":"Created"}}"#,
+            new_root.to_string_lossy().replace('\\', "\\\\")
+        );
+        let created = route_workspace_request(&create, Some(create_body.as_bytes()), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.status, 201);
+        let created_id = created.body["workspace"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let batch = parse_request(
+            format!("POST /api/workspaces/{created_id}/files/batch HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let batched = route_workspace_request(
+            &batch,
+            Some(br##"{"files":[{"path":"src/main.txt","text":"hello\n"},{"path":"README.md","text":"# Created\n"}]}"##),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(batched.status, 200);
+        assert_eq!(batched.body["results"].as_array().unwrap().len(), 2);
+
+        let read = parse_request(
+            format!("GET /api/workspaces/{created_id}/file?path=src/main.txt HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let file = route_workspace_request(&read, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.status, 200);
+        assert_eq!(file.body["text"], "hello\n");
+
+        let preview = parse_request(
+            format!("GET /api/workspaces/{created_id}/file/preview?path=README.md HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let previewed = route_workspace_request(&preview, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(previewed.status, 200);
+        assert_eq!(previewed.body["preview"]["kind"], "text");
+
+        let tree = parse_request(
+            format!("GET /api/workspaces/{created_id}/tree HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let tree = route_workspace_request(&tree, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tree.status, 200);
+        assert!(tree.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "src/main.txt"));
+
+        let context = parse_request(
+            format!("POST /api/workspaces/{created_id}/context HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let context = route_workspace_request(
+            &context,
+            Some(br#"{"paths":["src/main.txt","."]}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(context.status, 200);
+        assert_eq!(context.body["workspace"]["id"], created_id);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn creates_and_mutates_worktrees_in_rust() {
+        let (dir, config, root) = fixture();
+        let root = Path::new(&root);
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "VibeLink Test"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "base"]);
+
+        let target = root.parent().unwrap().join("linked-worktree");
+        let create = parse_request(
+            b"POST /api/workspaces/w/worktrees HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let create_body = format!(
+            r#"{{"branchName":"feature-rust","path":"{}"}}"#,
+            target.to_string_lossy().replace('\\', "\\\\")
+        );
+        let created = route_workspace_request(&create, Some(create_body.as_bytes()), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.status, 200);
+        assert_eq!(created.body["action"], "create-worktree");
+        assert!(target.join("tracked.txt").exists());
+
+        let action = parse_request(
+            b"POST /api/workspaces/w/worktrees/action HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let lock_body = format!(
+            r#"{{"action":"lock","path":"{}","reason":"rust test"}}"#,
+            target.to_string_lossy().replace('\\', "\\\\")
+        );
+        let locked = route_workspace_request(&action, Some(lock_body.as_bytes()), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(locked.status, 200);
+        assert_eq!(locked.body["action"], "lock");
+        assert!(locked.body["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["locked"] == true));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn executes_workspace_command_and_records_tool_run_state() {
+        let (dir, config, root) = fixture();
+        let command = parse_request(
+            b"POST /api/workspaces/w/command HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let body: &[u8] = if cfg!(windows) {
+            br#"{"command":"Write-Output hello","kind":"terminal"}"#
+        } else {
+            br#"{"command":"printf hello","kind":"terminal"}"#
+        };
+        let response = route_workspace_request(&command, Some(body), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], true);
+        assert!(response.body["stdout"].as_str().unwrap().contains("hello"));
+        let connection = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
+        let status: String = connection
+            .query_row("SELECT status FROM tool_runs ORDER BY created_at DESC LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM tool_events WHERE workspace_id = 'w' AND event_type = 'tool.completed'", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(response.body["workspace"]["path"], root);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn requests_approval_for_dangerous_commands() {
+        let (dir, config, _root) = fixture();
+        let command = parse_request(
+            b"POST /api/workspaces/w/command HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let response = route_workspace_request(
+            &command,
+            Some(br#"{"command":"rm -rf important","kind":"terminal"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status, 428);
+        let approval_id = response.body["approvalId"].as_str().unwrap();
+        let approvals = parse_request(
+            b"GET /api/approvals HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let listed = route_workspace_request(&approvals, None, &config)
+            .unwrap()
+            .unwrap();
+        assert!(listed.body["approvals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|approval| approval["id"] == approval_id));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -350,6 +350,31 @@
       "nextAction": "文件 mutation、Git status/diff/actions 与 worktree list 已默认开启；继续迁移 worktree actions 和 command/approval。"
     },
     {
+      "id": "execution-host",
+      "title": "Durable Execution Host",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": [
+        "VIBELINK_EXECUTION_HOST_COMMAND",
+        "VIBELINK_RUST_BIN"
+      ],
+      "nodeEntry": "src/executionHostClient.js",
+      "rustEntry": "apps/windows/src/execution_host",
+      "sidecarCommand": "vibelink execd --pipe <pipe-name>",
+      "fallback": "未配置可用 execd-capable Rust binary 时保持 legacy Node 执行路径；已由 execution-host 认领的 binding 只通过 host cursor reconciliation 恢复，不回退重放为外部进程。",
+      "tests": [
+        "apps/windows/src/execution_host",
+        "test/executionHostClient.test.js",
+        "test/executionHostTerminalRestart.test.js",
+        "test/terminalExecutionHostFacade.test.js",
+        "test/workspaceCommandExecutionHost.test.js",
+        "test/executionBindingDb.test.js",
+        "test/executionStartupReconciliation.test.js",
+        "tools/execution-host/reliability-canary.mjs"
+      ],
+      "nextAction": "execd、per-execution worker、ConPTY/stdio/app-server backend、durable binding、event spool 和 approval delivery 已接入；继续迁移 Provider registry、任务投影与剩余 HTTP 编排所有权。"
+    },
+    {
       "id": "mcp-session-sidecar",
       "title": "MCP 持久 stdio 会话",
       "priority": "P1",

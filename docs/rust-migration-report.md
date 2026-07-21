@@ -31,6 +31,7 @@
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
 | Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust allowed-root 文件操作、Git status/diff/actions 与 worktree list，Node 回退 | 继续迁移 worktree actions、command/approval |
 | 统一事件同步原生 HTTP 路由 | `default-on` | Rust unified replay、设备 ack、retention/compaction 与 marker | 保持客户端 ack 与多设备冲突观测 |
+| Durable Execution Host | `default-on` | Rust execd/worker 持有 ConPTY、stdio、app-server backend 与 host event spool | 继续迁移 Provider registry、任务投影与剩余 HTTP 编排 |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |
 | 事件存储 append/replay sidecar | `canary` | `auto`/显式开启，可回退 Worker/同步 SQLite | 有限真人运行会话并采集统计 |
 | 实时音频低延迟管线 | `contract` | 无 | 仅在新证据表明 Node 成为瓶颈时重评 |

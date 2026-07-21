@@ -69,9 +69,11 @@ jobs:
         with:
           workspaces: apps/windows
       - run: npm ci
-      - run: npm run package:windows:rust-only
-      - name: Verify rust-only archive exists
+      - name: Verify rust-only package is rejected
         shell: pwsh
         run: |
-          $archive = Get-Item artifacts/windows/*rust-only.zip | Select-Object -First 1
-          if (-not $archive -or $archive.Length -le 0) { throw "Rust-only archive was not produced." }
+          npm run package:windows:rust-only
+          if ($LASTEXITCODE -eq 0) {
+            throw "Rust-only packaging unexpectedly succeeded before Node removal blockers were cleared."
+          }
+          Write-Host "Rust-only packaging rejected as expected."

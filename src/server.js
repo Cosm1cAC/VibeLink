@@ -74,6 +74,7 @@ import { getCompactServiceMetrics } from "./compactService.js";
 import { getContextBudgetMetrics } from "./contextBudget.js";
 import { getCodexDesktopStatus, probeCodexDesktopDraft, sendToCodexDesktop } from "./codexDesktopControl.js";
 import { commandApprovalRequired } from "./commandSafety.js";
+import { mapApprovalApiDecision } from "./approvalDecision.js";
 import { subscribeDesktopObserver } from "./desktopObserver.js";
 import { clearDesktopRemoteQueue, enqueueDesktopRemoteMessage, focusDesktopRemoteConversation, getDesktopRemoteState, retryDesktopRemoteQueue, setDesktopRemoteNotificationHandler } from "./desktopRemote.js";
 import { filterArchivedCodexTasks, getHistory, listHistories } from "./history.js";
@@ -2253,7 +2254,7 @@ async function routeApi(request, response, url) {
           operationId: body.operationId || crypto.randomUUID(),
           continuationRef: body.continuationRef || approvalBefore.continuationRef,
           expectedDecisionVersion: body.expectedDecisionVersion ?? body.expectedVersion ?? approvalBefore.decisionVersion,
-          decision: body.decision === "approve" ? { decision: "accept" } : body.decision === "deny" ? { decision: "decline" } : body.decision,
+          decision: mapApprovalApiDecision(body.decision, approvalBefore.availableDecisions),
           reason: body.reason || "",
           deviceId: body.deviceId || ""
         });

@@ -211,7 +211,7 @@ class SettingsViewModel : ViewModel() {
     fun decideApproval(
         apiClient: ApiClient,
         approvalId: String,
-        approve: Boolean,
+        decision: String,
         onResolved: (ApprovalDecisionResponse) -> Unit = {},
     ) {
         viewModelScope.launch {
@@ -219,14 +219,14 @@ class SettingsViewModel : ViewModel() {
             try {
                 val result = apiClient.decideApproval(
                     approvalId = approvalId,
-                    approve = approve,
-                    reason = if (approve) strings.androidApprovalApprovedReason else strings.androidApprovalDeniedReason,
+                    decision = decision,
+                    reason = if (decision.lowercase() in listOf("decline", "cancel", "deny")) strings.androidApprovalDeniedReason else strings.androidApprovalApprovedReason,
                 )
                 val approvals = apiClient.listApprovals(status = "", limit = 50)
                 _uiState.update {
                     it.copy(
                         approvals = approvals,
-                        notice = if (approve) strings.approvalApproved else strings.approvalDenied,
+                        notice = if (decision.lowercase() in listOf("decline", "cancel", "deny")) strings.approvalDenied else strings.approvalApproved,
                     )
                 }
                 onResolved(result)
@@ -929,11 +929,8 @@ fun SettingsScreen(
                                     state.approvals.forEach { approval ->
                                         ApprovalCard(
                                             approval = approval,
-                                            onApprove = {
-                                                viewModel.decideApproval(apiClient, approval.id, approve = true, onResolved = onApprovalDecision)
-                                            },
-                                            onDeny = {
-                                                viewModel.decideApproval(apiClient, approval.id, approve = false, onResolved = onApprovalDecision)
+                                            onDecision = { decision ->
+                                                viewModel.decideApproval(apiClient, approval.id, decision = decision, onResolved = onApprovalDecision)
                                             },
                                         )
                                     }
@@ -1215,8 +1212,7 @@ private fun KeyField(label: String, value: String, onValueChange: (String) -> Un
 @Composable
 private fun ApprovalCard(
     approval: ApprovalRequestItem,
-    onApprove: () -> Unit,
-    onDeny: () -> Unit,
+    onDecision: (String) -> Unit,
 ) {
     val strings = LocalAppStrings.current
     Card(
@@ -1242,6 +1238,18 @@ private fun ApprovalCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            val permissions = approval.requestedPermissions?.entries
+                ?.joinToString(" · ") { (scope, value) ->
+                    val enabled = (value as? Map<*, *>)?.get("enabled") as? Boolean
+                    "$scope: ${if (enabled == false) "off" else "on"}"
+                }
+                .orEmpty()
+            if (permissions.isNotBlank()) {
+                Text("Permissions · $permissions", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (approval.availableDecisions.isNotEmpty()) {
+                Text("Available decisions · ${approval.availableDecisions.joinToString()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
             val deliveryStatus = approval.deliveryStatus.ifBlank { approval.status }
             Text(
                 listOfNotNull(
@@ -1254,13 +1262,20 @@ private fun ApprovalCard(
                 color = MaterialTheme.colorScheme.primary,
             )
             if (approval.status == "pending") Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onApprove) {
-                    Icon(Icons.Default.Check, contentDescription = null)
-                    Text(strings.text("批准", "Approve"))
-                }
-                OutlinedButton(onClick = onDeny) {
-                    Icon(Icons.Default.Close, contentDescription = null)
-                    Text(strings.text("拒绝", "Deny"))
+                val decisions = approval.availableDecisions.ifEmpty { listOf("approve", "deny") }
+                decisions.forEach { decision ->
+                    val denied = decision.lowercase() in listOf("decline", "cancel", "deny")
+                    if (denied) {
+                        OutlinedButton(onClick = { onDecision(decision) }) {
+                            Icon(Icons.Default.Close, contentDescription = null)
+                            Text(decision)
+                        }
+                    } else {
+                        Button(onClick = { onDecision(decision) }) {
+                            Icon(Icons.Default.Check, contentDescription = null)
+                            Text(decision)
+                        }
+                    }
                 }
             }
         }

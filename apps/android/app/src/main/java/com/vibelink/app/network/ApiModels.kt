@@ -1243,6 +1243,8 @@ data class ApprovalRequestItem(
     val risk: Map<String, Any?>? = null,
     val execution: ExecutionBindingSummary? = null,
     @SerializedName("providerFidelity") val providerFidelity: Map<String, Any?>? = null,
+    @SerializedName("requestedPermissions") val requestedPermissions: Map<String, Any?>? = null,
+    @SerializedName("availableDecisions") val availableDecisions: List<String> = emptyList(),
     @SerializedName("createdAt") val createdAt: String = "",
     @SerializedName("updatedAt") val updatedAt: String = "",
 )

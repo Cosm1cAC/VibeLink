@@ -918,13 +918,16 @@ class ApiClient(
         return gson.fromJson(json, ApprovalListResponse::class.java).items
     }
 
-    suspend fun decideApproval(approvalId: String, approve: Boolean, reason: String = "Decision from Android"): ApprovalDecisionResponse {
+    suspend fun decideApproval(approvalId: String, decision: String, reason: String = "Decision from Android"): ApprovalDecisionResponse {
         val json = post(
             "/api/approvals/${encode(approvalId)}/decision",
-            ApprovalDecisionRequest(decision = if (approve) "approve" else "deny", reason = reason),
+            ApprovalDecisionRequest(decision = decision, reason = reason),
         )
         return gson.fromJson(json, ApprovalDecisionResponse::class.java)
     }
+
+    suspend fun decideApproval(approvalId: String, approve: Boolean, reason: String = "Decision from Android"): ApprovalDecisionResponse =
+        decideApproval(approvalId, if (approve) "approve" else "deny", reason)
 
     // ── SSE (Live Call Events) ──
 

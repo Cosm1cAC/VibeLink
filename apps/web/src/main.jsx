@@ -12,6 +12,26 @@ import {
   retentionPresentation
 } from "./eventSyncModel.js";
 import "katex/dist/katex.min.css";
+
+function approvalDecisionValue(item) {
+  return typeof item === "string" ? item : item?.decision || item?.type || "";
+}
+
+function approvalDecisionOptions(approval) {
+  return (Array.isArray(approval?.availableDecisions) ? approval.availableDecisions : [])
+    .map(approvalDecisionValue)
+    .filter(Boolean);
+}
+
+function approvalPermissionSummary(permissions) {
+  if (!permissions || typeof permissions !== "object") return "";
+  return Object.entries(permissions)
+    .map(([scope, value]) => {
+      const enabled = value && typeof value === "object" && "enabled" in value ? value.enabled : value;
+      return `${scope}: ${enabled === false ? "off" : "on"}`;
+    })
+    .join(" · ");
+}
 import {
   ArrowUp,
   Archive,
@@ -4970,21 +4990,28 @@ function SettingsDrawer({ settings, token, onClose, onSaved, network, onApproval
           {approvals.length ? approvals.map((approval) => {
             const command = approval.request?.command || approval.request?.input?.command || approval.title || approval.kind;
             const delivery = approvalDeliveryPresentation(approval);
+            const decisions = approvalDecisionOptions(approval);
+            const permissionSummary = approvalPermissionSummary(approval.requestedPermissions);
             return (
               <div className={cx("security-row", "approval-row", delivery.tone)} key={approval.id}>
                 <div>
                   <strong>{approval.kind || "tool approval"}</strong>
                   <small>{approval.reason || "Approval required"} · expires {formatTime(approval.expiresAt)}</small>
                   <small>{delivery.label}{delivery.detail ? ` · ${delivery.detail}` : ""}{approval.providerFidelity?.executionState ? ` · execution ${approval.providerFidelity.executionState}` : ""}{approval.providerFidelity?.toolOutput ? ` · output ${approval.providerFidelity.toolOutput}` : ""}</small>
+                  {permissionSummary ? <small>Permissions · {permissionSummary}</small> : null}
+                  {decisions.length ? <small>Available decisions · {decisions.join(", ")}</small> : null}
                   <code>{command}</code>
                 </div>
                 {approval.status === "pending" ? <div className="security-row-actions">
-                  <button className="secondary-button" type="button" onClick={() => decideApproval(approval.id, "approve")} disabled={Boolean(securityBusy)}>
-                    Approve
-                  </button>
-                  <button className="secondary-button danger" type="button" onClick={() => decideApproval(approval.id, "deny")} disabled={Boolean(securityBusy)}>
-                    Deny
-                  </button>
+                  {(decisions.length ? decisions : ["approve", "deny"]).map((decision) => {
+                    const normalized = decision.toLowerCase().replace(/[^a-z]/g, "");
+                    const denied = ["decline", "cancel", "deny"].includes(normalized);
+                    return (
+                      <button key={decision} className={cx("secondary-button", denied ? "danger" : "")} type="button" onClick={() => decideApproval(approval.id, decision)} disabled={Boolean(securityBusy)}>
+                        {decision}
+                      </button>
+                    );
+                  })}
                 </div> : null}
               </div>
             );

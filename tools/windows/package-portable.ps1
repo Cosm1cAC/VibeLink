@@ -49,6 +49,77 @@ function Reset-Directory([string]$Path, [string]$AllowedRoot) {
   New-Item -ItemType Directory -Path $resolvedPath -Force | Out-Null
 }
 
+function Get-FreeLoopbackPort() {
+  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse("127.0.0.1"), 0)
+  $listener.Start()
+  try {
+    return $listener.LocalEndpoint.Port
+  } finally {
+    $listener.Stop()
+  }
+}
+
+function Get-DescendantProcessIds([int]$ParentPid) {
+  $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ParentPid" -ErrorAction SilentlyContinue)
+  foreach ($child in $children) {
+    $child.ProcessId
+    Get-DescendantProcessIds -ParentPid $child.ProcessId
+  }
+}
+
+function Test-RustOnlyPackageContents([string]$StagePath) {
+  foreach ($relative in @("runtime\node.exe", "src", "node_modules")) {
+    $target = Join-Path $StagePath $relative
+    if (Test-Path -LiteralPath $target) {
+      throw "Rust-only package contains forbidden Node asset: $relative"
+    }
+  }
+  $nodeBinaries = @(Get-ChildItem -LiteralPath $StagePath -Recurse -File -Filter "node.exe" -ErrorAction SilentlyContinue)
+  if ($nodeBinaries.Count -gt 0) {
+    throw "Rust-only package contains node.exe: $($nodeBinaries[0].FullName)"
+  }
+}
+
+function Test-RustOnlyStartupCanary([string]$StagePath) {
+  $exe = Join-Path $StagePath "vibelink.exe"
+  $port = Get-FreeLoopbackPort
+  $dataDir = Join-Path $tempRoot "rust-only-smoke-data"
+  Reset-Directory -Path $dataDir -AllowedRoot $tempRoot
+  $previousDataDir = $env:VIBELINK_DATA_DIR
+  $env:VIBELINK_DATA_DIR = $dataDir
+  $process = $null
+  try {
+    $process = Start-Process -FilePath $exe -ArgumentList @("--host", "127.0.0.1", "--port", "$port") -WorkingDirectory $StagePath -PassThru -WindowStyle Hidden
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $ready = $false
+    while ([DateTime]::UtcNow -lt $deadline) {
+      if ($process.HasExited) { throw "Rust-only startup canary exited early with code $($process.ExitCode)" }
+      try {
+        $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$port/api/status"
+        if ($response.StatusCode -eq 200) {
+          $ready = $true
+          break
+        }
+      } catch {
+        Start-Sleep -Milliseconds 250
+      }
+    }
+    if (-not $ready) { throw "Rust-only startup canary did not serve /api/status." }
+    $descendants = @(Get-DescendantProcessIds -ParentPid $process.Id)
+    foreach ($pid in $descendants) {
+      $child = Get-CimInstance Win32_Process -Filter "ProcessId = $pid" -ErrorAction SilentlyContinue
+      if ($child -and [IO.Path]::GetFileName($child.ExecutablePath) -ieq "node.exe") {
+        throw "Rust-only startup canary spawned Node: $($child.ExecutablePath)"
+      }
+    }
+  } finally {
+    if ($process -and -not $process.HasExited) {
+      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($previousDataDir) { $env:VIBELINK_DATA_DIR = $previousDataDir } else { Remove-Item Env:\VIBELINK_DATA_DIR -ErrorAction SilentlyContinue }
+  }
+}
+
 if ($RuntimeFlavor -eq "rust-only") {
   Invoke-Checked "node.exe" @((Join-Path $root "tools\check-node-removal-readiness.mjs"))
 }
@@ -241,6 +312,11 @@ $manifest = [ordered]@{
   [Text.Encoding]::ASCII
 )
 
+if ($RuntimeFlavor -eq "rust-only") {
+  Test-RustOnlyPackageContents -StagePath $stageRoot
+  Test-RustOnlyStartupCanary -StagePath $stageRoot
+}
+
 $archiveName = if ($RuntimeFlavor -eq "hybrid") {
   "VibeLink-$($sourcePackage.version)-windows-x64.zip"
 } else {
@@ -249,6 +325,9 @@ $archiveName = if ($RuntimeFlavor -eq "hybrid") {
 $archive = Join-Path $outputRoot $archiveName
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 Compress-Archive -LiteralPath $stageRoot -DestinationPath $archive -CompressionLevel Optimal
+if ($RuntimeFlavor -eq "rust-only") {
+  Invoke-Checked "node.exe" @((Join-Path $root "tools\rust-only-package-smoke.mjs"), "--archive", $archive)
+}
 $hash = Get-Sha256 $archive
 [IO.File]::WriteAllText("$archive.sha256", "$hash  $([IO.Path]::GetFileName($archive))`n", [Text.Encoding]::ASCII)
 

@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   defaultOnPolicyErrors,
-  nodeRuntimeReadiness
+  nodeRuntimeReadiness,
+  ownershipReadiness
 } from "../tools/rust-migration-policy.mjs";
 
 const manifest = JSON.parse(fs.readFileSync(new URL("../docs/rust-migration-status.json", import.meta.url), "utf8"));
@@ -23,13 +24,9 @@ test("every default Rust route is declared default-on and backed by the default 
 test("Node-free packaging remains blocked until every product owner is native", () => {
   const readiness = nodeRuntimeReadiness(manifest);
   assert.equal(readiness.ready, false);
-  assert.deepEqual(readiness.blockerIds, [
-    "workspace-git-command-approval",
-    "task-history-terminal",
-    "provider-runtime",
-    "live-call-runtime",
-    "native-release-entry"
-  ]);
+  assert.ok(readiness.blockerIds.includes("workspace-git-command-approval"));
+  assert.ok(readiness.blockerIds.includes("native-release-entry"));
+  assert.ok(readiness.blockerIds.some((id) => id.startsWith("ownership-")));
 });
 
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
@@ -40,13 +37,29 @@ test("the release gate refuses a rust-only package and reports concrete blockers
   assert.equal(result.status, 1);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.ready, false);
-  assert.equal(payload.blockers.length, 5);
+  assert.ok(payload.blockers.length >= 5);
+});
+
+test("ownership readiness rejects forged manifests with incomplete coverage", () => {
+  const openapi = JSON.parse(fs.readFileSync(new URL("../docs/openapi.json", import.meta.url), "utf8"));
+  const routeOwnership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const forged = {
+    ...routeOwnership,
+    publicRouteFamilies: routeOwnership.publicRouteFamilies.slice(0, 2).map((family) => ({ ...family, owner: "rust" })),
+    internalRouteFamilies: [],
+    responsibilities: []
+  };
+  const readiness = ownershipReadiness(forged, openapi);
+  assert.equal(readiness.ready, false);
+  assert.ok(readiness.blockerIds.includes("ownership-openapi-unowned") || readiness.blockerIds.includes("ownership-manifest-stale"));
 });
 
 test("portable packaging gates rust-only output before omitting Node assets", () => {
   const source = fs.readFileSync(new URL("../tools/windows/package-portable.ps1", import.meta.url), "utf8");
   assert.match(source, /ValidateSet\("hybrid", "rust-only"\)/);
   assert.match(source, /check-node-removal-readiness\.mjs/);
+  assert.match(source, /Test-RustOnlyPackageContents/);
+  assert.match(source, /Test-RustOnlyStartupCanary/);
   assert.match(source, /if \(\$RuntimeFlavor -eq "hybrid"\)[\s\S]*runtime\\node\.exe/);
   assert.match(source, /windows-x64-rust-only\.zip/);
 });

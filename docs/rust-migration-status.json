@@ -1,6 +1,7 @@
 {
   "schemaVersion": 2,
   "report": "docs/rust-migration-report.md",
+  "routeOwnership": "docs/route-ownership.json",
   "nodeRuntime": {
     "packaging": "required",
     "blockers": [

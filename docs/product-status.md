@@ -36,6 +36,7 @@ Windows portable 当前是混合运行时：普通 `vibelink.exe` 默认由 Rust
 - Rust `execd`、per-execution worker、Job Object、ConPTY/stdio/app-server、spool/replay/ack 和 approval outbox 已进入默认 Windows 运行链路；Bridge/execd 重连和长时 canary 已通过。
 - Android 已拆分 Codex Remote 与 Agent conversation 路由，并修复 drawer/返回导航和中断 Pairing claim 的客户端恢复策略。
 - 搜索、thread metadata、task queue、Provider catalog/health、结构化测试结果、artifact workbench、浏览器控制和 PR review 已形成 Web/Android 产品链路。
+- Rust-only Node 移除门禁已接入 `docs/route-ownership.json`，会把非 Rust route family、OpenAPI/运行时 route 差集、内部 Node 端点、后台职责和 rust-only 包内 Node 资产检查纳入 release gate。
 
 ## P0-P2 复核
 
@@ -54,7 +55,7 @@ Windows portable 当前是混合运行时：普通 `vibelink.exe` 默认由 Rust
 | Rust Pairing 丢失首次 claim 响应后无法恢复 | `3d3c594` 只在 Node 保存短期 retryable claim；普通 `vibelink.exe` 默认走 Rust Pairing，而 `apps/windows/src/pairing_http.rs` 仍对 `claimed` 返回 `409`。Android 会按新策略重试，但默认产品路径仍失败，用户必须重新配对。 | 把同一 session/code/device 的有界幂等恢复语义移植到 Rust，并增加 Node/Rust 差分合同和默认前门 HTTP canary。 |
 | Codex permission approval 的“批准”链路断裂 | permission approval 的可用决定是 `grant/decline`；`src/server.js` 却把 Web/Android 的 `approve` 固定映射为 `accept`，随后被 outbox 严格校验为 `APPROVAL_DECISION_INVALID`。现有测试也明确证明 permission + `accept` 必须失败。 | API 根据 `availableDecisions` 做显式映射，或客户端提交 Provider 原生决定；双端建模并展示 `requestedPermissions`、scope 和可用决定，覆盖 grant/decline/acceptForSession/cancel。 |
 | Web Live Call 实时事件未鉴权 | Web 创建 Live Call 使用 Bearer fetch，但随后 `EventSource` 只带 `after`，没有 `token`；服务端所有 `/api/*` 在进入 live-call SSE 前要求 Bearer 或 query token，因此流返回 `401`，Web 无法收到 transcript、audio level 和 QA 事件。Android 路径已带 token。 | SSE URL 带设备 token 或改为可设置 Authorization 的流客户端，并增加真实登录 Bridge 的 Web Live Call SSE E2E。 |
-| Rust-only 移除门禁可能误放行不完整产品 | 当前 `nodeRuntimeReadiness()` 只信任人工 blocker 数组和 `packaging` 字段，不核对 OpenAPI、运行时路由、内部端点、imports 或进程树。当前仍被 5 个 blocker 安全阻断，但未来仅修改清单即可放行缺大量 API/后台职责的空壳包。 | 建立唯一 route/responsibility ownership manifest；OpenAPI、运行时 registry 和 ownership 双向差集为 0；rust-only ZIP 启动后遍历必需 HTTP/SSE/WS family，并验证包内和产品进程树没有自带 Node。 |
+| Rust-only 移除门禁可能误放行不完整产品 | 已建立唯一 route/responsibility ownership manifest，并接入 `nodeRuntimeReadiness()`；当前 gate 会因为非 Rust route family、OpenAPI/运行时 registry 差集、内部 Node 端点和后台职责继续 fail-closed。 | OpenAPI、运行时 registry 和 ownership 双向差集为 0；所有 route/responsibility 均 Rust-owned；rust-only ZIP 启动后遍历必需 HTTP/SSE/WS family，并验证包内和产品进程树没有自带 Node。 |
 
 ### P2
 
@@ -77,7 +78,7 @@ Windows portable 当前是混合运行时：普通 `vibelink.exe` 默认由 Rust
 | 验证项 | 结果 |
 | --- | --- |
 | `npm run rust:migration:check` | 通过；18 个 slice 的阶段与文档快照一致。 |
-| `npm run rust:node-removal:check` | 按预期失败；明确列出 5 个未关闭 blocker。 |
+| `npm run rust:node-removal:check` | 按预期失败；除原有产品 blocker 外，明确列出 ownership manifest、OpenAPI/运行时 registry 差集、内部 Node 端点和后台职责 blocker。 |
 | `npm run status:contract` | 通过，17/17。 |
 | `npm run rust-http:contract` | 通过；Node 4/4、Rust frontdoor 10/10。 |
 | `npm run rust:test` | 120 秒内未完成；不能作为全量 Rust 已通过的证据。聚焦 HTTP 合同已通过。 |

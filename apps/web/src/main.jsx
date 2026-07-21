@@ -5331,7 +5331,9 @@ function LiveCallPanel({ onClose, token }) {
       rememberStreamCursor(cursorKey, data.cursor);
       ackEventCursor(token, eventStreamId("live-call", session.id), data.cursor, data.id || "").catch(() => {});
     };
-    const es = new EventSource(`/api/live-calls/${session.id}/events?after=${cursor}`);
+    const es = new EventSource(
+      `/api/live-calls/${session.id}/events?token=${encodeURIComponent(token)}&after=${cursor}`
+    );
     eventSourceRef.current = es;
 
     es.addEventListener("live_call.audio_level", (event) => {
@@ -5439,7 +5441,7 @@ function LiveCallPanel({ onClose, token }) {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [session?.id]);
+  }, [session?.id, token]);
 
   async function createSession() {
     setBusy("create");

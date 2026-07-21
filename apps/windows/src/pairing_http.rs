@@ -26,6 +26,7 @@ const CLAIM_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub struct PairingRouteConfig {
     data_dir: PathBuf,
     rate_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
+    retryable_claims: Arc<Mutex<HashMap<String, RetryableClaim>>>,
     decision_lock: Arc<Mutex<()>>,
     internal_settings: Option<InternalSettingsConfig>,
     metrics: Arc<RouteMetrics>,
@@ -41,6 +42,15 @@ struct InternalSettingsConfig {
 struct RateBucket {
     count: u32,
     reset_at: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+struct RetryableClaim {
+    code_hash: String,
+    device_id: String,
+    token: String,
+    label: String,
+    expires_at: SystemTime,
 }
 
 #[derive(Debug)]
@@ -73,7 +83,7 @@ struct PairingBody {
     code: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PairingRow {
     id: String,
     code_hash: String,
@@ -94,6 +104,7 @@ impl PairingRouteConfig {
         Self {
             data_dir,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            retryable_claims: Arc::new(Mutex::new(HashMap::new())),
             decision_lock: Arc::new(Mutex::new(())),
             internal_settings: None,
             metrics: Arc::new(RouteMetrics::default()),
@@ -361,6 +372,15 @@ fn route_claim_pairing(
         let connection = open_database(&config.data_dir, true)?;
         read_pairing(&connection, session_id)?
     };
+    if initial.as_ref().is_some_and(|row| row.status == "claimed") {
+        if let Some(public_settings) = retryable_claim_settings(config, initial.as_ref(), &code)? {
+            let response =
+                retryable_claim_response(initial.as_ref().unwrap(), public_settings, config)?;
+            return Ok(Some(
+                claimed_result(config, Ok(response)).with_headers(headers),
+            ));
+        }
+    }
     if let Some((status, message)) = claim_validation_error(initial.as_ref(), session_id, &code) {
         let response = audit_only(
             &config.data_dir,
@@ -395,7 +415,137 @@ fn route_claim_pairing(
         &label,
         public_settings,
     );
+    if let Ok(response) = &response {
+        if let Err(error) = remember_retryable_claim(config, session_id, initial.as_ref(), response)
+        {
+            eprintln!("Rust Pairing retry state unavailable after claim: {error:#}");
+        }
+    }
     Ok(Some(claimed_result(config, response).with_headers(headers)))
+}
+
+fn retryable_claim_settings(
+    config: &PairingRouteConfig,
+    row: Option<&PairingRow>,
+    code: &str,
+) -> Result<Option<Value>> {
+    let Some(row) = row else { return Ok(None) };
+    let supplied_hash =
+        crate::status_http::hash_token(&format!("{}:{}", row.id, code.trim().to_ascii_uppercase()));
+    if supplied_hash != row.code_hash {
+        return Ok(None);
+    }
+    let mut claims = config
+        .retryable_claims
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Pairing retry state is unavailable"))?;
+    let Some(claim) = claims.get(&row.id).cloned() else {
+        return Ok(None);
+    };
+    if claim.code_hash != row.code_hash
+        || claim.device_id != row.device_id
+        || claim.expires_at <= SystemTime::now()
+    {
+        claims.remove(&row.id);
+        return Ok(None);
+    }
+    let connection = open_database(&config.data_dir, true)?;
+    let active = connection
+        .query_row(
+            "SELECT id FROM devices
+             WHERE id = ?1 AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?2)",
+            params![claim.device_id, now_rfc3339()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("Cannot validate retryable pairing device")?;
+    if active.is_none() {
+        claims.remove(&row.id);
+        return Ok(None);
+    }
+    Ok(config
+        .internal_settings
+        .as_ref()
+        .map(fetch_public_settings)
+        .transpose()?)
+}
+
+fn retryable_claim_response(
+    row: &PairingRow,
+    public_settings: Value,
+    config: &PairingRouteConfig,
+) -> Result<HttpRouteResponse> {
+    let claims = config
+        .retryable_claims
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Pairing retry state is unavailable"))?;
+    let claim = claims
+        .get(&row.id)
+        .cloned()
+        .context("Pairing retry state disappeared")?;
+    Ok(HttpRouteResponse::json(
+        200,
+        json!({
+            "ok": true,
+            "token": claim.token,
+            "device": { "id": claim.device_id, "label": claim.label },
+            "session": public_pairing_session(row.clone()),
+            "settings": public_settings
+        }),
+    ))
+}
+
+fn remember_retryable_claim(
+    config: &PairingRouteConfig,
+    session_id: &str,
+    initial: Option<&PairingRow>,
+    response: &HttpRouteResponse,
+) -> Result<()> {
+    let Some(initial) = initial else {
+        return Ok(());
+    };
+    let Some(token) = response.body.get("token").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let Some(device) = response.body.get("device") else {
+        return Ok(());
+    };
+    let Some(device_id) = device.get("id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let Some(label) = device.get("label").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let expires_at = DateTime::parse_from_rfc3339(&initial.expires_at)
+        .map(|value| value.with_timezone(&Utc))
+        .ok()
+        .and_then(|value| {
+            let now: DateTime<Utc> = SystemTime::now().into();
+            value.signed_duration_since(now).to_std().ok()
+        })
+        .map(|duration| SystemTime::now() + duration)
+        .unwrap_or_else(SystemTime::now);
+    config
+        .retryable_claims
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Pairing retry state is unavailable"))?
+        .insert(
+            session_id.to_string(),
+            RetryableClaim {
+                code_hash: initial.code_hash.clone(),
+                device_id: device_id.to_string(),
+                token: token.to_string(),
+                label: label.to_string(),
+                expires_at,
+            },
+        );
+    Ok(())
+}
+
+fn now_rfc3339() -> String {
+    let current_time: DateTime<Utc> = SystemTime::now().into();
+    current_time.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 fn parse_pairing_body(body: &[u8]) -> PairingBody {
@@ -634,6 +784,13 @@ fn claim_validation_error(
     {
         return Some((410, "Pairing session expired.".to_string()));
     }
+    let supplied_hash = crate::status_http::hash_token(&format!(
+        "{session_id}:{}",
+        code.trim().to_ascii_uppercase()
+    ));
+    if supplied_hash != row.code_hash {
+        return Some((401, "Pairing code mismatch.".to_string()));
+    }
     if row.status != "approved" {
         let message = if row.status == "pending" {
             "Pairing session is waiting for confirmation.".to_string()
@@ -641,13 +798,6 @@ fn claim_validation_error(
             format!("Pairing session is {}.", row.status)
         };
         return Some((409, message));
-    }
-    let supplied_hash = crate::status_http::hash_token(&format!(
-        "{session_id}:{}",
-        code.trim().to_ascii_uppercase()
-    ));
-    if supplied_hash != row.code_hash {
-        return Some((401, "Pairing code mismatch.".to_string()));
     }
     None
 }
@@ -1456,20 +1606,22 @@ mod tests {
         let internal = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let internal_addr = internal.local_addr().unwrap();
         let internal_thread = std::thread::spawn(move || {
-            let (mut stream, _) = internal.accept().unwrap();
-            let mut request = [0_u8; 2048];
-            let size = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..size]);
-            assert!(request.starts_with("GET /internal/public-settings HTTP/1.1"));
-            assert!(request.contains("X-VibeLink-Internal-Token: secret"));
-            let body = r#"{"theme":"dark","hasOpenAIKey":false}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .unwrap();
+            for _ in 0..2 {
+                let (mut stream, _) = internal.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let size = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                assert!(request.starts_with("GET /internal/public-settings HTTP/1.1"));
+                assert!(request.contains("X-VibeLink-Internal-Token: secret"));
+                let body = r#"{"theme":"dark","hasOpenAIKey":false}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
         });
         let config = PairingRouteConfig::new(data_dir.clone())
             .with_internal_settings(internal_addr, "secret".to_string());
@@ -1531,6 +1683,39 @@ mod tests {
         assert_eq!(claimed.body["settings"]["theme"], "dark");
         let token = claimed.body["token"].as_str().unwrap();
         assert_eq!(token.len(), 64);
+        let mut response_fields = claimed
+            .body
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        response_fields.sort();
+        assert_eq!(
+            response_fields,
+            vec!["device", "ok", "session", "settings", "token"]
+        );
+        let retry = route_pairing_request_with_body(
+            &claim,
+            "198.51.100.8",
+            Some(claim_body.as_bytes()),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry.status, 200);
+        assert_eq!(retry.body["token"], token);
+        assert_eq!(retry.body["device"]["id"], claimed.body["device"]["id"]);
+        assert_eq!(retry.body["settings"]["theme"], "dark");
+        let mut retry_fields = retry
+            .body
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        retry_fields.sort();
+        assert_eq!(retry_fields, response_fields);
         internal_thread.join().unwrap();
 
         let database = Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();

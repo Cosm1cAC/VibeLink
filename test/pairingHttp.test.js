@@ -103,6 +103,8 @@ test("pairing claim is retryable and never exposes the token through status", { 
   const status = await requestJson(`${baseUrl}/api/pairing-sessions/${created.session.id}`);
 
   assert.ok(first.token);
+  assert.deepEqual(Object.keys(first).sort(), ["device", "ok", "session", "settings", "token"]);
+  assert.deepEqual(Object.keys(retry).sort(), ["device", "ok", "session", "settings", "token"]);
   assert.equal(retry.token, first.token);
   assert.equal(retry.device.id, first.device.id);
   assert.ok(first.settings);

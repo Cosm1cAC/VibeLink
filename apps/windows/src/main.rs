@@ -17,6 +17,7 @@ mod artifact_http;
 mod audit_http;
 mod compression_sidecar;
 mod device_http;
+mod desktop_remote_http;
 mod doctor_http;
 mod event_store_sidecar;
 mod event_sync_http;
@@ -455,6 +456,8 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| provider_http::ProviderRouteConfig::new(route_data_dir.clone()));
     let artifact_route =
         Some(artifact_http::ArtifactRouteConfig::new(route_data_dir.clone()));
+    let desktop_remote_route =
+        Some(desktop_remote_http::DesktopRemoteRouteConfig::new(route_data_dir.clone()));
     let workspace_route = rust_workspace_http_enabled(cli)
         .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
@@ -493,6 +496,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_settings(settings_route)
         .with_pairing(pairing_route)
         .with_artifact(artifact_route)
+        .with_desktop_remote(desktop_remote_route)
         .with_static(Some(static_route));
     let routes = routes.with_workspace(workspace_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);

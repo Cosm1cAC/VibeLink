@@ -8,6 +8,7 @@ use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
     DeviceRouteConfig,
 };
+use crate::desktop_remote_http::{route_desktop_remote_request, DesktopRemoteRouteConfig};
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
 use crate::event_sync_http::{
     event_sync_request_requires_body, route_event_sync_request, EventSyncRouteConfig,
@@ -64,6 +65,7 @@ pub struct FrontdoorRoutes {
     workspace: Option<WorkspaceRouteConfig>,
     event_sync: Option<EventSyncRouteConfig>,
     artifact: Option<ArtifactRouteConfig>,
+    desktop_remote: Option<DesktopRemoteRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -142,6 +144,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_desktop_remote(mut self, route: Option<DesktopRemoteRouteConfig>) -> Self {
+        self.desktop_remote = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -158,6 +165,7 @@ impl FrontdoorRoutes {
             && self.workspace.is_none()
             && self.event_sync.is_none()
             && self.artifact.is_none()
+            && self.desktop_remote.is_none()
     }
 }
 
@@ -316,6 +324,13 @@ fn handle_connection(
                 Err(error) => {
                     eprintln!("Rust Artifact route falling back to Node: {error:#}");
                 }
+            }
+        }
+        if let Some(desktop_remote_route) = routes.desktop_remote.as_ref() {
+            match route_desktop_remote_request(&request, desktop_remote_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => eprintln!("Rust Desktop Remote route falling back to Node: {error:#}"),
             }
         }
         if let Some(status_route) = routes.status.as_ref() {

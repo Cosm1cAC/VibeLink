@@ -12,6 +12,15 @@ use std::net::TcpStream;
 use zip::ZipArchive;
 use std::path::{Path, PathBuf};
 
+pub const ARTIFACT_RUNTIME_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/artifacts/:id"),
+    ("PATCH", "/api/artifacts/:id"),
+    ("GET", "/api/artifacts/:id/preview"),
+    ("GET", "/api/artifacts/:id/content"),
+    ("POST", "/api/attachments"),
+    ("GET", "/api/attachments/:id"),
+];
+
 #[derive(Clone)]
 pub struct ArtifactRouteConfig {
     data_dir: PathBuf,
@@ -706,6 +715,8 @@ mod tests {
 
     #[test]
     fn accepts_only_uuid_artifact_ids_with_safe_extensions() {
+        assert!(ARTIFACT_RUNTIME_ROUTES.contains(&("PATCH", "/api/artifacts/:id")));
+        assert!(ARTIFACT_RUNTIME_ROUTES.contains(&("POST", "/api/attachments")));
         assert!(artifact_path_for("a0b1c2d3-e4f5-6789-abcd-ef0123456789.csv").is_some());
         assert!(artifact_path_for("../settings.json").is_none());
     }

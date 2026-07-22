@@ -40,7 +40,10 @@ function normalizeMethod(method) {
 }
 
 function normalizePath(value) {
-  return String(value || "").trim().replace(/\/+$/, "") || "/";
+  return String(value || "")
+    .trim()
+    .replace(/\/(?:\{[^/}]+\}|:[^/]+)/g, "/:param")
+    .replace(/\/+$/, "") || "/";
 }
 
 function pathMatches(pattern, candidate) {
@@ -267,7 +270,12 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         })
       );
     });
-    const runtimeApiRoutes = runtimeRoutes.filter((route) => String(route).includes(" /api/"));
+    const runtimeApiRoutes = runtimeRoutes
+      .filter((route) => String(route).includes(" /api/"))
+      .map((route) => {
+        const [method, ...pathParts] = String(route).split(" ");
+        return operationKey(method, pathParts.join(" "));
+      });
     const openapiKeys = new Set(operations.map((operation) => operation.key));
     const runtimeKeys = new Set(runtimeApiRoutes);
     const openapiOnly = operations.filter((operation) => !runtimeKeys.has(operation.key));

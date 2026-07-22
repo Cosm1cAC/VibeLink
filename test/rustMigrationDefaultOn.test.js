@@ -68,6 +68,32 @@ test("ownership readiness rejects forged manifests with incomplete coverage", ()
   assert.ok(readiness.blockerIds.includes("ownership-openapi-unowned") || readiness.blockerIds.includes("ownership-manifest-stale"));
 });
 
+test("ownership comparison treats OpenAPI and runtime path parameters as the same route", () => {
+  const readiness = ownershipReadiness({
+    publicRouteFamilies: [{
+      id: "artifacts",
+      owner: "rust",
+      prefixes: ["/api/artifacts"]
+    }],
+    runtimeRoutes: ["GET /api/artifacts/:id"]
+  }, {
+    paths: {
+      "/api/artifacts/{id}": { get: { operationId: "getArtifact" } }
+    }
+  });
+
+  assert.equal(readiness.blockerIds.includes("ownership-runtime-registry-diff"), false);
+});
+
+test("the native artifact family has no OpenAPI or runtime registry gap", () => {
+  const readiness = nodeRuntimeReadiness(manifest);
+  const diff = readiness.blockers.find((blocker) => blocker.id === "ownership-runtime-registry-diff");
+  const entries = diff?.nodeEntries || [];
+
+  assert.equal(entries.some((entry) => entry.includes("/api/artifacts")), false);
+  assert.equal(entries.some((entry) => entry.includes("/api/attachments")), false);
+});
+
 test("portable packaging gates rust-only output before omitting Node assets", () => {
   const source = fs.readFileSync(new URL("../tools/windows/package-portable.ps1", import.meta.url), "utf8");
   assert.match(source, /ValidateSet\("hybrid", "rust-only"\)/);

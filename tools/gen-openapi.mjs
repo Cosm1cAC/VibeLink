@@ -1343,6 +1343,35 @@ const paths = {
       }
     }
   }),
+  ...path("/api/attachments", post("Upload attachment",
+    "Stores an authenticated attachment and returns its generated id, bounded preview, and optional artifact links.",
+    { type: "string", format: "binary" },
+    {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        id: { type: "string" },
+        name: { type: "string" },
+        url: { type: "string" },
+        mimeType: { type: "string" },
+        size: { type: "integer" },
+        artifact: { type: "object" }
+      }
+    },
+    { "201": { description: "Created" } }
+  )),
+  ...path("/api/attachments/{id}", {
+    get: {
+      summary: "Read attachment",
+      description: "Streams one authenticated attachment by its generated id.",
+      parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+      responses: {
+        "200": { description: "Attachment bytes", content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } } },
+        "401": { description: "Unauthorized", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        "404": { description: "Not found", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } }
+      }
+    }
+  }),
 
   // Managed browser sessions
   ...path("/api/browser-sessions", {

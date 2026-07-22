@@ -69,22 +69,25 @@ pub(crate) fn inject_post_file_mutation_failure_once(config: &WorkspaceRouteConf
 }
 
 pub fn workspace_request_requires_body(request: &ParsedRequest) -> bool {
-    request.method == "POST"
-        && (request.path() == "/api/workspaces"
-            || request.path() == "/api/approvals"
-            || request.path().ends_with("/decision")
-            || (request.path().starts_with("/api/workspaces/")
-                && (request.path().ends_with("/context")
-                    || request.path().ends_with("/file")
-                    || request.path().ends_with("/files/batch")
-                    || request.path().ends_with("/worktrees")
-                    || request.path().ends_with("/worktrees/action")
-                    || request.path().ends_with("/command")
-                    || request.path().ends_with("/terminal-session")
-                    || request.path().ends_with("/git/file-action")
-                    || request.path().ends_with("/git/action"))
-            || (request.path().starts_with("/api/terminal-sessions/")
-                && (request.path().ends_with("/input") || request.path().ends_with("/resize"))))
+    if request.method != "POST" {
+        return false;
+    }
+    let path = request.path();
+    path == "/api/workspaces"
+        || path == "/api/approvals"
+        || path.ends_with("/decision")
+        || (path.starts_with("/api/workspaces/")
+            && (path.ends_with("/context")
+                || path.ends_with("/file")
+                || path.ends_with("/files/batch")
+                || path.ends_with("/worktrees")
+                || path.ends_with("/worktrees/action")
+                || path.ends_with("/command")
+                || path.ends_with("/terminal-session")
+                || path.ends_with("/git/file-action")
+                || path.ends_with("/git/action")))
+        || (path.starts_with("/api/terminal-sessions/")
+            && (path.ends_with("/input") || path.ends_with("/resize")))
 }
 
 pub fn route_workspace_request(

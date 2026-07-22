@@ -143,18 +143,21 @@ pub fn route_task_request(
         } else {
             return Ok(None);
         }
+    } else if let Some((job_id, action)) = scheduler_path_parts(request.path()) {
+        if request.method != "POST" {
+            return Ok(None);
+        }
+        let job = match action {
+            "retry" => retry_scheduler_job(&connection, &job_id)?,
+            "cancel" => cancel_queued_scheduler_job(&connection, &job_id)?,
+            _ => return Ok(None),
+        };
+        let Some(job) = job else {
+            return Ok(None);
+        };
+        HttpRouteResponse::json(200, json!({ "ok": true, "job": job }))
     } else if request.path() == "/api/task-scheduler" && request.method == "GET" {
-        HttpRouteResponse::json(
-            200,
-            json!({
-                "ok": true,
-                "owner": "rust",
-                "mode": "durable-projection",
-                "queued": count_tasks_by_status(&connection, "queued")?,
-                "running": count_tasks_by_status(&connection, "running")?,
-                "pending": count_tasks_by_status(&connection, "queued")?
-            }),
-        )
+        HttpRouteResponse::json(200, scheduler_status(&connection)?)
     } else {
         return Ok(None);
     };
@@ -225,11 +228,20 @@ pub fn stream_task_events_request(
 }
 
 fn is_task_route(path: &str) -> bool {
-    path == "/api/tasks" || path == "/api/task-scheduler" || path.starts_with("/api/tasks/")
+    path == "/api/tasks"
+        || path == "/api/task-scheduler"
+        || path.starts_with("/api/tasks/")
+        || path.starts_with("/api/task-scheduler/")
 }
 
 fn task_path_parts(path: &str) -> Option<(String, &str)> {
     let rest = path.strip_prefix("/api/tasks/")?;
+    let (id, action) = rest.split_once('/')?;
+    Some((id.to_string(), action))
+}
+
+fn scheduler_path_parts(path: &str) -> Option<(String, &str)> {
+    let rest = path.strip_prefix("/api/task-scheduler/")?;
     let (id, action) = rest.split_once('/')?;
     Some((id.to_string(), action))
 }
@@ -544,14 +556,92 @@ fn list_task_events(
     rows
 }
 
-fn count_tasks_by_status(connection: &Connection, status: &str) -> Result<i64> {
+fn scheduler_status(connection: &Connection) -> Result<Value> {
+    let mut counts = serde_json::Map::new();
+    for status in ["queued", "running", "completed", "failed", "cancelled"] {
+        let count = connection.query_row(
+            "SELECT COUNT(*) FROM task_queue WHERE status = ?1",
+            params![status],
+            |row| row.get::<_, i64>(0),
+        )?;
+        counts.insert(status.to_string(), json!(count));
+    }
+    Ok(json!({
+        "concurrency": 2,
+        "active": counts["running"].as_i64().unwrap_or(0),
+        "counts": counts,
+        "items": list_scheduler_jobs(connection)?
+    }))
+}
+
+fn list_scheduler_jobs(connection: &Connection) -> Result<Vec<Value>> {
+    let mut statement = connection.prepare(
+        "SELECT id,task_id,status,priority,attempts,max_attempts,next_attempt_at,created_at,updated_at,
+                started_at,completed_at,last_error,payload_json
+         FROM task_queue
+         ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+                  priority DESC,created_at DESC LIMIT 200",
+    )?;
+    let jobs = statement
+        .query_map([], scheduler_job_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into);
+    jobs
+}
+
+fn scheduler_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let payload_json = row.get::<_, String>(12)?;
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "taskId": row.get::<_, String>(1)?,
+        "status": row.get::<_, String>(2)?,
+        "priority": row.get::<_, i64>(3)?,
+        "attempts": row.get::<_, i64>(4)?,
+        "maxAttempts": row.get::<_, i64>(5)?,
+        "nextAttemptAt": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        "createdAt": row.get::<_, String>(7)?,
+        "updatedAt": row.get::<_, String>(8)?,
+        "startedAt": row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        "completedAt": row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        "lastError": row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+        "payload": serde_json::from_str::<Value>(&payload_json).unwrap_or(json!({}))
+    }))
+}
+
+fn scheduler_job_by_id(connection: &Connection, id: &str) -> Result<Option<Value>> {
     connection
         .query_row(
-            "SELECT COUNT(*) FROM tasks WHERE status = ?1",
-            params![status],
-            |row| row.get(0),
+            "SELECT id,task_id,status,priority,attempts,max_attempts,next_attempt_at,created_at,updated_at,
+                    started_at,completed_at,last_error,payload_json
+             FROM task_queue WHERE id = ?1 OR task_id = ?1",
+            params![id],
+            scheduler_job_from_row,
         )
+        .optional()
         .map_err(Into::into)
+}
+
+fn retry_scheduler_job(connection: &Connection, id: &str) -> Result<Option<Value>> {
+    let at = now_iso();
+    connection.execute(
+        "UPDATE task_queue SET status = 'queued', attempts = 0, next_attempt_at = ?1,
+                completed_at = NULL, started_at = NULL, updated_at = ?1, last_error = ''
+         WHERE (id = ?2 OR task_id = ?2) AND status IN ('failed','cancelled')",
+        params![at, id],
+    )?;
+    let job = scheduler_job_by_id(connection, id)?;
+    Ok(job.filter(|item| item["status"].as_str() == Some("queued")))
+}
+
+fn cancel_queued_scheduler_job(connection: &Connection, id: &str) -> Result<Option<Value>> {
+    let at = now_iso();
+    connection.execute(
+        "UPDATE task_queue SET status = 'cancelled', updated_at = ?1, completed_at = ?1, next_attempt_at = NULL
+         WHERE (id = ?2 OR task_id = ?2) AND status = 'queued'",
+        params![at, id],
+    )?;
+    let job = scheduler_job_by_id(connection, id)?;
+    Ok(job.filter(|item| item["status"].as_str() == Some("cancelled")))
 }
 
 fn bounded_limit(value: Option<String>) -> i64 {
@@ -714,6 +804,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(queue_status, "cancelled");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn exposes_and_retries_durable_scheduler_jobs() {
+        let (dir, config) = fixture();
+        let create = parse_request(
+            b"POST /api/tasks HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let created = route_task_request(&create, Some(br#"{"prompt":"retry me"}"#), &config)
+            .unwrap()
+            .unwrap();
+        let id = created.body["id"].as_str().unwrap();
+        let connection = open_task_db(&dir).unwrap();
+        connection
+            .execute(
+                "UPDATE task_queue SET status = 'failed', attempts = 3, completed_at = ?1 WHERE task_id = ?2",
+                params![now_iso(), id],
+            )
+            .unwrap();
+
+        let scheduler = parse_request(
+            b"GET /api/task-scheduler HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let status = route_task_request(&scheduler, None, &config).unwrap().unwrap();
+        assert_eq!(status.body["counts"]["failed"], 1);
+        assert_eq!(status.body["items"][0]["taskId"], id);
+
+        let retry = parse_request(
+            format!("POST /api/task-scheduler/{id}/retry HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 0\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let retried = route_task_request(&retry, Some(b"{}"), &config).unwrap().unwrap();
+        assert_eq!(retried.status, 200);
+        assert_eq!(retried.body["job"]["status"], "queued");
+        assert_eq!(retried.body["job"]["attempts"], 0);
         let _ = fs::remove_dir_all(dir);
     }
 }

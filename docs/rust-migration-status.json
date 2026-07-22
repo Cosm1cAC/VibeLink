@@ -30,6 +30,7 @@
         "completedRoutes": [
           "GET /api/tasks",
           "POST /api/tasks",
+          "GET /api/tasks/:id/events SSE",
           "GET /api/tasks/:id/events/catch-up",
           "POST /api/tasks/:id/input",
           "POST /api/tasks/:id/stop",
@@ -39,7 +40,6 @@
           "GET /api/histories",
           "GET /api/histories/:provider/:id",
           "GET/POST/DELETE /api/search*",
-          "GET /api/tasks/:id/events SSE",
           "GET /api/tasks/:id/changes",
           "terminal input/resize over execd"
         ]

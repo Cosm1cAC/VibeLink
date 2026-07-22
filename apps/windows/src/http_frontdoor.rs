@@ -1,7 +1,8 @@
 use crate::audit_http::{route_audit_request, AuditRouteConfig};
 use crate::artifact_http::{
-    artifact_request_requires_body, route_artifact_mutation_request, route_artifact_preview_request,
-    route_artifact_request, stream_artifact_content_request, ArtifactRouteConfig,
+    artifact_request_requires_body, attachment_upload_requires_body, route_artifact_mutation_request,
+    route_artifact_preview_request, route_artifact_request, route_attachment_upload_request,
+    stream_artifact_content_request, stream_attachment_request, ArtifactRouteConfig,
 };
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
@@ -232,6 +233,11 @@ fn handle_connection(
             }
         }
         if let Some(artifact_route) = routes.artifact.as_ref() {
+            match stream_attachment_request(&request, artifact_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => eprintln!("Rust Attachment route falling back to Node: {error:#}"),
+            }
             match stream_artifact_content_request(&request, artifact_route, &mut client) {
                 Ok(Some(())) => return Ok(()),
                 Ok(None) => {}
@@ -268,6 +274,16 @@ fn handle_connection(
             }
         }
         if let Some(artifact_route) = routes.artifact.as_ref() {
+            if attachment_upload_requires_body(&request) {
+                let body = match read_request_body_with_limit(&mut client, &mut prefix, &request, 30 * 1024 * 1024)? {
+                    Some(body) => body,
+                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                };
+                match route_attachment_upload_request(&request, &body, artifact_route) {
+                    Ok(Some(response)) => return response.write_to(&mut client),
+                    Ok(None) | Err(_) => return HttpRouteResponse::error(500, "Attachment upload failed.").write_to(&mut client),
+                }
+            }
             if artifact_request_requires_body(&request) {
                 let body = match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => body,
@@ -491,12 +507,21 @@ fn read_request_body(
     prefix: &mut Vec<u8>,
     request: &crate::status_http::ParsedRequest,
 ) -> io::Result<Option<Vec<u8>>> {
+    read_request_body_with_limit(client, prefix, request, MAX_DIRECT_JSON_BODY_BYTES)
+}
+
+fn read_request_body_with_limit(
+    client: &mut TcpStream,
+    prefix: &mut Vec<u8>,
+    request: &crate::status_http::ParsedRequest,
+    max_bytes: usize,
+) -> io::Result<Option<Vec<u8>>> {
     if request.header("transfer-encoding").is_some() {
         return Ok(None);
     }
     let content_length = match request.header("content-length") {
         Some(value) => match value.parse::<usize>() {
-            Ok(length) if length <= MAX_DIRECT_JSON_BODY_BYTES => length,
+            Ok(length) if length <= max_bytes => length,
             _ => return Ok(None),
         },
         None => 0,

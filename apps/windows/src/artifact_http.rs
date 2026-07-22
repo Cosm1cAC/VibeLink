@@ -181,6 +181,80 @@ pub fn artifact_request_requires_body(request: &ParsedRequest) -> bool {
         && !request.path()["/api/artifacts/".len()..].contains('/')
 }
 
+pub fn attachment_upload_requires_body(request: &ParsedRequest) -> bool {
+    request.method == "POST" && request.path() == "/api/attachments"
+}
+
+pub fn route_attachment_upload_request(
+    request: &ParsedRequest,
+    body: &[u8],
+    config: &ArtifactRouteConfig,
+) -> Result<Option<HttpRouteResponse>> {
+    if !attachment_upload_requires_body(request) {
+        return Ok(None);
+    }
+    match authenticate_route_request(request, &config.data_dir)? {
+        RouteAuthentication::Pending => return Ok(None),
+        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
+        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::Device(_) => {}
+    }
+    if body.is_empty() {
+        return Ok(Some(HttpRouteResponse::error(400, "Empty upload.")));
+    }
+    let name = safe_upload_name(request.header("x-file-name").unwrap_or("attachment"));
+    let mime_type = request.header("content-type").unwrap_or("application/octet-stream").split(';').next().unwrap_or("application/octet-stream");
+    let extension = upload_extension(mime_type, &name);
+    let id = format!("{}{}", uuid::Uuid::new_v4(), extension);
+    let attachments = config.data_dir.join("attachments");
+    fs::create_dir_all(&attachments)?;
+    let path = attachments.join(&id);
+    fs::write(&path, body)?;
+    let detected_mime = mime_type_for(&path);
+    let artifact = (kind_for(detected_mime) != "binary").then(|| json!({
+        "metadataUrl": format!("/api/artifacts/{id}"),
+        "previewUrl": format!("/api/artifacts/{id}/preview"),
+        "contentUrl": format!("/api/artifacts/{id}/content")
+    }));
+    Ok(Some(HttpRouteResponse::json(201, json!({
+        "ok": true, "id": id, "name": name, "relativePath": request.header("x-relative-path").unwrap_or(""),
+        "path": path, "url": format!("/api/attachments/{id}"), "kind": "file",
+        "markdown": format!("[{name}]({})", path.display()), "mimeType": detected_mime,
+        "size": body.len(), "preview": "", "artifact": artifact
+    }))))
+}
+
+pub fn stream_attachment_request(
+    request: &ParsedRequest,
+    config: &ArtifactRouteConfig,
+    client: &mut TcpStream,
+) -> Result<Option<()>> {
+    if request.method != "GET" {
+        return Ok(None);
+    }
+    let Some(id) = request.path().strip_prefix("/api/attachments/") else {
+        return Ok(None);
+    };
+    let Some(relative) = artifact_path_for(id) else {
+        return Ok(None);
+    };
+    match authenticate_route_request(request, &config.data_dir)? {
+        RouteAuthentication::Pending => return Ok(None),
+        RouteAuthentication::HostDenied => return HttpRouteResponse::error(403, "Host is not allowed.").write_to(client).map(|_| Some(())).map_err(Into::into),
+        RouteAuthentication::Unauthorized => return HttpRouteResponse::error(401, "Unauthorized").write_to(client).map(|_| Some(())).map_err(Into::into),
+        RouteAuthentication::Device(_) => {}
+    }
+    let path = config.data_dir.join("attachments").join(relative);
+    let data = match fs::read(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return HttpRouteResponse::error(404, "Attachment not found.").write_to(client).map(|_| Some(())).map_err(Into::into),
+        Err(error) => return Err(error.into()),
+    };
+    write!(client, "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Disposition: inline; filename=\"{}\"\r\nCache-Control: private, max-age=300\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n\r\n", mime_type_for(&path), id.replace('"', ""), data.len())?;
+    client.write_all(&data)?;
+    Ok(Some(()))
+}
+
 pub fn route_artifact_mutation_request(
     request: &ParsedRequest,
     body: &[u8],
@@ -361,6 +435,36 @@ fn kind_for(mime_type: &str) -> &'static str {
         "application/x-ipynb+json" => "notebook",
         "application/json" | "text/plain" | "text/markdown" => "text",
         _ => "binary",
+    }
+}
+
+fn safe_upload_name(value: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    let name = normalized.rsplit('/').next().unwrap_or("attachment");
+    let filtered = name.chars().map(|character| {
+        if character.is_control() || "<>:\"/\\|?*".contains(character) { '_' } else { character }
+    }).take(160).collect::<String>();
+    if filtered.is_empty() { "attachment".to_string() } else { filtered }
+}
+
+fn upload_extension(mime_type: &str, name: &str) -> String {
+    let known = match mime_type {
+        "text/csv" => Some(".csv"),
+        "text/tab-separated-values" => Some(".tsv"),
+        "application/pdf" => Some(".pdf"),
+        "application/x-ipynb+json" => Some(".ipynb"),
+        "image/png" => Some(".png"),
+        "image/jpeg" => Some(".jpg"),
+        _ => None,
+    };
+    if let Some(extension) = known {
+        return extension.to_string();
+    }
+    let extension = Path::new(name).extension().and_then(|value| value.to_str()).unwrap_or("");
+    if !extension.is_empty() && extension.len() <= 16 && extension.chars().all(|character| character.is_ascii_alphanumeric()) {
+        format!(".{}", extension.to_ascii_lowercase())
+    } else {
+        ".bin".to_string()
     }
 }
 
@@ -713,6 +817,21 @@ mod tests {
         assert_eq!(notebook_response.status, 200);
         let saved: serde_json::Value = serde_json::from_str(&fs::read_to_string(attachments.join(notebook_id)).unwrap()).unwrap();
         assert_eq!(saved["cells"][0]["source"][0], "print('edited')");
+
+        let upload_request = parse_request(
+            b"POST /api/attachments HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Type: text/csv\r\nX-File-Name: uploaded.csv\r\nContent-Length: 4\r\n\r\n",
+        )
+        .unwrap();
+        let upload = route_attachment_upload_request(
+            &upload_request,
+            b"a,b\n",
+            &ArtifactRouteConfig::new(directory.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(upload.status, 201);
+        assert_eq!(upload.body["mimeType"], "text/csv");
+        assert!(attachments.join(upload.body["id"].as_str().unwrap()).is_file());
         let _ = fs::remove_dir_all(directory);
     }
 }

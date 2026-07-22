@@ -1,4 +1,5 @@
 use crate::audit_http::{route_audit_request, AuditRouteConfig};
+use crate::artifact_http::{route_artifact_request, ArtifactRouteConfig};
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
     DeviceRouteConfig,
@@ -58,6 +59,7 @@ pub struct FrontdoorRoutes {
     task: Option<TaskRouteConfig>,
     workspace: Option<WorkspaceRouteConfig>,
     event_sync: Option<EventSyncRouteConfig>,
+    artifact: Option<ArtifactRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -131,6 +133,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_artifact(mut self, route: Option<ArtifactRouteConfig>) -> Self {
+        self.artifact = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -146,6 +153,7 @@ impl FrontdoorRoutes {
             && self.task.is_none()
             && self.workspace.is_none()
             && self.event_sync.is_none()
+            && self.artifact.is_none()
     }
 }
 
@@ -247,6 +255,15 @@ fn handle_connection(
                 Err(error) => {
                     provider_route.record_fallback();
                     eprintln!("Rust Provider route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            match route_artifact_request(&request, artifact_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Artifact route falling back to Node: {error:#}");
                 }
             }
         }

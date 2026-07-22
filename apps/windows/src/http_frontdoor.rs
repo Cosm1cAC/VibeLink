@@ -19,6 +19,7 @@ use crate::settings_http::{
 use crate::status_http::{
     parse_request, route_status_request, HttpRouteResponse, StatusRouteConfig, MAX_HEADER_BYTES,
 };
+use crate::static_http::{stream_static_request, StaticRouteConfig};
 use crate::task_http::{
     route_task_request, stream_task_events_request, task_request_requires_body, TaskRouteConfig,
 };
@@ -53,6 +54,7 @@ pub struct FrontdoorRoutes {
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
     provider: Option<ProviderRouteConfig>,
+    static_route: Option<StaticRouteConfig>,
     task: Option<TaskRouteConfig>,
     workspace: Option<WorkspaceRouteConfig>,
     event_sync: Option<EventSyncRouteConfig>,
@@ -109,6 +111,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_static(mut self, route: Option<StaticRouteConfig>) -> Self {
+        self.static_route = route;
+        self
+    }
+
     pub fn with_task(mut self, route: Option<TaskRouteConfig>) -> Self {
         self.task = route;
         self
@@ -135,6 +142,7 @@ impl FrontdoorRoutes {
             && self.settings.is_none()
             && self.pairing.is_none()
             && self.provider.is_none()
+            && self.static_route.is_none()
             && self.task.is_none()
             && self.workspace.is_none()
             && self.event_sync.is_none()
@@ -203,6 +211,15 @@ fn handle_connection(
         .unwrap_or_default();
     let mut prefix = read_request_head(&mut client)?;
     if let Ok(request) = parse_request(&prefix) {
+        if let Some(static_route) = routes.static_route.as_ref() {
+            match stream_static_request(&request, static_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust static route falling back to Node: {error:#}");
+                }
+            }
+        }
         if let Some(tool_events_sse) = routes.tool_events_sse.as_ref() {
             match stream_tool_events_request(&request, &peer_ip, tool_events_sse, &mut client) {
                 Ok(Some(())) => return Ok(()),

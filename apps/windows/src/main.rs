@@ -29,6 +29,7 @@ mod settings_contract;
 mod settings_credentials;
 mod settings_http;
 mod sidecar_protocol;
+mod static_http;
 mod status_http;
 mod status_sidecar;
 mod task_http;
@@ -468,6 +469,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     } else {
         None
     };
+    let static_route = static_http::StaticRouteConfig::new(root.to_path_buf());
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
@@ -486,7 +488,8 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_task(task_route)
         .with_provider(provider_route)
         .with_settings(settings_route)
-        .with_pairing(pairing_route);
+        .with_pairing(pairing_route)
+        .with_static(Some(static_route));
     let routes = routes.with_workspace(workspace_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
     if node

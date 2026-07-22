@@ -13,7 +13,8 @@
     }
   },
   "publicRouteFamilies": [
-    { "id": "discovery", "owner": "node", "status": "node-owned", "prefixes": ["/api/tool-registry", "/api/command-registry", "/api/openapi.json"] },
+    { "id": "discovery", "owner": "node", "status": "node-owned", "prefixes": ["/api/tool-registry", "/api/command-registry"] },
+    { "id": "openapi", "owner": "rust", "status": "default-on", "prefixes": ["/api/openapi.json"] },
     { "id": "provider-registry", "owner": "mixed", "status": "phase-3-cache-projection", "prefixes": ["/api/provider-registry"] },
     { "id": "status", "owner": "rust", "status": "default-on", "prefixes": ["/api/status"] },
     { "id": "doctor", "owner": "rust", "status": "default-on", "prefixes": ["/api/doctor"] },

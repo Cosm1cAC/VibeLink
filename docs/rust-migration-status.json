@@ -402,6 +402,22 @@
       "nextAction": "迁移 freshness probe/cache refresh 与 queued task provider launch mapping，保持 fidelity 字段只描述实际可达路径。"
     },
     {
+      "id": "static-assets-openapi-route",
+      "title": "Static Assets 与 OpenAPI 原生服务",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": [],
+      "nodeEntry": "src/server.js static/OpenAPI fallback",
+      "rustEntry": "apps/windows/src/static_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary bridge",
+      "fallback": "仅白名单的根页面、public asset、icons 和 /api/openapi.json 由 Rust 认领；不匹配路径或读取失败在写响应前回放 Node。",
+      "tests": [
+        "apps/windows/src/static_http.rs",
+        "apps/windows/src/http_frontdoor.rs"
+      ],
+      "nextAction": "将 packaged public root 与 rust-only package smoke 连接，并为 Web/Android 采集不经过 Node 静态服务的首屏证据。"
+    },
+    {
       "id": "execution-host",
       "title": "Durable Execution Host",
       "priority": "P1",

@@ -30,6 +30,9 @@
 | Tool Events SSE 原生 HTTP 路由 | `default-on` | Rust catch-up/SSE/Last-Event-ID | 监测重连与慢消费者 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
 | Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust allowed-root 文件操作、Git status/diff/actions 与 worktree list，Node 回退 | 继续迁移 worktree actions、command/approval |
+| Task 持久投影原生 HTTP 路由 | `default-on` | Rust task collection、mutation 与事件 SSE | 迁移 queued provider runner、changes、history/search |
+| Provider Registry 缓存投影原生 HTTP 路由 | `default-on` | Rust SQLite cache projection，`fresh=1` 仍回放 Node | 迁移 fresh probe、cache refresh 与 provider launch mapping |
+| Static Assets 与 OpenAPI 原生服务 | `default-on` | Rust 服务白名单 public assets 与 `/api/openapi.json` | 连接 package smoke，并补齐 Web/Android 无 Node 首屏证据 |
 | 统一事件同步原生 HTTP 路由 | `default-on` | Rust unified replay、设备 ack、retention/compaction 与 marker | 保持客户端 ack 与多设备冲突观测 |
 | Durable Execution Host | `default-on` | Rust execd/worker 持有 ConPTY、stdio、app-server backend 与 host event spool | 继续迁移 Provider registry、任务投影与剩余 HTTP 编排 |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |

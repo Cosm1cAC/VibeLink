@@ -406,7 +406,7 @@
       "title": "Static Assets 与 OpenAPI 原生服务",
       "priority": "P1",
       "status": "default-on",
-      "featureFlags": [],
+      "featureFlags": ["--rust-http-canary"],
       "nodeEntry": "src/server.js static/OpenAPI fallback",
       "rustEntry": "apps/windows/src/static_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary bridge",

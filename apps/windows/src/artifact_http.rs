@@ -84,12 +84,49 @@ pub fn route_artifact_preview_request(
     }
     let path = config.data_dir.join("attachments").join(relative_path);
     let mime_type = mime_type_for(&path);
-    if mime_type != "text/csv" && mime_type != "text/tab-separated-values" {
-        return Ok(None);
-    }
     let source = fs::read_to_string(path)?;
     if source.len() > 8 * 1024 * 1024 {
         return Ok(Some(HttpRouteResponse::error(413, "Artifact source exceeds the preview limit.")));
+    }
+    if mime_type == "application/x-ipynb+json" {
+        let notebook: serde_json::Value = match serde_json::from_str(&source) {
+            Ok(notebook) => notebook,
+            Err(_) => return Ok(Some(HttpRouteResponse::error(422, "Notebook JSON is invalid."))),
+        };
+        let Some(cells) = notebook["cells"].as_array() else {
+            return Ok(Some(HttpRouteResponse::error(422, "Notebook cells are missing.")));
+        };
+        let cells = cells.iter().take(200).enumerate().map(|(index, cell)| {
+            let source = json_text(&cell["source"]);
+            json!({
+                "index": index,
+                "type": cell["cell_type"].as_str().unwrap_or("raw"),
+                "executionCount": cell["execution_count"],
+                "source": redact_preview_field(&source),
+                "outputs": []
+            })
+        }).collect::<Vec<_>>();
+        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+            "version": 1, "readonly": false, "mimeType": mime_type, "kind": "notebook",
+            "document": { "type": "notebook", "nbformat": notebook["nbformat"], "cells": cells },
+            "truncated": { "cells": notebook["cells"].as_array().is_some_and(|source| source.len() > 200) },
+            "redaction": { "applied": source.to_ascii_lowercase().contains("token="), "count": 0 },
+            "limits": { "maxBytes": 8 * 1024 * 1024, "maxTextChars": 256 * 1024 }
+        } }))));
+    }
+    if matches!(mime_type, "application/json" | "text/plain" | "text/markdown") {
+        let clipped = source.chars().take(256 * 1024).collect::<String>();
+        let redacted = redact_preview_field(&clipped);
+        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+            "version": 1, "readonly": true, "mimeType": mime_type, "kind": "text",
+            "document": { "type": "text", "text": redacted },
+            "truncated": { "text": source.len() > 256 * 1024 },
+            "redaction": { "applied": redacted.contains("[REDACTED]"), "count": usize::from(redacted.contains("[REDACTED]")) },
+            "limits": { "maxBytes": 8 * 1024 * 1024, "maxTextChars": 256 * 1024 }
+        } }))));
+    }
+    if mime_type != "text/csv" && mime_type != "text/tab-separated-values" {
+        return Ok(None);
     }
     let delimiter = if mime_type == "text/csv" { ',' } else { '\t' };
     let mut rows = parse_delimited_preview(&source, delimiter).into_iter();
@@ -136,7 +173,8 @@ pub fn route_artifact_mutation_request(
         RouteAuthentication::Device(_) => {}
     }
     let path = config.data_dir.join("attachments").join(relative_path);
-    if !matches!(mime_type_for(&path), "text/csv" | "text/tab-separated-values") {
+    let mime_type = mime_type_for(&path);
+    if !matches!(mime_type, "text/csv" | "text/tab-separated-values" | "application/x-ipynb+json") {
         return Ok(Some(HttpRouteResponse::error(405, "Artifact type is read-only.")));
     }
     let payload: serde_json::Value = match serde_json::from_slice(body) {
@@ -146,6 +184,37 @@ pub fn route_artifact_mutation_request(
     let current = artifact_metadata(&path, id)?;
     if payload["expectedDigest"].as_str() != current["digest"].as_str() {
         return Ok(Some(HttpRouteResponse::error(409, "Artifact changed since it was loaded.")));
+    }
+    if mime_type == "application/x-ipynb+json" {
+        let mut notebook: serde_json::Value = match serde_json::from_str(&fs::read_to_string(&path)?) {
+            Ok(notebook) => notebook,
+            Err(_) => return Ok(Some(HttpRouteResponse::error(422, "Notebook JSON is invalid."))),
+        };
+        let Some(cells) = notebook["cells"].as_array_mut() else {
+            return Ok(Some(HttpRouteResponse::error(422, "Notebook cells are missing.")));
+        };
+        let Some(patches) = payload["cellPatches"].as_array() else {
+            return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patches are invalid.")));
+        };
+        if patches.is_empty() || patches.len() > 1_000 {
+            return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patches are invalid.")));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for patch in patches {
+            let Some(index) = patch["index"].as_u64().map(|value| value as usize) else {
+                return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patch is invalid.")));
+            };
+            let Some(source) = patch["source"].as_str() else {
+                return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patch is invalid.")));
+            };
+            if index >= cells.len() || !seen.insert(index) || source.len() > 1024 * 1024 {
+                return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patch is invalid.")));
+            }
+            cells[index]["source"] = json!([source]);
+        }
+        let output = serde_json::to_string_pretty(&notebook)? + "\n";
+        replace_artifact_file(&path, output.as_bytes())?;
+        return Ok(Some(HttpRouteResponse::json(200, json!({ "metadata": artifact_metadata(&path, id)? }))));
     }
     let document = &payload["document"];
     let Some(columns) = document["columns"].as_array() else {
@@ -174,9 +243,7 @@ pub fn route_artifact_mutation_request(
     if output.len() > 8 * 1024 * 1024 {
         return Ok(Some(HttpRouteResponse::error(413, "Table mutation is too large.")));
     }
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(&temporary, output)?;
-    fs::rename(&temporary, &path)?;
+    replace_artifact_file(&path, output.as_bytes())?;
     let metadata = artifact_metadata(&path, id)?;
     Ok(Some(HttpRouteResponse::json(200, json!({ "metadata": metadata }))))
 }
@@ -387,6 +454,13 @@ fn redact_preview_field(value: &str) -> String {
     value.to_string()
 }
 
+fn json_text(value: &serde_json::Value) -> String {
+    if let Some(values) = value.as_array() {
+        return values.iter().filter_map(serde_json::Value::as_str).collect::<String>();
+    }
+    value.as_str().unwrap_or_default().to_string()
+}
+
 fn serialize_delimited_row(values: &[serde_json::Value], delimiter: char) -> Result<String> {
     let cells = values.iter().map(|value| {
         let value = value.as_str().unwrap_or_else(|| value.as_str().unwrap_or(""));
@@ -397,6 +471,18 @@ fn serialize_delimited_row(values: &[serde_json::Value], delimiter: char) -> Res
         }
     }).collect::<Vec<_>>();
     Ok(cells.join(&delimiter.to_string()))
+}
+
+fn replace_artifact_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, content)?;
+    match fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            Err(error)
+        }
+    }
 }
 
 fn parse_artifact_range(value: &str, size: u64) -> Result<(u64, u64), &'static str> {
@@ -526,6 +612,31 @@ mod tests {
         assert_eq!(mutation.status, 200);
         assert_ne!(mutation.body["metadata"]["digest"], response.body["artifact"]["digest"]);
         assert_eq!(fs::read_to_string(attachments.join(id)).unwrap(), "name,note\nAda,\"edited,value\"\n");
+
+        let notebook_id = "b0b1c2d3-e4f5-6789-abcd-ef0123456789.ipynb";
+        fs::write(
+            attachments.join(notebook_id),
+            r#"{"nbformat":4,"cells":[{"cell_type":"code","source":["token=private"],"outputs":[]}]}"#,
+        )
+        .unwrap();
+        let notebook_metadata = artifact_metadata(&attachments.join(notebook_id), notebook_id).unwrap();
+        let notebook_request = parse_request(format!(
+            "PATCH /api/artifacts/{notebook_id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 1\r\n\r\n"
+        ).as_bytes()).unwrap();
+        let notebook_mutation = json!({
+            "expectedDigest": notebook_metadata["digest"],
+            "cellPatches": [{ "index": 0, "source": "print('edited')" }]
+        });
+        let notebook_response = route_artifact_mutation_request(
+            &notebook_request,
+            notebook_mutation.to_string().as_bytes(),
+            &ArtifactRouteConfig::new(directory.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(notebook_response.status, 200);
+        let saved: serde_json::Value = serde_json::from_str(&fs::read_to_string(attachments.join(notebook_id)).unwrap()).unwrap();
+        assert_eq!(saved["cells"][0]["source"][0], "print('edited')");
         let _ = fs::remove_dir_all(directory);
     }
 }

@@ -7,6 +7,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
+use std::io::{Seek, SeekFrom, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -150,6 +152,91 @@ fn kind_for(mime_type: &str) -> &'static str {
     }
 }
 
+pub fn stream_artifact_content_request(
+    request: &ParsedRequest,
+    config: &ArtifactRouteConfig,
+    client: &mut TcpStream,
+) -> Result<Option<()>> {
+    if request.method != "GET" {
+        return Ok(None);
+    }
+    let Some(id) = request.path().strip_prefix("/api/artifacts/").and_then(|path| path.strip_suffix("/content")) else {
+        return Ok(None);
+    };
+    let Some(relative_path) = artifact_path_for(id) else {
+        return Ok(None);
+    };
+    match authenticate_route_request(request, &config.data_dir)? {
+        RouteAuthentication::Pending => return Ok(None),
+        RouteAuthentication::HostDenied => {
+            return HttpRouteResponse::error(403, "Host is not allowed.").write_to(client).map(|_| Some(())).map_err(Into::into);
+        }
+        RouteAuthentication::Unauthorized => {
+            return HttpRouteResponse::error(401, "Unauthorized").write_to(client).map(|_| Some(())).map_err(Into::into);
+        }
+        RouteAuthentication::Device(_) => {}
+    }
+    let path = config.data_dir.join("attachments").join(relative_path);
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return HttpRouteResponse::error(404, "Artifact not found.").write_to(client).map(|_| Some(())).map_err(Into::into);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let size = file.metadata()?.len();
+    let Some(range_header) = request.header("range") else {
+        return HttpRouteResponse::error(416, "Artifact content requires a single byte range.")
+            .with_headers(vec![("Accept-Ranges".to_string(), "bytes".to_string()), ("Content-Range".to_string(), format!("bytes */{size}"))])
+            .write_to(client).map(|_| Some(())).map_err(Into::into);
+    };
+    let (start, end) = match parse_artifact_range(range_header, size) {
+        Ok(range) => range,
+        Err(message) => return HttpRouteResponse::error(416, message)
+            .with_headers(vec![("Accept-Ranges".to_string(), "bytes".to_string()), ("Content-Range".to_string(), format!("bytes */{size}"))])
+            .write_to(client).map(|_| Some(())).map_err(Into::into),
+    };
+    let length = end - start + 1;
+    file.seek(SeekFrom::Start(start))?;
+    let mut data = vec![0_u8; length as usize];
+    file.read_exact(&mut data)?;
+    write!(client, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {length}\r\nContent-Range: bytes {start}-{end}/{size}\r\nAccept-Ranges: bytes\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n\r\n")?;
+    client.write_all(&data)?;
+    Ok(Some(()))
+}
+
+fn parse_artifact_range(value: &str, size: u64) -> Result<(u64, u64), &'static str> {
+    const MAX_RANGE_BYTES: u64 = 1024 * 1024;
+    let Some(spec) = value.strip_prefix("bytes=") else {
+        return Err("Artifact content requires a single byte range.");
+    };
+    if size == 0 || spec.contains(',') {
+        return Err("Artifact byte range is invalid.");
+    }
+    let Some((start, end)) = spec.split_once('-') else {
+        return Err("Artifact byte range is invalid.");
+    };
+    let (start, end) = if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| "Artifact byte range is invalid.")?;
+        if suffix == 0 {
+            return Err("Artifact byte range is invalid.");
+        }
+        (size.saturating_sub(suffix), size - 1)
+    } else {
+        let start = start.parse::<u64>().map_err(|_| "Artifact byte range is invalid.")?;
+        let end = if end.is_empty() {
+            start.saturating_add(MAX_RANGE_BYTES - 1).min(size - 1)
+        } else {
+            end.parse::<u64>().map_err(|_| "Artifact byte range is invalid.")?
+        };
+        (start, end.min(size - 1))
+    };
+    if start >= size || end < start || end - start + 1 > MAX_RANGE_BYTES {
+        return Err("Artifact byte range is unsatisfiable.");
+    }
+    Ok((start, end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +248,14 @@ mod tests {
     fn accepts_only_uuid_artifact_ids_with_safe_extensions() {
         assert!(artifact_path_for("a0b1c2d3-e4f5-6789-abcd-ef0123456789.csv").is_some());
         assert!(artifact_path_for("../settings.json").is_none());
+    }
+
+    #[test]
+    fn bounds_a_single_artifact_byte_range() {
+        assert_eq!(parse_artifact_range("bytes=2-5", 10).unwrap(), (2, 5));
+        assert_eq!(parse_artifact_range("bytes=-3", 10).unwrap(), (7, 9));
+        assert!(parse_artifact_range("bytes=0-1048576", 2_000_000).is_err());
+        assert!(parse_artifact_range("bytes=1-2,4-5", 10).is_err());
     }
 
     #[test]

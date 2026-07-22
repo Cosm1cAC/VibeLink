@@ -1,5 +1,7 @@
 use crate::audit_http::{route_audit_request, AuditRouteConfig};
-use crate::artifact_http::{route_artifact_request, ArtifactRouteConfig};
+use crate::artifact_http::{
+    route_artifact_request, stream_artifact_content_request, ArtifactRouteConfig,
+};
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
     DeviceRouteConfig,
@@ -225,6 +227,15 @@ fn handle_connection(
                 Ok(None) => {}
                 Err(error) => {
                     eprintln!("Rust static route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            match stream_artifact_content_request(&request, artifact_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Artifact content route falling back to Node: {error:#}");
                 }
             }
         }

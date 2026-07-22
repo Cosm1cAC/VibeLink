@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -123,6 +124,11 @@ pub fn route_task_request(
                 "limit": limit
             }),
         )
+    } else if let Some((task_id, "changes")) = task_path_parts(request.path()) {
+        let Some(task) = task_by_id(&connection, &task_id)? else {
+            return Ok(Some(HttpRouteResponse::error(404, "Task not found.")));
+        };
+        HttpRouteResponse::json(200, task_changes(&connection, &task)?)
     } else if let Some((task_id, "input")) = task_path_parts(request.path()) {
         let payload = read_json_body(body)?;
         let text = payload
@@ -513,6 +519,123 @@ fn task_by_id(connection: &Connection, id: &str) -> Result<Option<Value>> {
         .map_err(Into::into)
 }
 
+fn task_changes(connection: &Connection, task: &Value) -> Result<Value> {
+    let task_id = task["id"].as_str().unwrap_or_default();
+    let workspace_id = task["workspaceId"].as_str().unwrap_or_default();
+    let cwd = task["cwd"].as_str().unwrap_or_default();
+    if workspace_id.is_empty() || cwd.is_empty() {
+        return Ok(json!({
+            "ok": false, "error": "Task has no workspace directory.",
+            "files": [], "fileCount": 0, "lineCount": 0, "diff": "", "taskId": task_id
+        }));
+    }
+    let workspace = connection
+        .query_row(
+            "SELECT id,path,title FROM workspaces WHERE id = ?1",
+            params![workspace_id],
+            |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "path": row.get::<_, String>(1)?,
+                    "title": row.get::<_, String>(2)?
+                }))
+            },
+        )
+        .optional()?;
+    let Some(workspace) = workspace else {
+        return Ok(json!({
+            "ok": false, "error": "Task workspace is not registered.",
+            "files": [], "fileCount": 0, "lineCount": 0, "diff": "", "taskId": task_id
+        }));
+    };
+    let workspace_path = workspace["path"].as_str().unwrap_or_default();
+    if !same_canonical_path(cwd, workspace_path) {
+        return Ok(json!({
+            "ok": false, "error": "Task directory does not match its workspace.",
+            "files": [], "fileCount": 0, "lineCount": 0, "diff": "", "taskId": task_id
+        }));
+    }
+    let status = git_output(cwd, &["status", "--porcelain=v1", "-b"])?;
+    let first_diff = git_output(cwd, &["diff", "HEAD", "--stat", "--patch", "--find-renames"])?;
+    let first_stderr = String::from_utf8_lossy(&first_diff.stderr);
+    let diff = if first_diff.status.success()
+        || !["bad revision", "ambiguous argument", "unknown revision"]
+            .iter()
+            .any(|needle| first_stderr.contains(needle))
+    {
+        first_diff
+    } else {
+        git_output(cwd, &["diff", "--stat", "--patch", "--find-renames"])?
+    };
+    let status_stdout = String::from_utf8_lossy(&status.stdout).to_string();
+    let diff_stdout = String::from_utf8_lossy(&diff.stdout).to_string();
+    let stderr = [
+        String::from_utf8_lossy(&status.stderr),
+        String::from_utf8_lossy(&diff.stderr),
+    ]
+    .into_iter()
+    .filter(|value| !value.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let files = parse_git_status_files(&status_stdout);
+    let branch = status_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("## "))
+        .unwrap_or_default();
+    Ok(json!({
+        "ok": status.status.success() && diff.status.success(),
+        "branch": branch,
+        "files": files,
+        "changedCount": files.len(),
+        "fileCount": files.len(),
+        "lineCount": diff_stdout.lines().filter(|line| {
+            (line.starts_with('+') && !line.starts_with("+++"))
+                || (line.starts_with('-') && !line.starts_with("---"))
+        }).count(),
+        "diff": diff_stdout,
+        "statusStdout": status_stdout,
+        "stdout": String::from_utf8_lossy(&diff.stdout),
+        "stderr": stderr,
+        "exitCode": diff.status.code().unwrap_or(1),
+        "untrackedPreviewErrors": [],
+        "taskId": task_id,
+        "workspace": workspace,
+        "cwd": cwd
+    }))
+}
+
+fn git_output(cwd: &str, args: &[&str]) -> Result<std::process::Output> {
+    Command::new("git")
+        .args(["-C", cwd])
+        .args(args)
+        .output()
+        .with_context(|| format!("Failed to run Git in {cwd}"))
+}
+
+fn same_canonical_path(left: &str, right: &str) -> bool {
+    let left = Path::new(left).canonicalize().ok();
+    let right = Path::new(right).canonicalize().ok();
+    left.zip(right).is_some_and(|(left, right)| left == right)
+}
+
+fn parse_git_status_files(status: &str) -> Vec<Value> {
+    status
+        .lines()
+        .filter(|line| !line.starts_with("##") && line.len() > 3)
+        .map(|line| {
+            let status = line[..2].trim();
+            let path = line[3..].split(" -> ").last().unwrap_or_default();
+            json!({
+                "status": if status == "??" { "A" } else { status },
+                "path": path,
+                "oldPath": path,
+                "additions": 0,
+                "deletions": 0
+            })
+        })
+        .collect()
+}
+
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let meta_json = row
         .get::<_, Option<String>>(12)?
@@ -842,6 +965,40 @@ mod tests {
         assert_eq!(retried.status, 200);
         assert_eq!(retried.body["job"]["status"], "queued");
         assert_eq!(retried.body["job"]["attempts"], 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_task_changes_only_from_the_registered_workspace() {
+        let (dir, config) = fixture();
+        let repo = dir.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let initialized = Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap();
+        assert!(initialized.success());
+        fs::write(repo.join("untracked.txt"), "phase three\n").unwrap();
+        let connection = open_task_db(&dir).unwrap();
+        connection.execute_batch("CREATE TABLE workspaces(id TEXT PRIMARY KEY,path TEXT NOT NULL,title TEXT NOT NULL);").unwrap();
+        connection.execute(
+            "INSERT INTO workspaces(id,path,title) VALUES ('workspace-1',?1,'Repo')",
+            params![repo.to_string_lossy()],
+        ).unwrap();
+        let create = parse_request(
+            b"POST /api/tasks HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        ).unwrap();
+        let created = route_task_request(
+            &create,
+            Some(format!(r#"{{"prompt":"inspect","workspaceId":"workspace-1","cwd":"{}"}}"#, repo.to_string_lossy().replace('\\', "\\\\")).as_bytes()),
+            &config,
+        ).unwrap().unwrap();
+        let id = created.body["id"].as_str().unwrap();
+        let changes = parse_request(
+            format!("GET /api/tasks/{id}/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
+        ).unwrap();
+        let response = route_task_request(&changes, None, &config).unwrap().unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["ok"], true);
+        assert_eq!(response.body["workspace"]["id"], "workspace-1");
+        assert!(response.body["files"].as_array().unwrap().iter().any(|file| file["path"] == "untracked.txt"));
         let _ = fs::remove_dir_all(dir);
     }
 }

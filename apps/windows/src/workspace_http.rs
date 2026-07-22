@@ -1,6 +1,8 @@
 use crate::status_http::{
     authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication,
 };
+use crate::execution_host::protocol::{read_json_frame, write_frame, RequestEnvelope, ResponseEnvelope, PROTOCOL_VERSION};
+use crate::execution_host::windows::execd_pipe_name;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -8,6 +10,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
+use std::fs::OpenOptions;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,7 +82,9 @@ pub fn workspace_request_requires_body(request: &ParsedRequest) -> bool {
                     || request.path().ends_with("/command")
                     || request.path().ends_with("/terminal-session")
                     || request.path().ends_with("/git/file-action")
-                    || request.path().ends_with("/git/action"))))
+                    || request.path().ends_with("/git/action"))
+            || (request.path().starts_with("/api/terminal-sessions/")
+                && (request.path().ends_with("/input") || request.path().ends_with("/resize"))))
 }
 
 pub fn route_workspace_request(
@@ -93,7 +98,7 @@ pub fn route_workspace_request(
     if let Some(response) = route_tool_run_request(request, config)? {
         return Ok(Some(response));
     }
-    if let Some(response) = route_terminal_session_request(request, config)? {
+    if let Some(response) = route_terminal_session_request(request, body, config)? {
         return Ok(Some(response));
     }
     if request.path() == "/api/workspaces" {
@@ -543,6 +548,7 @@ fn route_tool_run_request(
 
 fn route_terminal_session_request(
     request: &ParsedRequest,
+    body: Option<&[u8]>,
     config: &WorkspaceRouteConfig,
 ) -> Result<Option<HttpRouteResponse>> {
     let list = request.path() == "/api/terminal-sessions" && request.method == "GET";
@@ -550,7 +556,9 @@ fn route_terminal_session_request(
         .path()
         .strip_prefix("/api/terminal-sessions/")
         .filter(|value| !value.is_empty() && !value.contains('/'));
-    if !list && !(session_id.is_some() && request.method == "GET") {
+    let input_id = request.path().strip_prefix("/api/terminal-sessions/").and_then(|value| value.strip_suffix("/input"));
+    let resize_id = request.path().strip_prefix("/api/terminal-sessions/").and_then(|value| value.strip_suffix("/resize"));
+    if !list && !(session_id.is_some() && request.method == "GET") && input_id.is_none() && resize_id.is_none() {
         return Ok(None);
     }
     let auth = authenticate_route_request(request, &config.data_dir)?;
@@ -564,6 +572,25 @@ fn route_terminal_session_request(
         RouteAuthentication::Pending => unreachable!(),
     }
     let connection = open_workspace_db(&config.data_dir)?;
+    if let Some(id) = input_id {
+        if request.method != "POST" { return Ok(None); }
+        let payload = terminal_json_body(body)?;
+        let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
+        if text.is_empty() { return Ok(Some(HttpRouteResponse::error(400, "Input is required."))); }
+        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, id, "execution.input", json!({
+            "executionId": id, "data": text, "encoding": "utf8", "operationId": uuid::Uuid::new_v4().to_string()
+        }))?));
+    }
+    if let Some(id) = resize_id {
+        if request.method != "POST" { return Ok(None); }
+        let payload = terminal_json_body(body)?;
+        let cols = payload.get("cols").and_then(Value::as_u64).filter(|value| (1..=1000).contains(value));
+        let rows = payload.get("rows").and_then(Value::as_u64).filter(|value| (1..=1000).contains(value));
+        let (Some(cols), Some(rows)) = (cols, rows) else { return Ok(Some(HttpRouteResponse::error(400, "Valid cols and rows are required."))); };
+        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, id, "execution.resize", json!({
+            "executionId": id, "cols": cols, "rows": rows, "operationId": uuid::Uuid::new_v4().to_string()
+        }))?));
+    }
     if let Some(id) = session_id {
         let session = connection
             .query_row(
@@ -585,6 +612,52 @@ fn route_terminal_session_request(
         .query_map([], |row| Ok(terminal_session_json(row.get(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default(), row.get(2)?, row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "{}".into()), row.get::<_, Option<String>>(4)?.unwrap_or_default())))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Some(HttpRouteResponse::json(200, json!({ "items": rows }))))
+}
+
+fn terminal_host_mutation(
+    connection: &Connection,
+    data_dir: &Path,
+    id: &str,
+    method: &str,
+    params_value: Value,
+) -> Result<HttpRouteResponse> {
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tool_runs WHERE id = ?1 AND tool_name = 'workspace.terminal_session')",
+        params![id],
+        |row| row.get::<_, i64>(0),
+    )? != 0;
+    if !exists {
+        return Ok(HttpRouteResponse::error(404, "Terminal session not found."));
+    }
+    let pipe_name = execd_pipe_name(data_dir);
+    let mut pipe = OpenOptions::new().read(true).write(true).open(&pipe_name)
+        .with_context(|| format!("Cannot connect to execution host {pipe_name}"))?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    write_frame(&mut pipe, &RequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        method: method.to_string(),
+        params: params_value,
+    })?;
+    let response: ResponseEnvelope = read_json_frame(&mut pipe)?
+        .ok_or_else(|| anyhow::anyhow!("Execution host closed the terminal request."))?;
+    if response.request_id != request_id {
+        bail!("Execution host returned a mismatched request ID.");
+    }
+    if let Some(error) = response.error {
+        return Ok(HttpRouteResponse::json(409, json!({
+            "ok": false, "error": error.message, "code": error.code, "retryable": error.retryable
+        })));
+    }
+    Ok(HttpRouteResponse::json(200, json!({ "ok": true, "result": response.result.unwrap_or(Value::Null) })))
+}
+
+fn terminal_json_body(body: Option<&[u8]>) -> Result<Value> {
+    let body = body.ok_or_else(|| anyhow::anyhow!("Terminal request body is required."))?;
+    if body.len() > MAX_BODY_BYTES {
+        bail!("Request body is too large.");
+    }
+    serde_json::from_slice(body).context("Invalid terminal request JSON.")
 }
 
 fn tool_run_json(

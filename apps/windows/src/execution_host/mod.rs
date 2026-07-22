@@ -8,7 +8,7 @@ mod codex_app_server;
 #[cfg(windows)]
 mod daemon;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 #[cfg(windows)]
 mod worker;
 

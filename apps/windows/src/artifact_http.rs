@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Read;
 use std::io::{Seek, SeekFrom, Write};
 use std::net::TcpStream;
+use zip::ZipArchive;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -84,7 +85,11 @@ pub fn route_artifact_preview_request(
     }
     let path = config.data_dir.join("attachments").join(relative_path);
     let mime_type = mime_type_for(&path);
-    let source = fs::read_to_string(path)?;
+    let source = if mime_type.contains("openxmlformats") || mime_type == "application/pdf" {
+        String::new()
+    } else {
+        fs::read_to_string(&path)?
+    };
     if source.len() > 8 * 1024 * 1024 {
         return Ok(Some(HttpRouteResponse::error(413, "Artifact source exceeds the preview limit.")));
     }
@@ -122,6 +127,28 @@ pub fn route_artifact_preview_request(
             "document": { "type": "text", "text": redacted },
             "truncated": { "text": source.len() > 256 * 1024 },
             "redaction": { "applied": redacted.contains("[REDACTED]"), "count": usize::from(redacted.contains("[REDACTED]")) },
+            "limits": { "maxBytes": 8 * 1024 * 1024, "maxTextChars": 256 * 1024 }
+        } }))));
+    }
+    if mime_type.contains("openxmlformats") {
+        let document = ooxml_preview(&path, mime_type)?;
+        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+            "version": 1, "readonly": true, "mimeType": mime_type, "kind": kind_for(mime_type),
+            "document": document, "truncated": {}, "redaction": { "applied": false, "count": 0 },
+            "limits": { "maxBytes": 8 * 1024 * 1024, "archiveEntries": 2048, "archiveEntryBytes": 4 * 1024 * 1024 }
+        } }))));
+    }
+    if mime_type == "application/pdf" {
+        let bytes = fs::read(&path)?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Ok(Some(HttpRouteResponse::error(413, "Artifact source exceeds the preview limit.")));
+        }
+        let source = String::from_utf8_lossy(&bytes);
+        let page_count = source.matches("/Type /Page").count().max(1).min(200);
+        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+            "version": 1, "readonly": true, "mimeType": mime_type, "kind": "pdf",
+            "document": { "type": "pdf", "pageCount": page_count, "text": "", "extraction": "best-effort" },
+            "truncated": { "pages": false, "text": false }, "redaction": { "applied": false, "count": 0 },
             "limits": { "maxBytes": 8 * 1024 * 1024, "maxTextChars": 256 * 1024 }
         } }))));
     }
@@ -459,6 +486,55 @@ fn json_text(value: &serde_json::Value) -> String {
         return values.iter().filter_map(serde_json::Value::as_str).collect::<String>();
     }
     value.as_str().unwrap_or_default().to_string()
+}
+
+fn ooxml_preview(path: &Path, mime_type: &str) -> Result<serde_json::Value> {
+    let file = fs::File::open(path)?;
+    let mut archive = ZipArchive::new(file)?;
+    if archive.len() > 2048 {
+        anyhow::bail!("Artifact archive exceeds preview limits.");
+    }
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if entry.enclosed_name().is_none() || entry.size() > 4 * 1024 * 1024 {
+            anyhow::bail!("Artifact archive entry exceeds preview limits.");
+        }
+        let name = entry.name().replace('\\', "/");
+        let selected = match mime_type {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => name == "word/document.xml",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation" => name.starts_with("ppt/slides/slide") && name.ends_with(".xml"),
+            _ => false,
+        };
+        if selected {
+            let mut xml = String::new();
+            entry.read_to_string(&mut xml)?;
+            entries.push(xml_text(&xml));
+        }
+    }
+    Ok(match mime_type {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => json!({ "type": "document", "paragraphs": entries.into_iter().take(1000).collect::<Vec<_>>() }),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => json!({ "type": "workbook", "sheets": entries.into_iter().take(24).enumerate().map(|(index, text)| json!({ "name": format!("Sheet {}", index + 1), "rows": [[text]], "truncated": false })).collect::<Vec<_>>() }),
+        _ => json!({ "type": "presentation", "slides": entries.into_iter().take(200).enumerate().map(|(index, text)| json!({ "index": index + 1, "paragraphs": [text] })).collect::<Vec<_>>() }),
+    })
+}
+
+fn xml_text(source: &str) -> String {
+    let mut text = String::new();
+    let mut inside_tag = false;
+    for character in source.chars() {
+        match character {
+            '<' => inside_tag = true,
+            '>' => {
+                inside_tag = false;
+                if !text.ends_with(' ') { text.push(' '); }
+            }
+            value if !inside_tag => text.push(value),
+            _ => {}
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn serialize_delimited_row(values: &[serde_json::Value], delimiter: char) -> Result<String> {

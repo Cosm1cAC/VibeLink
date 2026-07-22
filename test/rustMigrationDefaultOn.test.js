@@ -29,6 +29,20 @@ test("Node-free packaging remains blocked until every product owner is native", 
   assert.ok(readiness.blockerIds.some((id) => id.startsWith("ownership-")));
 });
 
+test("artifact and attachment routes are declared Rust-owned once the native frontdoor handles them", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const byId = new Map(ownership.publicRouteFamilies.map((family) => [family.id, family]));
+
+  assert.equal(byId.get("artifacts").owner, "rust");
+  assert.equal(byId.get("artifacts").status, "default-on");
+  assert.equal(byId.get("attachments").owner, "rust");
+  assert.equal(byId.get("attachments").status, "default-on");
+  assert.deepEqual(
+    ownership.responsibilities.find((responsibility) => responsibility.id === "artifact-storage-runtime"),
+    { id: "artifact-storage-runtime", owner: "rust", status: "required-for-rust-only" }
+  );
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),

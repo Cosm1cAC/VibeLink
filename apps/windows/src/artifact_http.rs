@@ -63,6 +63,54 @@ pub fn route_artifact_request(
     )))
 }
 
+pub fn route_artifact_preview_request(
+    request: &ParsedRequest,
+    config: &ArtifactRouteConfig,
+) -> Result<Option<HttpRouteResponse>> {
+    if request.method != "GET" {
+        return Ok(None);
+    }
+    let Some(id) = request.path().strip_prefix("/api/artifacts/").and_then(|path| path.strip_suffix("/preview")) else {
+        return Ok(None);
+    };
+    let Some(relative_path) = artifact_path_for(id) else {
+        return Ok(None);
+    };
+    match authenticate_route_request(request, &config.data_dir)? {
+        RouteAuthentication::Pending => return Ok(None),
+        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
+        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::Device(_) => {}
+    }
+    let path = config.data_dir.join("attachments").join(relative_path);
+    let mime_type = mime_type_for(&path);
+    if mime_type != "text/csv" && mime_type != "text/tab-separated-values" {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(path)?;
+    if source.len() > 8 * 1024 * 1024 {
+        return Ok(Some(HttpRouteResponse::error(413, "Artifact source exceeds the preview limit.")));
+    }
+    let delimiter = if mime_type == "text/csv" { ',' } else { '\t' };
+    let mut rows = parse_delimited_preview(&source, delimiter).into_iter();
+    let columns = rows.next().unwrap_or_default();
+    let data = rows.take(200).collect::<Vec<_>>();
+    let redaction_count = columns.iter().chain(data.iter().flatten()).filter(|value| value.contains("[REDACTED]")).count();
+    let source_rows = source.lines().filter(|line| !line.is_empty()).count().saturating_sub(1);
+    Ok(Some(HttpRouteResponse::json(200, json!({
+        "preview": {
+            "version": 1,
+            "readonly": false,
+            "mimeType": mime_type,
+            "kind": "table",
+            "document": { "type": "table", "columns": columns, "rows": data },
+            "truncated": { "rows": source_rows > data.len(), "columns": columns.len() >= 100 },
+            "redaction": { "applied": redaction_count > 0, "count": redaction_count },
+            "limits": { "maxBytes": 8 * 1024 * 1024, "maxRows": 200, "maxColumns": 100 }
+        }
+    }))))
+}
+
 fn artifact_path_for(id: &str) -> Option<PathBuf> {
     let (uuid, extension) = id.split_once('.')?;
     if extension.is_empty()
@@ -205,6 +253,70 @@ pub fn stream_artifact_content_request(
     Ok(Some(()))
 }
 
+fn parse_delimited_preview(source: &str, delimiter: char) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut characters = source.chars().peekable();
+    while let Some(character) = characters.next() {
+        if quoted {
+            if character == '"' && characters.peek() == Some(&'"') {
+                field.push('"');
+                characters.next();
+            } else if character == '"' {
+                quoted = false;
+            } else {
+                field.push(character);
+            }
+            continue;
+        }
+        match character {
+            '"' if field.is_empty() => quoted = true,
+            value if value == delimiter => {
+                if row.len() < 100 {
+                    row.push(redact_preview_field(&field));
+                }
+                field.clear();
+            }
+            '\n' | '\r' => {
+                if character == '\r' && characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                if row.len() < 100 {
+                    row.push(redact_preview_field(&field));
+                }
+                if row.iter().any(|value| !value.is_empty()) && rows.len() < 201 {
+                    rows.push(std::mem::take(&mut row));
+                } else {
+                    row.clear();
+                }
+                field.clear();
+            }
+            value => field.push(value),
+        }
+    }
+    if !field.is_empty() || !row.is_empty() {
+        if row.len() < 100 {
+            row.push(redact_preview_field(&field));
+        }
+        if row.iter().any(|value| !value.is_empty()) && rows.len() < 201 {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+fn redact_preview_field(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    for marker in ["token=", "secret=", "api_key=", "password="] {
+        if let Some(index) = lower.find(marker) {
+            return format!("{}[REDACTED]", &value[..index + marker.len()]);
+        }
+    }
+    value.to_string()
+}
+
 fn parse_artifact_range(value: &str, size: u64) -> Result<(u64, u64), &'static str> {
     const MAX_RANGE_BYTES: u64 = 1024 * 1024;
     let Some(spec) = value.strip_prefix("bytes=") else {
@@ -282,7 +394,11 @@ mod tests {
             )
             .unwrap();
         let id = "a0b1c2d3-e4f5-6789-abcd-ef0123456789.csv";
-        fs::write(attachments.join(id), "name,note\nAda,hello\n").unwrap();
+        fs::write(
+            attachments.join(id),
+            "name,note\nAda,\"token=private-value, still private\"\n",
+        )
+        .unwrap();
 
         let request = parse_request(format!(
             "GET /api/artifacts/{id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n"
@@ -297,8 +413,20 @@ mod tests {
         assert_eq!(response.body["artifact"]["capabilities"]["mutation"], true);
         assert_eq!(
             response.body["artifact"]["digest"],
-            "sha256:5c937efbaeb5ec886b1bf4164d1cdb477e65dba9678d82bb15bb78fcf0bcd78e"
+            "sha256:1b8be7eacc53952e8b9c643081598eaa10e0493bac9627394a3936349cd8d9b0"
         );
+        let preview_request = parse_request(format!(
+            "GET /api/artifacts/{id}/preview HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n"
+        ).as_bytes()).unwrap();
+        let preview = route_artifact_preview_request(
+            &preview_request,
+            &ArtifactRouteConfig::new(directory.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(preview.body["preview"]["document"]["rows"][0].as_array().unwrap().len(), 2);
+        assert_eq!(preview.body["preview"]["document"]["rows"][0][1], "token=[REDACTED]");
+        assert_eq!(preview.body["preview"]["redaction"]["applied"], true);
         let _ = fs::remove_dir_all(directory);
     }
 }

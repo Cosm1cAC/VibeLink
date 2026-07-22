@@ -1,6 +1,7 @@
 use crate::audit_http::{route_audit_request, AuditRouteConfig};
 use crate::artifact_http::{
-    route_artifact_request, stream_artifact_content_request, ArtifactRouteConfig,
+    route_artifact_preview_request, route_artifact_request, stream_artifact_content_request,
+    ArtifactRouteConfig,
 };
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
@@ -237,6 +238,13 @@ fn handle_connection(
                 Err(error) => {
                     eprintln!("Rust Artifact content route falling back to Node: {error:#}");
                 }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            match route_artifact_preview_request(&request, artifact_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => eprintln!("Rust Artifact preview route falling back to Node: {error:#}"),
             }
         }
         if let Some(tool_events_sse) = routes.tool_events_sse.as_ref() {

@@ -45,8 +45,7 @@ impl TaskRouteConfig {
 
 pub fn task_request_requires_body(request: &ParsedRequest) -> bool {
     request.method == "POST"
-        && (request.path() == "/api/tasks"
-            || request.path().starts_with("/api/tasks/"))
+        && (request.path() == "/api/tasks" || request.path().starts_with("/api/tasks/"))
 }
 
 pub fn route_task_request(
@@ -63,32 +62,42 @@ pub fn route_task_request(
     }
     config.metrics.attempts.fetch_add(1, Ordering::SeqCst);
     match auth {
-        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {}
         RouteAuthentication::Pending => unreachable!(),
     }
 
-    let connection = open_task_db(&config.data_dir)?;
+    let mut connection = open_task_db(&config.data_dir)?;
     let response = if request.path() == "/api/tasks" && request.method == "GET" {
         HttpRouteResponse::json(200, json!({ "items": list_tasks(&connection)? }))
     } else if request.path() == "/api/tasks" && request.method == "POST" {
         let payload = read_json_body(body)?;
         if request.query_parameter("dryRun").as_deref() == Some("1") {
-            HttpRouteResponse::json(200, json!({
-                "dryRun": true,
-                "agent": payload.get("agent").and_then(Value::as_str).unwrap_or("codex"),
-                "prompt": payload.get("prompt").and_then(Value::as_str).unwrap_or(""),
-                "approvalRequired": false,
-                "wouldPersist": true
-            }))
+            HttpRouteResponse::json(
+                200,
+                json!({
+                    "dryRun": true,
+                    "agent": payload.get("agent").and_then(Value::as_str).unwrap_or("codex"),
+                    "prompt": payload.get("prompt").and_then(Value::as_str).unwrap_or(""),
+                    "approvalRequired": false,
+                    "wouldPersist": true
+                }),
+            )
         } else {
-            let task = create_queued_task(&connection, &payload)?;
-            HttpRouteResponse::json(201, json!({
-                "id": task["id"],
-                "status": task["status"],
-                "task": task
-            }))
+            let task = create_queued_task(&mut connection, &payload)?;
+            HttpRouteResponse::json(
+                201,
+                json!({
+                    "id": task["id"],
+                    "status": task["status"],
+                    "task": task
+                }),
+            )
         }
     } else if let Some((task_id, "events/catch-up")) = task_path_parts(request.path()) {
         let limit = bounded_limit(request.query_parameter("limit"));
@@ -105,15 +114,22 @@ pub fn route_task_request(
             .and_then(|item| item.get("cursor"))
             .and_then(Value::as_i64)
             .unwrap_or(after);
-        HttpRouteResponse::json(200, json!({
-            "items": items,
-            "nextCursor": next_cursor,
-            "hasMore": has_more,
-            "limit": limit
-        }))
+        HttpRouteResponse::json(
+            200,
+            json!({
+                "items": items,
+                "nextCursor": next_cursor,
+                "hasMore": has_more,
+                "limit": limit
+            }),
+        )
     } else if let Some((task_id, "input")) = task_path_parts(request.path()) {
         let payload = read_json_body(body)?;
-        let text = payload.get("text").and_then(Value::as_str).unwrap_or("").trim();
+        let text = payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
         if text.is_empty() {
             HttpRouteResponse::error(400, "Input is required.")
         } else if append_task_input(&connection, &task_id, text)? {
@@ -122,20 +138,23 @@ pub fn route_task_request(
             HttpRouteResponse::error(404, "Task not found.")
         }
     } else if let Some((task_id, "stop")) = task_path_parts(request.path()) {
-        if stop_task_projection(&connection, &task_id)? {
+        if stop_queued_task_projection(&connection, &task_id)? {
             HttpRouteResponse::json(200, json!({ "ok": true, "stopped": true }))
         } else {
-            HttpRouteResponse::error(404, "Task not found.")
+            return Ok(None);
         }
     } else if request.path() == "/api/task-scheduler" && request.method == "GET" {
-        HttpRouteResponse::json(200, json!({
-            "ok": true,
-            "owner": "rust",
-            "mode": "durable-projection",
-            "queued": count_tasks_by_status(&connection, "queued")?,
-            "running": count_tasks_by_status(&connection, "running")?,
-            "pending": count_tasks_by_status(&connection, "queued")?
-        }))
+        HttpRouteResponse::json(
+            200,
+            json!({
+                "ok": true,
+                "owner": "rust",
+                "mode": "durable-projection",
+                "queued": count_tasks_by_status(&connection, "queued")?,
+                "running": count_tasks_by_status(&connection, "running")?,
+                "pending": count_tasks_by_status(&connection, "queued")?
+            }),
+        )
     } else {
         return Ok(None);
     };
@@ -244,15 +263,38 @@ fn open_task_db(data_dir: &Path) -> Result<Connection> {
           text TEXT, payload_json TEXT, event_json TEXT NOT NULL, created_at TEXT NOT NULL,
           UNIQUE(task_id, event_id)
         );
-        CREATE INDEX IF NOT EXISTS idx_task_events_task_cursor ON task_events(task_id, cursor);",
+        CREATE INDEX IF NOT EXISTS idx_task_events_task_cursor ON task_events(task_id, cursor);
+        CREATE TABLE IF NOT EXISTS task_queue (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 0,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3,
+          next_attempt_at TEXT,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          completed_at TEXT,
+          last_error TEXT,
+          FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_queue_ready
+          ON task_queue(status, next_attempt_at, priority DESC, created_at);",
     )?;
     Ok(connection)
 }
 
-fn create_queued_task(connection: &Connection, payload: &Value) -> Result<Value> {
+fn create_queued_task(connection: &mut Connection, payload: &Value) -> Result<Value> {
     let id = uuid::Uuid::new_v4().to_string();
+    let queue_id = uuid::Uuid::new_v4().to_string();
     let now = now_iso();
-    let agent = payload.get("agent").and_then(Value::as_str).unwrap_or("codex").trim();
+    let agent = payload
+        .get("agent")
+        .and_then(Value::as_str)
+        .unwrap_or("codex")
+        .trim();
     let agent = if agent.is_empty() { "codex" } else { agent };
     let prompt = payload.get("prompt").and_then(Value::as_str).unwrap_or("");
     let title = payload
@@ -269,34 +311,110 @@ fn create_queued_task(connection: &Connection, payload: &Value) -> Result<Value>
         title
     };
     let cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or("");
-    let workspace_id = payload.get("workspaceId").and_then(Value::as_str).unwrap_or("");
-    let session_id = payload.get("sessionId").and_then(Value::as_str).unwrap_or("");
+    let workspace_id = payload
+        .get("workspaceId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let session_id = payload
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let launch_payload = task_launch_payload(payload);
     let meta = json!({
         "launchMode": payload.get("mode").and_then(Value::as_str).unwrap_or("new"),
         "sessionOrigin": "vibelink-cli",
         "rustOwner": "task-http",
         "pendingWorkerStart": true,
-        "launchPayload": payload
+        "queueId": queue_id,
+        "launchPayload": launch_payload
     });
-    connection.execute(
+    let priority = payload.get("priority").and_then(Value::as_i64).unwrap_or(0);
+    let max_attempts = payload
+        .get("maxAttempts")
+        .and_then(Value::as_i64)
+        .unwrap_or(3)
+        .max(1);
+    let transaction = connection.transaction()?;
+    transaction.execute(
         "INSERT INTO tasks (id,agent,title,cwd,workspace_id,status,created_at,updated_at,exit_code,session_id,command_label,log_path,meta_json)
          VALUES (?1,?2,?3,?4,?5,'queued',?6,?6,NULL,?7,?8,'',?9)",
         params![id, agent, title, cwd, workspace_id, now, session_id, agent, meta.to_string()],
     )?;
-    insert_task_event(connection, &id, "system", &format!("Starting {agent} in {cwd}"), json!({ "agent": agent, "launchMode": meta["launchMode"] }))?;
-    insert_task_event(connection, &id, "security", "Security policy: rust durable projection", json!({ "owner": "rust" }))?;
+    transaction.execute(
+        "INSERT INTO task_queue (
+           id,task_id,status,priority,attempts,max_attempts,next_attempt_at,payload_json,created_at,updated_at
+         ) VALUES (?1,?2,'queued',?3,0,?4,?5,?6,?5,?5)",
+        params![queue_id, id, priority, max_attempts, now, launch_payload.to_string()],
+    )?;
+    insert_task_event(
+        &transaction,
+        &id,
+        "system",
+        &format!("Starting {agent} in {cwd}"),
+        json!({ "agent": agent, "launchMode": meta["launchMode"] }),
+    )?;
+    insert_task_event(
+        &transaction,
+        &id,
+        "security",
+        "Security policy: rust durable projection",
+        json!({ "owner": "rust" }),
+    )?;
     if !prompt.trim().is_empty() {
-        insert_task_event(connection, &id, "stdin", prompt, json!({}))?;
+        insert_task_event(&transaction, &id, "stdin", prompt, json!({}))?;
     }
+    insert_task_event(
+        &transaction,
+        &id,
+        "system",
+        "Task added to the persistent execution queue.",
+        json!({ "queueId": queue_id }),
+    )?;
+    transaction.commit()?;
     task_by_id(connection, &id)?.ok_or_else(|| anyhow::anyhow!("Created task is missing."))
+}
+
+fn task_launch_payload(payload: &Value) -> Value {
+    let mut launch_payload = serde_json::Map::new();
+    for key in [
+        "agent",
+        "title",
+        "prompt",
+        "cwd",
+        "model",
+        "mode",
+        "sessionId",
+        "reasoningEffort",
+        "permissionMode",
+        "security",
+        "template",
+        "name",
+    ] {
+        if let Some(value) = payload.get(key) {
+            launch_payload.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(launch_payload)
 }
 
 fn append_task_input(connection: &Connection, task_id: &str, text: &str) -> Result<bool> {
     if task_by_id(connection, task_id)?.is_none() {
         return Ok(false);
     }
-    insert_task_event(connection, task_id, "stdin", text, json!({ "queued": true }))?;
-    insert_task_event(connection, task_id, "system", "Input queued for the next resume turn.", json!({}))?;
+    insert_task_event(
+        connection,
+        task_id,
+        "stdin",
+        text,
+        json!({ "queued": true }),
+    )?;
+    insert_task_event(
+        connection,
+        task_id,
+        "system",
+        "Input queued for the next resume turn.",
+        json!({}),
+    )?;
     connection.execute(
         "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
         params![now_iso(), task_id],
@@ -304,15 +422,34 @@ fn append_task_input(connection: &Connection, task_id: &str, text: &str) -> Resu
     Ok(true)
 }
 
-fn stop_task_projection(connection: &Connection, task_id: &str) -> Result<bool> {
-    let changed = connection.execute(
+fn stop_queued_task_projection(connection: &Connection, task_id: &str) -> Result<bool> {
+    let Some(task) = task_by_id(connection, task_id)? else {
+        return Ok(false);
+    };
+    if task["status"].as_str() != Some("queued") {
+        return Ok(false);
+    }
+    let transaction = connection.unchecked_transaction()?;
+    let changed = transaction.execute(
         "UPDATE tasks SET status = 'cancelled', updated_at = ?1 WHERE id = ?2",
         params![now_iso(), task_id],
     )?;
     if changed == 0 {
         return Ok(false);
     }
-    insert_task_event(connection, task_id, "system", "Task stop requested.", json!({ "stopped": true }))?;
+    transaction.execute(
+        "UPDATE task_queue SET status = 'cancelled', updated_at = ?1, completed_at = ?1, next_attempt_at = NULL
+         WHERE task_id = ?2 AND status = 'queued'",
+        params![now_iso(), task_id],
+    )?;
+    insert_task_event(
+        &transaction,
+        task_id,
+        "system",
+        "Task stop requested.",
+        json!({ "stopped": true }),
+    )?;
+    transaction.commit()?;
     Ok(true)
 }
 
@@ -365,7 +502,9 @@ fn task_by_id(connection: &Connection, id: &str) -> Result<Option<Value>> {
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    let meta_json = row.get::<_, Option<String>>(12)?.unwrap_or_else(|| "{}".to_string());
+    let meta_json = row
+        .get::<_, Option<String>>(12)?
+        .unwrap_or_else(|| "{}".to_string());
     Ok(json!({
         "id": row.get::<_, String>(0)?,
         "agent": row.get::<_, String>(1)?,
@@ -395,7 +534,8 @@ fn list_task_events(
     let rows = statement
         .query_map(params![task_id, after, limit], |row| {
             let cursor = row.get::<_, i64>(0)?;
-            let mut event = serde_json::from_str::<Value>(&row.get::<_, String>(1)?).unwrap_or(json!({}));
+            let mut event =
+                serde_json::from_str::<Value>(&row.get::<_, String>(1)?).unwrap_or(json!({}));
             event["cursor"] = json!(cursor);
             Ok(event)
         })?
@@ -406,7 +546,11 @@ fn list_task_events(
 
 fn count_tasks_by_status(connection: &Connection, status: &str) -> Result<i64> {
     connection
-        .query_row("SELECT COUNT(*) FROM tasks WHERE status = ?1", params![status], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status = ?1",
+            params![status],
+            |row| row.get(0),
+        )
         .map_err(Into::into)
 }
 
@@ -470,19 +614,45 @@ mod tests {
         assert_eq!(created.status, 201);
         let id = created.body["id"].as_str().unwrap().to_string();
         assert_eq!(created.body["task"]["status"], "queued");
+        let queue = Connection::open(dir.join("mobile-agent.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT task_id,status,payload_json FROM task_queue WHERE task_id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(queue.0, id);
+        assert_eq!(queue.1, "queued");
+        assert_eq!(
+            serde_json::from_str::<Value>(&queue.2).unwrap()["prompt"],
+            "hello task"
+        );
 
         let list = parse_request(
             b"GET /api/tasks HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
         )
         .unwrap();
         let listed = route_task_request(&list, None, &config).unwrap().unwrap();
-        assert!(listed.body["items"].as_array().unwrap().iter().any(|task| task["id"] == id));
+        assert!(listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["id"] == id));
 
         let catch_up = parse_request(
             format!("GET /api/tasks/{id}/events/catch-up?after=0&limit=10 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
         )
         .unwrap();
-        let events = route_task_request(&catch_up, None, &config).unwrap().unwrap();
+        let events = route_task_request(&catch_up, None, &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(events.status, 200);
         assert!(events.body["items"].as_array().unwrap().len() >= 3);
         let first_cursor = events.body["items"][0]["cursor"].as_i64().unwrap();
@@ -491,8 +661,14 @@ mod tests {
             format!("GET /api/tasks/{id}/events/catch-up?after={first_cursor}&limit=10 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
         )
         .unwrap();
-        let replayed = route_task_request(&replay_after_first, None, &config).unwrap().unwrap();
-        assert!(replayed.body["items"].as_array().unwrap().iter().all(|event| event["cursor"].as_i64().unwrap() > first_cursor));
+        let replayed = route_task_request(&replay_after_first, None, &config)
+            .unwrap()
+            .unwrap();
+        assert!(replayed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["cursor"].as_i64().unwrap() > first_cursor));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -522,11 +698,22 @@ mod tests {
             format!("POST /api/tasks/{id}/stop HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 0\r\n\r\n").as_bytes(),
         )
         .unwrap();
-        let stopped = route_task_request(&stop, Some(b"{}"), &config).unwrap().unwrap();
+        let stopped = route_task_request(&stop, Some(b"{}"), &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(stopped.body["stopped"], true);
         let listed = list_tasks(&open_task_db(&dir).unwrap()).unwrap();
         assert_eq!(listed[0]["id"], id);
         assert_eq!(listed[0]["status"], "cancelled");
+        let queue_status = Connection::open(dir.join("mobile-agent.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT status FROM task_queue WHERE task_id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(queue_status, "cancelled");
         let _ = fs::remove_dir_all(dir);
     }
 }

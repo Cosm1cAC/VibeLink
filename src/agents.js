@@ -344,6 +344,7 @@ export const __testInternals = {
   agentLaunchPlan,
   claudeArgs,
   persistentLaunchPayload,
+  queuedDurableInputs,
   resolveWorkingDir,
   createOutputNormalizer: (...args) => createOutputNormalizer(...args)
 };
@@ -560,6 +561,13 @@ function persistentLaunchPayload(payload = {}) {
     "agent", "title", "prompt", "cwd", "model", "mode", "sessionId", "reasoningEffort",
     "permissionMode", "security", "template", "name"
   ].filter((key) => payload[key] !== undefined).map((key) => [key, payload[key]]));
+}
+
+function queuedDurableInputs(events = []) {
+  return events
+    .filter((event) => event?.type === "stdin" && event?.payload?.queued === true)
+    .map((event) => String(event.text || ""))
+    .filter((text) => text.trim());
 }
 
 function createOutputNormalizer(onEvent) {
@@ -897,6 +905,7 @@ export async function executeQueuedTask(job, settings) {
       execution: null,
       listeners: new Set(),
       events: [],
+      inputQueue: queuedDurableInputs(listTaskEvents(job.taskId, { after: 0, limit: 2000 })),
       logPath: path.join(tasksDir, `${job.taskId}.jsonl`)
     };
     tasks.set(task.id, task);
@@ -905,7 +914,7 @@ export async function executeQueuedTask(job, settings) {
   }
   task.executionFacade = payload.executionHost || getExecutionHostFacade();
   task.launchPayload = { ...payload, executionHost: undefined };
-  task.inputQueue ||= [];
+  task.inputQueue ||= queuedDurableInputs(listTaskEvents(job.taskId, { after: 0, limit: 2000 }));
   task.stopRequested = false;
   task.status = "starting";
   task.exitCode = null;

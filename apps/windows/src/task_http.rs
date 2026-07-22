@@ -74,7 +74,9 @@ pub fn route_task_request(
     }
 
     let mut connection = open_task_db(&config.data_dir)?;
-    let response = if request.path() == "/api/tasks" && request.method == "GET" {
+    let response = if request.path() == "/api/thread-state" && request.method == "GET" {
+        HttpRouteResponse::json(200, thread_state(&connection)?)
+    } else if request.path() == "/api/tasks" && request.method == "GET" {
         HttpRouteResponse::json(200, json!({ "items": list_tasks(&connection)? }))
     } else if request.path() == "/api/tasks" && request.method == "POST" {
         let payload = read_json_body(body)?;
@@ -235,6 +237,7 @@ pub fn stream_task_events_request(
 
 fn is_task_route(path: &str) -> bool {
     path == "/api/tasks"
+        || path == "/api/thread-state"
         || path == "/api/task-scheduler"
         || path.starts_with("/api/tasks/")
         || path.starts_with("/api/task-scheduler/")
@@ -602,6 +605,64 @@ fn task_changes(connection: &Connection, task: &Value) -> Result<Value> {
         "workspace": workspace,
         "cwd": cwd
     }))
+}
+
+fn thread_state(connection: &Connection) -> Result<Value> {
+    let mut items = serde_json::Map::new();
+    let mut statement = connection.prepare(
+        "SELECT key,title,group_name,pinned,archived,meta_json,revision,updated_at
+         FROM threads ORDER BY updated_at DESC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            row.get::<_, i64>(3)? != 0,
+            row.get::<_, i64>(4)? != 0,
+            row.get::<_, Option<String>>(5)?.unwrap_or_else(|| "{}".to_string()),
+            row.get::<_, i64>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    for row in rows {
+        let (key, title, group, pinned, archived, meta_json, revision, updated_at) = row?;
+        let mut item = serde_json::from_str::<Value>(&meta_json).unwrap_or(json!({}));
+        item["key"] = json!(key.clone());
+        item["title"] = json!(title);
+        item["group"] = json!(group);
+        item["pinned"] = json!(pinned);
+        item["archived"] = json!(archived);
+        item["tags"] = item["tags"].as_array().cloned().unwrap_or_default().into();
+        item["favorite"] = json!(item["favorite"].as_bool().unwrap_or(false));
+        item["revision"] = json!(revision);
+        item["updatedAt"] = json!(updated_at);
+        items.insert(key, item);
+    }
+    let mut forks = Vec::new();
+    let mut statement = connection.prepare(
+        "SELECT id,source_key,source_id,provider,title,cwd,group_name,pinned,archived,created_at,updated_at
+         FROM thread_forks ORDER BY updated_at DESC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(json!({
+            "id": row.get::<_, String>(0)?,
+            "sourceKey": row.get::<_, String>(1)?,
+            "sourceId": row.get::<_, String>(2)?,
+            "provider": row.get::<_, String>(3)?,
+            "title": row.get::<_, String>(4)?,
+            "cwd": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            "group": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            "pinned": row.get::<_, i64>(7)? != 0,
+            "archived": row.get::<_, i64>(8)? != 0,
+            "createdAt": row.get::<_, String>(9)?,
+            "updatedAt": row.get::<_, String>(10)?
+        }))
+    })?;
+    for row in rows {
+        forks.push(row?);
+    }
+    Ok(json!({ "version": 2, "items": items, "forks": forks }))
 }
 
 fn git_output(cwd: &str, args: &[&str]) -> Result<std::process::Output> {
@@ -999,6 +1060,35 @@ mod tests {
         assert_eq!(response.body["ok"], true);
         assert_eq!(response.body["workspace"]["id"], "workspace-1");
         assert!(response.body["files"].as_array().unwrap().iter().any(|file| file["path"] == "untracked.txt"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_thread_metadata_from_the_durable_projection() {
+        let (dir, config) = fixture();
+        let connection = open_task_db(&dir).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE threads (
+               key TEXT PRIMARY KEY,title TEXT,group_name TEXT,pinned INTEGER,archived INTEGER,
+               meta_json TEXT,revision INTEGER,updated_at TEXT
+             );
+             CREATE TABLE thread_forks (
+               id TEXT PRIMARY KEY,source_key TEXT,source_id TEXT,provider TEXT,title TEXT,cwd TEXT,
+               group_name TEXT,pinned INTEGER,archived INTEGER,created_at TEXT,updated_at TEXT
+             );",
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO threads VALUES ('history:codex:session-1','Thread','Work',1,0,?1,4,'2026-07-23T00:00:00.000Z')",
+            params![r#"{"tags":["release"],"favorite":true}"#],
+        ).unwrap();
+        let request = parse_request(
+            b"GET /api/thread-state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        ).unwrap();
+        let response = route_task_request(&request, None, &config).unwrap().unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["version"], 2);
+        assert_eq!(response.body["items"]["history:codex:session-1"]["favorite"], true);
+        assert_eq!(response.body["items"]["history:codex:session-1"]["tags"][0], "release");
         let _ = fs::remove_dir_all(dir);
     }
 }

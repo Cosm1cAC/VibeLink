@@ -47,9 +47,15 @@
       {
         "id": "provider-runtime",
         "title": "Provider registry 与执行所有权",
-        "status": "planned",
+        "status": "in-progress",
         "nodeEntries": ["src/providerRegistry.js", "src/providerRuntimeLoaders.js"],
-        "rustTarget": "apps/windows/src/execution_host"
+        "rustTarget": "apps/windows/src/provider_http.rs",
+        "completedRoutes": ["GET /api/provider-registry (cached projection)"],
+        "remainingRoutes": [
+          "GET /api/provider-registry?fresh=1 live probe",
+          "provider launch mapping from queued tasks to execd",
+          "provider cache refresh ownership"
+        ]
       },
       {
         "id": "live-call-runtime",
@@ -375,7 +381,25 @@
         "apps/windows/src/http_frontdoor.rs",
         "apps/windows/src/main.rs"
       ],
-      "nextAction": "将 queued task projection 接到 execd provider runner，并迁移 SSE events、changes、history/search 索引和 provider registry/cache HTTP 所有权。"
+      "nextAction": "task SSE 已由 Rust 认领；继续将 queued task projection 接到 execd provider runner，并迁移 changes、history/search 索引和 provider registry/cache 的 fresh probe 所有权。"
+    },
+    {
+      "id": "provider-http-route",
+      "title": "Provider Registry 缓存投影原生 HTTP 路由",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary", "--rust-provider-http"],
+      "nodeEntry": "src/server.js#/api/provider-registry",
+      "rustEntry": "apps/windows/src/provider_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-provider-http bridge",
+      "fallback": "Rust 返回 SQLite cache 与静态 fidelity；fresh=1 和任何 Rust 读取失败均在响应前回放 Node，维持现有真实 probe 的执行语义。",
+      "tests": [
+        "apps/windows/src/provider_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "apps/windows/src/main.rs",
+        "test/providerRegistry.test.js"
+      ],
+      "nextAction": "迁移 freshness probe/cache refresh 与 queued task provider launch mapping，保持 fidelity 字段只描述实际可达路径。"
     },
     {
       "id": "execution-host",

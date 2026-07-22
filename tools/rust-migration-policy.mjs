@@ -14,6 +14,7 @@ const DEFAULT_ROUTE_FIELDS = new Map([
   ["tool-events-sse-http-route", "rust_tool_events_sse"],
   ["event-sync-http-route", "rust_event_sync_http"],
   ["task-http-route", "rust_task_http"],
+  ["provider-http-route", "rust_provider_http"],
   ["workspace-http", "rust_workspace_http"]
 ]);
 

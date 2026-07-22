@@ -23,6 +23,7 @@ mod execution_host;
 mod http_frontdoor;
 mod mcp_session_sidecar;
 mod pairing_http;
+mod provider_http;
 mod public_tunnel;
 mod settings_contract;
 mod settings_credentials;
@@ -98,6 +99,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_task_http: bool,
+
+    #[arg(long, global = true)]
+    rust_provider_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -367,6 +371,10 @@ fn rust_task_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_task_http
 }
 
+fn rust_provider_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_provider_http
+}
+
 fn default_rust_profile(cli: &Cli) -> Cli {
     let mut effective = cli.clone();
     effective.rust_canary = true;
@@ -383,6 +391,7 @@ fn default_rust_profile(cli: &Cli) -> Cli {
     effective.rust_event_sync_http = true;
     effective.rust_workspace_http = true;
     effective.rust_task_http = true;
+    effective.rust_provider_http = true;
     effective
 }
 
@@ -440,6 +449,8 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| event_sync_http::EventSyncRouteConfig::new(route_data_dir.clone()));
     let task_route =
         rust_task_http_enabled(cli).then(|| task_http::TaskRouteConfig::new(route_data_dir.clone()));
+    let provider_route = rust_provider_http_enabled(cli)
+        .then(|| provider_http::ProviderRouteConfig::new(route_data_dir.clone()));
     let workspace_route = rust_workspace_http_enabled(cli)
         .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
@@ -473,6 +484,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_tool_events_sse(tool_events_sse_route)
         .with_event_sync(event_sync_route)
         .with_task(task_route)
+        .with_provider(provider_route)
         .with_settings(settings_route)
         .with_pairing(pairing_route);
     let routes = routes.with_workspace(workspace_route);
@@ -675,6 +687,9 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     }
     if cli.rust_task_http {
         command.arg("--rust-task-http");
+    }
+    if cli.rust_provider_http {
+        command.arg("--rust-provider-http");
     }
     if cli.rust_workspace_http {
         command.arg("--rust-workspace-http");
@@ -915,6 +930,7 @@ mod tests {
         assert!(effective.rust_tool_events_http);
         assert!(effective.rust_workspace_http);
         assert!(effective.rust_task_http);
+        assert!(effective.rust_provider_http);
         assert!(effective.rust_tool_events_sse);
         assert!(effective.rust_event_sync_http);
     }
@@ -1135,6 +1151,22 @@ mod tests {
             Cli::try_parse_from(["vibelink", "--rust-task-http", "bridge"]).unwrap();
         assert!(route_only.rust_task_http);
         assert!(!rust_task_http_enabled(&route_only));
+    }
+
+    #[test]
+    fn rust_provider_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-provider-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_provider_http);
+        assert!(rust_provider_http_enabled(&enabled));
+        let route_only =
+            Cli::try_parse_from(["vibelink", "--rust-provider-http", "bridge"]).unwrap();
+        assert!(!rust_provider_http_enabled(&route_only));
     }
 
     #[test]

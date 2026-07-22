@@ -5,10 +5,13 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
+use std::io::Write;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_EVENT_LIMIT: i64 = 200;
@@ -138,6 +141,68 @@ pub fn route_task_request(
     };
     config.metrics.responses.fetch_add(1, Ordering::SeqCst);
     Ok(Some(response))
+}
+
+pub fn stream_task_events_request(
+    request: &ParsedRequest,
+    config: &TaskRouteConfig,
+    client: &mut TcpStream,
+) -> Result<Option<()>> {
+    let Some((task_id, "events")) = task_path_parts(request.path()) else {
+        return Ok(None);
+    };
+    if request.method != "GET" {
+        return Ok(None);
+    }
+    let auth = authenticate_route_request(request, &config.data_dir)?;
+    if auth == RouteAuthentication::Pending {
+        return Ok(None);
+    }
+    config.metrics.attempts.fetch_add(1, Ordering::SeqCst);
+    match auth {
+        RouteAuthentication::HostDenied => {
+            HttpRouteResponse::error(403, "Host is not allowed.").write_to(client)?;
+            return Ok(Some(()));
+        }
+        RouteAuthentication::Unauthorized => {
+            HttpRouteResponse::error(401, "Unauthorized").write_to(client)?;
+            return Ok(Some(()));
+        }
+        RouteAuthentication::Device(_) => {}
+        RouteAuthentication::Pending => unreachable!(),
+    }
+    let connection = open_task_db(&config.data_dir)?;
+    if task_by_id(&connection, &task_id)?.is_none() {
+        HttpRouteResponse::error(404, "Task not found.").write_to(client)?;
+        return Ok(Some(()));
+    }
+    let mut after = request
+        .query_parameter("after")
+        .or_else(|| request.header("last-event-id").map(str::to_string))
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    client.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\nX-VibeLink-Control-Plane: rust\r\n\r\n")?;
+    client.flush()?;
+    let started = Instant::now();
+    let mut heartbeat = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        let events = list_task_events(&connection, &task_id, after, 500)?;
+        for event in events {
+            let cursor = event.get("cursor").and_then(Value::as_i64).unwrap_or(after);
+            let data = serde_json::to_string(&event).context("Cannot encode task event")?;
+            write!(client, "id: {cursor}\nevent: task\ndata: {data}\n\n")?;
+            after = cursor;
+            heartbeat = Instant::now();
+        }
+        if heartbeat.elapsed() >= Duration::from_secs(25) {
+            client.write_all(b"event: ping\ndata: {}\n\n")?;
+            heartbeat = Instant::now();
+        }
+        client.flush()?;
+        thread::sleep(Duration::from_millis(250));
+    }
+    config.metrics.responses.fetch_add(1, Ordering::SeqCst);
+    Ok(Some(()))
 }
 
 fn is_task_route(path: &str) -> bool {

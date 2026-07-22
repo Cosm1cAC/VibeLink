@@ -11,6 +11,7 @@ use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
 };
+use crate::provider_http::{route_provider_request, ProviderRouteConfig};
 use crate::settings_http::{
     route_settings_request, route_settings_request_with_body, settings_request_requires_body,
     SettingsRouteConfig,
@@ -18,7 +19,9 @@ use crate::settings_http::{
 use crate::status_http::{
     parse_request, route_status_request, HttpRouteResponse, StatusRouteConfig, MAX_HEADER_BYTES,
 };
-use crate::task_http::{route_task_request, task_request_requires_body, TaskRouteConfig};
+use crate::task_http::{
+    route_task_request, stream_task_events_request, task_request_requires_body, TaskRouteConfig,
+};
 use crate::tool_events_http::{
     route_tool_events_request, stream_tool_events_request, ToolEventsRouteConfig,
 };
@@ -49,6 +52,7 @@ pub struct FrontdoorRoutes {
     tool_events_sse: Option<ToolEventsRouteConfig>,
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
+    provider: Option<ProviderRouteConfig>,
     task: Option<TaskRouteConfig>,
     workspace: Option<WorkspaceRouteConfig>,
     event_sync: Option<EventSyncRouteConfig>,
@@ -100,6 +104,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_provider(mut self, route: Option<ProviderRouteConfig>) -> Self {
+        self.provider = route;
+        self
+    }
+
     pub fn with_task(mut self, route: Option<TaskRouteConfig>) -> Self {
         self.task = route;
         self
@@ -125,6 +134,7 @@ impl FrontdoorRoutes {
             && self.tool_events_sse.is_none()
             && self.settings.is_none()
             && self.pairing.is_none()
+            && self.provider.is_none()
             && self.task.is_none()
             && self.workspace.is_none()
             && self.event_sync.is_none()
@@ -200,6 +210,26 @@ fn handle_connection(
                 Err(error) => {
                     tool_events_sse.record_fallback();
                     eprintln!("Rust Tool Events SSE route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(task_route) = routes.task.as_ref() {
+            match stream_task_events_request(&request, task_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    task_route.record_fallback();
+                    eprintln!("Rust Task SSE route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(provider_route) = routes.provider.as_ref() {
+            match route_provider_request(&request, provider_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    provider_route.record_fallback();
+                    eprintln!("Rust Provider route falling back to Node: {error:#}");
                 }
             }
         }

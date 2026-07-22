@@ -95,10 +95,10 @@ fn open_provider_db(data_dir: &Path) -> Result<Connection> {
 
 fn builtin_providers() -> Vec<Value> {
     vec![
-        provider("codex", "Codex", "cli", "vibelink-host", "codex-app-server", true, true, "observed", "complete", "authoritative"),
-        provider("claude", "Claude", "cli", "vibelink-host", "claude-cli-stream-json", true, false, "observed", "complete", "authoritative"),
-        provider("doubao", "Doubao", "web", "external", "doubao-browser-bridge", false, false, "unavailable", "sampled", "observed"),
-        provider("zhipu", "GLM", "cli", "vibelink-host", "zhipu-http-cli", false, false, "unavailable", "complete", "authoritative"),
+        provider("codex", "Codex", "cli", "vibelink-host", "codex-app-server", true, true, true, true, true, "observed", "complete", "authoritative"),
+        provider("claude", "Claude", "cli", "vibelink-host", "claude-cli-stream-json", true, true, true, true, false, "observed", "complete", "authoritative"),
+        provider("doubao", "Doubao", "web", "external", "doubao-browser-bridge", false, false, false, false, false, "unavailable", "sampled", "observed"),
+        provider("zhipu", "GLM", "cli", "vibelink-host", "zhipu-http-cli", false, true, true, true, false, "unavailable", "complete", "authoritative"),
     ]
 }
 
@@ -110,6 +110,9 @@ fn provider(
     execution_ownership: &str,
     protocol: &str,
     resume: bool,
+    model_override: bool,
+    reasoning_effort: bool,
+    reattach: bool,
     approval_continuation: bool,
     structured_tool_events: &str,
     tool_output: &str,
@@ -121,8 +124,13 @@ fn provider(
         "kind": kind,
         "executionOwnership": execution_ownership,
         "capabilities": {
+            "modelOverride": model_override,
+            "reasoningEffort": reasoning_effort,
             "resume": resume,
+            "liveCallAssistant": true,
+            "reattach": reattach,
             "approvalContinuation": approval_continuation,
+            "liveInput": false,
             "structuredToolEvents": structured_tool_events,
             "toolOutput": tool_output,
             "exitStatus": exit_status,
@@ -221,6 +229,10 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.body["items"].as_array().unwrap().len(), 4);
         assert_eq!(response.body["items"][0]["fidelity"]["executionState"], "authoritative");
+        assert_eq!(response.body["items"][0]["capabilities"]["reattach"], true);
+        assert_eq!(response.body["items"][0]["capabilities"]["liveInput"], false);
+        assert_eq!(response.body["items"][2]["capabilities"]["modelOverride"], false);
+        assert_eq!(response.body["items"][2]["capabilities"]["liveCallAssistant"], true);
         let fresh = parse_request(b"GET /api/provider-registry?fresh=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
         assert!(route_provider_request(&fresh, &config).unwrap().is_none());
         let _ = fs::remove_dir_all(dir);

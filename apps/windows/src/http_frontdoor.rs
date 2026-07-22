@@ -1,7 +1,7 @@
 use crate::audit_http::{route_audit_request, AuditRouteConfig};
 use crate::artifact_http::{
-    route_artifact_preview_request, route_artifact_request, stream_artifact_content_request,
-    ArtifactRouteConfig,
+    artifact_request_requires_body, route_artifact_mutation_request, route_artifact_preview_request,
+    route_artifact_request, stream_artifact_content_request, ArtifactRouteConfig,
 };
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
@@ -264,6 +264,22 @@ fn handle_connection(
                 Err(error) => {
                     task_route.record_fallback();
                     eprintln!("Rust Task SSE route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            if artifact_request_requires_body(&request) {
+                let body = match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => body,
+                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                };
+                match route_artifact_mutation_request(&request, &body, artifact_route) {
+                    Ok(Some(response)) => return response.write_to(&mut client),
+                    Ok(None) => return HttpRouteResponse::error(500, "Artifact mutation failed.").write_to(&mut client),
+                    Err(error) => {
+                        eprintln!("Rust Artifact mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Artifact mutation failed.").write_to(&mut client);
+                    }
                 }
             }
         }

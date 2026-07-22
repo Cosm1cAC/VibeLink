@@ -111,6 +111,76 @@ pub fn route_artifact_preview_request(
     }))))
 }
 
+pub fn artifact_request_requires_body(request: &ParsedRequest) -> bool {
+    request.method == "PATCH"
+        && request.path().starts_with("/api/artifacts/")
+        && !request.path()["/api/artifacts/".len()..].contains('/')
+}
+
+pub fn route_artifact_mutation_request(
+    request: &ParsedRequest,
+    body: &[u8],
+    config: &ArtifactRouteConfig,
+) -> Result<Option<HttpRouteResponse>> {
+    if !artifact_request_requires_body(request) {
+        return Ok(None);
+    }
+    let id = request.path().trim_start_matches("/api/artifacts/");
+    let Some(relative_path) = artifact_path_for(id) else {
+        return Ok(Some(HttpRouteResponse::error(400, "Invalid artifact.")));
+    };
+    match authenticate_route_request(request, &config.data_dir)? {
+        RouteAuthentication::Pending => return Ok(None),
+        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
+        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::Device(_) => {}
+    }
+    let path = config.data_dir.join("attachments").join(relative_path);
+    if !matches!(mime_type_for(&path), "text/csv" | "text/tab-separated-values") {
+        return Ok(Some(HttpRouteResponse::error(405, "Artifact type is read-only.")));
+    }
+    let payload: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(Some(HttpRouteResponse::error(400, "Invalid JSON body."))),
+    };
+    let current = artifact_metadata(&path, id)?;
+    if payload["expectedDigest"].as_str() != current["digest"].as_str() {
+        return Ok(Some(HttpRouteResponse::error(409, "Artifact changed since it was loaded.")));
+    }
+    let document = &payload["document"];
+    let Some(columns) = document["columns"].as_array() else {
+        return Ok(Some(HttpRouteResponse::error(422, "Table document is invalid.")));
+    };
+    let Some(rows) = document["rows"].as_array() else {
+        return Ok(Some(HttpRouteResponse::error(422, "Table document is invalid.")));
+    };
+    if document["type"] != "table" || columns.len() > 500 || rows.len() > 10_000 {
+        return Ok(Some(HttpRouteResponse::error(413, "Table mutation exceeds the supported limits.")));
+    }
+    let delimiter = if mime_type_for(&path) == "text/csv" { ',' } else { '\t' };
+    let mut output = String::new();
+    output.push_str(&serialize_delimited_row(columns, delimiter)?);
+    output.push('\n');
+    for row in rows {
+        let Some(row) = row.as_array() else {
+            return Ok(Some(HttpRouteResponse::error(422, "Table rows must match the column count.")));
+        };
+        if row.len() != columns.len() {
+            return Ok(Some(HttpRouteResponse::error(422, "Table rows must match the column count.")));
+        }
+        output.push_str(&serialize_delimited_row(row, delimiter)?);
+        output.push('\n');
+    }
+    if output.len() > 8 * 1024 * 1024 {
+        return Ok(Some(HttpRouteResponse::error(413, "Table mutation is too large.")));
+    }
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, output)?;
+    fs::rename(&temporary, &path)?;
+    let metadata = artifact_metadata(&path, id)?;
+    Ok(Some(HttpRouteResponse::json(200, json!({ "metadata": metadata }))))
+}
+
 fn artifact_path_for(id: &str) -> Option<PathBuf> {
     let (uuid, extension) = id.split_once('.')?;
     if extension.is_empty()
@@ -317,6 +387,18 @@ fn redact_preview_field(value: &str) -> String {
     value.to_string()
 }
 
+fn serialize_delimited_row(values: &[serde_json::Value], delimiter: char) -> Result<String> {
+    let cells = values.iter().map(|value| {
+        let value = value.as_str().unwrap_or_else(|| value.as_str().unwrap_or(""));
+        if value.contains(delimiter) || value.contains('"') || value.contains('\r') || value.contains('\n') {
+            format!("\"{}\"", value.replace('"', "\"\""))
+        } else {
+            value.to_string()
+        }
+    }).collect::<Vec<_>>();
+    Ok(cells.join(&delimiter.to_string()))
+}
+
 fn parse_artifact_range(value: &str, size: u64) -> Result<(u64, u64), &'static str> {
     const MAX_RANGE_BYTES: u64 = 1024 * 1024;
     let Some(spec) = value.strip_prefix("bytes=") else {
@@ -427,6 +509,23 @@ mod tests {
         assert_eq!(preview.body["preview"]["document"]["rows"][0].as_array().unwrap().len(), 2);
         assert_eq!(preview.body["preview"]["document"]["rows"][0][1], "token=[REDACTED]");
         assert_eq!(preview.body["preview"]["redaction"]["applied"], true);
+        let mutation_body = json!({
+            "expectedDigest": response.body["artifact"]["digest"],
+            "document": { "type": "table", "columns": ["name", "note"], "rows": [["Ada", "edited,value"]] }
+        });
+        let mutation_request = parse_request(format!(
+            "PATCH /api/artifacts/{id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 1\r\n\r\n"
+        ).as_bytes()).unwrap();
+        let mutation = route_artifact_mutation_request(
+            &mutation_request,
+            mutation_body.to_string().as_bytes(),
+            &ArtifactRouteConfig::new(directory.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(mutation.status, 200);
+        assert_ne!(mutation.body["metadata"]["digest"], response.body["artifact"]["digest"]);
+        assert_eq!(fs::read_to_string(attachments.join(id)).unwrap(), "name,note\nAda,\"edited,value\"\n");
         let _ = fs::remove_dir_all(directory);
     }
 }

@@ -6,6 +6,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -234,6 +236,16 @@ pub fn route_task_request(
             return Ok(None);
         };
         HttpRouteResponse::json(200, status)
+    } else if request.path() == "/api/search/index/refresh" && request.method == "POST" {
+        let result = refresh_search_index(&connection)?;
+        HttpRouteResponse::json(
+            200,
+            json!({
+                "ok": true,
+                "result": result,
+                "index": search_index_status(&connection)?.unwrap_or(json!({}))
+            }),
+        )
     } else if request.path() == "/api/search" && request.method == "GET" {
         let Some(result) = search_projection(&connection, request)? else {
             return Ok(None);
@@ -315,6 +327,7 @@ fn is_task_route(path: &str) -> bool {
         || path == "/api/search/saved"
         || path == "/api/search/history"
         || path == "/api/search/index"
+        || path == "/api/search/index/refresh"
         || path == "/api/search"
         || path.starts_with("/api/search/saved/")
         || path.starts_with("/api/search/history/")
@@ -398,7 +411,32 @@ fn open_task_db(data_dir: &Path) -> Result<Connection> {
           searched_at TEXT NOT NULL,device_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_search_history_searched
-          ON search_history(searched_at DESC);",
+          ON search_history(searched_at DESC);
+        CREATE TABLE IF NOT EXISTS workspace_search_files (
+          rowid INTEGER PRIMARY KEY AUTOINCREMENT,workspace_id TEXT NOT NULL,path TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,mtime_ms INTEGER NOT NULL,indexable INTEGER NOT NULL DEFAULT 1,
+          indexed_at TEXT NOT NULL,UNIQUE(workspace_id,path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workspace_search_files_workspace
+          ON workspace_search_files(workspace_id,path);
+        CREATE VIRTUAL TABLE IF NOT EXISTS workspace_search_fts USING fts5(
+          path,content,workspace_id UNINDEXED,tokenize='trigram'
+        );
+        CREATE TABLE IF NOT EXISTS content_search_documents (
+          rowid INTEGER PRIMARY KEY AUTOINCREMENT,source_key TEXT NOT NULL,event_cursor INTEGER NOT NULL,
+          kind TEXT NOT NULL,item_id TEXT NOT NULL,provider TEXT,title TEXT NOT NULL,content TEXT NOT NULL,
+          turn_id TEXT,updated_at TEXT,UNIQUE(source_key,event_cursor)
+        );
+        CREATE TABLE IF NOT EXISTS content_search_sources (
+          source_key TEXT PRIMARY KEY,provider TEXT NOT NULL,session_id TEXT NOT NULL,
+          session_origin TEXT NOT NULL DEFAULT 'unknown',source_kind TEXT NOT NULL,file_path TEXT,
+          byte_offset INTEGER NOT NULL DEFAULT 0,event_cursor INTEGER NOT NULL DEFAULT 0,
+          source_size INTEGER NOT NULL DEFAULT 0,source_mtime_ms INTEGER NOT NULL DEFAULT 0,
+          indexed_at TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS content_search_fts USING fts5(
+          title,content,tokenize='trigram'
+        );",
     )?;
     Ok(connection)
 }
@@ -1141,6 +1179,190 @@ fn search_index_status(connection: &Connection) -> Result<Option<Value>> {
         "pendingWorkspaces": 0,
         "owner": "rust-sqlite-projection"
     })))
+}
+
+const SEARCH_MAX_FILES: usize = 50_000;
+const SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
+
+fn refresh_search_index(connection: &Connection) -> Result<Vec<Value>> {
+    if !table_exists(connection, "workspaces")? {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare("SELECT id,path FROM workspaces ORDER BY id")?;
+    let workspaces = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut result = Vec::new();
+    for (workspace_id, root) in workspaces {
+        let root = PathBuf::from(root);
+        if !root.is_dir() {
+            continue;
+        }
+        let files = collect_search_files(&root)?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let refreshed = refresh_workspace_search_rows(connection, &workspace_id, &root, &files);
+        match refreshed {
+            Ok(value) => {
+                connection.execute_batch("COMMIT")?;
+                result.push(value);
+            }
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn collect_search_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if file_type.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if !matches!(
+                    name.as_str(),
+                    ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | ".gradle"
+                ) {
+                    pending.push(path);
+                }
+            } else if file_type.is_file() {
+                let metadata = entry.metadata()?;
+                if metadata.len() <= SEARCH_MAX_FILE_BYTES && is_search_text_file(&path) {
+                    files.push(path);
+                    if files.len() >= SEARCH_MAX_FILES {
+                        return Ok(files);
+                    }
+                }
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn is_search_text_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "txt"
+            | "md"
+            | "rs"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "kt"
+            | "kts"
+            | "java"
+            | "py"
+            | "go"
+            | "html"
+            | "css"
+            | "sql"
+    )
+}
+
+fn refresh_workspace_search_rows(
+    connection: &Connection,
+    workspace_id: &str,
+    root: &Path,
+    files: &[PathBuf],
+) -> Result<Value> {
+    let existing = {
+        let mut statement = connection
+            .prepare("SELECT rowid,path FROM workspace_search_files WHERE workspace_id = ?1")?;
+        let rows = statement
+            .query_map(params![workspace_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut seen = HashSet::new();
+    let mut upserted = 0;
+    for path in files {
+        let relative = path
+            .strip_prefix(root)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        seen.insert(relative.clone());
+        let metadata = fs::metadata(path)?;
+        let mtime_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|value| value.as_millis() as i64)
+            .unwrap_or(0);
+        let content = fs::read_to_string(path).unwrap_or_default();
+        let rowid = connection
+            .query_row(
+                "SELECT rowid FROM workspace_search_files WHERE workspace_id=?1 AND path=?2",
+                params![workspace_id, relative],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let rowid = if let Some(rowid) = rowid {
+            connection.execute(
+                "DELETE FROM workspace_search_fts WHERE rowid=?1",
+                params![rowid],
+            )?;
+            connection.execute(
+                "UPDATE workspace_search_files SET size_bytes=?1,mtime_ms=?2,indexable=1,indexed_at=?3 WHERE rowid=?4",
+                params![metadata.len() as i64, mtime_ms, now_iso(), rowid],
+            )?;
+            rowid
+        } else {
+            connection.execute(
+                "INSERT INTO workspace_search_files(workspace_id,path,size_bytes,mtime_ms,indexable,indexed_at)
+                 VALUES (?1,?2,?3,?4,1,?5)",
+                params![workspace_id, relative, metadata.len() as i64, mtime_ms, now_iso()],
+            )?;
+            connection.last_insert_rowid()
+        };
+        connection.execute(
+            "INSERT INTO workspace_search_fts(rowid,path,content,workspace_id) VALUES (?1,?2,?3,?4)",
+            params![rowid, relative, content, workspace_id],
+        )?;
+        upserted += 1;
+    }
+    let mut deleted = 0;
+    for (rowid, path) in existing {
+        if seen.contains(&path) {
+            continue;
+        }
+        connection.execute(
+            "DELETE FROM workspace_search_fts WHERE rowid=?1",
+            params![rowid],
+        )?;
+        connection.execute(
+            "DELETE FROM workspace_search_files WHERE rowid=?1",
+            params![rowid],
+        )?;
+        deleted += 1;
+    }
+    Ok(json!({
+        "workspaceId": workspace_id,
+        "upserted": upserted,
+        "deleted": deleted
+    }))
 }
 
 fn normalize_search_scope(value: Option<String>) -> &'static str {
@@ -1951,6 +2173,50 @@ mod tests {
         .unwrap();
         let cleared = route_task_request(&clear, None, &config).unwrap().unwrap();
         assert_eq!(cleared.body["deleted"], 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refreshes_workspace_fts_from_rust() {
+        let (dir, config) = fixture();
+        let workspace = dir.join("search-workspace");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(
+            workspace.join("src").join("phase.txt"),
+            "native refresh marker",
+        )
+        .unwrap();
+        let connection = open_task_db(&dir).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE workspaces(id TEXT PRIMARY KEY,path TEXT NOT NULL,title TEXT NOT NULL);",
+        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO workspaces VALUES ('workspace-1',?1,'Search')",
+                params![workspace.to_string_lossy()],
+            )
+            .unwrap();
+        let refresh = parse_request(
+            b"POST /api/search/index/refresh HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 0\r\n\r\n",
+        )
+        .unwrap();
+        let refreshed = route_task_request(&refresh, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.body["ok"], true);
+        assert_eq!(refreshed.body["result"][0]["upserted"], 1);
+        let search = parse_request(
+            b"GET /api/search?q=native%20refresh&scope=files&record=0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let result = route_task_request(&search, None, &config).unwrap().unwrap();
+        assert_eq!(result.body["total"], 1);
+        assert_eq!(result.body["items"][0]["path"], "src/phase.txt");
+        fs::remove_file(workspace.join("src").join("phase.txt")).unwrap();
+        let refreshed = route_task_request(&refresh, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.body["result"][0]["deleted"], 1);
         let _ = fs::remove_dir_all(dir);
     }
 }

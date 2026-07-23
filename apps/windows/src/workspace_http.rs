@@ -580,7 +580,7 @@ fn route_terminal_session_request(
         let payload = terminal_json_body(body)?;
         let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
         if text.is_empty() { return Ok(Some(HttpRouteResponse::error(400, "Input is required."))); }
-        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, id, "execution.input", json!({
+        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, request, id, "execution.input", json!({
             "executionId": id, "data": text, "encoding": "utf8", "operationId": uuid::Uuid::new_v4().to_string()
         }))?));
     }
@@ -590,7 +590,7 @@ fn route_terminal_session_request(
         let cols = payload.get("cols").and_then(Value::as_u64).filter(|value| (1..=1000).contains(value));
         let rows = payload.get("rows").and_then(Value::as_u64).filter(|value| (1..=1000).contains(value));
         let (Some(cols), Some(rows)) = (cols, rows) else { return Ok(Some(HttpRouteResponse::error(400, "Valid cols and rows are required."))); };
-        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, id, "execution.resize", json!({
+        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, request, id, "execution.resize", json!({
             "executionId": id, "cols": cols, "rows": rows, "operationId": uuid::Uuid::new_v4().to_string()
         }))?));
     }
@@ -620,22 +620,28 @@ fn route_terminal_session_request(
 fn terminal_host_mutation(
     connection: &Connection,
     data_dir: &Path,
+    request: &ParsedRequest,
     id: &str,
     method: &str,
     params_value: Value,
 ) -> Result<HttpRouteResponse> {
-    let exists = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tool_runs WHERE id = ?1 AND tool_name = 'workspace.terminal_session')",
+    let workspace_id = connection.query_row(
+        "SELECT workspace_id FROM tool_runs WHERE id = ?1 AND tool_name = 'workspace.terminal_session'",
         params![id],
-        |row| row.get::<_, i64>(0),
-    )? != 0;
-    if !exists {
+        |row| row.get::<_, String>(0),
+    ).optional()?;
+    let Some(workspace_id) = workspace_id else {
         return Ok(HttpRouteResponse::error(404, "Terminal session not found."));
-    }
+    };
     let pipe_name = execd_pipe_name(data_dir);
     let mut pipe = OpenOptions::new().read(true).write(true).open(&pipe_name)
         .with_context(|| format!("Cannot connect to execution host {pipe_name}"))?;
     let request_id = uuid::Uuid::new_v4().to_string();
+    let event_text = if method == "execution.input" {
+        params_value["data"].as_str().unwrap_or_default().to_string()
+    } else {
+        format!("{}x{}", params_value["cols"], params_value["rows"])
+    };
     write_frame(&mut pipe, &RequestEnvelope {
         protocol_version: PROTOCOL_VERSION,
         request_id: request_id.clone(),
@@ -653,6 +659,19 @@ fn terminal_host_mutation(
         })));
     }
     let result = response.result.unwrap_or(Value::Null);
+    let event_type = if method == "execution.input" { "tool.input" } else { "tool.resize" };
+    insert_workspace_tool_event(connection, id, &workspace_id, event_type, &event_text, json!({
+        "session": result.clone(), "executionMethod": method
+    }))?;
+    let at = now_iso();
+    connection.execute(
+        "INSERT INTO audit_log (event_type,event_at,method,path,success,target,meta_json,created_at)
+         VALUES (?1,?2,'POST',?3,1,?4,?5,?2)",
+        params![
+            if method == "execution.input" { "workspace.terminal_session.input" } else { "workspace.terminal_session.resize" },
+            at, request.path(), id, json!({ "toolRunId": id, "executionMethod": method }).to_string()
+        ],
+    )?;
     let mut output = json!({ "ok": true, "session": result });
     if method == "execution.resize" {
         let cols = output["session"].get("cols").cloned().unwrap_or(Value::Null);
@@ -2933,6 +2952,22 @@ mod tests {
             WorkspaceRouteConfig::new(dir),
             root.to_string_lossy().to_string(),
         )
+    }
+
+    #[test]
+    fn terminal_mutations_require_a_body_and_reject_unknown_sessions_before_pipe_access() {
+        let (dir, config, _) = fixture();
+        let request = parse_request(
+            b"POST /api/terminal-sessions/missing/input HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 16\r\n\r\n",
+        )
+        .unwrap();
+        assert!(workspace_request_requires_body(&request));
+        let response = route_workspace_request(&request, Some(br#"{"text":"hello"}"#), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 404);
+        assert_eq!(response.body["error"], "Terminal session not found.");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

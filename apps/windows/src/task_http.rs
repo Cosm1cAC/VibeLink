@@ -172,6 +172,22 @@ pub fn route_task_request(
         HttpRouteResponse::json(200, json!({ "ok": true, "job": job }))
     } else if request.path() == "/api/task-scheduler" && request.method == "GET" {
         HttpRouteResponse::json(200, scheduler_status(&connection)?)
+    } else if request.path() == "/api/histories" && request.method == "GET" {
+        if request.query_parameter("fresh").as_deref() == Some("1") {
+            return Ok(None);
+        }
+        let Some(items) = list_history_projection(&connection, request)? else {
+            return Ok(None);
+        };
+        HttpRouteResponse::json(200, json!({ "items": items }))
+    } else if let Some((provider, id)) = history_path_parts(request.path()) {
+        if request.method != "GET" || request.query_parameter("fresh").as_deref() == Some("1") {
+            return Ok(None);
+        }
+        match history_projection(&connection, provider, id)? {
+            Some(item) => HttpRouteResponse::json(200, item),
+            None => HttpRouteResponse::error(404, "History not found"),
+        }
     } else if request.path() == "/api/search/saved" && request.method == "GET" {
         let Some(items) = list_saved_searches(&connection)? else {
             return Ok(None);
@@ -329,6 +345,8 @@ fn is_task_route(path: &str) -> bool {
         || path == "/api/search/index"
         || path == "/api/search/index/refresh"
         || path == "/api/search"
+        || path == "/api/histories"
+        || path.starts_with("/api/histories/")
         || path.starts_with("/api/search/saved/")
         || path.starts_with("/api/search/history/")
         || path.starts_with("/api/tasks/")
@@ -345,6 +363,12 @@ fn scheduler_path_parts(path: &str) -> Option<(String, &str)> {
     let rest = path.strip_prefix("/api/task-scheduler/")?;
     let (id, action) = rest.split_once('/')?;
     Some((id.to_string(), action))
+}
+
+fn history_path_parts(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("/api/histories/")?;
+    let (provider, id) = rest.split_once('/')?;
+    (!provider.is_empty() && !id.is_empty() && !id.contains('/')).then_some((provider, id))
 }
 
 fn read_json_body(body: Option<&[u8]>) -> Result<Value> {
@@ -1125,6 +1149,104 @@ fn list_search_history(connection: &Connection, limit: i64) -> Result<Option<Vec
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Some(items))
+}
+
+fn list_history_projection(
+    connection: &Connection,
+    request: &ParsedRequest,
+) -> Result<Option<Vec<Value>>> {
+    if !table_exists(connection, "content_search_sources")?
+        || !table_exists(connection, "content_search_documents")?
+    {
+        return Ok(None);
+    }
+    let origin = request
+        .query_parameter("sessionOrigin")
+        .unwrap_or_else(|| "all".to_string());
+    let mut sql = String::from(
+        "SELECT s.provider,s.session_id,s.session_origin,s.file_path,s.indexed_at,
+                d.title,d.content,d.updated_at
+         FROM content_search_sources s
+         JOIN content_search_documents d ON d.source_key=s.source_key AND d.event_cursor=0
+         WHERE s.source_kind IN ('agent','history') AND d.kind='history'",
+    );
+    let mut values = Vec::new();
+    if origin != "all" {
+        sql.push_str(" AND s.session_origin=?");
+        values.push(SqlValue::Text(origin));
+    }
+    sql.push_str(" ORDER BY d.updated_at DESC,s.session_id ASC LIMIT 600");
+    let mut statement = connection.prepare(&sql)?;
+    let items = statement
+        .query_map(params_from_iter(values), |row| {
+            Ok(json!({
+                "provider": row.get::<_, String>(0)?,
+                "id": row.get::<_, String>(1)?,
+                "sessionOrigin": row.get::<_, String>(2)?,
+                "filePath": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                "indexedAt": row.get::<_, String>(4)?,
+                "title": row.get::<_, String>(5)?,
+                "preview": row.get::<_, String>(6)?,
+                "updatedAt": row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                "projectPath": ""
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(items))
+}
+
+fn history_projection(connection: &Connection, provider: &str, id: &str) -> Result<Option<Value>> {
+    let base = connection
+        .query_row(
+            "SELECT s.provider,s.session_id,s.session_origin,s.file_path,s.indexed_at,
+                    d.title,d.content,d.updated_at
+             FROM content_search_sources s
+             JOIN content_search_documents d ON d.source_key=s.source_key AND d.event_cursor=0
+             WHERE s.provider=?1 AND s.session_id=?2 AND s.source_kind IN ('agent','history')
+                   AND d.kind='history'",
+            params![provider, id],
+            |row| {
+                Ok(json!({
+                    "provider": row.get::<_, String>(0)?,
+                    "id": row.get::<_, String>(1)?,
+                    "sessionOrigin": row.get::<_, String>(2)?,
+                    "filePath": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    "indexedAt": row.get::<_, String>(4)?,
+                    "title": row.get::<_, String>(5)?,
+                    "preview": row.get::<_, String>(6)?,
+                    "updatedAt": row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    "projectPath": ""
+                }))
+            },
+        )
+        .optional()?;
+    let Some(mut base) = base else {
+        return Ok(None);
+    };
+    let source_key = format!("agent:{provider}:{id}");
+    let alternate_key = format!("history:{provider}:{id}");
+    let mut statement = connection.prepare(
+        "SELECT event_cursor,content,turn_id,updated_at FROM content_search_documents
+         WHERE source_key IN (?1,?2) AND kind='message' ORDER BY event_cursor ASC LIMIT 4000",
+    )?;
+    let transcript = statement
+        .query_map(params![source_key, alternate_key], |row| {
+            Ok(json!({
+                "type": "message",
+                "role": "assistant",
+                "text": row.get::<_, String>(1)?,
+                "turnId": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                "timestamp": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                "cursor": row.get::<_, i64>(0)?
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    base["entryCount"] = json!(transcript.len());
+    base["clientTranscriptCount"] = json!(transcript.len());
+    base["transcript"] = json!(transcript);
+    base["sessionState"] = json!({ "owner": "rust-content-index" });
+    base["toolTaskId"] = json!(format!("history:{provider}:{id}"));
+    Ok(Some(base))
 }
 
 fn search_index_status(connection: &Connection) -> Result<Option<Value>> {
@@ -2015,7 +2137,7 @@ mod tests {
             [],
         ).unwrap();
         connection.execute(
-            "INSERT INTO content_search_documents VALUES (1,'history:codex:one',1,'history','one','codex','One','body','turn','2026-07-23T00:00:00.000Z')",
+            "INSERT INTO content_search_documents VALUES (1,'history:codex:one',0,'history','one','codex','One','body','turn','2026-07-23T00:00:00.000Z')",
             [],
         ).unwrap();
         connection.execute(
@@ -2055,6 +2177,24 @@ mod tests {
         assert_eq!(search_response.body["items"][0]["path"], "src/main.rs");
         assert_eq!(search_response.body["scope"], "files");
         assert_eq!(search_response.body["order"], "asc");
+        let histories = parse_request(b"GET /api/histories HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let histories_response = route_task_request(&histories, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(histories_response.body["items"][0]["id"], "one");
+        assert_eq!(histories_response.body["items"][0]["provider"], "codex");
+        let history = parse_request(b"GET /api/histories/codex/one HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let history_response = route_task_request(&history, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(history_response.body["id"], "one");
+        assert_eq!(
+            history_response.body["transcript"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

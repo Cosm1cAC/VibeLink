@@ -166,6 +166,26 @@ pub fn route_task_request(
         HttpRouteResponse::json(200, json!({ "ok": true, "job": job }))
     } else if request.path() == "/api/task-scheduler" && request.method == "GET" {
         HttpRouteResponse::json(200, scheduler_status(&connection)?)
+    } else if request.path() == "/api/search/saved" && request.method == "GET" {
+        let Some(items) = list_saved_searches(&connection)? else {
+            return Ok(None);
+        };
+        HttpRouteResponse::json(200, json!({ "items": items }))
+    } else if request.path() == "/api/search/history" && request.method == "GET" {
+        let limit = request
+            .query_parameter("limit")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(50)
+            .clamp(1, 200);
+        let Some(items) = list_search_history(&connection, limit)? else {
+            return Ok(None);
+        };
+        HttpRouteResponse::json(200, json!({ "items": items }))
+    } else if request.path() == "/api/search/index" && request.method == "GET" {
+        let Some(status) = search_index_status(&connection)? else {
+            return Ok(None);
+        };
+        HttpRouteResponse::json(200, status)
     } else {
         return Ok(None);
     };
@@ -239,6 +259,9 @@ fn is_task_route(path: &str) -> bool {
     path == "/api/tasks"
         || path == "/api/thread-state"
         || path == "/api/task-scheduler"
+        || path == "/api/search/saved"
+        || path == "/api/search/history"
+        || path == "/api/search/index"
         || path.starts_with("/api/tasks/")
         || path.starts_with("/api/task-scheduler/")
 }
@@ -559,7 +582,10 @@ fn task_changes(connection: &Connection, task: &Value) -> Result<Value> {
         }));
     }
     let status = git_output(cwd, &["status", "--porcelain=v1", "-b"])?;
-    let first_diff = git_output(cwd, &["diff", "HEAD", "--stat", "--patch", "--find-renames"])?;
+    let first_diff = git_output(
+        cwd,
+        &["diff", "HEAD", "--stat", "--patch", "--find-renames"],
+    )?;
     let first_stderr = String::from_utf8_lossy(&first_diff.stderr);
     let diff = if first_diff.status.success()
         || !["bad revision", "ambiguous argument", "unknown revision"]
@@ -620,7 +646,8 @@ fn thread_state(connection: &Connection) -> Result<Value> {
             row.get::<_, Option<String>>(2)?.unwrap_or_default(),
             row.get::<_, i64>(3)? != 0,
             row.get::<_, i64>(4)? != 0,
-            row.get::<_, Option<String>>(5)?.unwrap_or_else(|| "{}".to_string()),
+            row.get::<_, Option<String>>(5)?
+                .unwrap_or_else(|| "{}".to_string()),
             row.get::<_, i64>(6)?,
             row.get::<_, String>(7)?,
         ))
@@ -756,6 +783,132 @@ fn scheduler_status(connection: &Connection) -> Result<Value> {
         "counts": counts,
         "items": list_scheduler_jobs(connection)?
     }))
+}
+
+fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |_| Ok(true),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(false))
+        .map_err(Into::into)
+}
+
+fn list_saved_searches(connection: &Connection) -> Result<Option<Vec<Value>>> {
+    if !table_exists(connection, "saved_searches")? {
+        return Ok(None);
+    }
+    let mut statement = connection.prepare(
+        "SELECT id,name,query,scope,session_origin,tag,favorite,sort,sort_order,
+                created_at,updated_at,last_used_at
+         FROM saved_searches ORDER BY updated_at DESC,name COLLATE NOCASE ASC",
+    )?;
+    let items = statement
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "query": row.get::<_, String>(2)?,
+                "scope": row.get::<_, String>(3)?,
+                "sessionOrigin": row.get::<_, String>(4)?,
+                "tag": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                "favorite": row.get::<_, i64>(6)? != 0,
+                "sort": row.get::<_, String>(7)?,
+                "order": row.get::<_, String>(8)?,
+                "createdAt": row.get::<_, String>(9)?,
+                "updatedAt": row.get::<_, String>(10)?,
+                "lastUsedAt": row.get::<_, Option<String>>(11)?.unwrap_or_default()
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(items))
+}
+
+fn list_search_history(connection: &Connection, limit: i64) -> Result<Option<Vec<Value>>> {
+    if !table_exists(connection, "search_history")? {
+        return Ok(None);
+    }
+    let mut statement = connection.prepare(
+        "SELECT id,query,scope,session_origin,tag,favorite,sort,sort_order,
+                result_count,use_count,searched_at,device_id
+         FROM search_history ORDER BY searched_at DESC LIMIT ?1",
+    )?;
+    let items = statement
+        .query_map(params![limit], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "query": row.get::<_, String>(1)?,
+                "scope": row.get::<_, String>(2)?,
+                "sessionOrigin": row.get::<_, String>(3)?,
+                "tag": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                "favorite": row.get::<_, i64>(5)? != 0,
+                "sort": row.get::<_, String>(6)?,
+                "order": row.get::<_, String>(7)?,
+                "resultCount": row.get::<_, i64>(8)?,
+                "useCount": row.get::<_, i64>(9)?,
+                "searchedAt": row.get::<_, String>(10)?,
+                "deviceId": row.get::<_, Option<String>>(11)?.unwrap_or_default()
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(items))
+}
+
+fn search_index_status(connection: &Connection) -> Result<Option<Value>> {
+    if !table_exists(connection, "workspace_search_files")?
+        || !table_exists(connection, "content_search_documents")?
+    {
+        return Ok(None);
+    }
+    let indexed_files = connection.query_row(
+        "SELECT COUNT(*) FROM workspace_search_files WHERE indexable = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let indexed_workspaces = connection.query_row(
+        "SELECT COUNT(DISTINCT workspace_id) FROM workspace_search_files",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let mut content = serde_json::Map::new();
+    let mut statement =
+        connection.prepare("SELECT kind,COUNT(*) FROM content_search_documents GROUP BY kind")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (kind, count) = row?;
+        content.insert(
+            match kind.as_str() {
+                "history" => "sessions",
+                "task" => "tasks",
+                "message" => "messages",
+                _ => continue,
+            }
+            .to_string(),
+            json!(count),
+        );
+    }
+    for kind in ["sessions", "tasks", "messages"] {
+        content.entry(kind.to_string()).or_insert(json!(0));
+    }
+    Ok(Some(json!({
+        "indexedFiles": indexed_files,
+        "indexedWorkspaces": indexed_workspaces,
+        "sessions": content["sessions"],
+        "tasks": content["tasks"],
+        "messages": content["messages"],
+        "content": content,
+        "ready": true,
+        "running": false,
+        "started": false,
+        "watchers": 0,
+        "pendingWorkspaces": 0,
+        "owner": "rust-sqlite-projection"
+    })))
 }
 
 fn list_scheduler_jobs(connection: &Connection) -> Result<Vec<Value>> {
@@ -1014,7 +1167,9 @@ mod tests {
             b"GET /api/task-scheduler HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
         )
         .unwrap();
-        let status = route_task_request(&scheduler, None, &config).unwrap().unwrap();
+        let status = route_task_request(&scheduler, None, &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(status.body["counts"]["failed"], 1);
         assert_eq!(status.body["items"][0]["taskId"], id);
 
@@ -1022,7 +1177,9 @@ mod tests {
             format!("POST /api/task-scheduler/{id}/retry HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 0\r\n\r\n").as_bytes(),
         )
         .unwrap();
-        let retried = route_task_request(&retry, Some(b"{}"), &config).unwrap().unwrap();
+        let retried = route_task_request(&retry, Some(b"{}"), &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(retried.status, 200);
         assert_eq!(retried.body["job"]["status"], "queued");
         assert_eq!(retried.body["job"]["attempts"], 0);
@@ -1034,32 +1191,52 @@ mod tests {
         let (dir, config) = fixture();
         let repo = dir.join("repo");
         fs::create_dir_all(&repo).unwrap();
-        let initialized = Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap();
+        let initialized = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
         assert!(initialized.success());
         fs::write(repo.join("untracked.txt"), "phase three\n").unwrap();
         let connection = open_task_db(&dir).unwrap();
         connection.execute_batch("CREATE TABLE workspaces(id TEXT PRIMARY KEY,path TEXT NOT NULL,title TEXT NOT NULL);").unwrap();
-        connection.execute(
-            "INSERT INTO workspaces(id,path,title) VALUES ('workspace-1',?1,'Repo')",
-            params![repo.to_string_lossy()],
-        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO workspaces(id,path,title) VALUES ('workspace-1',?1,'Repo')",
+                params![repo.to_string_lossy()],
+            )
+            .unwrap();
         let create = parse_request(
             b"POST /api/tasks HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
         ).unwrap();
         let created = route_task_request(
             &create,
-            Some(format!(r#"{{"prompt":"inspect","workspaceId":"workspace-1","cwd":"{}"}}"#, repo.to_string_lossy().replace('\\', "\\\\")).as_bytes()),
+            Some(
+                format!(
+                    r#"{{"prompt":"inspect","workspaceId":"workspace-1","cwd":"{}"}}"#,
+                    repo.to_string_lossy().replace('\\', "\\\\")
+                )
+                .as_bytes(),
+            ),
             &config,
-        ).unwrap().unwrap();
+        )
+        .unwrap()
+        .unwrap();
         let id = created.body["id"].as_str().unwrap();
         let changes = parse_request(
             format!("GET /api/tasks/{id}/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
         ).unwrap();
-        let response = route_task_request(&changes, None, &config).unwrap().unwrap();
+        let response = route_task_request(&changes, None, &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body["ok"], true);
         assert_eq!(response.body["workspace"]["id"], "workspace-1");
-        assert!(response.body["files"].as_array().unwrap().iter().any(|file| file["path"] == "untracked.txt"));
+        assert!(response.body["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"] == "untracked.txt"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1067,8 +1244,9 @@ mod tests {
     fn reads_thread_metadata_from_the_durable_projection() {
         let (dir, config) = fixture();
         let connection = open_task_db(&dir).unwrap();
-        connection.execute_batch(
-            "CREATE TABLE threads (
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
                key TEXT PRIMARY KEY,title TEXT,group_name TEXT,pinned INTEGER,archived INTEGER,
                meta_json TEXT,revision INTEGER,updated_at TEXT
              );
@@ -1076,7 +1254,8 @@ mod tests {
                id TEXT PRIMARY KEY,source_key TEXT,source_id TEXT,provider TEXT,title TEXT,cwd TEXT,
                group_name TEXT,pinned INTEGER,archived INTEGER,created_at TEXT,updated_at TEXT
              );",
-        ).unwrap();
+            )
+            .unwrap();
         connection.execute(
             "INSERT INTO threads VALUES ('history:codex:session-1','Thread','Work',1,0,?1,4,'2026-07-23T00:00:00.000Z')",
             params![r#"{"tags":["release"],"favorite":true}"#],
@@ -1084,11 +1263,83 @@ mod tests {
         let request = parse_request(
             b"GET /api/thread-state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
         ).unwrap();
-        let response = route_task_request(&request, None, &config).unwrap().unwrap();
+        let response = route_task_request(&request, None, &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body["version"], 2);
-        assert_eq!(response.body["items"]["history:codex:session-1"]["favorite"], true);
-        assert_eq!(response.body["items"]["history:codex:session-1"]["tags"][0], "release");
+        assert_eq!(
+            response.body["items"]["history:codex:session-1"]["favorite"],
+            true
+        );
+        assert_eq!(
+            response.body["items"]["history:codex:session-1"]["tags"][0],
+            "release"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn serves_persisted_search_metadata_without_node_runtime() {
+        let (dir, config) = fixture();
+        let connection = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE saved_searches (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, query TEXT NOT NULL, scope TEXT NOT NULL,
+               session_origin TEXT NOT NULL, tag TEXT, favorite INTEGER NOT NULL,
+               sort TEXT NOT NULL, sort_order TEXT NOT NULL, created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL, last_used_at TEXT
+             );
+             CREATE TABLE search_history (
+               id TEXT PRIMARY KEY, signature TEXT NOT NULL, query TEXT NOT NULL, scope TEXT NOT NULL,
+               session_origin TEXT NOT NULL, tag TEXT, favorite INTEGER NOT NULL,
+               sort TEXT NOT NULL, sort_order TEXT NOT NULL, result_count INTEGER NOT NULL,
+               use_count INTEGER NOT NULL, searched_at TEXT NOT NULL, device_id TEXT
+             );
+             CREATE TABLE workspace_search_files (
+               rowid INTEGER PRIMARY KEY, workspace_id TEXT NOT NULL, path TEXT NOT NULL,
+               size_bytes INTEGER NOT NULL, mtime_ms INTEGER NOT NULL, indexable INTEGER NOT NULL,
+               indexed_at TEXT NOT NULL
+             );
+             CREATE TABLE content_search_documents (
+               rowid INTEGER PRIMARY KEY, source_key TEXT NOT NULL, event_cursor INTEGER NOT NULL,
+               kind TEXT NOT NULL, item_id TEXT NOT NULL, provider TEXT, title TEXT NOT NULL,
+               content TEXT NOT NULL, turn_id TEXT, updated_at TEXT
+             );",
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO saved_searches VALUES ('saved-1','Release','rust migration','files','vibelink-cli','release',1,'title','asc','2026-07-23T00:00:00.000Z','2026-07-23T00:00:00.000Z',NULL)",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO search_history VALUES ('history-1','sig','rust migration','files','vibelink-cli','release',1,'title','asc',3,2,'2026-07-23T00:00:00.000Z','d')",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO workspace_search_files VALUES (1,'workspace-1','src/main.rs',12,1,1,'2026-07-23T00:00:00.000Z')",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO content_search_documents VALUES (1,'history:codex:one',1,'history','one','codex','One','body','turn','2026-07-23T00:00:00.000Z')",
+            [],
+        ).unwrap();
+        let saved = parse_request(b"GET /api/search/saved HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let saved_response = route_task_request(&saved, None, &config).unwrap().unwrap();
+        assert_eq!(saved_response.body["items"][0]["name"], "Release");
+        assert_eq!(
+            saved_response.body["items"][0]["sessionOrigin"],
+            "vibelink-cli"
+        );
+        let history = parse_request(b"GET /api/search/history?limit=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let history_response = route_task_request(&history, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(history_response.body["items"][0]["resultCount"], 3);
+        assert_eq!(history_response.body["items"][0]["useCount"], 2);
+        let index = parse_request(b"GET /api/search/index HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let index_response = route_task_request(&index, None, &config).unwrap().unwrap();
+        assert_eq!(index_response.body["indexedFiles"], 1);
+        assert_eq!(index_response.body["content"]["sessions"], 1);
         let _ = fs::remove_dir_all(dir);
     }
 }

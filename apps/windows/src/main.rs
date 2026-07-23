@@ -160,6 +160,7 @@ enum Mode {
         max_samples_per_chunk: usize,
     },
     /// Run the durable local execution router and worker discovery daemon.
+    #[command(name = "execd", visible_alias = "execution-host")]
     Execd {
         #[arg(long)]
         data_dir: Option<PathBuf>,

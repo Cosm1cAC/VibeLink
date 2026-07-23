@@ -15,8 +15,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::time::SystemTime;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
@@ -633,32 +636,17 @@ fn terminal_host_mutation(
     let Some(workspace_id) = workspace_id else {
         return Ok(HttpRouteResponse::error(404, "Terminal session not found."));
     };
-    let pipe_name = execd_pipe_name(data_dir);
-    let mut pipe = OpenOptions::new().read(true).write(true).open(&pipe_name)
-        .with_context(|| format!("Cannot connect to execution host {pipe_name}"))?;
-    let request_id = uuid::Uuid::new_v4().to_string();
     let event_text = if method == "execution.input" {
         params_value["data"].as_str().unwrap_or_default().to_string()
     } else {
         format!("{}x{}", params_value["cols"], params_value["rows"])
     };
-    write_frame(&mut pipe, &RequestEnvelope {
-        protocol_version: PROTOCOL_VERSION,
-        request_id: request_id.clone(),
-        method: method.to_string(),
-        params: params_value,
-    })?;
-    let response: ResponseEnvelope = read_json_frame(&mut pipe)?
-        .ok_or_else(|| anyhow::anyhow!("Execution host closed the terminal request."))?;
-    if response.request_id != request_id {
-        bail!("Execution host returned a mismatched request ID.");
-    }
-    if let Some(error) = response.error {
-        return Ok(HttpRouteResponse::json(409, json!({
-            "ok": false, "error": error.message, "code": error.code, "retryable": error.retryable
-        })));
-    }
-    let result = response.result.unwrap_or(Value::Null);
+    let result = match request_execution_host(data_dir, method, params_value) {
+        Ok(result) => result,
+        Err(error) => return Ok(HttpRouteResponse::json(409, json!({
+            "ok": false, "error": error.to_string()
+        }))),
+    };
     let event_type = if method == "execution.input" { "tool.input" } else { "tool.resize" };
     insert_workspace_tool_event(connection, id, &workspace_id, event_type, &event_text, json!({
         "session": result.clone(), "executionMethod": method
@@ -682,6 +670,57 @@ fn terminal_host_mutation(
         }
     }
     Ok(HttpRouteResponse::json(200, output))
+}
+
+fn request_execution_host(data_dir: &Path, method: &str, params_value: Value) -> Result<Value> {
+    let mut pipe = connect_execution_host(data_dir)?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    write_frame(
+        &mut pipe,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request_id.clone(),
+            method: method.to_string(),
+            params: params_value,
+        },
+    )?;
+    let response: ResponseEnvelope = read_json_frame(&mut pipe)?
+        .ok_or_else(|| anyhow::anyhow!("Execution host closed the request."))?;
+    if response.request_id != request_id {
+        bail!("Execution host returned a mismatched request ID.");
+    }
+    if let Some(error) = response.error {
+        bail!("{}: {}", error.code, error.message);
+    }
+    Ok(response.result.unwrap_or(Value::Null))
+}
+
+fn connect_execution_host(data_dir: &Path) -> Result<std::fs::File> {
+    let pipe_name = execd_pipe_name(data_dir);
+    if let Ok(pipe) = OpenOptions::new().read(true).write(true).open(&pipe_name) {
+        return Ok(pipe);
+    }
+
+    let executable = std::env::current_exe().context("Cannot resolve VibeLink executable")?;
+    let mut command = Command::new(executable);
+    command.arg("execd").arg("--data-dir").arg(data_dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(crate::execution_host::windows::CREATE_NO_WINDOW);
+    command.spawn().context("Cannot start execution host")?;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match OpenOptions::new().read(true).write(true).open(&pipe_name) {
+            Ok(pipe) => return Ok(pipe),
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Cannot connect to execution host {pipe_name}"));
+            }
+        }
+    }
 }
 
 fn terminal_json_body(body: Option<&[u8]>) -> Result<Value> {
@@ -819,12 +858,46 @@ fn start_workspace_terminal_session(
     payload: &Value,
 ) -> Result<HttpRouteResponse> {
     let workspace = load_workspace_git_context(data_dir, workspace_id)?;
-    let shell = payload.get("shell").and_then(Value::as_str).unwrap_or("");
-    let shell = if shell.is_empty() {
+    let requested_shell = payload.get("shell").and_then(Value::as_str).unwrap_or("");
+    let shell = if requested_shell.is_empty() {
         if cfg!(windows) { "powershell.exe" } else { "sh" }
     } else {
-        shell
+        requested_shell
     };
+    let args = payload
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            if requested_shell.is_empty() && cfg!(windows) {
+                vec![
+                    "-NoLogo".into(),
+                    "-NoExit".into(),
+                    "-Command".into(),
+                    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [Console]::OutputEncoding".into(),
+                ]
+            } else {
+                Vec::new()
+            }
+        });
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("auto");
+    let backend = if mode == "spawn" { "stdio" } else { "conpty" };
+    let cols = payload
+        .get("cols")
+        .and_then(Value::as_u64)
+        .unwrap_or(100)
+        .clamp(20, 240);
+    let rows = payload
+        .get("rows")
+        .and_then(Value::as_u64)
+        .unwrap_or(30)
+        .clamp(8, 80);
     let connection = open_workspace_db(data_dir)?;
     let tool_run_id = create_started_workspace_tool_run(
         &connection,
@@ -835,11 +908,37 @@ fn start_workspace_terminal_session(
             "workspaceId": workspace_id,
             "cwd": workspace.cwd,
             "shell": shell,
-            "mode": payload.get("mode").and_then(Value::as_str).unwrap_or("auto"),
-            "cols": payload.get("cols").cloned().unwrap_or(json!(100)),
-            "rows": payload.get("rows").cloned().unwrap_or(json!(30))
+            "args": args,
+            "mode": mode,
+            "cols": cols,
+            "rows": rows
         }),
     )?;
+    let snapshot = match request_execution_host(data_dir, "execution.start", json!({
+        "executionId": tool_run_id,
+        "kind": "terminal",
+        "backend": backend,
+        "command": shell,
+        "args": args,
+        "cwd": workspace.cwd,
+        "env": { "TERM": "xterm-256color" },
+        "cols": cols,
+        "rows": rows,
+        "spoolQuotaBytes": 64 * 1024 * 1024,
+        "segmentBytes": 1024 * 1024,
+        "operationId": format!("terminal-start:{tool_run_id}")
+    })) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let message = error.to_string();
+            fail_workspace_tool_run(&connection, &tool_run_id, workspace_id, &message)?;
+            return Ok(HttpRouteResponse::json(409, json!({
+                "ok": false,
+                "error": message,
+                "toolRunId": tool_run_id
+            })));
+        }
+    };
     let result = json!({
         "ok": true,
         "status": "running",
@@ -850,8 +949,14 @@ fn start_workspace_terminal_session(
             "workspaceId": workspace_id,
             "cwd": workspace.cwd,
             "shell": shell,
-            "mode": "execd",
-            "status": "running"
+            "mode": if backend == "stdio" { "spawn" } else { "pty" },
+            "backend": backend,
+            "pid": snapshot.get("processPid").cloned().unwrap_or(json!(0)),
+            "status": snapshot.get("status").cloned().unwrap_or(json!("running")),
+            "startedAt": snapshot.get("startedAt").cloned().unwrap_or(json!("")),
+            "supportsStdin": snapshot.pointer("/capabilities/input").cloned().unwrap_or(json!(true)),
+            "supportsResize": snapshot.pointer("/capabilities/resize").cloned().unwrap_or(json!(backend == "conpty")),
+            "supportsAnsi": backend != "stdio"
         }
     });
     Ok(HttpRouteResponse::json(202, result))
@@ -2967,6 +3072,118 @@ mod tests {
             .unwrap();
         assert_eq!(response.status, 404);
         assert_eq!(response.body["error"], "Terminal session not found.");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a freshly built vibelink.exe execution host"]
+    fn terminal_session_uses_execd_and_persists_control_events() {
+        let (dir, _, _) = fixture();
+        let binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("vibelink.exe");
+        assert!(binary.exists(), "missing test binary {}", binary.display());
+        let mut execd = Command::new(binary)
+            .args(["execd", "--data-dir"])
+            .arg(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pipe_name = execd_pipe_name(&dir);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while OpenOptions::new().read(true).write(true).open(&pipe_name).is_err() {
+            assert!(Instant::now() < deadline, "execd did not open {pipe_name}");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let created = start_workspace_terminal_session(
+            &dir,
+            "w",
+            &json!({
+                "shell": "cmd.exe",
+                "args": ["/D", "/Q", "/K"],
+                "mode": "pty",
+                "cols": 100,
+                "rows": 30
+            }),
+        )
+        .unwrap();
+        assert_eq!(created.status, 202);
+        let id = created.body["toolRunId"].as_str().unwrap().to_string();
+        let request = parse_request(
+            format!(
+                "POST /api/terminal-sessions/{id}/input HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 1\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let connection = open_workspace_db(&dir).unwrap();
+        let input = terminal_host_mutation(
+            &connection,
+            &dir,
+            &request,
+            &id,
+            "execution.input",
+            json!({
+                "executionId": id,
+                "data": "echo terminal-control\r\n",
+                "encoding": "utf8",
+                "operationId": format!("test-input-{id}")
+            }),
+        )
+        .unwrap();
+        assert_eq!(input.status, 200);
+        assert!(input.body["session"]["writtenBytes"].as_u64().unwrap_or_default() > 0);
+        let resize = terminal_host_mutation(
+            &connection,
+            &dir,
+            &request,
+            &id,
+            "execution.resize",
+            json!({
+                "executionId": id,
+                "cols": 120,
+                "rows": 40,
+                "operationId": format!("test-resize-{id}")
+            }),
+        )
+        .unwrap();
+        assert_eq!(resize.status, 200);
+        assert_eq!(resize.body["cols"], 120);
+        assert_eq!(resize.body["rows"], 40);
+        let events: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM tool_events WHERE tool_run_id = ?1 AND event_type IN ('tool.input', 'tool.resize')",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 2);
+        let audits: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE target = ?1 AND event_type IN ('workspace.terminal_session.input', 'workspace.terminal_session.resize')",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audits, 2);
+        let _ = request_execution_host(
+            &dir,
+            "execution.signal",
+            json!({
+                "executionId": id,
+                "signal": "terminate",
+                "operationId": format!("test-stop-{id}")
+            }),
+        );
+        let _ = execd.kill();
+        let _ = execd.wait();
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -5,10 +5,13 @@ use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone)]
 pub struct ProviderRouteConfig {
@@ -43,10 +46,6 @@ pub fn route_provider_request(
     if request.path() != "/api/provider-registry" || request.method != "GET" {
         return Ok(None);
     }
-    // Fresh mode asks the existing probe owner to perform real discovery.
-    if request.query_parameter("fresh").as_deref() == Some("1") {
-        return Ok(None);
-    }
     let auth = authenticate_route_request(request, &config.data_dir)?;
     if auth == RouteAuthentication::Pending {
         return Ok(None);
@@ -63,6 +62,9 @@ pub fn route_provider_request(
         RouteAuthentication::Pending => unreachable!(),
     }
     let connection = open_provider_db(&config.data_dir)?;
+    if request.query_parameter("fresh").as_deref() == Some("1") {
+        refresh_provider_health(&connection, &config.data_dir)?;
+    }
     let providers = builtin_providers()
         .into_iter()
         .map(|provider| merge_cached_provider(provider, &connection))
@@ -343,6 +345,202 @@ fn merge_cached_provider(mut provider: Value, connection: &Connection) -> Result
     Ok(provider)
 }
 
+fn refresh_provider_health(connection: &Connection, data_dir: &Path) -> Result<()> {
+    let settings = fs::read_to_string(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .unwrap_or_else(|| json!({}));
+    for (id, setting_key, default_command, source) in [
+        ("codex", "codexCommand", "codex", "codex-cli"),
+        ("claude", "claudeCommand", "claude", "claude-cli"),
+    ] {
+        let configured = settings
+            .get(setting_key)
+            .and_then(Value::as_str)
+            .unwrap_or(default_command);
+        let health = if configured == "disabled" {
+            ProviderHealth::failure(
+                "disabled",
+                source,
+                &format!("{id} is disabled in settings."),
+            )
+        } else {
+            let command = if configured == "auto" {
+                default_command
+            } else {
+                configured
+            };
+            probe_provider_command(command, source)
+        };
+        cache_provider_health(connection, id, &health)?;
+    }
+    let doubao_disabled = settings.get("doubaoCommand").and_then(Value::as_str) == Some("disabled");
+    let doubao = if doubao_disabled {
+        ProviderHealth::failure(
+            "disabled",
+            "doubao-browser-bridge",
+            "Doubao is disabled in settings.",
+        )
+    } else {
+        ProviderHealth::failure(
+            "unavailable",
+            "doubao-browser-bridge",
+            "Doubao browser bridge has no active Rust runtime session.",
+        )
+    };
+    cache_provider_health(connection, "doubao", &doubao)?;
+    let zhipu = ProviderHealth::failure(
+        "missing_credentials",
+        "zhipu-model-api",
+        "GLM credentials are not available to the Rust probe.",
+    );
+    cache_provider_health(connection, "zhipu", &zhipu)?;
+    Ok(())
+}
+
+struct ProviderHealth {
+    ok: bool,
+    status: String,
+    source: String,
+    version: String,
+    latency_ms: i64,
+    error: String,
+}
+
+impl ProviderHealth {
+    fn failure(status: &str, source: &str, error: &str) -> Self {
+        Self {
+            ok: false,
+            status: status.to_string(),
+            source: source.to_string(),
+            version: String::new(),
+            latency_ms: 0,
+            error: error.to_string(),
+        }
+    }
+}
+
+fn split_command(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in value.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            ' ' | '\t' if !quoted => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+fn probe_provider_command(command_line: &str, source: &str) -> ProviderHealth {
+    let parts = split_command(command_line);
+    let Some(command) = parts.first() else {
+        return ProviderHealth::failure("unavailable", source, "Provider command is empty.");
+    };
+    let started = Instant::now();
+    let mut process = Command::new(command);
+    process
+        .args(&parts[1..])
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x08000000);
+    }
+    let Ok(mut child) = process.spawn() else {
+        return ProviderHealth::failure("unavailable", source, "Provider command is unavailable.");
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok();
+                let version = output
+                    .as_ref()
+                    .map(|output| String::from_utf8_lossy(&output.stdout))
+                    .unwrap_or_default()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .chars()
+                    .take(160)
+                    .collect::<String>();
+                return ProviderHealth {
+                    ok: status.success(),
+                    status: if status.success() {
+                        "ready"
+                    } else {
+                        "unavailable"
+                    }
+                    .to_string(),
+                    source: source.to_string(),
+                    version,
+                    latency_ms: started.elapsed().as_millis() as i64,
+                    error: if status.success() {
+                        String::new()
+                    } else {
+                        "Provider command probe failed.".to_string()
+                    },
+                };
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ProviderHealth::failure(
+                    "unavailable",
+                    source,
+                    "Provider command probe timed out.",
+                );
+            }
+        }
+    }
+}
+
+fn cache_provider_health(
+    connection: &Connection,
+    provider_id: &str,
+    health: &ProviderHealth,
+) -> Result<()> {
+    let at = now_iso();
+    connection.execute(
+        "INSERT INTO provider_cache (
+           provider_id,health_ok,health_status,health_cache_status,health_source,
+           health_checked_at,health_expires_at,health_latency_ms,health_version,health_error,updated_at
+         ) VALUES (?1,?2,?3,'fresh',?4,?5,?5,?6,?7,?8,?5)
+         ON CONFLICT(provider_id) DO UPDATE SET
+           health_ok=excluded.health_ok,health_status=excluded.health_status,
+           health_cache_status='fresh',health_source=excluded.health_source,
+           health_checked_at=excluded.health_checked_at,health_expires_at=excluded.health_expires_at,
+           health_latency_ms=excluded.health_latency_ms,health_version=excluded.health_version,
+           health_error=excluded.health_error,updated_at=excluded.updated_at",
+        params![
+            provider_id,
+            i64::from(health.ok),
+            health.status,
+            health.source,
+            at,
+            health.latency_ms,
+            health.version,
+            health.error
+        ],
+    )?;
+    Ok(())
+}
+
 fn now_iso() -> String {
     DateTime::<Utc>::from(SystemTime::now()).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -406,8 +604,16 @@ mod tests {
             true
         );
         assert!(response.body.get("items").is_none());
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"pairingToken":"pair","hostAllowlist":[],"codexCommand":"disabled","claudeCommand":"disabled","doubaoCommand":"disabled"}"#,
+        )
+        .unwrap();
         let fresh = parse_request(b"GET /api/provider-registry?fresh=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
-        assert!(route_provider_request(&fresh, &config).unwrap().is_none());
+        let fresh_response = route_provider_request(&fresh, &config).unwrap().unwrap();
+        assert_eq!(fresh_response.body["providers"][0]["status"], "disabled");
+        assert_eq!(fresh_response.body["providers"][1]["status"], "disabled");
+        assert_eq!(fresh_response.body["providers"][2]["status"], "disabled");
         let _ = fs::remove_dir_all(dir);
     }
 

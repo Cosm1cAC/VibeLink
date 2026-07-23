@@ -3,7 +3,8 @@ use crate::status_http::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::net::TcpStream;
@@ -186,6 +187,11 @@ pub fn route_task_request(
             return Ok(None);
         };
         HttpRouteResponse::json(200, status)
+    } else if request.path() == "/api/search" && request.method == "GET" {
+        let Some(result) = search_projection(&connection, request)? else {
+            return Ok(None);
+        };
+        HttpRouteResponse::json(200, result)
     } else {
         return Ok(None);
     };
@@ -262,6 +268,7 @@ fn is_task_route(path: &str) -> bool {
         || path == "/api/search/saved"
         || path == "/api/search/history"
         || path == "/api/search/index"
+        || path == "/api/search"
         || path.starts_with("/api/tasks/")
         || path.starts_with("/api/task-scheduler/")
 }
@@ -911,6 +918,239 @@ fn search_index_status(connection: &Connection) -> Result<Option<Value>> {
     })))
 }
 
+fn normalize_search_scope(value: Option<String>) -> &'static str {
+    match value
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "session" | "history" | "sessions" => "sessions",
+        "task" | "tasks" => "tasks",
+        "message" | "messages" => "messages",
+        "workspace" | "file" | "files" => "files",
+        _ => "all",
+    }
+}
+
+fn normalize_search_sort(value: Option<String>) -> &'static str {
+    match value.as_deref().unwrap_or("relevance") {
+        "updatedAt" => "updatedAt",
+        "title" => "title",
+        "kind" => "kind",
+        _ => "relevance",
+    }
+}
+
+fn normalize_search_order(value: Option<String>, sort: &str) -> &'static str {
+    match value.as_deref().map(str::trim) {
+        Some("asc") => "asc",
+        Some("desc") => "desc",
+        _ if matches!(sort, "relevance" | "updatedAt") => "desc",
+        _ => "asc",
+    }
+}
+
+fn fts_expression(query: &str) -> Option<String> {
+    let tokens = query
+        .split_whitespace()
+        .map(|token| token.replace('"', "").trim().to_string())
+        .filter(|token| token.chars().count() >= 3)
+        .map(|token| format!("\"{token}\""))
+        .collect::<Vec<_>>();
+    (!tokens.is_empty()).then(|| tokens.join(" AND "))
+}
+
+fn search_projection(connection: &Connection, request: &ParsedRequest) -> Result<Option<Value>> {
+    if !table_exists(connection, "content_search_documents")?
+        || !table_exists(connection, "content_search_sources")?
+        || !table_exists(connection, "content_search_fts")?
+        || !table_exists(connection, "workspace_search_fts")?
+    {
+        return Ok(None);
+    }
+    let query = request
+        .query_parameter("q")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let scope = normalize_search_scope(request.query_parameter("scope"));
+    let sort = normalize_search_sort(request.query_parameter("sort"));
+    let order = normalize_search_order(request.query_parameter("order"), sort);
+    let limit = request
+        .query_parameter("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let offset = request
+        .query_parameter("cursor")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if query.is_empty() {
+        return Ok(Some(json!({
+            "items": [], "query": "", "scope": scope, "sort": sort, "order": order,
+            "total": 0, "limit": limit, "cursor": offset.to_string(), "nextCursor": "",
+            "savedSearchId": "", "index": search_index_status(connection)?.unwrap_or(json!({}))
+        })));
+    }
+    let session_origin = request
+        .query_parameter("sessionOrigin")
+        .unwrap_or_else(|| "all".to_string());
+    let mut results = Vec::new();
+    if matches!(scope, "all" | "sessions" | "tasks" | "messages") {
+        let kinds = match scope {
+            "sessions" => vec!["history"],
+            "tasks" => vec!["task"],
+            "messages" => vec!["message"],
+            _ => vec!["history", "task", "message"],
+        };
+        results.extend(search_content_rows(
+            connection,
+            &query,
+            &kinds,
+            &session_origin,
+        )?);
+    }
+    if matches!(scope, "all" | "files") {
+        results.extend(search_file_rows(connection, &query)?);
+    }
+    results.sort_by(|left, right| {
+        let left_text = |key: &str| left[key].as_str().unwrap_or("");
+        let right_text = |key: &str| right[key].as_str().unwrap_or("");
+        let compared = match sort {
+            "title" => left_text("title")
+                .to_lowercase()
+                .cmp(&right_text("title").to_lowercase()),
+            "kind" => left_text("kind").cmp(right_text("kind")),
+            "updatedAt" => left_text("updatedAt").cmp(right_text("updatedAt")),
+            _ => left["_relevance"]
+                .as_f64()
+                .partial_cmp(&right["_relevance"].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal),
+        };
+        let compared = if order == "desc" {
+            compared.reverse()
+        } else {
+            compared
+        };
+        compared
+            .then_with(|| right_text("updatedAt").cmp(left_text("updatedAt")))
+            .then_with(|| left_text("id").cmp(right_text("id")))
+    });
+    let total = results.len();
+    let items = results
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|mut item| {
+            item.as_object_mut()
+                .map(|object| object.remove("_relevance"));
+            item
+        })
+        .collect::<Vec<_>>();
+    let next_offset = offset + items.len();
+    Ok(Some(json!({
+        "items": items,
+        "query": query,
+        "scope": scope,
+        "sort": sort,
+        "order": order,
+        "total": total,
+        "limit": limit,
+        "cursor": offset.to_string(),
+        "nextCursor": if next_offset < total { next_offset.to_string() } else { String::new() },
+        "savedSearchId": "",
+        "index": search_index_status(connection)?.unwrap_or(json!({}))
+    })))
+}
+
+fn search_content_rows(
+    connection: &Connection,
+    query: &str,
+    kinds: &[&str],
+    session_origin: &str,
+) -> Result<Vec<Value>> {
+    let mut sql = String::from(
+        "SELECT d.kind,d.item_id,d.provider,d.title,d.content,d.turn_id,d.updated_at,
+                s.session_origin,bm25(content_search_fts,4.0,1.0)
+         FROM content_search_fts
+         JOIN content_search_documents d ON d.rowid = content_search_fts.rowid
+         JOIN content_search_sources s ON s.source_key = d.source_key
+         WHERE content_search_fts MATCH ?1",
+    );
+    let mut values = vec![SqlValue::Text(
+        fts_expression(query).unwrap_or_else(|| format!("\"{query}\"")),
+    )];
+    if !kinds.is_empty() {
+        sql.push_str(&format!(
+            " AND d.kind IN ({})",
+            (0..kinds.len()).map(|_| "?").collect::<Vec<_>>().join(",")
+        ));
+        values.extend(kinds.iter().map(|kind| SqlValue::Text((*kind).to_string())));
+    }
+    if session_origin != "all" {
+        sql.push_str(" AND s.session_origin = ?");
+        values.push(SqlValue::Text(session_origin.to_string()));
+    }
+    sql.push_str(" ORDER BY 9 ASC,d.updated_at DESC LIMIT 10000");
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement
+        .query_map(params_from_iter(values), |row| {
+            let title = row.get::<_, String>(3)?;
+            let content = row.get::<_, String>(4)?;
+            let rank = row.get::<_, f64>(8)?;
+            Ok(json!({
+                "kind": row.get::<_, String>(0)?,
+                "id": row.get::<_, String>(1)?,
+                "provider": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                "sessionOrigin": row.get::<_, String>(7)?,
+                "title": title,
+                "snippet": content.chars().take(400).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "),
+                "turnId": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                "updatedAt": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                "_relevance": -rank + if title.to_lowercase().contains(query) { 10.0 } else { 0.0 }
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn search_file_rows(connection: &Connection, query: &str) -> Result<Vec<Value>> {
+    let expression = fts_expression(query).unwrap_or_else(|| format!("\"{query}\""));
+    let mut statement = connection.prepare(
+        "SELECT f.path,f.workspace_id,m.mtime_ms,f.content,bm25(workspace_search_fts,4.0,1.0,0.0)
+         FROM workspace_search_fts f
+         JOIN workspace_search_files m ON m.rowid = f.rowid
+         WHERE workspace_search_fts MATCH ?1
+         ORDER BY 5 ASC,m.mtime_ms DESC,f.path ASC LIMIT 10000",
+    )?;
+    let rows = statement
+        .query_map(params![expression], |row| {
+            let path = row.get::<_, String>(0)?;
+            let workspace_id = row.get::<_, String>(1)?;
+            let mtime_ms = row.get::<_, i64>(2)?;
+            let content = row.get::<_, String>(3)?;
+            let rank = row.get::<_, f64>(4)?;
+            let updated_at = DateTime::<Utc>::from_timestamp_millis(mtime_ms)
+                .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true))
+                .unwrap_or_default();
+            Ok(json!({
+                "kind": "file",
+                "id": format!("{workspace_id}:{path}"),
+                "workspaceId": workspace_id,
+                "title": path,
+                "path": path,
+                "provider": "workspace",
+                "snippet": content.chars().take(400).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "),
+                "updatedAt": updated_at,
+                "_relevance": -rank + if path.to_lowercase().contains(query) { 10.0 } else { 0.0 }
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn list_scheduler_jobs(connection: &Connection) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(
         "SELECT id,task_id,status,priority,attempts,max_attempts,next_attempt_at,created_at,updated_at,
@@ -1305,7 +1545,15 @@ mod tests {
                rowid INTEGER PRIMARY KEY, source_key TEXT NOT NULL, event_cursor INTEGER NOT NULL,
                kind TEXT NOT NULL, item_id TEXT NOT NULL, provider TEXT, title TEXT NOT NULL,
                content TEXT NOT NULL, turn_id TEXT, updated_at TEXT
-             );",
+             );
+             CREATE TABLE content_search_sources (
+               source_key TEXT PRIMARY KEY, provider TEXT NOT NULL, session_id TEXT NOT NULL,
+               session_origin TEXT NOT NULL, source_kind TEXT NOT NULL, file_path TEXT,
+               byte_offset INTEGER NOT NULL, event_cursor INTEGER NOT NULL, source_size INTEGER NOT NULL,
+               source_mtime_ms INTEGER NOT NULL, indexed_at TEXT NOT NULL
+             );
+             CREATE VIRTUAL TABLE content_search_fts USING fts5(title,content,tokenize='trigram');
+             CREATE VIRTUAL TABLE workspace_search_fts USING fts5(path,content,workspace_id UNINDEXED,tokenize='trigram');",
         ).unwrap();
         connection.execute(
             "INSERT INTO saved_searches VALUES ('saved-1','Release','rust migration','files','vibelink-cli','release',1,'title','asc','2026-07-23T00:00:00.000Z','2026-07-23T00:00:00.000Z',NULL)",
@@ -1321,6 +1569,20 @@ mod tests {
         ).unwrap();
         connection.execute(
             "INSERT INTO content_search_documents VALUES (1,'history:codex:one',1,'history','one','codex','One','body','turn','2026-07-23T00:00:00.000Z')",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO content_search_sources VALUES ('history:codex:one','codex','one','vibelink-cli','history','',0,1,4,1,'2026-07-23T00:00:00.000Z')",
+            [],
+        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO content_search_fts(rowid,title,content) VALUES (1,'One','body')",
+                [],
+            )
+            .unwrap();
+        connection.execute(
+            "INSERT INTO workspace_search_fts(rowid,path,content,workspace_id) VALUES (1,'src/main.rs','rust migration body','workspace-1')",
             [],
         ).unwrap();
         let saved = parse_request(b"GET /api/search/saved HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
@@ -1340,6 +1602,12 @@ mod tests {
         let index_response = route_task_request(&index, None, &config).unwrap().unwrap();
         assert_eq!(index_response.body["indexedFiles"], 1);
         assert_eq!(index_response.body["content"]["sessions"], 1);
+        let search = parse_request(b"GET /api/search?q=rust%20migration&scope=files&sort=title&order=asc&record=0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let search_response = route_task_request(&search, None, &config).unwrap().unwrap();
+        assert_eq!(search_response.body["total"], 1);
+        assert_eq!(search_response.body["items"][0]["path"], "src/main.rs");
+        assert_eq!(search_response.body["scope"], "files");
+        assert_eq!(search_response.body["order"], "asc");
         let _ = fs::remove_dir_all(dir);
     }
 

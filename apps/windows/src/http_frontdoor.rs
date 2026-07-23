@@ -1,14 +1,15 @@
-use crate::audit_http::{route_audit_request, AuditRouteConfig};
 use crate::artifact_http::{
-    artifact_request_requires_body, attachment_upload_requires_body, route_artifact_mutation_request,
-    route_artifact_preview_request, route_artifact_request, route_attachment_upload_request,
-    stream_artifact_content_request, stream_attachment_request, ArtifactRouteConfig,
+    artifact_request_requires_body, attachment_upload_requires_body,
+    route_artifact_mutation_request, route_artifact_preview_request, route_artifact_request,
+    route_attachment_upload_request, stream_artifact_content_request, stream_attachment_request,
+    ArtifactRouteConfig,
 };
+use crate::audit_http::{route_audit_request, AuditRouteConfig};
+use crate::desktop_remote_http::{route_desktop_remote_request, DesktopRemoteRouteConfig};
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
     DeviceRouteConfig,
 };
-use crate::desktop_remote_http::{route_desktop_remote_request, DesktopRemoteRouteConfig};
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
 use crate::event_sync_http::{
     event_sync_request_requires_body, route_event_sync_request, EventSyncRouteConfig,
@@ -22,10 +23,10 @@ use crate::settings_http::{
     route_settings_request, route_settings_request_with_body, settings_request_requires_body,
     SettingsRouteConfig,
 };
+use crate::static_http::{stream_static_request, StaticRouteConfig};
 use crate::status_http::{
     parse_request, route_status_request, HttpRouteResponse, StatusRouteConfig, MAX_HEADER_BYTES,
 };
-use crate::static_http::{stream_static_request, StaticRouteConfig};
 use crate::task_http::{
     route_task_request, stream_task_events_request, task_request_requires_body, TaskRouteConfig,
 };
@@ -258,7 +259,9 @@ fn handle_connection(
             match route_artifact_preview_request(&request, artifact_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
-                Err(error) => eprintln!("Rust Artifact preview route falling back to Node: {error:#}"),
+                Err(error) => {
+                    eprintln!("Rust Artifact preview route falling back to Node: {error:#}")
+                }
             }
         }
         if let Some(tool_events_sse) = routes.tool_events_sse.as_ref() {
@@ -283,13 +286,21 @@ fn handle_connection(
         }
         if let Some(artifact_route) = routes.artifact.as_ref() {
             if attachment_upload_requires_body(&request) {
-                let body = match read_request_body_with_limit(&mut client, &mut prefix, &request, 30 * 1024 * 1024)? {
+                let body = match read_request_body_with_limit(
+                    &mut client,
+                    &mut prefix,
+                    &request,
+                    30 * 1024 * 1024,
+                )? {
                     Some(body) => body,
                     None => return proxy_connection_with_prefix(client, upstream, prefix),
                 };
                 match route_attachment_upload_request(&request, &body, artifact_route) {
                     Ok(Some(response)) => return response.write_to(&mut client),
-                    Ok(None) | Err(_) => return HttpRouteResponse::error(500, "Attachment upload failed.").write_to(&mut client),
+                    Ok(None) | Err(_) => {
+                        return HttpRouteResponse::error(500, "Attachment upload failed.")
+                            .write_to(&mut client)
+                    }
                 }
             }
             if artifact_request_requires_body(&request) {
@@ -299,10 +310,14 @@ fn handle_connection(
                 };
                 match route_artifact_mutation_request(&request, &body, artifact_route) {
                     Ok(Some(response)) => return response.write_to(&mut client),
-                    Ok(None) => return HttpRouteResponse::error(500, "Artifact mutation failed.").write_to(&mut client),
+                    Ok(None) => {
+                        return HttpRouteResponse::error(500, "Artifact mutation failed.")
+                            .write_to(&mut client)
+                    }
                     Err(error) => {
                         eprintln!("Rust Artifact mutation failed after ownership: {error:#}");
-                        return HttpRouteResponse::error(500, "Artifact mutation failed.").write_to(&mut client);
+                        return HttpRouteResponse::error(500, "Artifact mutation failed.")
+                            .write_to(&mut client);
                     }
                 }
             }
@@ -330,7 +345,9 @@ fn handle_connection(
             match route_desktop_remote_request(&request, desktop_remote_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
-                Err(error) => eprintln!("Rust Desktop Remote route falling back to Node: {error:#}"),
+                Err(error) => {
+                    eprintln!("Rust Desktop Remote route falling back to Node: {error:#}")
+                }
             }
         }
         if let Some(status_route) = routes.status.as_ref() {

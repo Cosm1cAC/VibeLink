@@ -1,4 +1,6 @@
-use crate::status_http::{authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication};
+use crate::status_http::{
+    authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication,
+};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
@@ -28,8 +30,12 @@ pub fn route_desktop_remote_request(
     }
     match authenticate_route_request(request, &config.data_dir)? {
         RouteAuthentication::Pending => Ok(None),
-        RouteAuthentication::HostDenied => Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {
             let after = request
                 .query_parameter("after")
@@ -72,7 +78,8 @@ fn list_observations(data_dir: &Path, after: i64, limit: i64) -> Result<Vec<Valu
             "desktop": event_object.and_then(|value| value.get("desktop")).cloned().unwrap_or(observation),
         }))
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().context("Cannot read desktop observations")
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("Cannot read desktop observations")
 }
 
 #[cfg(test)]
@@ -84,7 +91,8 @@ mod tests {
 
     #[test]
     fn reads_authenticated_desktop_observations_in_cursor_order() {
-        let directory = std::env::temp_dir().join(format!("vibelink-desktop-remote-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-desktop-remote-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         fs::write(
             directory.join("settings.json"),
@@ -96,11 +104,18 @@ mod tests {
         database.execute("INSERT INTO devices VALUES ('device', 'Device', ?1, '', '', NULL, '2099-01-01T00:00:00.000Z', NULL, '{}')", params![hash_token("token")]).unwrap();
         database.execute("INSERT INTO desktop_observations VALUES (1, '2026-07-01T00:00:00.000Z', 'hash', 'desktop.snapshot', '{\"ready\":true}', 'null')", []).unwrap();
         let request = parse_request(b"GET /api/desktop-remote/observations?after=0&limit=1 HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
-        let response = route_desktop_remote_request(&request, &DesktopRemoteRouteConfig::new(directory.clone())).unwrap().unwrap();
+        let response = route_desktop_remote_request(
+            &request,
+            &DesktopRemoteRouteConfig::new(directory.clone()),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body["items"][0]["cursor"], 1);
         assert_eq!(response.body["items"][0]["desktop"]["ready"], true);
-        assert!(DESKTOP_REMOTE_RUNTIME_ROUTES.contains(&("GET", "/api/desktop-remote/observations")));
+        assert!(
+            DESKTOP_REMOTE_RUNTIME_ROUTES.contains(&("GET", "/api/desktop-remote/observations"))
+        );
         drop(database);
         fs::remove_dir_all(directory).unwrap();
     }

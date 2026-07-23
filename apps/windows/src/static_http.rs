@@ -24,7 +24,8 @@ pub fn stream_static_request(
     if request.method != "GET" && request.method != "HEAD" {
         return Ok(None);
     }
-    let Some((path, content_type, cache_control)) = resolve_static_path(request.path(), config)? else {
+    let Some((path, content_type, cache_control)) = resolve_static_path(request.path(), config)?
+    else {
         return Ok(None);
     };
     let bytes = fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
@@ -53,16 +54,21 @@ fn resolve_static_path(
     }
     let relative = match request_path {
         "/" | "/index.html" => PathBuf::from("index.html"),
-        path if path.starts_with("/assets/") || path.starts_with("/icons/") => PathBuf::from(&path[1..]),
+        path if path.starts_with("/assets/") || path.starts_with("/icons/") => {
+            PathBuf::from(&path[1..])
+        }
         "/app.js" | "/styles.css" | "/manifest.webmanifest" | "/sw.js" => {
             PathBuf::from(&request_path[1..])
         }
         _ => return Ok(None),
     };
     if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         bail!("Static asset path is outside the public root.");
     }
@@ -71,16 +77,23 @@ fn resolve_static_path(
         return Ok(None);
     }
     let content_type = content_type(&path);
-    let cache_control = if request_path.starts_with("/assets/") || request_path.starts_with("/icons/") {
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
-    };
+    let cache_control =
+        if request_path.starts_with("/assets/") || request_path.starts_with("/icons/") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
     Ok(Some((path, content_type, cache_control)))
 }
 
 fn content_type(path: &Path) -> &'static str {
-    match path.extension().and_then(|extension| extension.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
@@ -102,14 +115,21 @@ mod tests {
 
     #[test]
     fn resolves_openapi_and_public_assets_without_traversal() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
         let config = StaticRouteConfig::new(root);
-        let openapi = parse_request(b"GET /api/openapi.json HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-        let (_, type_, cache) = resolve_static_path(openapi.path(), &config).unwrap().unwrap();
+        let openapi =
+            parse_request(b"GET /api/openapi.json HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let (_, type_, cache) = resolve_static_path(openapi.path(), &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(type_, "application/json; charset=utf-8");
         assert_eq!(cache, "no-store");
         let asset = parse_request(b"GET /styles.css HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-        assert!(resolve_static_path(asset.path(), &config).unwrap().is_some());
+        assert!(resolve_static_path(asset.path(), &config)
+            .unwrap()
+            .is_some());
         assert!(resolve_static_path("/assets/../../settings.json", &config).is_err());
     }
 }

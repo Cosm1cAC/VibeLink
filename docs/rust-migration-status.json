@@ -8,7 +8,7 @@
       {
         "id": "workspace-git-command-approval",
         "title": "Workspace Git、command 与 approval 所有权",
-        "status": "in-progress",
+        "status": "default-on",
         "nodeEntries": ["src/workspaces.js", "src/toolRuntime.js"],
         "rustTarget": "apps/windows/src/workspace_http.rs",
         "completedRoutes": [
@@ -24,7 +24,7 @@
       {
         "id": "task-history-terminal",
         "title": "Task、history 与 terminal 所有权",
-        "status": "in-progress",
+        "status": "default-on",
         "nodeEntries": ["src/agents.js", "src/history.js", "src/terminalRuntime.js"],
         "rustTarget": "apps/windows/src/task_http.rs",
         "completedRoutes": [
@@ -40,15 +40,15 @@
           "GET /api/search/saved",
           "GET /api/search/history",
           "GET /api/search/index",
-          "terminal input/resize over execd"
-        ],
-        "remainingRoutes": [
           "GET /api/histories",
           "GET /api/histories/:provider/:id",
           "GET /api/search FTS query",
           "POST/PATCH/DELETE /api/search metadata",
-          "POST /api/search/index/refresh and index/watch ownership"
-        ]
+          "POST /api/search/index/refresh and index/watch ownership",
+          "task queue/scheduler execution ownership over execd",
+          "terminal input/resize over execd"
+        ],
+        "remainingRoutes": []
       },
       {
         "id": "provider-runtime",
@@ -56,11 +56,12 @@
         "status": "in-progress",
         "nodeEntries": ["src/providerRegistry.js", "src/providerRuntimeLoaders.js"],
         "rustTarget": "apps/windows/src/provider_http.rs",
-        "completedRoutes": ["GET /api/provider-registry (cached projection)"],
-        "remainingRoutes": [
-          "GET /api/provider-registry?fresh=1 live probe",
+        "completedRoutes": [
+          "GET /api/provider-registry (cached projection)",
+          "GET /api/provider-registry?fresh=1 CLI health probe",
+          "Zhipu/Claude model API catalog refresh",
           "provider launch mapping from queued tasks to execd",
-          "provider cache refresh ownership"
+          "Doubao browser bridge doctor health/fidelity probe"
         ]
       },
       {
@@ -387,7 +388,7 @@
         "apps/windows/src/http_frontdoor.rs",
         "apps/windows/src/main.rs"
       ],
-      "nextAction": "task SSE、changes、thread metadata 与 search metadata 只读投影已由 Rust 认领；继续将 queued task projection 接到 execd provider runner，并迁移 history、FTS query/index/watch 和 provider registry/cache 的 fresh probe 所有权。"
+      "nextAction": "Rust execd 已消费 durable queue，并持有 task/provider execution binding、event replay/ack、history/search/FTS watcher；继续扩大真实 Provider 任务与 resume/input/stop 观测。"
     },
     {
       "id": "provider-http-route",
@@ -405,7 +406,7 @@
         "apps/windows/src/main.rs",
         "test/providerRegistry.test.js"
       ],
-      "nextAction": "迁移 freshness probe/cache refresh 与 queued task provider launch mapping，保持 fidelity 字段只描述实际可达路径。"
+      "nextAction": "Rust 已持有 CLI health、Doubao bridge doctor health/fidelity probe、Zhipu/Claude catalog refresh 和 queued provider launch mapping；继续保持真实 Provider 任务与 registry freshness 观测。"
     },
     {
       "id": "static-assets-openapi-route",
@@ -446,7 +447,7 @@
         "test/executionStartupReconciliation.test.js",
         "tools/execution-host/reliability-canary.mjs"
       ],
-      "nextAction": "execd、per-execution worker、ConPTY/stdio/app-server backend、durable binding、event spool 和 approval delivery 已接入；继续迁移 Provider registry、任务投影与剩余 HTTP 编排所有权。"
+      "nextAction": "execd、per-execution worker、task scheduler、ConPTY/stdio/app-server backend、durable binding、event spool、ack drain 和 approval outbox delivery 已接入；继续迁移 Live Call/ASR 生命周期。"
     },
     {
       "id": "mcp-session-sidecar",

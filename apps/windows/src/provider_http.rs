@@ -1,10 +1,12 @@
+use crate::settings_credentials;
 use crate::status_http::{
     authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -365,36 +367,263 @@ fn refresh_provider_health(connection: &Connection, data_dir: &Path) -> Result<(
                 &format!("{id} is disabled in settings."),
             )
         } else {
-            let command = if configured == "auto" {
-                default_command
+            let command = if id == "codex" {
+                resolve_codex_probe_command(configured)
+            } else if configured == "auto" {
+                default_command.to_string()
             } else {
-                configured
+                configured.to_string()
             };
-            probe_provider_command(command, source)
+            let mut health = probe_provider_command(&command, source);
+            if id == "codex" && health.ok {
+                let auth = probe_provider_args(&command, &["login", "status"], source);
+                if !auth.ok {
+                    health.ok = false;
+                    health.status = "unavailable".to_string();
+                    health.error = "Codex authentication is not ready.".to_string();
+                    health.latency_ms += auth.latency_ms;
+                }
+            }
+            health
         };
         cache_provider_health(connection, id, &health)?;
     }
-    let doubao_disabled = settings.get("doubaoCommand").and_then(Value::as_str) == Some("disabled");
-    let doubao = if doubao_disabled {
+    let doubao_configured = settings
+        .get("doubaoCommand")
+        .and_then(Value::as_str)
+        .unwrap_or("auto");
+    let doubao = if doubao_configured == "disabled" {
         ProviderHealth::failure(
             "disabled",
             "doubao-browser-bridge",
             "Doubao is disabled in settings.",
         )
     } else {
-        ProviderHealth::failure(
-            "unavailable",
-            "doubao-browser-bridge",
-            "Doubao browser bridge has no active Rust runtime session.",
-        )
+        probe_doubao_bridge(&settings, doubao_configured)
     };
     cache_provider_health(connection, "doubao", &doubao)?;
-    let zhipu = ProviderHealth::failure(
-        "missing_credentials",
+    refresh_remote_catalog(
+        connection,
+        data_dir,
+        &settings,
+        "claude",
+        "anthropic",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODELS_URL",
+        "https://api.anthropic.com/v1/models",
+        "anthropic-model-api",
+    )?;
+    let zhipu = match refresh_remote_catalog(
+        connection,
+        data_dir,
+        &settings,
+        "zhipu",
+        "zhipu",
+        "ZHIPU_API_KEY",
+        "ZHIPU_MODELS_URL",
+        "https://open.bigmodel.cn/api/paas/v4/models",
         "zhipu-model-api",
-        "GLM credentials are not available to the Rust probe.",
-    );
+    )? {
+        CatalogRefresh::Ready(latency_ms) => ProviderHealth {
+            ok: true,
+            status: "ready".to_string(),
+            source: "zhipu-model-api".to_string(),
+            version: "v4".to_string(),
+            latency_ms,
+            error: String::new(),
+        },
+        CatalogRefresh::MissingCredentials => ProviderHealth::failure(
+            "missing_credentials",
+            "zhipu-model-api",
+            "GLM API key is not configured.",
+        ),
+        CatalogRefresh::Failed(error) => {
+            ProviderHealth::failure("unavailable", "zhipu-model-api", &error)
+        }
+    };
     cache_provider_health(connection, "zhipu", &zhipu)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_remote_catalog(
+    connection: &Connection,
+    data_dir: &Path,
+    settings: &Value,
+    provider_id: &str,
+    secret_name: &str,
+    environment_key: &str,
+    url_environment_key: &str,
+    default_url: &str,
+    source: &str,
+) -> Result<CatalogRefresh> {
+    let secret = std::env::var(environment_key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            settings
+                .get("apiKeys")
+                .and_then(|value| value.get(secret_name))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            settings_credentials::read_secret(data_dir, secret_name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+    let Some(secret) = secret else {
+        cache_catalog_error(
+            connection,
+            provider_id,
+            "missing_credentials",
+            source,
+            &format!("{provider_id} API key is not configured."),
+        )?;
+        return Ok(CatalogRefresh::MissingCredentials);
+    };
+    let url = std::env::var(url_environment_key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_url.to_string());
+    let started = Instant::now();
+    let mut request = ureq::get(&url)
+        .timeout(Duration::from_secs(8))
+        .set("Accept", "application/json");
+    request = if provider_id == "claude" {
+        request
+            .set("anthropic-version", "2023-06-01")
+            .set("x-api-key", &secret)
+    } else {
+        request.set("Authorization", &format!("Bearer {secret}"))
+    };
+    let payload = match request.call() {
+        Ok(response) => response
+            .into_json::<Value>()
+            .context("Provider model API returned invalid JSON"),
+        Err(error) => Err(anyhow::anyhow!(
+            "Provider model API request failed: {}",
+            match error {
+                ureq::Error::Status(status, _) => format!("HTTP {status}"),
+                other => other.to_string(),
+            }
+        )),
+    };
+    let payload = match payload {
+        Ok(payload) => payload,
+        Err(error) => {
+            cache_catalog_error(connection, provider_id, "stale", source, &error.to_string())?;
+            return Ok(CatalogRefresh::Failed(error.to_string()));
+        }
+    };
+    let raw_models = payload
+        .get("data")
+        .or_else(|| payload.get("models"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut seen = HashSet::new();
+    let mut models = vec![json!({
+        "id": "",
+        "label": "Default model",
+        "default": true
+    })];
+    for model in raw_models {
+        let id = model
+            .as_str()
+            .or_else(|| model.get("id").and_then(Value::as_str))
+            .or_else(|| model.get("model").and_then(Value::as_str))
+            .unwrap_or("")
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(160)
+            .collect::<String>();
+        if id.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        let label = model
+            .get("display_name")
+            .or_else(|| model.get("displayName"))
+            .or_else(|| model.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(&id)
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(160)
+            .collect::<String>();
+        models.push(json!({ "id": id, "label": label, "default": false }));
+    }
+    if models.len() == 1 {
+        cache_catalog_error(
+            connection,
+            provider_id,
+            "stale",
+            source,
+            "Provider model API returned no usable models.",
+        )?;
+        return Ok(CatalogRefresh::Failed(
+            "Provider model API returned no usable models.".to_string(),
+        ));
+    }
+    let latency_ms = started.elapsed().as_millis() as i64;
+    cache_provider_catalog(connection, provider_id, &models, source)?;
+    Ok(CatalogRefresh::Ready(latency_ms))
+}
+
+enum CatalogRefresh {
+    MissingCredentials,
+    Ready(i64),
+    Failed(String),
+}
+
+fn cache_provider_catalog(
+    connection: &Connection,
+    provider_id: &str,
+    models: &[Value],
+    source: &str,
+) -> Result<()> {
+    let at = now_iso();
+    connection.execute(
+        "INSERT INTO provider_cache (
+           provider_id,catalog_models_json,catalog_status,catalog_source,catalog_fetched_at,
+           catalog_expires_at,catalog_error,updated_at
+         ) VALUES (?1,?2,'fresh',?3,?4,?4,'',?4)
+         ON CONFLICT(provider_id) DO UPDATE SET
+           catalog_models_json=excluded.catalog_models_json,catalog_status='fresh',
+           catalog_source=excluded.catalog_source,catalog_fetched_at=excluded.catalog_fetched_at,
+           catalog_expires_at=excluded.catalog_expires_at,catalog_error='',updated_at=excluded.updated_at",
+        params![provider_id, serde_json::to_string(models)?, source, at],
+    )?;
+    Ok(())
+}
+
+fn cache_catalog_error(
+    connection: &Connection,
+    provider_id: &str,
+    status: &str,
+    source: &str,
+    error: &str,
+) -> Result<()> {
+    let at = now_iso();
+    connection.execute(
+        "INSERT INTO provider_cache (
+           provider_id,catalog_status,catalog_source,catalog_error,updated_at
+         ) VALUES (?1,?2,?3,?4,?5)
+         ON CONFLICT(provider_id) DO UPDATE SET
+           catalog_status=CASE WHEN COALESCE(provider_cache.catalog_models_json,'')=''
+                               THEN excluded.catalog_status ELSE 'stale' END,
+           catalog_source=CASE WHEN provider_cache.catalog_source=''
+                               THEN excluded.catalog_source ELSE provider_cache.catalog_source END,
+           catalog_error=excluded.catalog_error,updated_at=excluded.updated_at",
+        params![
+            provider_id,
+            status,
+            source,
+            error.chars().take(500).collect::<String>(),
+            at
+        ],
+    )?;
     Ok(())
 }
 
@@ -442,15 +671,114 @@ fn split_command(value: &str) -> Vec<String> {
 }
 
 fn probe_provider_command(command_line: &str, source: &str) -> ProviderHealth {
+    probe_provider_args(command_line, &["--version"], source)
+}
+
+fn probe_doubao_bridge(settings: &Value, configured: &str) -> ProviderHealth {
+    let invocation = resolve_doubao_probe_command(configured);
+    let mut args = invocation.prefix_args;
+    args.extend(["doctor".to_string(), "--json".to_string()]);
+    if let Some(endpoint) = settings.get("doubaoCdpEndpoint").and_then(Value::as_str) {
+        if !endpoint.trim().is_empty() {
+            args.extend(["--endpoint".to_string(), endpoint.to_string()]);
+        }
+    }
+    if let Some(url) = settings.get("doubaoUrl").and_then(Value::as_str) {
+        if !url.trim().is_empty() {
+            args.extend(["--url".to_string(), url.to_string()]);
+        }
+    }
+    let result = probe_command_args(&invocation.command, &args, "doubao-browser-bridge");
+    if !result.ok {
+        return ProviderHealth::failure(
+            "unavailable",
+            "doubao-browser-bridge",
+            &bounded_doubao_error(&result.stdout, &result.stderr),
+        );
+    }
+    let payload = result
+        .stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .unwrap_or_else(|| json!({}));
+    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+        ProviderHealth {
+            ok: true,
+            status: "ready".to_string(),
+            source: "doubao-browser-bridge".to_string(),
+            version: payload
+                .get("version")
+                .or_else(|| payload.get("protocolVersion"))
+                .and_then(Value::as_str)
+                .unwrap_or("doubao-web")
+                .chars()
+                .take(160)
+                .collect(),
+            latency_ms: result.latency_ms,
+            error: String::new(),
+        }
+    } else {
+        ProviderHealth::failure(
+            "unavailable",
+            "doubao-browser-bridge",
+            &bounded_doubao_error(&payload.to_string(), &result.stderr),
+        )
+    }
+}
+
+struct CommandProbeResult {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+    latency_ms: i64,
+}
+
+fn probe_provider_args(command_line: &str, args: &[&str], source: &str) -> ProviderHealth {
     let parts = split_command(command_line);
     let Some(command) = parts.first() else {
         return ProviderHealth::failure("unavailable", source, "Provider command is empty.");
     };
+    let mut probe_args = parts[1..].to_vec();
+    probe_args.extend(args.iter().map(|value| value.to_string()));
+    let result = probe_command_args(command, &probe_args, source);
+    ProviderHealth {
+        ok: result.ok,
+        status: if result.ok { "ready" } else { "unavailable" }.to_string(),
+        source: source.to_string(),
+        version: result
+            .stdout
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(160)
+            .collect::<String>(),
+        latency_ms: result.latency_ms,
+        error: if result.ok {
+            String::new()
+        } else if result.stderr.trim().is_empty() {
+            "Provider command probe failed.".to_string()
+        } else {
+            result
+                .stderr
+                .lines()
+                .next()
+                .unwrap_or("Provider command probe failed.")
+                .chars()
+                .take(500)
+                .collect()
+        },
+    }
+}
+
+fn probe_command_args(command: &str, args: &[String], source: &str) -> CommandProbeResult {
     let started = Instant::now();
     let mut process = Command::new(command);
     process
-        .args(&parts[1..])
-        .arg("--version")
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -460,54 +788,168 @@ fn probe_provider_command(command_line: &str, source: &str) -> ProviderHealth {
         process.creation_flags(0x08000000);
     }
     let Ok(mut child) = process.spawn() else {
-        return ProviderHealth::failure("unavailable", source, "Provider command is unavailable.");
+        return CommandProbeResult {
+            ok: false,
+            stdout: String::new(),
+            stderr: format!("{source} command is unavailable."),
+            latency_ms: started.elapsed().as_millis() as i64,
+        };
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let output = child.wait_with_output().ok();
-                let version = output
-                    .as_ref()
-                    .map(|output| String::from_utf8_lossy(&output.stdout))
-                    .unwrap_or_default()
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .chars()
-                    .take(160)
-                    .collect::<String>();
-                return ProviderHealth {
+                return CommandProbeResult {
                     ok: status.success(),
-                    status: if status.success() {
-                        "ready"
-                    } else {
-                        "unavailable"
-                    }
-                    .to_string(),
-                    source: source.to_string(),
-                    version,
+                    stdout: output
+                        .as_ref()
+                        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                        .unwrap_or_default(),
+                    stderr: output
+                        .as_ref()
+                        .map(|output| String::from_utf8_lossy(&output.stderr).into_owned())
+                        .unwrap_or_default(),
                     latency_ms: started.elapsed().as_millis() as i64,
-                    error: if status.success() {
-                        String::new()
-                    } else {
-                        "Provider command probe failed.".to_string()
-                    },
                 };
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return ProviderHealth::failure(
-                    "unavailable",
-                    source,
-                    "Provider command probe timed out.",
-                );
+                return CommandProbeResult {
+                    ok: false,
+                    stdout: String::new(),
+                    stderr: format!("{source} command probe timed out."),
+                    latency_ms: started.elapsed().as_millis() as i64,
+                };
             }
         }
     }
+}
+
+struct CommandInvocation {
+    command: String,
+    prefix_args: Vec<String>,
+}
+
+fn resolve_doubao_probe_command(configured: &str) -> CommandInvocation {
+    let configured = configured.trim();
+    if configured.is_empty() || configured == "auto" {
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let preferred = root
+            .join("packages")
+            .join("doubao-cli")
+            .join("src")
+            .join("bin")
+            .join("doubao.mjs");
+        let script = if preferred.exists() {
+            preferred
+        } else {
+            root.join("tools").join("doubao-cli.mjs")
+        };
+        return CommandInvocation {
+            command: node_command(&root),
+            prefix_args: vec![script.to_string_lossy().into_owned()],
+        };
+    }
+    let parts = split_command(configured);
+    CommandInvocation {
+        command: parts
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "doubao".to_string()),
+        prefix_args: parts.get(1..).unwrap_or(&[]).to_vec(),
+    }
+}
+
+fn node_command(root: &Path) -> String {
+    std::env::var("VIBELINK_NODE_COMMAND")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let bundled = root.join("runtime").join("node.exe");
+            bundled
+                .exists()
+                .then(|| bundled.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "node".to_string())
+}
+
+fn bounded_doubao_error(stdout: &str, stderr: &str) -> String {
+    for candidate in [stderr, stdout] {
+        let text = candidate.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let line = text
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or(text);
+        if let Ok(payload) = serde_json::from_str::<Value>(line) {
+            if let Some(message) = payload
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    payload
+                        .get("status")
+                        .and_then(|status| status.get("target"))
+                        .and_then(|target| target.get("reason"))
+                        .and_then(Value::as_str)
+                })
+            {
+                return message.chars().take(500).collect();
+            }
+        }
+        return line.chars().take(500).collect();
+    }
+    "Doubao browser bridge is not ready.".to_string()
+}
+
+fn resolve_codex_probe_command(configured: &str) -> String {
+    if !configured.is_empty()
+        && configured != "auto"
+        && !configured.eq_ignore_ascii_case("codex")
+        && !configured.eq_ignore_ascii_case("codex.exe")
+    {
+        return configured.to_string();
+    }
+    let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return "codex".to_string();
+    };
+    let mut candidates = Vec::new();
+    let bin = local.join("OpenAI").join("Codex").join("bin");
+    if let Ok(entries) = fs::read_dir(bin) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("codex.exe");
+            if candidate.exists() {
+                candidates.push(candidate);
+            }
+        }
+    }
+    let packaged = local
+        .join("Packages")
+        .join("OpenAI.Codex_2p2nqsd0c76g0")
+        .join("LocalCache")
+        .join("Local")
+        .join("OpenAI")
+        .join("Codex")
+        .join("bin")
+        .join("codex.exe");
+    if packaged.exists() {
+        candidates.push(packaged);
+    }
+    candidates
+        .into_iter()
+        .max_by_key(|path| {
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
+        .map(|path| format!("\"{}\"", path.to_string_lossy()))
+        .unwrap_or_else(|| "codex".to_string())
 }
 
 fn cache_provider_health(
@@ -551,6 +993,8 @@ mod tests {
     use crate::status_http::{hash_token, parse_request};
     use rusqlite::params;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn serves_cached_provider_fidelity_without_forcing_a_probe() {
@@ -668,6 +1112,131 @@ mod tests {
         assert_eq!(claude["reason"], "Claude is unavailable.");
         assert_eq!(claude["fidelity"]["executionState"], "authoritative");
         assert_eq!(claude["capabilities"]["protocolVersion"], "unavailable");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rust_model_probe_persists_zhipu_catalog_and_health_source() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let bytes = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.contains("Authorization: Bearer test-key"));
+            let body = r#"{"data":[{"id":"glm-test","name":"GLM Test"}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let dir =
+            std::env::temp_dir().join(format!("vibelink-provider-http-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), "{}").unwrap();
+        Connection::open(dir.join("mobile-agent.sqlite"))
+            .unwrap()
+            .close()
+            .unwrap();
+        let connection = open_provider_db(&dir).unwrap();
+        let settings = json!({ "apiKeys": { "zhipu": "test-key" } });
+        let result = refresh_remote_catalog(
+            &connection,
+            &dir,
+            &settings,
+            "zhipu",
+            "zhipu",
+            "VIBELINK_TEST_ZHIPU_KEY",
+            "VIBELINK_TEST_ZHIPU_URL",
+            &format!("http://{address}/models"),
+            "zhipu-model-api",
+        )
+        .unwrap();
+        assert!(matches!(result, CatalogRefresh::Ready(_)));
+        let cached =
+            merge_cached_provider(builtin_providers().pop().unwrap(), &connection).unwrap();
+        assert_eq!(cached["catalog"]["status"], "fresh");
+        assert_eq!(cached["catalog"]["source"], "zhipu-model-api");
+        assert_eq!(cached["models"][1]["id"], "glm-test");
+        assert!(!cached.to_string().contains("test-key"));
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn doubao_fresh_probe_uses_real_doctor_status_for_readiness() {
+        let dir =
+            std::env::temp_dir().join(format!("vibelink-provider-http-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let probe = dir.join("doubao-ready.cmd");
+        fs::write(
+            &probe,
+            r#"@echo off
+echo {"ok":true,"status":{"target":{"url":"https://www.doubao.com/chat/"}}}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("settings.json"),
+            json!({
+                "pairingToken": "pair",
+                "hostAllowlist": [],
+                "doubaoCommand": format!("cmd.exe /C \"{}\"", probe.to_string_lossy())
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let db = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE devices(id TEXT PRIMARY KEY,label TEXT,token_hash TEXT UNIQUE,created_at TEXT,last_seen_at TEXT,revoked_at TEXT,expires_at TEXT,rotated_at TEXT,meta_json TEXT);").unwrap();
+        db.execute(
+            "INSERT INTO devices VALUES ('d','Device',?1,'now',NULL,NULL,NULL,NULL,NULL)",
+            params![hash_token("token")],
+        )
+        .unwrap();
+        let config = ProviderRouteConfig::new(dir.clone());
+        let request = parse_request(b"GET /api/provider-registry?fresh=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").unwrap();
+        let response = route_provider_request(&request, &config).unwrap().unwrap();
+        let doubao = response.body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == "doubao")
+            .unwrap();
+        assert_eq!(doubao["available"], true);
+        assert_eq!(doubao["status"], "ready");
+        assert_eq!(doubao["health"]["source"], "doubao-browser-bridge");
+        assert_eq!(doubao["capabilities"]["protocolVersion"], "doubao-web");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn doubao_fresh_probe_reports_bounded_bridge_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("vibelink-provider-http-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let probe = dir.join("doubao-offline.cmd");
+        fs::write(
+            &probe,
+            r#"@echo off
+echo {"ok":false,"error":{"message":"extension offline"}}
+exit /b 1
+"#,
+        )
+        .unwrap();
+        let health = probe_doubao_bridge(
+            &json!({}),
+            &format!("cmd.exe /C \"{}\"", probe.to_string_lossy()),
+        );
+        assert!(!health.ok);
+        assert_eq!(health.status, "unavailable");
+        assert_eq!(health.source, "doubao-browser-bridge");
+        assert_eq!(health.error, "extension offline");
         let _ = fs::remove_dir_all(dir);
     }
 }

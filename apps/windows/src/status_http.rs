@@ -1,3 +1,6 @@
+use crate::settings_contract::load_settings;
+use crate::settings_http::project_public_settings;
+use crate::sidecar_protocol::now_iso;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -6,7 +9,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +16,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
-const MAX_INTERNAL_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HEADERS: usize = 64;
 
 #[derive(Debug)]
@@ -211,8 +212,6 @@ pub(crate) enum RoutePreparation {
 #[derive(Debug, Clone)]
 pub struct StatusRouteConfig {
     data_dir: PathBuf,
-    upstream: SocketAddr,
-    internal_token: String,
     metrics: Arc<RouteMetrics>,
 }
 
@@ -267,11 +266,9 @@ impl RouteMetrics {
 }
 
 impl StatusRouteConfig {
-    pub fn new(data_dir: PathBuf, upstream: SocketAddr, internal_token: String) -> Self {
+    pub fn new(data_dir: PathBuf) -> Self {
         Self {
             data_dir,
-            upstream,
-            internal_token,
             metrics: Arc::new(RouteMetrics::default()),
         }
     }
@@ -388,7 +385,7 @@ pub fn route_status_request(
         RouteAuthentication::Pending => unreachable!(),
     }
 
-    let snapshot = fetch_status_snapshot(request.host(), config)?;
+    let snapshot = build_status_snapshot(request, config)?;
     let mut body = crate::status_sidecar::render_status_snapshot(snapshot)
         .context("Invalid internal Status snapshot")?;
     let object = body
@@ -474,35 +471,128 @@ pub(crate) fn prepare_route_request(
     Ok(RoutePreparation::Ready(connection))
 }
 
-fn fetch_status_snapshot(host: &str, config: &StatusRouteConfig) -> Result<Value> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout_read(Duration::from_secs(5))
-        .timeout_write(Duration::from_secs(2))
-        .build();
-    let url = format!("http://{}/internal/status-snapshot", config.upstream);
-    let mut request = agent
-        .get(&url)
-        .set("X-VibeLink-Internal-Token", &config.internal_token);
-    if !host.is_empty() {
-        request = request.set("X-VibeLink-Original-Host", host);
-    }
-    let response = request
-        .call()
-        .context("Internal Status snapshot request failed")?;
-    read_internal_json(response, "Status snapshot")
+fn build_status_snapshot(request: &ParsedRequest, config: &StatusRouteConfig) -> Result<Value> {
+    let settings = load_settings(&config.data_dir, Path::new("."))
+        .context("Cannot load Rust Status settings snapshot")?;
+    let public_settings = project_public_settings(&settings, &config.data_dir);
+    Ok(json!({
+        "ok": true,
+        "settings": public_settings,
+        "providerRegistry": {
+            "providers": [],
+            "commands": [],
+            "generatedAt": now_iso()
+        },
+        "storage": {
+            "sqlite": config.data_dir.join("mobile-agent.sqlite").to_string_lossy()
+        },
+        "security": {
+            "warnings": public_access_warnings(request, &settings),
+            "devices": list_devices(&config.data_dir)?,
+            "cloudflare": cloudflare_guide(request, &settings)
+        },
+        "notifications": {
+            "webPush": public_settings.get("webPush").cloned().unwrap_or_else(|| json!({})),
+            "emailFallback": {
+                "configured": settings.get("notificationEmail").and_then(Value::as_str).is_some_and(|value| !value.is_empty())
+            }
+        },
+        "workspaces": settings.get("workspaces").and_then(Value::as_array).cloned().unwrap_or_default(),
+        "workspaceRuntime": {},
+        "controlPlaneRuntime": {},
+        "network": [],
+        "tasks": []
+    }))
 }
 
-pub(crate) fn read_internal_json(response: ureq::Response, label: &str) -> Result<Value> {
-    if response
-        .header("Content-Length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > MAX_INTERNAL_JSON_BYTES)
-    {
-        bail!("Internal {label} exceeds {MAX_INTERNAL_JSON_BYTES} bytes");
+fn list_devices(data_dir: &Path) -> Result<Value> {
+    let database_path = data_dir.join("mobile-agent.sqlite");
+    let connection = Connection::open_with_flags(
+        &database_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Cannot open {}", database_path.display()))?;
+    let columns = table_columns(&connection, "devices")?;
+    let column = |name: &str, fallback: &str| {
+        if columns.iter().any(|column| column == name) {
+            name.to_string()
+        } else {
+            fallback.to_string()
+        }
+    };
+    let label = column("label", "''");
+    let created_at = column("created_at", "''");
+    let last_seen_at = column("last_seen_at", "''");
+    let revoked_at = column("revoked_at", "NULL");
+    let expires_at = column("expires_at", "NULL");
+    let sql = format!(
+        "SELECT id, {label}, {created_at}, {last_seen_at}, {revoked_at}, {expires_at}
+         FROM devices
+         ORDER BY COALESCE({last_seen_at}, {created_at}, '') DESC"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .context("Cannot prepare Rust Status devices query")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0).unwrap_or_default(),
+                "label": row.get::<_, String>(1).unwrap_or_default(),
+                "createdAt": row.get::<_, String>(2).unwrap_or_default(),
+                "lastSeenAt": row.get::<_, String>(3).unwrap_or_default(),
+                "revokedAt": row.get::<_, Option<String>>(4).unwrap_or_default().unwrap_or_default(),
+                "expiresAt": row.get::<_, Option<String>>(5).unwrap_or_default().unwrap_or_default()
+            }))
+        })
+        .context("Cannot query Rust Status devices")?;
+    let mut devices = Vec::new();
+    for row in rows {
+        devices.push(row.context("Cannot map Rust Status device")?);
     }
-    read_json_bounded(response.into_reader(), MAX_INTERNAL_JSON_BYTES)
-        .with_context(|| format!("Internal {label} is not valid bounded JSON"))
+    Ok(Value::Array(devices))
+}
+
+fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .context("Cannot inspect table columns")?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("Cannot query table columns")?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row.context("Cannot map table column")?);
+    }
+    Ok(columns)
+}
+
+fn public_access_warnings(request: &ParsedRequest, settings: &Value) -> Vec<String> {
+    let host = clean_host(request.host());
+    let allowlist = settings
+        .get("hostAllowlist")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if host.is_empty() || is_host_allowed(&host, &allowlist) {
+        Vec::new()
+    } else {
+        vec![format!("Host {host} is not in the allowlist.")]
+    }
+}
+
+fn cloudflare_guide(request: &ParsedRequest, settings: &Value) -> Value {
+    let host = clean_host(request.host());
+    json!({
+        "enabled": host.ends_with(".trycloudflare.com"),
+        "host": host,
+        "allowed": settings.get("allowTryCloudflare").and_then(Value::as_bool).unwrap_or(true)
+    })
 }
 
 fn read_json_bounded(mut reader: impl Read, max_bytes: usize) -> Result<Value> {
@@ -563,10 +653,8 @@ mod tests {
     use rusqlite::{params, Connection};
     use serde_json::json;
     use std::fs;
-    use std::io::{Cursor, Read, Write};
-    use std::net::TcpListener;
+    use std::io::Cursor;
     use std::path::PathBuf;
-    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn device_database() -> Connection {
@@ -757,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_only_authenticated_status_requests_through_the_internal_snapshot() {
+    fn routes_only_authenticated_status_from_rust_snapshot_without_node_callback() {
         let data_dir = temporary_data_dir();
         fs::write(
             data_dir.join("settings.json"),
@@ -785,44 +873,7 @@ mod tests {
             .unwrap();
         drop(database);
 
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let snapshot = json!({
-            "ok": true,
-            "settings": {},
-            "providerRegistry": {},
-            "storage": { "sqlite": "mobile-agent.sqlite" },
-            "security": {},
-            "notifications": {},
-            "workspaces": [],
-            "workspaceRuntime": {},
-            "controlPlaneRuntime": {},
-            "network": [],
-            "tasks": []
-        });
-        let snapshot_body = serde_json::to_vec(&snapshot).unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = [0_u8; 2048];
-            let size = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..size]);
-            assert!(request.starts_with("GET /internal/status-snapshot HTTP/1.1\r\n"));
-            assert!(request.contains("X-VibeLink-Internal-Token: internal-secret\r\n"));
-            assert!(request.contains("X-VibeLink-Original-Host: bridge.test\r\n"));
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                snapshot_body.len()
-            )
-            .unwrap();
-            stream.write_all(&snapshot_body).unwrap();
-        });
-
-        let config = StatusRouteConfig::new(
-            data_dir.clone(),
-            upstream_addr,
-            "internal-secret".to_string(),
-        );
+        let config = StatusRouteConfig::new(data_dir.clone());
         let other =
             parse_request(b"GET /api/doctor HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
         assert!(route_status_request(&other, &config).unwrap().is_none());
@@ -857,7 +908,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(response.body["ok"], snapshot["ok"]);
+        assert_eq!(response.body["ok"], true);
+        assert_eq!(response.body["settings"]["pairingTokenConfigured"], true);
+        assert_eq!(
+            response.body["security"]["devices"][0]["id"],
+            "device-active"
+        );
         assert_eq!(
             response.body["controlPlaneRuntime"]["statusHttp"],
             json!({
@@ -871,7 +927,6 @@ mod tests {
                 "pending": 0
             })
         );
-        upstream_thread.join().unwrap();
         fs::remove_dir_all(data_dir).unwrap();
     }
 
@@ -883,12 +938,7 @@ mod tests {
             r#"{"pairingToken":"PAIR","hostAllowlist":[]}"#,
         )
         .unwrap();
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let config = StatusRouteConfig::new(
-            data_dir.clone(),
-            upstream.local_addr().unwrap(),
-            "internal-secret".to_string(),
-        );
+        let config = StatusRouteConfig::new(data_dir.clone());
         let request =
             parse_request(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
 
@@ -905,12 +955,7 @@ mod tests {
             r#"{"pairingToken":"","hostAllowlist":[]}"#,
         )
         .unwrap();
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let config = StatusRouteConfig::new(
-            data_dir.clone(),
-            upstream.local_addr().unwrap(),
-            "internal-secret".to_string(),
-        );
+        let config = StatusRouteConfig::new(data_dir.clone());
         let request =
             parse_request(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
 

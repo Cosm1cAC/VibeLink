@@ -1,22 +1,24 @@
+use crate::execution_host::protocol::{
+    read_json_frame, write_frame, RequestEnvelope, ResponseEnvelope, PROTOCOL_VERSION,
+};
+use crate::execution_host::windows::execd_pipe_name;
 use crate::status_http::{
     authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication,
 };
-use crate::execution_host::protocol::{read_json_frame, write_frame, RequestEnvelope, ResponseEnvelope, PROTOCOL_VERSION};
-use crate::execution_host::windows::execd_pipe_name;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -429,9 +431,48 @@ fn open_workspace_db(data_dir: &Path) -> Result<Connection> {
            request_json TEXT, risk_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
            expires_at TEXT, decided_at TEXT, decided_by_device_id TEXT,
            decision_reason TEXT, decision_json TEXT
+         );
+         CREATE TABLE IF NOT EXISTS approval_outbox (
+           id TEXT PRIMARY KEY, approval_id TEXT NOT NULL UNIQUE,
+           operation_id TEXT NOT NULL UNIQUE, continuation_ref TEXT NOT NULL,
+           expected_version INTEGER NOT NULL DEFAULT 0, decision_json TEXT NOT NULL,
+           status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+           next_attempt_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+           delivered_at TEXT, applied_at TEXT, last_error TEXT
          );",
     )?;
+    for (name, definition) in [
+        ("provider", "TEXT"),
+        ("thread_id", "TEXT"),
+        ("turn_id", "TEXT"),
+        ("item_id", "TEXT"),
+        ("continuation_ref", "TEXT"),
+        ("decision_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("delivery_status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("requested_permissions_json", "TEXT"),
+        ("available_decisions_json", "TEXT"),
+    ] {
+        ensure_workspace_column(&connection, "approval_requests", name, definition)?;
+    }
     Ok(connection)
+}
+
+fn ensure_workspace_column(
+    connection: &Connection,
+    table: &str,
+    name: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == name) {
+        connection.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {name} {definition}"
+        ))?;
+    }
+    Ok(())
 }
 
 fn route_approval_request(
@@ -453,8 +494,12 @@ fn route_approval_request(
         return Ok(None);
     }
     match auth {
-        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {}
         RouteAuthentication::Pending => unreachable!(),
     }
@@ -484,27 +529,184 @@ fn route_approval_request(
                 }))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        return Ok(Some(HttpRouteResponse::json(200, json!({ "approvals": rows }))));
+        return Ok(Some(HttpRouteResponse::json(
+            200,
+            json!({ "approvals": rows }),
+        )));
     }
     let approval_id = decision_id.unwrap();
     let body = body.ok_or_else(|| anyhow::anyhow!("Approval decision body is required"))?;
-    let payload: Value = serde_json::from_slice(body).map_err(|_| anyhow::anyhow!("Invalid approval decision JSON."))?;
-    let decision = payload.get("decision").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
-    if !matches!(decision.as_str(), "approve" | "approved" | "deny" | "denied" | "reject" | "decline") {
-        return Ok(Some(HttpRouteResponse::error(400, "Approval decision must be approve or deny.")));
+    let payload: Value = serde_json::from_slice(body)
+        .map_err(|_| anyhow::anyhow!("Invalid approval decision JSON."))?;
+    let decision = payload
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        decision.as_str(),
+        "approve" | "approved" | "deny" | "denied" | "reject" | "decline"
+    ) {
+        return Ok(Some(HttpRouteResponse::error(
+            400,
+            "Approval decision must be approve or deny.",
+        )));
     }
-    let status = if matches!(decision.as_str(), "approve" | "approved") { "approved" } else { "denied" };
+    let status = if matches!(decision.as_str(), "approve" | "approved") {
+        "approved"
+    } else {
+        "denied"
+    };
     let now = now_iso();
+    let provider_continuation = connection
+        .query_row(
+            "SELECT continuation_ref,decision_version,available_decisions_json
+             FROM approval_requests WHERE id=?1 AND status='pending'",
+            params![approval_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?
+                        .unwrap_or_else(|| "[]".to_string()),
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((continuation_ref, expected_version, available_json)) =
+        provider_continuation.filter(|row| !row.0.is_empty())
+    {
+        let available =
+            serde_json::from_str::<Value>(&available_json).unwrap_or_else(|_| json!([]));
+        let provider_decision = map_provider_approval_decision(
+            if status == "approved" {
+                "approve"
+            } else {
+                "deny"
+            },
+            &available,
+        );
+        let operation_id = payload
+            .get("operationId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let transaction = connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE approval_requests SET status=?1,updated_at=?2,decided_at=?2,
+             decision_reason=?3,decision_json=?4,decision_version=?5,
+             delivery_status='decision_recorded'
+             WHERE id=?6 AND status='pending' AND decision_version=?7",
+            params![
+                status,
+                now,
+                payload.get("reason").and_then(Value::as_str).unwrap_or(""),
+                provider_decision.to_string(),
+                expected_version + 1,
+                approval_id,
+                expected_version
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(Some(HttpRouteResponse::error(
+                409,
+                "Approval continuation is no longer current.",
+            )));
+        }
+        let outbox_id = uuid::Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO approval_outbox (
+               id,approval_id,operation_id,continuation_ref,expected_version,decision_json,
+               status,attempts,next_attempt_at,created_at,updated_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,'decision_recorded',0,?7,?7,?7)",
+            params![
+                outbox_id,
+                approval_id,
+                operation_id,
+                continuation_ref,
+                expected_version,
+                provider_decision.to_string(),
+                now
+            ],
+        )?;
+        transaction.commit()?;
+        return Ok(Some(HttpRouteResponse::json(
+            202,
+            json!({
+                "ok": true,
+                "approval": {
+                    "id": approval_id,
+                    "status": status,
+                    "decision": decision,
+                    "deliveryStatus": "decision_recorded"
+                },
+                "outbox": {
+                    "id": outbox_id,
+                    "status": "decision_recorded",
+                    "continuationRef": continuation_ref
+                }
+            }),
+        )));
+    }
     let changed = connection.execute(
         "UPDATE approval_requests SET status = ?1, updated_at = ?2, decided_at = ?2,
          decision_reason = ?3, decision_json = ?4 WHERE id = ?5 AND status = 'pending'",
-        params![status, now, payload.get("reason").and_then(Value::as_str).unwrap_or(""), payload.to_string(), approval_id],
+        params![
+            status,
+            now,
+            payload.get("reason").and_then(Value::as_str).unwrap_or(""),
+            payload.to_string(),
+            approval_id
+        ],
     )?;
     if changed == 0 {
-        return Ok(Some(HttpRouteResponse::error(409, "Approval request is no longer pending.")));
+        return Ok(Some(HttpRouteResponse::error(
+            409,
+            "Approval request is no longer pending.",
+        )));
     }
     let approval = json!({ "id": approval_id, "status": status, "decision": decision });
-    Ok(Some(HttpRouteResponse::json(200, json!({ "ok": status == "approved", "approval": approval }))))
+    Ok(Some(HttpRouteResponse::json(
+        200,
+        json!({ "ok": status == "approved", "approval": approval }),
+    )))
+}
+
+fn normalized_provider_decision(value: &Value) -> String {
+    value
+        .as_str()
+        .or_else(|| value.get("decision").and_then(Value::as_str))
+        .or_else(|| value.get("type").and_then(Value::as_str))
+        .unwrap_or("")
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn map_provider_approval_decision(decision: &str, available: &Value) -> Value {
+    let preferred = if decision == "approve" {
+        ["grant", "accept", "acceptforsession", "approve"]
+    } else {
+        ["decline", "cancel", "deny", "reject"]
+    };
+    if let Some(items) = available.as_array() {
+        for candidate in preferred {
+            if let Some(item) = items
+                .iter()
+                .find(|item| normalized_provider_decision(item) == candidate)
+            {
+                let value = item
+                    .as_str()
+                    .or_else(|| item.get("decision").and_then(Value::as_str))
+                    .or_else(|| item.get("type").and_then(Value::as_str))
+                    .unwrap_or(candidate);
+                return json!({ "decision": value });
+            }
+        }
+    }
+    json!({ "decision": if decision == "approve" { "accept" } else { "decline" } })
 }
 
 fn route_tool_run_request(
@@ -519,8 +721,12 @@ fn route_tool_run_request(
         return Ok(None);
     }
     match auth {
-        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {}
         RouteAuthentication::Pending => unreachable!(),
     }
@@ -539,8 +745,10 @@ fn route_tool_run_request(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "{}".into()),
-                row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "null".into()),
+                row.get::<_, Option<String>>(6)?
+                    .unwrap_or_else(|| "{}".into()),
+                row.get::<_, Option<String>>(7)?
+                    .unwrap_or_else(|| "null".into()),
                 row.get::<_, Option<String>>(8)?.unwrap_or_default(),
                 row.get::<_, String>(9)?,
                 row.get::<_, String>(10)?,
@@ -562,9 +770,19 @@ fn route_terminal_session_request(
         .path()
         .strip_prefix("/api/terminal-sessions/")
         .filter(|value| !value.is_empty() && !value.contains('/'));
-    let input_id = request.path().strip_prefix("/api/terminal-sessions/").and_then(|value| value.strip_suffix("/input"));
-    let resize_id = request.path().strip_prefix("/api/terminal-sessions/").and_then(|value| value.strip_suffix("/resize"));
-    if !list && !(session_id.is_some() && request.method == "GET") && input_id.is_none() && resize_id.is_none() {
+    let input_id = request
+        .path()
+        .strip_prefix("/api/terminal-sessions/")
+        .and_then(|value| value.strip_suffix("/input"));
+    let resize_id = request
+        .path()
+        .strip_prefix("/api/terminal-sessions/")
+        .and_then(|value| value.strip_suffix("/resize"));
+    if !list
+        && !(session_id.is_some() && request.method == "GET")
+        && input_id.is_none()
+        && resize_id.is_none()
+    {
         return Ok(None);
     }
     let auth = authenticate_route_request(request, &config.data_dir)?;
@@ -572,30 +790,65 @@ fn route_terminal_session_request(
         return Ok(None);
     }
     match auth {
-        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {}
         RouteAuthentication::Pending => unreachable!(),
     }
     let connection = open_workspace_db(&config.data_dir)?;
     if let Some(id) = input_id {
-        if request.method != "POST" { return Ok(None); }
+        if request.method != "POST" {
+            return Ok(None);
+        }
         let payload = terminal_json_body(body)?;
         let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
-        if text.is_empty() { return Ok(Some(HttpRouteResponse::error(400, "Input is required."))); }
-        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, request, id, "execution.input", json!({
-            "executionId": id, "data": text, "encoding": "utf8", "operationId": uuid::Uuid::new_v4().to_string()
-        }))?));
+        if text.is_empty() {
+            return Ok(Some(HttpRouteResponse::error(400, "Input is required.")));
+        }
+        return Ok(Some(terminal_host_mutation(
+            &connection,
+            &config.data_dir,
+            request,
+            id,
+            "execution.input",
+            json!({
+                "executionId": id, "data": text, "encoding": "utf8", "operationId": uuid::Uuid::new_v4().to_string()
+            }),
+        )?));
     }
     if let Some(id) = resize_id {
-        if request.method != "POST" { return Ok(None); }
+        if request.method != "POST" {
+            return Ok(None);
+        }
         let payload = terminal_json_body(body)?;
-        let cols = payload.get("cols").and_then(Value::as_u64).filter(|value| (1..=1000).contains(value));
-        let rows = payload.get("rows").and_then(Value::as_u64).filter(|value| (1..=1000).contains(value));
-        let (Some(cols), Some(rows)) = (cols, rows) else { return Ok(Some(HttpRouteResponse::error(400, "Valid cols and rows are required."))); };
-        return Ok(Some(terminal_host_mutation(&connection, &config.data_dir, request, id, "execution.resize", json!({
-            "executionId": id, "cols": cols, "rows": rows, "operationId": uuid::Uuid::new_v4().to_string()
-        }))?));
+        let cols = payload
+            .get("cols")
+            .and_then(Value::as_u64)
+            .filter(|value| (1..=1000).contains(value));
+        let rows = payload
+            .get("rows")
+            .and_then(Value::as_u64)
+            .filter(|value| (1..=1000).contains(value));
+        let (Some(cols), Some(rows)) = (cols, rows) else {
+            return Ok(Some(HttpRouteResponse::error(
+                400,
+                "Valid cols and rows are required.",
+            )));
+        };
+        return Ok(Some(terminal_host_mutation(
+            &connection,
+            &config.data_dir,
+            request,
+            id,
+            "execution.resize",
+            json!({
+                "executionId": id, "cols": cols, "rows": rows, "operationId": uuid::Uuid::new_v4().to_string()
+            }),
+        )?));
     }
     if let Some(id) = session_id {
         let session = connection
@@ -615,7 +868,16 @@ fn route_terminal_session_request(
          WHERE tool_name = 'workspace.terminal_session' ORDER BY updated_at DESC LIMIT 200",
     )?;
     let rows = statement
-        .query_map([], |row| Ok(terminal_session_json(row.get(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default(), row.get(2)?, row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "{}".into()), row.get::<_, Option<String>>(4)?.unwrap_or_default())))?
+        .query_map([], |row| {
+            Ok(terminal_session_json(
+                row.get(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get(2)?,
+                row.get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "{}".into()),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Some(HttpRouteResponse::json(200, json!({ "items": rows }))))
 }
@@ -637,20 +899,39 @@ fn terminal_host_mutation(
         return Ok(HttpRouteResponse::error(404, "Terminal session not found."));
     };
     let event_text = if method == "execution.input" {
-        params_value["data"].as_str().unwrap_or_default().to_string()
+        params_value["data"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
     } else {
         format!("{}x{}", params_value["cols"], params_value["rows"])
     };
     let result = match request_execution_host(data_dir, method, params_value) {
         Ok(result) => result,
-        Err(error) => return Ok(HttpRouteResponse::json(409, json!({
-            "ok": false, "error": error.to_string()
-        }))),
+        Err(error) => {
+            return Ok(HttpRouteResponse::json(
+                409,
+                json!({
+                    "ok": false, "error": error.to_string()
+                }),
+            ))
+        }
     };
-    let event_type = if method == "execution.input" { "tool.input" } else { "tool.resize" };
-    insert_workspace_tool_event(connection, id, &workspace_id, event_type, &event_text, json!({
-        "session": result.clone(), "executionMethod": method
-    }))?;
+    let event_type = if method == "execution.input" {
+        "tool.input"
+    } else {
+        "tool.resize"
+    };
+    insert_workspace_tool_event(
+        connection,
+        id,
+        &workspace_id,
+        event_type,
+        &event_text,
+        json!({
+            "session": result.clone(), "executionMethod": method
+        }),
+    )?;
     let at = now_iso();
     connection.execute(
         "INSERT INTO audit_log (event_type,event_at,method,path,success,target,meta_json,created_at)
@@ -662,8 +943,14 @@ fn terminal_host_mutation(
     )?;
     let mut output = json!({ "ok": true, "session": result });
     if method == "execution.resize" {
-        let cols = output["session"].get("cols").cloned().unwrap_or(Value::Null);
-        let rows = output["session"].get("rows").cloned().unwrap_or(Value::Null);
+        let cols = output["session"]
+            .get("cols")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let rows = output["session"]
+            .get("rows")
+            .cloned()
+            .unwrap_or(Value::Null);
         if !cols.is_null() || !rows.is_null() {
             output["cols"] = cols;
             output["rows"] = rows;
@@ -672,7 +959,11 @@ fn terminal_host_mutation(
     Ok(HttpRouteResponse::json(200, output))
 }
 
-fn request_execution_host(data_dir: &Path, method: &str, params_value: Value) -> Result<Value> {
+pub(crate) fn request_execution_host(
+    data_dir: &Path,
+    method: &str,
+    params_value: Value,
+) -> Result<Value> {
     let mut pipe = connect_execution_host(data_dir)?;
     let request_id = uuid::Uuid::new_v4().to_string();
     write_frame(
@@ -703,7 +994,13 @@ fn connect_execution_host(data_dir: &Path) -> Result<std::fs::File> {
 
     let executable = std::env::current_exe().context("Cannot resolve VibeLink executable")?;
     let mut command = Command::new(executable);
-    command.arg("execd").arg("--data-dir").arg(data_dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .arg("execd")
+        .arg("--data-dir")
+        .arg(data_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     command.creation_flags(crate::execution_host::windows::CREATE_NO_WINDOW);
     command.spawn().context("Cannot start execution host")?;
@@ -789,21 +1086,40 @@ fn run_workspace_command(
     payload: &Value,
 ) -> Result<HttpRouteResponse> {
     let workspace = load_workspace_git_context(data_dir, workspace_id)?;
-    let command = payload.get("command").and_then(Value::as_str).unwrap_or("").trim();
+    let command = payload
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     if command.is_empty() {
         return Ok(HttpRouteResponse::error(400, "Command is required."));
     }
-    let kind = if payload.get("kind").and_then(Value::as_str) == Some("test") { "test" } else { "terminal" };
+    let kind = if payload.get("kind").and_then(Value::as_str) == Some("test") {
+        "test"
+    } else {
+        "terminal"
+    };
     let connection = open_workspace_db(data_dir)?;
     let tool_run_id = create_started_workspace_tool_run(
         &connection,
         workspace_id,
-        &format!("workspace.{}", if kind == "test" { "test" } else { "command" }),
+        &format!(
+            "workspace.{}",
+            if kind == "test" { "test" } else { "command" }
+        ),
         &format!("{} {}", kind, command),
         &json!({ "command": command, "kind": kind, "timeoutMs": payload.get("timeoutMs").cloned().unwrap_or(json!(120000)) }),
     )?;
-    let risky = ["rm -rf", "remove-item", "format ", "shutdown", "del /s", "git reset --hard"]
-        .iter().any(|needle| command.to_ascii_lowercase().contains(needle));
+    let risky = [
+        "rm -rf",
+        "remove-item",
+        "format ",
+        "shutdown",
+        "del /s",
+        "git reset --hard",
+    ]
+    .iter()
+    .any(|needle| command.to_ascii_lowercase().contains(needle));
     if risky && payload.get("approved").and_then(Value::as_bool) != Some(true) {
         let approval_id = uuid::Uuid::new_v4().to_string();
         let now = now_iso();
@@ -818,19 +1134,28 @@ fn run_workspace_command(
                 json!({ "reasons": ["dangerous command"], "matches": ["command policy"] }).to_string(), now
             ],
         )?;
-        return Ok(HttpRouteResponse::json(428, json!({
-            "error": "Command requires explicit approval: dangerous command",
-            "approvalId": approval_id,
-            "toolRunId": tool_run_id,
-            "reasons": ["dangerous command"],
-            "matches": ["command policy"],
-            "approval": { "id": approval_id, "status": "pending", "toolRunId": tool_run_id }
-        })));
+        return Ok(HttpRouteResponse::json(
+            428,
+            json!({
+                "error": "Command requires explicit approval: dangerous command",
+                "approvalId": approval_id,
+                "toolRunId": tool_run_id,
+                "reasons": ["dangerous command"],
+                "matches": ["command policy"],
+                "approval": { "id": approval_id, "status": "pending", "toolRunId": tool_run_id }
+            }),
+        ));
     }
     #[cfg(windows)]
     let mut process = Command::new("powershell.exe");
     #[cfg(windows)]
-    process.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]);
+    process.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ]);
     #[cfg(not(windows))]
     let mut process = Command::new("sh");
     #[cfg(not(windows))]
@@ -846,9 +1171,28 @@ fn run_workspace_command(
         "exitCode": output.status.code().unwrap_or(1),
         "toolRunId": tool_run_id
     });
-    let status = if output.status.success() { "completed" } else { "failed" };
+    let status = if output.status.success() {
+        "completed"
+    } else {
+        "failed"
+    };
     connection.execute("UPDATE tool_runs SET status = ?1, result_json = ?2, updated_at = ?3, completed_at = ?3 WHERE id = ?4", params![status, result.to_string(), now_iso(), tool_run_id])?;
-    insert_workspace_tool_event(&connection, &tool_run_id, workspace_id, if output.status.success() { "tool.completed" } else { "tool.error" }, if output.status.success() { "Workspace command completed." } else { "Workspace command failed." }, result.clone())?;
+    insert_workspace_tool_event(
+        &connection,
+        &tool_run_id,
+        workspace_id,
+        if output.status.success() {
+            "tool.completed"
+        } else {
+            "tool.error"
+        },
+        if output.status.success() {
+            "Workspace command completed."
+        } else {
+            "Workspace command failed."
+        },
+        result.clone(),
+    )?;
     Ok(HttpRouteResponse::json(200, result))
 }
 
@@ -860,7 +1204,11 @@ fn start_workspace_terminal_session(
     let workspace = load_workspace_git_context(data_dir, workspace_id)?;
     let requested_shell = payload.get("shell").and_then(Value::as_str).unwrap_or("");
     let shell = if requested_shell.is_empty() {
-        if cfg!(windows) { "powershell.exe" } else { "sh" }
+        if cfg!(windows) {
+            "powershell.exe"
+        } else {
+            "sh"
+        }
     } else {
         requested_shell
     };
@@ -886,7 +1234,10 @@ fn start_workspace_terminal_session(
                 Vec::new()
             }
         });
-    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("auto");
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("auto");
     let backend = if mode == "spawn" { "stdio" } else { "conpty" };
     let cols = payload
         .get("cols")
@@ -914,29 +1265,36 @@ fn start_workspace_terminal_session(
             "rows": rows
         }),
     )?;
-    let snapshot = match request_execution_host(data_dir, "execution.start", json!({
-        "executionId": tool_run_id,
-        "kind": "terminal",
-        "backend": backend,
-        "command": shell,
-        "args": args,
-        "cwd": workspace.cwd,
-        "env": { "TERM": "xterm-256color" },
-        "cols": cols,
-        "rows": rows,
-        "spoolQuotaBytes": 64 * 1024 * 1024,
-        "segmentBytes": 1024 * 1024,
-        "operationId": format!("terminal-start:{tool_run_id}")
-    })) {
+    let snapshot = match request_execution_host(
+        data_dir,
+        "execution.start",
+        json!({
+            "executionId": tool_run_id,
+            "kind": "terminal",
+            "backend": backend,
+            "command": shell,
+            "args": args,
+            "cwd": workspace.cwd,
+            "env": { "TERM": "xterm-256color" },
+            "cols": cols,
+            "rows": rows,
+            "spoolQuotaBytes": 64 * 1024 * 1024,
+            "segmentBytes": 1024 * 1024,
+            "operationId": format!("terminal-start:{tool_run_id}")
+        }),
+    ) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             let message = error.to_string();
             fail_workspace_tool_run(&connection, &tool_run_id, workspace_id, &message)?;
-            return Ok(HttpRouteResponse::json(409, json!({
-                "ok": false,
-                "error": message,
-                "toolRunId": tool_run_id
-            })));
+            return Ok(HttpRouteResponse::json(
+                409,
+                json!({
+                    "ok": false,
+                    "error": message,
+                    "toolRunId": tool_run_id
+                }),
+            ));
         }
     };
     let result = json!({
@@ -3097,7 +3455,12 @@ mod tests {
             .unwrap();
         let pipe_name = execd_pipe_name(&dir);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while OpenOptions::new().read(true).write(true).open(&pipe_name).is_err() {
+        while OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pipe_name)
+            .is_err()
+        {
             assert!(Instant::now() < deadline, "execd did not open {pipe_name}");
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -3139,7 +3502,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(input.status, 200);
-        assert!(input.body["session"]["writtenBytes"].as_u64().unwrap_or_default() > 0);
+        assert!(
+            input.body["session"]["writtenBytes"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
         let resize = terminal_host_mutation(
             &connection,
             &dir,
@@ -3363,7 +3731,11 @@ mod tests {
         assert!(response.body["stdout"].as_str().unwrap().contains("hello"));
         let connection = Connection::open(dir.join("mobile-agent.sqlite")).unwrap();
         let status: String = connection
-            .query_row("SELECT status FROM tool_runs ORDER BY created_at DESC LIMIT 1", [], |row| row.get(0))
+            .query_row(
+                "SELECT status FROM tool_runs ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(status, "completed");
         assert_eq!(

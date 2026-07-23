@@ -8,7 +8,7 @@ use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtensio
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,6 +45,26 @@ impl TaskRouteConfig {
     pub(crate) fn record_fallback(&self) {
         self.metrics.fallbacks.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+pub(crate) fn start_search_watcher(data_dir: PathBuf) {
+    let interval_ms = std::env::var("VIBELINK_SEARCH_INDEX_REFRESH_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(15_000)
+        .max(1_000);
+    let _ = thread::Builder::new()
+        .name("rust-search-index-watcher".to_string())
+        .spawn(move || loop {
+            if data_dir.join("mobile-agent.sqlite").exists() {
+                if let Ok(connection) = open_task_db(&data_dir) {
+                    if let Err(error) = refresh_search_index(&connection) {
+                        eprintln!("Rust search index refresh failed: {error:#}");
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(interval_ms));
+        });
 }
 
 pub fn task_request_requires_body(request: &ParsedRequest) -> bool {
@@ -152,7 +172,7 @@ pub fn route_task_request(
             HttpRouteResponse::error(404, "Task not found.")
         }
     } else if let Some((task_id, "stop")) = task_path_parts(request.path()) {
-        if stop_queued_task_projection(&connection, &task_id)? {
+        if stop_task_projection(&connection, &config.data_dir, &task_id)? {
             HttpRouteResponse::json(200, json!({ "ok": true, "stopped": true }))
         } else {
             return Ok(None);
@@ -174,15 +194,18 @@ pub fn route_task_request(
         HttpRouteResponse::json(200, scheduler_status(&connection)?)
     } else if request.path() == "/api/histories" && request.method == "GET" {
         if request.query_parameter("fresh").as_deref() == Some("1") {
-            return Ok(None);
+            refresh_content_index(&connection)?;
         }
         let Some(items) = list_history_projection(&connection, request)? else {
             return Ok(None);
         };
         HttpRouteResponse::json(200, json!({ "items": items }))
     } else if let Some((provider, id)) = history_path_parts(request.path()) {
-        if request.method != "GET" || request.query_parameter("fresh").as_deref() == Some("1") {
+        if request.method != "GET" {
             return Ok(None);
+        }
+        if request.query_parameter("fresh").as_deref() == Some("1") {
+            refresh_content_index(&connection)?;
         }
         match history_projection(&connection, provider, id)? {
             Some(item) => HttpRouteResponse::json(200, item),
@@ -627,6 +650,62 @@ fn stop_queued_task_projection(connection: &Connection, task_id: &str) -> Result
         "system",
         "Task stop requested.",
         json!({ "stopped": true }),
+    )?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+fn stop_task_projection(connection: &Connection, data_dir: &Path, task_id: &str) -> Result<bool> {
+    let Some(task) = task_by_id(connection, task_id)? else {
+        return Ok(false);
+    };
+    if task["status"].as_str() == Some("queued") {
+        return stop_queued_task_projection(connection, task_id);
+    }
+    if !matches!(
+        task["status"].as_str(),
+        Some("starting" | "running" | "awaiting_approval" | "stopping")
+    ) {
+        return Ok(false);
+    }
+    let execution_id = connection
+        .query_row(
+            "SELECT id FROM execution_bindings
+             WHERE task_id=?1 AND status NOT IN ('completed','failed','cancelled','lost','outcome_unknown')
+             ORDER BY created_at DESC,id DESC LIMIT 1",
+            params![task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(execution_id) = execution_id else {
+        return Ok(false);
+    };
+    crate::workspace_http::request_execution_host(
+        data_dir,
+        "execution.signal",
+        json!({
+            "executionId": execution_id,
+            "signal": "stop",
+            "operationId": format!("task-stop-{task_id}")
+        }),
+    )?;
+    let now = now_iso();
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "UPDATE tasks SET status='stopping',updated_at=?1 WHERE id=?2",
+        params![now, task_id],
+    )?;
+    transaction.execute(
+        "UPDATE task_queue SET updated_at=?1,last_error='stop requested'
+         WHERE task_id=?2 AND status='running'",
+        params![now, task_id],
+    )?;
+    insert_task_event(
+        &transaction,
+        task_id,
+        "system",
+        "Task stop requested.",
+        json!({ "stopped": true, "executionId": execution_id, "owner": "rust-execd" }),
     )?;
     transaction.commit()?;
     Ok(true)
@@ -1305,6 +1384,8 @@ fn search_index_status(connection: &Connection) -> Result<Option<Value>> {
 
 const SEARCH_MAX_FILES: usize = 50_000;
 const SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
+const HISTORY_MAX_FILE_BYTES: i64 = 16 * 1024 * 1024;
+const CONTENT_MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 
 fn refresh_search_index(connection: &Connection) -> Result<Vec<Value>> {
     if !table_exists(connection, "workspaces")? {
@@ -1336,6 +1417,7 @@ fn refresh_search_index(connection: &Connection) -> Result<Vec<Value>> {
             }
         }
     }
+    refresh_content_index(connection)?;
     Ok(result)
 }
 
@@ -1485,6 +1567,567 @@ fn refresh_workspace_search_rows(
         "upserted": upserted,
         "deleted": deleted
     }))
+}
+
+#[derive(Debug)]
+struct HistoryIndexFile {
+    provider: &'static str,
+    path: PathBuf,
+    size: i64,
+    mtime_ms: i64,
+    updated_at: String,
+}
+
+fn refresh_content_index(connection: &Connection) -> Result<Value> {
+    let history_files = collect_history_index_files();
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    let refreshed = (|| {
+        let mut active = HashSet::new();
+        let mut sessions = 0_i64;
+        let mut messages = 0_i64;
+        for file in &history_files {
+            let (source_key, changed) = refresh_history_content_source(connection, file)?;
+            active.insert(source_key);
+            sessions += 1;
+            messages += changed;
+        }
+        remove_missing_content_sources(connection, "agent", &active)?;
+
+        let (task_keys, task_count, task_messages) = refresh_task_content_sources(connection)?;
+        remove_missing_content_sources(connection, "task", &task_keys)?;
+        Ok::<_, anyhow::Error>(json!({
+            "sessions": sessions,
+            "tasks": task_count,
+            "messages": messages + task_messages,
+            "owner": "rust-content-index"
+        }))
+    })();
+    match refreshed {
+        Ok(value) => {
+            connection.execute_batch("COMMIT")?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn collect_history_index_files() -> Vec<HistoryIndexFile> {
+    #[cfg(test)]
+    {
+        return Vec::new();
+    }
+    #[cfg(not(test))]
+    let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    #[cfg(not(test))]
+    {
+        collect_history_index_files_from_home(&home)
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn collect_history_index_files_from_home(home: &Path) -> Vec<HistoryIndexFile> {
+    let mut files = Vec::new();
+    for (provider, root) in [
+        ("codex", home.join(".codex").join("sessions")),
+        ("claude", home.join(".claude").join("projects")),
+    ] {
+        let mut pending = vec![root];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_symlink() {
+                    continue;
+                }
+                let path = entry.path();
+                if file_type.is_dir() {
+                    pending.push(path);
+                } else if file_type.is_file()
+                    && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                {
+                    let Ok(metadata) = entry.metadata() else {
+                        continue;
+                    };
+                    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                    let mtime_ms = modified
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|value| value.as_millis() as i64)
+                        .unwrap_or(0);
+                    if metadata.len() > HISTORY_MAX_FILE_BYTES as u64 {
+                        continue;
+                    }
+                    files.push(HistoryIndexFile {
+                        provider,
+                        path,
+                        size: metadata.len().min(i64::MAX as u64) as i64,
+                        mtime_ms,
+                        updated_at: DateTime::<Utc>::from(modified)
+                            .to_rfc3339_opts(SecondsFormat::Millis, true),
+                    });
+                }
+            }
+        }
+    }
+    files.sort_by(|left, right| right.mtime_ms.cmp(&left.mtime_ms));
+    files.truncate(600);
+    files
+}
+
+fn refresh_history_content_source(
+    connection: &Connection,
+    file: &HistoryIndexFile,
+) -> Result<(String, i64)> {
+    let source_path = file.path.to_string_lossy().into_owned();
+    let unchanged_source = connection
+        .query_row(
+            "SELECT source_key FROM content_search_sources
+             WHERE file_path=?1 AND source_size=?2 AND source_mtime_ms=?3
+               AND source_kind='agent'",
+            params![source_path, file.size, file.mtime_ms],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(source_key) = unchanged_source {
+        return Ok((source_key, 0));
+    }
+    let mut entries = Vec::new();
+    let reader = BufReader::new(fs::File::open(&file.path)?);
+    for line in reader.lines().take(50_000) {
+        let Ok(line) = line else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            entries.push(value);
+        }
+    }
+    let first = entries.first().cloned().unwrap_or_else(|| json!({}));
+    let meta = first.get("payload").unwrap_or(&first);
+    let id = meta
+        .get("session_id")
+        .or_else(|| meta.get("id"))
+        .or_else(|| first.get("sessionId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            file.path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
+    let source_key = format!("agent:{}:{id}", file.provider);
+    delete_content_documents(connection, &source_key)?;
+    let mut visible = Vec::new();
+    for entry in &entries {
+        if let Some((role, text, turn_id, timestamp)) = history_search_entry(entry) {
+            visible.push((role, text, turn_id, timestamp));
+        }
+    }
+    let title = visible
+        .iter()
+        .find(|entry| entry.0 == "user")
+        .or_else(|| visible.first())
+        .map(|entry| entry.1.chars().take(120).collect::<String>())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| id.clone());
+    let preview = visible
+        .iter()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|entry| format!("{}: {}", entry.0, entry.1))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .chars()
+        .take(4000)
+        .collect::<String>();
+    connection.execute(
+        "INSERT INTO content_search_sources (
+           source_key,provider,session_id,session_origin,source_kind,file_path,byte_offset,
+           event_cursor,source_size,source_mtime_ms,indexed_at
+         ) VALUES (?1,?2,?3,'unknown','agent',?4,?5,?6,?5,?7,?8)
+         ON CONFLICT(source_key) DO UPDATE SET provider=excluded.provider,
+           session_id=excluded.session_id,file_path=excluded.file_path,
+           byte_offset=excluded.byte_offset,event_cursor=excluded.event_cursor,
+           source_size=excluded.source_size,source_mtime_ms=excluded.source_mtime_ms,
+           indexed_at=excluded.indexed_at",
+        params![
+            source_key,
+            file.provider,
+            id,
+            source_path,
+            file.size,
+            entries.len() as i64,
+            file.mtime_ms,
+            now_iso()
+        ],
+    )?;
+    insert_content_document(
+        connection,
+        &source_key,
+        0,
+        "history",
+        &id,
+        file.provider,
+        &title,
+        &preview,
+        "",
+        &file.updated_at,
+    )?;
+    for (index, (_, text, turn_id, timestamp)) in visible.iter().enumerate() {
+        insert_content_document(
+            connection,
+            &source_key,
+            index as i64 + 1,
+            "message",
+            &id,
+            file.provider,
+            &title,
+            text,
+            turn_id,
+            if timestamp.is_empty() {
+                &file.updated_at
+            } else {
+                timestamp
+            },
+        )?;
+    }
+    Ok((source_key, visible.len() as i64))
+}
+
+fn history_search_entry(entry: &Value) -> Option<(String, String, String, String)> {
+    let payload = entry.get("payload").unwrap_or(entry);
+    let message = entry
+        .get("message")
+        .or_else(|| payload.get("message"))
+        .unwrap_or(entry);
+    let kind = message
+        .get("type")
+        .or_else(|| payload.get("type"))
+        .or_else(|| entry.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(
+        kind.as_str(),
+        "attachment"
+            | "compacted"
+            | "context_compacted"
+            | "function_call"
+            | "function_call_output"
+            | "reasoning"
+            | "session"
+            | "session_meta"
+            | "summary"
+            | "token_count"
+            | "tool_result"
+            | "tool_use"
+            | "turn_context"
+    ) {
+        return None;
+    }
+    let raw_role = entry
+        .get("role")
+        .or_else(|| message.get("role"))
+        .or_else(|| payload.get("role"))
+        .or_else(|| payload.get("type"))
+        .or_else(|| entry.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let role = match raw_role {
+        "user" | "stdin" | "user_message" => "user",
+        "assistant" | "json" | "stdout" | "agent_message" | "assistant_message" => "assistant",
+        "error" | "stderr" => "error",
+        _ => return None,
+    };
+    let text = [
+        message.get("content"),
+        payload.get("content"),
+        entry.get("content"),
+        payload.get("text"),
+        payload.get("summary"),
+        entry.get("display"),
+        entry.get("summary"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(first_history_text)
+    .unwrap_or_default();
+    if text.trim().is_empty()
+        || text.trim_start().starts_with("<environment_context>")
+        || text.trim_start().starts_with("<permissions instructions>")
+    {
+        return None;
+    }
+    let turn_id = payload
+        .get("turn_id")
+        .or_else(|| payload.get("turnId"))
+        .or_else(|| entry.get("turn_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let timestamp = entry
+        .get("timestamp")
+        .or_else(|| payload.get("timestamp"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some((role.to_string(), text, turn_id, timestamp))
+}
+
+fn first_history_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(first_history_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        }
+        Value::Object(object) => object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .and_then(first_history_text),
+        _ => None,
+    }
+}
+
+fn refresh_task_content_sources(connection: &Connection) -> Result<(HashSet<String>, i64, i64)> {
+    let mut statement = connection.prepare(
+        "SELECT id,agent,title,cwd,status,updated_at,COALESCE(session_id,''),
+                COALESCE(command_label,'') FROM tasks ORDER BY id",
+    )?;
+    let tasks = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut active = HashSet::new();
+    let mut message_count = 0_i64;
+    for (id, agent, title, cwd, status, updated_at, session_id, command_label) in &tasks {
+        let source_key = format!("task:{agent}:{id}");
+        active.insert(source_key.clone());
+        let max_cursor = connection.query_row(
+            "SELECT COALESCE(MAX(cursor),0) FROM task_events WHERE task_id=?1",
+            params![id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let unchanged = connection
+            .query_row(
+                "SELECT event_cursor FROM content_search_sources WHERE source_key=?1",
+                params![source_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            == Some(max_cursor);
+        if unchanged {
+            continue;
+        }
+        delete_content_documents(connection, &source_key)?;
+        let mut event_statement = connection.prepare(
+            "SELECT cursor,event_at,COALESCE(text,''),COALESCE(payload_json,'{}')
+             FROM task_events WHERE task_id=?1 ORDER BY cursor ASC LIMIT 5000",
+        )?;
+        let events = event_statement
+            .query_map(params![id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut task_content = String::new();
+        push_capped_content(
+            &mut task_content,
+            &format!("{title}\n{command_label}\n{status}\n{cwd}"),
+        );
+        for event in &events {
+            push_capped_content(
+                &mut task_content,
+                if event.2.is_empty() {
+                    &event.3
+                } else {
+                    &event.2
+                },
+            );
+        }
+        connection.execute(
+            "INSERT INTO content_search_sources (
+               source_key,provider,session_id,session_origin,source_kind,file_path,byte_offset,
+               event_cursor,source_size,source_mtime_ms,indexed_at
+             ) VALUES (?1,?2,?3,'vibelink-cli','task','',0,?4,0,0,?5)
+             ON CONFLICT(source_key) DO UPDATE SET session_id=excluded.session_id,
+               event_cursor=excluded.event_cursor,indexed_at=excluded.indexed_at",
+            params![
+                source_key,
+                agent,
+                if session_id.is_empty() {
+                    id
+                } else {
+                    session_id
+                },
+                max_cursor,
+                now_iso()
+            ],
+        )?;
+        insert_content_document(
+            connection,
+            &source_key,
+            0,
+            "task",
+            id,
+            agent,
+            title,
+            &task_content,
+            "",
+            updated_at,
+        )?;
+        for (cursor, at, text, payload_json) in &events {
+            let content = if text.is_empty() { payload_json } else { text };
+            if content.is_empty() {
+                continue;
+            }
+            insert_content_document(
+                connection,
+                &source_key,
+                *cursor,
+                "message",
+                if session_id.is_empty() {
+                    id
+                } else {
+                    session_id
+                },
+                agent,
+                title,
+                content,
+                "",
+                at,
+            )?;
+            message_count += 1;
+        }
+    }
+    Ok((active, tasks.len() as i64, message_count))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_content_document(
+    connection: &Connection,
+    source_key: &str,
+    event_cursor: i64,
+    kind: &str,
+    item_id: &str,
+    provider: &str,
+    title: &str,
+    content: &str,
+    turn_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO content_search_documents (
+           source_key,event_cursor,kind,item_id,provider,title,content,turn_id,updated_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            source_key,
+            event_cursor,
+            kind,
+            item_id,
+            provider,
+            title,
+            truncate_content(content, CONTENT_MAX_DOCUMENT_BYTES),
+            turn_id,
+            updated_at
+        ],
+    )?;
+    let rowid = connection.last_insert_rowid();
+    connection.execute(
+        "INSERT INTO content_search_fts(rowid,title,content) VALUES (?1,?2,?3)",
+        params![rowid, title, content],
+    )?;
+    Ok(())
+}
+
+fn push_capped_content(target: &mut String, value: &str) {
+    if target.len() >= CONTENT_MAX_DOCUMENT_BYTES {
+        return;
+    }
+    if !target.is_empty() {
+        target.push('\n');
+    }
+    let remaining = CONTENT_MAX_DOCUMENT_BYTES.saturating_sub(target.len());
+    target.push_str(&truncate_content(value, remaining));
+}
+
+fn truncate_content(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    value[..end].to_string()
+}
+
+fn delete_content_documents(connection: &Connection, source_key: &str) -> Result<()> {
+    connection.execute(
+        "DELETE FROM content_search_fts WHERE rowid IN
+         (SELECT rowid FROM content_search_documents WHERE source_key=?1)",
+        params![source_key],
+    )?;
+    connection.execute(
+        "DELETE FROM content_search_documents WHERE source_key=?1",
+        params![source_key],
+    )?;
+    Ok(())
+}
+
+fn remove_missing_content_sources(
+    connection: &Connection,
+    source_kind: &str,
+    active: &HashSet<String>,
+) -> Result<()> {
+    let mut statement =
+        connection.prepare("SELECT source_key FROM content_search_sources WHERE source_kind=?1")?;
+    let existing = statement
+        .query_map(params![source_kind], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for source_key in existing {
+        if active.contains(&source_key) {
+            continue;
+        }
+        delete_content_documents(connection, &source_key)?;
+        connection.execute(
+            "DELETE FROM content_search_sources WHERE source_key=?1",
+            params![source_key],
+        )?;
+    }
+    Ok(())
 }
 
 fn normalize_search_scope(value: Option<String>) -> &'static str {
@@ -2357,6 +3000,63 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(refreshed.body["result"][0]["deleted"], 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn indexes_history_jsonl_without_node_runtime() {
+        let (dir, config) = fixture();
+        let history_path = dir.join("rollout-test.jsonl");
+        fs::write(
+            &history_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-rust\",\"cwd\":\"C:/repo\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-07-23T00:00:00.000Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"native history marker\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-07-23T00:00:01.000Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"indexed by rust\"}]}}\n"
+            ),
+        )
+        .unwrap();
+        let metadata = fs::metadata(&history_path).unwrap();
+        let modified = metadata.modified().unwrap();
+        let file = HistoryIndexFile {
+            provider: "codex",
+            path: history_path,
+            size: metadata.len() as i64,
+            mtime_ms: modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64,
+            updated_at: DateTime::<Utc>::from(modified)
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        };
+        let connection = open_task_db(&dir).unwrap();
+        let (source_key, changed) = refresh_history_content_source(&connection, &file).unwrap();
+        assert_eq!(source_key, "agent:codex:session-rust");
+        assert_eq!(changed, 2);
+        assert_eq!(
+            refresh_history_content_source(&connection, &file)
+                .unwrap()
+                .1,
+            0
+        );
+        let histories = parse_request(
+            b"GET /api/histories HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let listed = route_task_request(&histories, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(listed.body["items"][0]["id"], "session-rust");
+        assert!(listed.body["items"][0]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("native history marker"));
+        let search = parse_request(
+            b"GET /api/search?q=indexed%20by%20rust&scope=messages&record=0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let result = route_task_request(&search, None, &config).unwrap().unwrap();
+        assert_eq!(result.body["total"], 1);
         let _ = fs::remove_dir_all(dir);
     }
 }

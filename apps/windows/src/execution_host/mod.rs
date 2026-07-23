@@ -8,6 +8,8 @@ mod codex_app_server;
 #[cfg(windows)]
 mod daemon;
 #[cfg(windows)]
+mod task_scheduler;
+#[cfg(windows)]
 pub(crate) mod windows;
 #[cfg(windows)]
 mod worker;

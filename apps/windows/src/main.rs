@@ -12,12 +12,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod audio_pipeline_sidecar;
 mod artifact_http;
+mod audio_pipeline_sidecar;
 mod audit_http;
 mod compression_sidecar;
-mod device_http;
 mod desktop_remote_http;
+mod device_http;
 mod doctor_http;
 mod event_store_sidecar;
 mod event_sync_http;
@@ -451,14 +451,18 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
     let event_sync_route = rust_event_sync_http_enabled(cli)
         .then(|| event_sync_http::EventSyncRouteConfig::new(route_data_dir.clone()));
-    let task_route =
-        rust_task_http_enabled(cli).then(|| task_http::TaskRouteConfig::new(route_data_dir.clone()));
+    let task_route = rust_task_http_enabled(cli).then(|| {
+        task_http::start_search_watcher(route_data_dir.clone());
+        task_http::TaskRouteConfig::new(route_data_dir.clone())
+    });
     let provider_route = rust_provider_http_enabled(cli)
         .then(|| provider_http::ProviderRouteConfig::new(route_data_dir.clone()));
-    let artifact_route =
-        Some(artifact_http::ArtifactRouteConfig::new(route_data_dir.clone()));
-    let desktop_remote_route =
-        Some(desktop_remote_http::DesktopRemoteRouteConfig::new(route_data_dir.clone()));
+    let artifact_route = Some(artifact_http::ArtifactRouteConfig::new(
+        route_data_dir.clone(),
+    ));
+    let desktop_remote_route = Some(desktop_remote_http::DesktopRemoteRouteConfig::new(
+        route_data_dir.clone(),
+    ));
     let workspace_route = rust_workspace_http_enabled(cli)
         .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
@@ -552,6 +556,11 @@ fn spawn_node_bridge(
         command
             .env("VIBELINK_RUNTIME_HOST", &plan.runtime.host)
             .env("VIBELINK_RUNTIME_PORT", plan.runtime.port.to_string());
+    }
+    if rust_task_http_enabled(cli) {
+        command
+            .env("VIBELINK_TASK_SCHEDULER_OWNER", "rust")
+            .env("VIBELINK_SEARCH_INDEX_STARTUP", "0");
     }
     if let Some(token) = internal_control_token {
         command.env("VIBELINK_INTERNAL_CONTROL_TOKEN", token);
@@ -1159,8 +1168,7 @@ mod tests {
         assert!(enabled.rust_task_http);
         assert!(rust_task_http_enabled(&enabled));
 
-        let route_only =
-            Cli::try_parse_from(["vibelink", "--rust-task-http", "bridge"]).unwrap();
+        let route_only = Cli::try_parse_from(["vibelink", "--rust-task-http", "bridge"]).unwrap();
         assert!(route_only.rust_task_http);
         assert!(!rust_task_http_enabled(&route_only));
     }

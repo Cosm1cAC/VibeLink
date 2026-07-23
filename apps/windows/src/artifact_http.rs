@@ -9,8 +9,8 @@ use std::fs;
 use std::io::Read;
 use std::io::{Seek, SeekFrom, Write};
 use std::net::TcpStream;
-use zip::ZipArchive;
 use std::path::{Path, PathBuf};
+use zip::ZipArchive;
 
 pub const ARTIFACT_RUNTIME_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/artifacts/:id"),
@@ -80,7 +80,11 @@ pub fn route_artifact_preview_request(
     if request.method != "GET" {
         return Ok(None);
     }
-    let Some(id) = request.path().strip_prefix("/api/artifacts/").and_then(|path| path.strip_suffix("/preview")) else {
+    let Some(id) = request
+        .path()
+        .strip_prefix("/api/artifacts/")
+        .and_then(|path| path.strip_suffix("/preview"))
+    else {
         return Ok(None);
     };
     let Some(relative_path) = artifact_path_for(id) else {
@@ -88,8 +92,12 @@ pub fn route_artifact_preview_request(
     };
     match authenticate_route_request(request, &config.data_dir)? {
         RouteAuthentication::Pending => return Ok(None),
-        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {}
     }
     let path = config.data_dir.join("attachments").join(relative_path);
@@ -100,66 +108,100 @@ pub fn route_artifact_preview_request(
         fs::read_to_string(&path)?
     };
     if source.len() > 8 * 1024 * 1024 {
-        return Ok(Some(HttpRouteResponse::error(413, "Artifact source exceeds the preview limit.")));
+        return Ok(Some(HttpRouteResponse::error(
+            413,
+            "Artifact source exceeds the preview limit.",
+        )));
     }
     if mime_type == "application/x-ipynb+json" {
         let notebook: serde_json::Value = match serde_json::from_str(&source) {
             Ok(notebook) => notebook,
-            Err(_) => return Ok(Some(HttpRouteResponse::error(422, "Notebook JSON is invalid."))),
+            Err(_) => {
+                return Ok(Some(HttpRouteResponse::error(
+                    422,
+                    "Notebook JSON is invalid.",
+                )))
+            }
         };
         let Some(cells) = notebook["cells"].as_array() else {
-            return Ok(Some(HttpRouteResponse::error(422, "Notebook cells are missing.")));
+            return Ok(Some(HttpRouteResponse::error(
+                422,
+                "Notebook cells are missing.",
+            )));
         };
-        let cells = cells.iter().take(200).enumerate().map(|(index, cell)| {
-            let source = json_text(&cell["source"]);
-            json!({
-                "index": index,
-                "type": cell["cell_type"].as_str().unwrap_or("raw"),
-                "executionCount": cell["execution_count"],
-                "source": redact_preview_field(&source),
-                "outputs": []
+        let cells = cells
+            .iter()
+            .take(200)
+            .enumerate()
+            .map(|(index, cell)| {
+                let source = json_text(&cell["source"]);
+                json!({
+                    "index": index,
+                    "type": cell["cell_type"].as_str().unwrap_or("raw"),
+                    "executionCount": cell["execution_count"],
+                    "source": redact_preview_field(&source),
+                    "outputs": []
+                })
             })
-        }).collect::<Vec<_>>();
-        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+            .collect::<Vec<_>>();
+        return Ok(Some(HttpRouteResponse::json(
+            200,
+            json!({ "preview": {
             "version": 1, "readonly": false, "mimeType": mime_type, "kind": "notebook",
             "document": { "type": "notebook", "nbformat": notebook["nbformat"], "cells": cells },
             "truncated": { "cells": notebook["cells"].as_array().is_some_and(|source| source.len() > 200) },
             "redaction": { "applied": source.to_ascii_lowercase().contains("token="), "count": 0 },
             "limits": { "maxBytes": 8 * 1024 * 1024, "maxTextChars": 256 * 1024 }
-        } }))));
+        } }),
+        )));
     }
-    if matches!(mime_type, "application/json" | "text/plain" | "text/markdown") {
+    if matches!(
+        mime_type,
+        "application/json" | "text/plain" | "text/markdown"
+    ) {
         let clipped = source.chars().take(256 * 1024).collect::<String>();
         let redacted = redact_preview_field(&clipped);
-        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+        return Ok(Some(HttpRouteResponse::json(
+            200,
+            json!({ "preview": {
             "version": 1, "readonly": true, "mimeType": mime_type, "kind": "text",
             "document": { "type": "text", "text": redacted },
             "truncated": { "text": source.len() > 256 * 1024 },
             "redaction": { "applied": redacted.contains("[REDACTED]"), "count": usize::from(redacted.contains("[REDACTED]")) },
             "limits": { "maxBytes": 8 * 1024 * 1024, "maxTextChars": 256 * 1024 }
-        } }))));
+        } }),
+        )));
     }
     if mime_type.contains("openxmlformats") {
         let document = ooxml_preview(&path, mime_type)?;
-        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+        return Ok(Some(HttpRouteResponse::json(
+            200,
+            json!({ "preview": {
             "version": 1, "readonly": true, "mimeType": mime_type, "kind": kind_for(mime_type),
             "document": document, "truncated": {}, "redaction": { "applied": false, "count": 0 },
             "limits": { "maxBytes": 8 * 1024 * 1024, "archiveEntries": 2048, "archiveEntryBytes": 4 * 1024 * 1024 }
-        } }))));
+        } }),
+        )));
     }
     if mime_type == "application/pdf" {
         let bytes = fs::read(&path)?;
         if bytes.len() > 8 * 1024 * 1024 {
-            return Ok(Some(HttpRouteResponse::error(413, "Artifact source exceeds the preview limit.")));
+            return Ok(Some(HttpRouteResponse::error(
+                413,
+                "Artifact source exceeds the preview limit.",
+            )));
         }
         let source = String::from_utf8_lossy(&bytes);
         let page_count = source.matches("/Type /Page").count().max(1).min(200);
-        return Ok(Some(HttpRouteResponse::json(200, json!({ "preview": {
+        return Ok(Some(HttpRouteResponse::json(
+            200,
+            json!({ "preview": {
             "version": 1, "readonly": true, "mimeType": mime_type, "kind": "pdf",
             "document": { "type": "pdf", "pageCount": page_count, "text": "", "extraction": "best-effort" },
             "truncated": { "pages": false, "text": false }, "redaction": { "applied": false, "count": 0 },
             "limits": { "maxBytes": 8 * 1024 * 1024, "maxTextChars": 256 * 1024 }
-        } }))));
+        } }),
+        )));
     }
     if mime_type != "text/csv" && mime_type != "text/tab-separated-values" {
         return Ok(None);
@@ -168,20 +210,31 @@ pub fn route_artifact_preview_request(
     let mut rows = parse_delimited_preview(&source, delimiter).into_iter();
     let columns = rows.next().unwrap_or_default();
     let data = rows.take(200).collect::<Vec<_>>();
-    let redaction_count = columns.iter().chain(data.iter().flatten()).filter(|value| value.contains("[REDACTED]")).count();
-    let source_rows = source.lines().filter(|line| !line.is_empty()).count().saturating_sub(1);
-    Ok(Some(HttpRouteResponse::json(200, json!({
-        "preview": {
-            "version": 1,
-            "readonly": false,
-            "mimeType": mime_type,
-            "kind": "table",
-            "document": { "type": "table", "columns": columns, "rows": data },
-            "truncated": { "rows": source_rows > data.len(), "columns": columns.len() >= 100 },
-            "redaction": { "applied": redaction_count > 0, "count": redaction_count },
-            "limits": { "maxBytes": 8 * 1024 * 1024, "maxRows": 200, "maxColumns": 100 }
-        }
-    }))))
+    let redaction_count = columns
+        .iter()
+        .chain(data.iter().flatten())
+        .filter(|value| value.contains("[REDACTED]"))
+        .count();
+    let source_rows = source
+        .lines()
+        .filter(|line| !line.is_empty())
+        .count()
+        .saturating_sub(1);
+    Ok(Some(HttpRouteResponse::json(
+        200,
+        json!({
+            "preview": {
+                "version": 1,
+                "readonly": false,
+                "mimeType": mime_type,
+                "kind": "table",
+                "document": { "type": "table", "columns": columns, "rows": data },
+                "truncated": { "rows": source_rows > data.len(), "columns": columns.len() >= 100 },
+                "redaction": { "applied": redaction_count > 0, "count": redaction_count },
+                "limits": { "maxBytes": 8 * 1024 * 1024, "maxRows": 200, "maxColumns": 100 }
+            }
+        }),
+    )))
 }
 
 pub fn artifact_request_requires_body(request: &ParsedRequest) -> bool {
@@ -204,15 +257,24 @@ pub fn route_attachment_upload_request(
     }
     match authenticate_route_request(request, &config.data_dir)? {
         RouteAuthentication::Pending => return Ok(None),
-        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {}
     }
     if body.is_empty() {
         return Ok(Some(HttpRouteResponse::error(400, "Empty upload.")));
     }
     let name = safe_upload_name(request.header("x-file-name").unwrap_or("attachment"));
-    let mime_type = request.header("content-type").unwrap_or("application/octet-stream").split(';').next().unwrap_or("application/octet-stream");
+    let mime_type = request
+        .header("content-type")
+        .unwrap_or("application/octet-stream")
+        .split(';')
+        .next()
+        .unwrap_or("application/octet-stream");
     let extension = upload_extension(mime_type, &name);
     let id = format!("{}{}", uuid::Uuid::new_v4(), extension);
     let attachments = config.data_dir.join("attachments");
@@ -220,17 +282,22 @@ pub fn route_attachment_upload_request(
     let path = attachments.join(&id);
     fs::write(&path, body)?;
     let detected_mime = mime_type_for(&path);
-    let artifact = (kind_for(detected_mime) != "binary").then(|| json!({
-        "metadataUrl": format!("/api/artifacts/{id}"),
-        "previewUrl": format!("/api/artifacts/{id}/preview"),
-        "contentUrl": format!("/api/artifacts/{id}/content")
-    }));
-    Ok(Some(HttpRouteResponse::json(201, json!({
-        "ok": true, "id": id, "name": name, "relativePath": request.header("x-relative-path").unwrap_or(""),
-        "path": path, "url": format!("/api/attachments/{id}"), "kind": "file",
-        "markdown": format!("[{name}]({})", path.display()), "mimeType": detected_mime,
-        "size": body.len(), "preview": "", "artifact": artifact
-    }))))
+    let artifact = (kind_for(detected_mime) != "binary").then(|| {
+        json!({
+            "metadataUrl": format!("/api/artifacts/{id}"),
+            "previewUrl": format!("/api/artifacts/{id}/preview"),
+            "contentUrl": format!("/api/artifacts/{id}/content")
+        })
+    });
+    Ok(Some(HttpRouteResponse::json(
+        201,
+        json!({
+            "ok": true, "id": id, "name": name, "relativePath": request.header("x-relative-path").unwrap_or(""),
+            "path": path, "url": format!("/api/attachments/{id}"), "kind": "file",
+            "markdown": format!("[{name}]({})", path.display()), "mimeType": detected_mime,
+            "size": body.len(), "preview": "", "artifact": artifact
+        }),
+    )))
 }
 
 pub fn stream_attachment_request(
@@ -249,14 +316,29 @@ pub fn stream_attachment_request(
     };
     match authenticate_route_request(request, &config.data_dir)? {
         RouteAuthentication::Pending => return Ok(None),
-        RouteAuthentication::HostDenied => return HttpRouteResponse::error(403, "Host is not allowed.").write_to(client).map(|_| Some(())).map_err(Into::into),
-        RouteAuthentication::Unauthorized => return HttpRouteResponse::error(401, "Unauthorized").write_to(client).map(|_| Some(())).map_err(Into::into),
+        RouteAuthentication::HostDenied => {
+            return HttpRouteResponse::error(403, "Host is not allowed.")
+                .write_to(client)
+                .map(|_| Some(()))
+                .map_err(Into::into)
+        }
+        RouteAuthentication::Unauthorized => {
+            return HttpRouteResponse::error(401, "Unauthorized")
+                .write_to(client)
+                .map(|_| Some(()))
+                .map_err(Into::into)
+        }
         RouteAuthentication::Device(_) => {}
     }
     let path = config.data_dir.join("attachments").join(relative);
     let data = match fs::read(&path) {
         Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return HttpRouteResponse::error(404, "Attachment not found.").write_to(client).map(|_| Some(())).map_err(Into::into),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return HttpRouteResponse::error(404, "Attachment not found.")
+                .write_to(client)
+                .map(|_| Some(()))
+                .map_err(Into::into)
+        }
         Err(error) => return Err(error.into()),
     };
     write!(client, "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Disposition: inline; filename=\"{}\"\r\nCache-Control: private, max-age=300\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-VibeLink-Control-Plane: rust\r\n\r\n", mime_type_for(&path), id.replace('"', ""), data.len())?;
@@ -278,14 +360,24 @@ pub fn route_artifact_mutation_request(
     };
     match authenticate_route_request(request, &config.data_dir)? {
         RouteAuthentication::Pending => return Ok(None),
-        RouteAuthentication::HostDenied => return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed."))),
-        RouteAuthentication::Unauthorized => return Ok(Some(HttpRouteResponse::error(401, "Unauthorized"))),
+        RouteAuthentication::HostDenied => {
+            return Ok(Some(HttpRouteResponse::error(403, "Host is not allowed.")))
+        }
+        RouteAuthentication::Unauthorized => {
+            return Ok(Some(HttpRouteResponse::error(401, "Unauthorized")))
+        }
         RouteAuthentication::Device(_) => {}
     }
     let path = config.data_dir.join("attachments").join(relative_path);
     let mime_type = mime_type_for(&path);
-    if !matches!(mime_type, "text/csv" | "text/tab-separated-values" | "application/x-ipynb+json") {
-        return Ok(Some(HttpRouteResponse::error(405, "Artifact type is read-only.")));
+    if !matches!(
+        mime_type,
+        "text/csv" | "text/tab-separated-values" | "application/x-ipynb+json"
+    ) {
+        return Ok(Some(HttpRouteResponse::error(
+            405,
+            "Artifact type is read-only.",
+        )));
     }
     let payload: serde_json::Value = match serde_json::from_slice(body) {
         Ok(payload) => payload,
@@ -293,76 +385,133 @@ pub fn route_artifact_mutation_request(
     };
     let current = artifact_metadata(&path, id)?;
     if payload["expectedDigest"].as_str() != current["digest"].as_str() {
-        return Ok(Some(HttpRouteResponse::error(409, "Artifact changed since it was loaded.")));
+        return Ok(Some(HttpRouteResponse::error(
+            409,
+            "Artifact changed since it was loaded.",
+        )));
     }
     if mime_type == "application/x-ipynb+json" {
-        let mut notebook: serde_json::Value = match serde_json::from_str(&fs::read_to_string(&path)?) {
-            Ok(notebook) => notebook,
-            Err(_) => return Ok(Some(HttpRouteResponse::error(422, "Notebook JSON is invalid."))),
-        };
+        let mut notebook: serde_json::Value =
+            match serde_json::from_str(&fs::read_to_string(&path)?) {
+                Ok(notebook) => notebook,
+                Err(_) => {
+                    return Ok(Some(HttpRouteResponse::error(
+                        422,
+                        "Notebook JSON is invalid.",
+                    )))
+                }
+            };
         let Some(cells) = notebook["cells"].as_array_mut() else {
-            return Ok(Some(HttpRouteResponse::error(422, "Notebook cells are missing.")));
+            return Ok(Some(HttpRouteResponse::error(
+                422,
+                "Notebook cells are missing.",
+            )));
         };
         let Some(patches) = payload["cellPatches"].as_array() else {
-            return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patches are invalid.")));
+            return Ok(Some(HttpRouteResponse::error(
+                422,
+                "Notebook cell patches are invalid.",
+            )));
         };
         if patches.is_empty() || patches.len() > 1_000 {
-            return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patches are invalid.")));
+            return Ok(Some(HttpRouteResponse::error(
+                422,
+                "Notebook cell patches are invalid.",
+            )));
         }
         let mut seen = std::collections::HashSet::new();
         for patch in patches {
             let Some(index) = patch["index"].as_u64().map(|value| value as usize) else {
-                return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patch is invalid.")));
+                return Ok(Some(HttpRouteResponse::error(
+                    422,
+                    "Notebook cell patch is invalid.",
+                )));
             };
             let Some(source) = patch["source"].as_str() else {
-                return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patch is invalid.")));
+                return Ok(Some(HttpRouteResponse::error(
+                    422,
+                    "Notebook cell patch is invalid.",
+                )));
             };
             if index >= cells.len() || !seen.insert(index) || source.len() > 1024 * 1024 {
-                return Ok(Some(HttpRouteResponse::error(422, "Notebook cell patch is invalid.")));
+                return Ok(Some(HttpRouteResponse::error(
+                    422,
+                    "Notebook cell patch is invalid.",
+                )));
             }
             cells[index]["source"] = json!([source]);
         }
         let output = serde_json::to_string_pretty(&notebook)? + "\n";
         replace_artifact_file(&path, output.as_bytes())?;
-        return Ok(Some(HttpRouteResponse::json(200, json!({ "metadata": artifact_metadata(&path, id)? }))));
+        return Ok(Some(HttpRouteResponse::json(
+            200,
+            json!({ "metadata": artifact_metadata(&path, id)? }),
+        )));
     }
     let document = &payload["document"];
     let Some(columns) = document["columns"].as_array() else {
-        return Ok(Some(HttpRouteResponse::error(422, "Table document is invalid.")));
+        return Ok(Some(HttpRouteResponse::error(
+            422,
+            "Table document is invalid.",
+        )));
     };
     let Some(rows) = document["rows"].as_array() else {
-        return Ok(Some(HttpRouteResponse::error(422, "Table document is invalid.")));
+        return Ok(Some(HttpRouteResponse::error(
+            422,
+            "Table document is invalid.",
+        )));
     };
     if document["type"] != "table" || columns.len() > 500 || rows.len() > 10_000 {
-        return Ok(Some(HttpRouteResponse::error(413, "Table mutation exceeds the supported limits.")));
+        return Ok(Some(HttpRouteResponse::error(
+            413,
+            "Table mutation exceeds the supported limits.",
+        )));
     }
-    let delimiter = if mime_type_for(&path) == "text/csv" { ',' } else { '\t' };
+    let delimiter = if mime_type_for(&path) == "text/csv" {
+        ','
+    } else {
+        '\t'
+    };
     let mut output = String::new();
     output.push_str(&serialize_delimited_row(columns, delimiter)?);
     output.push('\n');
     for row in rows {
         let Some(row) = row.as_array() else {
-            return Ok(Some(HttpRouteResponse::error(422, "Table rows must match the column count.")));
+            return Ok(Some(HttpRouteResponse::error(
+                422,
+                "Table rows must match the column count.",
+            )));
         };
         if row.len() != columns.len() {
-            return Ok(Some(HttpRouteResponse::error(422, "Table rows must match the column count.")));
+            return Ok(Some(HttpRouteResponse::error(
+                422,
+                "Table rows must match the column count.",
+            )));
         }
         output.push_str(&serialize_delimited_row(row, delimiter)?);
         output.push('\n');
     }
     if output.len() > 8 * 1024 * 1024 {
-        return Ok(Some(HttpRouteResponse::error(413, "Table mutation is too large.")));
+        return Ok(Some(HttpRouteResponse::error(
+            413,
+            "Table mutation is too large.",
+        )));
     }
     replace_artifact_file(&path, output.as_bytes())?;
     let metadata = artifact_metadata(&path, id)?;
-    Ok(Some(HttpRouteResponse::json(200, json!({ "metadata": metadata }))))
+    Ok(Some(HttpRouteResponse::json(
+        200,
+        json!({ "metadata": metadata }),
+    )))
 }
 
 fn artifact_path_for(id: &str) -> Option<PathBuf> {
     let (uuid, extension) = id.split_once('.')?;
     if extension.is_empty()
         || extension.len() > 16
-        || !extension.chars().all(|character| character.is_ascii_alphanumeric())
+        || !extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
         || uuid::Uuid::parse_str(uuid).is_err()
     {
         return None;
@@ -380,7 +529,8 @@ fn artifact_metadata(path: &Path, id: &str) -> std::io::Result<serde_json::Value
     }
     let mime_type = mime_type_for(path);
     let kind = kind_for(mime_type);
-    let modified_at = DateTime::<Utc>::from(stat.modified()?).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let modified_at = DateTime::<Utc>::from(stat.modified()?)
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     Ok(json!({
         "version": 1,
         "id": id,
@@ -413,7 +563,13 @@ fn sha256(path: &Path) -> std::io::Result<String> {
 }
 
 fn mime_type_for(path: &Path) -> &'static str {
-    match path.extension().and_then(|extension| extension.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "csv" => "text/csv",
         "tsv" => "text/tab-separated-values",
         "ipynb" => "application/x-ipynb+json",
@@ -439,7 +595,9 @@ fn kind_for(mime_type: &str) -> &'static str {
         "application/vnd.ms-excel"
         | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "workbook",
         "application/vnd.ms-powerpoint"
-        | "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "presentation",
+        | "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+            "presentation"
+        }
         "text/csv" | "text/tab-separated-values" => "table",
         "application/x-ipynb+json" => "notebook",
         "application/json" | "text/plain" | "text/markdown" => "text",
@@ -450,10 +608,22 @@ fn kind_for(mime_type: &str) -> &'static str {
 fn safe_upload_name(value: &str) -> String {
     let normalized = value.replace('\\', "/");
     let name = normalized.rsplit('/').next().unwrap_or("attachment");
-    let filtered = name.chars().map(|character| {
-        if character.is_control() || "<>:\"/\\|?*".contains(character) { '_' } else { character }
-    }).take(160).collect::<String>();
-    if filtered.is_empty() { "attachment".to_string() } else { filtered }
+    let filtered = name
+        .chars()
+        .map(|character| {
+            if character.is_control() || "<>:\"/\\|?*".contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(160)
+        .collect::<String>();
+    if filtered.is_empty() {
+        "attachment".to_string()
+    } else {
+        filtered
+    }
 }
 
 fn upload_extension(mime_type: &str, name: &str) -> String {
@@ -469,8 +639,16 @@ fn upload_extension(mime_type: &str, name: &str) -> String {
     if let Some(extension) = known {
         return extension.to_string();
     }
-    let extension = Path::new(name).extension().and_then(|value| value.to_str()).unwrap_or("");
-    if !extension.is_empty() && extension.len() <= 16 && extension.chars().all(|character| character.is_ascii_alphanumeric()) {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if !extension.is_empty()
+        && extension.len() <= 16
+        && extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
         format!(".{}", extension.to_ascii_lowercase())
     } else {
         ".bin".to_string()
@@ -485,7 +663,11 @@ pub fn stream_artifact_content_request(
     if request.method != "GET" {
         return Ok(None);
     }
-    let Some(id) = request.path().strip_prefix("/api/artifacts/").and_then(|path| path.strip_suffix("/content")) else {
+    let Some(id) = request
+        .path()
+        .strip_prefix("/api/artifacts/")
+        .and_then(|path| path.strip_suffix("/content"))
+    else {
         return Ok(None);
     };
     let Some(relative_path) = artifact_path_for(id) else {
@@ -494,10 +676,16 @@ pub fn stream_artifact_content_request(
     match authenticate_route_request(request, &config.data_dir)? {
         RouteAuthentication::Pending => return Ok(None),
         RouteAuthentication::HostDenied => {
-            return HttpRouteResponse::error(403, "Host is not allowed.").write_to(client).map(|_| Some(())).map_err(Into::into);
+            return HttpRouteResponse::error(403, "Host is not allowed.")
+                .write_to(client)
+                .map(|_| Some(()))
+                .map_err(Into::into);
         }
         RouteAuthentication::Unauthorized => {
-            return HttpRouteResponse::error(401, "Unauthorized").write_to(client).map(|_| Some(())).map_err(Into::into);
+            return HttpRouteResponse::error(401, "Unauthorized")
+                .write_to(client)
+                .map(|_| Some(()))
+                .map_err(Into::into);
         }
         RouteAuthentication::Device(_) => {}
     }
@@ -505,21 +693,36 @@ pub fn stream_artifact_content_request(
     let mut file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return HttpRouteResponse::error(404, "Artifact not found.").write_to(client).map(|_| Some(())).map_err(Into::into);
+            return HttpRouteResponse::error(404, "Artifact not found.")
+                .write_to(client)
+                .map(|_| Some(()))
+                .map_err(Into::into);
         }
         Err(error) => return Err(error.into()),
     };
     let size = file.metadata()?.len();
     let Some(range_header) = request.header("range") else {
         return HttpRouteResponse::error(416, "Artifact content requires a single byte range.")
-            .with_headers(vec![("Accept-Ranges".to_string(), "bytes".to_string()), ("Content-Range".to_string(), format!("bytes */{size}"))])
-            .write_to(client).map(|_| Some(())).map_err(Into::into);
+            .with_headers(vec![
+                ("Accept-Ranges".to_string(), "bytes".to_string()),
+                ("Content-Range".to_string(), format!("bytes */{size}")),
+            ])
+            .write_to(client)
+            .map(|_| Some(()))
+            .map_err(Into::into);
     };
     let (start, end) = match parse_artifact_range(range_header, size) {
         Ok(range) => range,
-        Err(message) => return HttpRouteResponse::error(416, message)
-            .with_headers(vec![("Accept-Ranges".to_string(), "bytes".to_string()), ("Content-Range".to_string(), format!("bytes */{size}"))])
-            .write_to(client).map(|_| Some(())).map_err(Into::into),
+        Err(message) => {
+            return HttpRouteResponse::error(416, message)
+                .with_headers(vec![
+                    ("Accept-Ranges".to_string(), "bytes".to_string()),
+                    ("Content-Range".to_string(), format!("bytes */{size}")),
+                ])
+                .write_to(client)
+                .map(|_| Some(()))
+                .map_err(Into::into)
+        }
     };
     let length = end - start + 1;
     file.seek(SeekFrom::Start(start))?;
@@ -596,7 +799,10 @@ fn redact_preview_field(value: &str) -> String {
 
 fn json_text(value: &serde_json::Value) -> String {
     if let Some(values) = value.as_array() {
-        return values.iter().filter_map(serde_json::Value::as_str).collect::<String>();
+        return values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<String>();
     }
     value.as_str().unwrap_or_default().to_string()
 }
@@ -615,9 +821,15 @@ fn ooxml_preview(path: &Path, mime_type: &str) -> Result<serde_json::Value> {
         }
         let name = entry.name().replace('\\', "/");
         let selected = match mime_type {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => name == "word/document.xml",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"),
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation" => name.starts_with("ppt/slides/slide") && name.ends_with(".xml"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+                name == "word/document.xml"
+            }
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+                name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml")
+            }
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+                name.starts_with("ppt/slides/slide") && name.ends_with(".xml")
+            }
             _ => false,
         };
         if selected {
@@ -627,9 +839,15 @@ fn ooxml_preview(path: &Path, mime_type: &str) -> Result<serde_json::Value> {
         }
     }
     Ok(match mime_type {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => json!({ "type": "document", "paragraphs": entries.into_iter().take(1000).collect::<Vec<_>>() }),
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => json!({ "type": "workbook", "sheets": entries.into_iter().take(24).enumerate().map(|(index, text)| json!({ "name": format!("Sheet {}", index + 1), "rows": [[text]], "truncated": false })).collect::<Vec<_>>() }),
-        _ => json!({ "type": "presentation", "slides": entries.into_iter().take(200).enumerate().map(|(index, text)| json!({ "index": index + 1, "paragraphs": [text] })).collect::<Vec<_>>() }),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            json!({ "type": "document", "paragraphs": entries.into_iter().take(1000).collect::<Vec<_>>() })
+        }
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+            json!({ "type": "workbook", "sheets": entries.into_iter().take(24).enumerate().map(|(index, text)| json!({ "name": format!("Sheet {}", index + 1), "rows": [[text]], "truncated": false })).collect::<Vec<_>>() })
+        }
+        _ => {
+            json!({ "type": "presentation", "slides": entries.into_iter().take(200).enumerate().map(|(index, text)| json!({ "index": index + 1, "paragraphs": [text] })).collect::<Vec<_>>() })
+        }
     })
 }
 
@@ -641,7 +859,9 @@ fn xml_text(source: &str) -> String {
             '<' => inside_tag = true,
             '>' => {
                 inside_tag = false;
-                if !text.ends_with(' ') { text.push(' '); }
+                if !text.ends_with(' ') {
+                    text.push(' ');
+                }
             }
             value if !inside_tag => text.push(value),
             _ => {}
@@ -651,14 +871,23 @@ fn xml_text(source: &str) -> String {
 }
 
 fn serialize_delimited_row(values: &[serde_json::Value], delimiter: char) -> Result<String> {
-    let cells = values.iter().map(|value| {
-        let value = value.as_str().unwrap_or_else(|| value.as_str().unwrap_or(""));
-        if value.contains(delimiter) || value.contains('"') || value.contains('\r') || value.contains('\n') {
-            format!("\"{}\"", value.replace('"', "\"\""))
-        } else {
-            value.to_string()
-        }
-    }).collect::<Vec<_>>();
+    let cells = values
+        .iter()
+        .map(|value| {
+            let value = value
+                .as_str()
+                .unwrap_or_else(|| value.as_str().unwrap_or(""));
+            if value.contains(delimiter)
+                || value.contains('"')
+                || value.contains('\r')
+                || value.contains('\n')
+            {
+                format!("\"{}\"", value.replace('"', "\"\""))
+            } else {
+                value.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
     Ok(cells.join(&delimiter.to_string()))
 }
 
@@ -686,17 +915,22 @@ fn parse_artifact_range(value: &str, size: u64) -> Result<(u64, u64), &'static s
         return Err("Artifact byte range is invalid.");
     };
     let (start, end) = if start.is_empty() {
-        let suffix = end.parse::<u64>().map_err(|_| "Artifact byte range is invalid.")?;
+        let suffix = end
+            .parse::<u64>()
+            .map_err(|_| "Artifact byte range is invalid.")?;
         if suffix == 0 {
             return Err("Artifact byte range is invalid.");
         }
         (size.saturating_sub(suffix), size - 1)
     } else {
-        let start = start.parse::<u64>().map_err(|_| "Artifact byte range is invalid.")?;
+        let start = start
+            .parse::<u64>()
+            .map_err(|_| "Artifact byte range is invalid.")?;
         let end = if end.is_empty() {
             start.saturating_add(MAX_RANGE_BYTES - 1).min(size - 1)
         } else {
-            end.parse::<u64>().map_err(|_| "Artifact byte range is invalid.")?
+            end.parse::<u64>()
+                .map_err(|_| "Artifact byte range is invalid.")?
         };
         (start, end.min(size - 1))
     };
@@ -762,9 +996,10 @@ mod tests {
         let request = parse_request(format!(
             "GET /api/artifacts/{id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n"
         ).as_bytes()).unwrap();
-        let response = route_artifact_request(&request, &ArtifactRouteConfig::new(directory.clone()))
-            .unwrap()
-            .unwrap();
+        let response =
+            route_artifact_request(&request, &ArtifactRouteConfig::new(directory.clone()))
+                .unwrap()
+                .unwrap();
 
         assert_eq!(response.status, 200);
         assert_eq!(response.body["artifact"]["mimeType"], "text/csv");
@@ -783,8 +1018,17 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(preview.body["preview"]["document"]["rows"][0].as_array().unwrap().len(), 2);
-        assert_eq!(preview.body["preview"]["document"]["rows"][0][1], "token=[REDACTED]");
+        assert_eq!(
+            preview.body["preview"]["document"]["rows"][0]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            preview.body["preview"]["document"]["rows"][0][1],
+            "token=[REDACTED]"
+        );
         assert_eq!(preview.body["preview"]["redaction"]["applied"], true);
         let mutation_body = json!({
             "expectedDigest": response.body["artifact"]["digest"],
@@ -801,8 +1045,14 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(mutation.status, 200);
-        assert_ne!(mutation.body["metadata"]["digest"], response.body["artifact"]["digest"]);
-        assert_eq!(fs::read_to_string(attachments.join(id)).unwrap(), "name,note\nAda,\"edited,value\"\n");
+        assert_ne!(
+            mutation.body["metadata"]["digest"],
+            response.body["artifact"]["digest"]
+        );
+        assert_eq!(
+            fs::read_to_string(attachments.join(id)).unwrap(),
+            "name,note\nAda,\"edited,value\"\n"
+        );
 
         let notebook_id = "b0b1c2d3-e4f5-6789-abcd-ef0123456789.ipynb";
         fs::write(
@@ -810,7 +1060,8 @@ mod tests {
             r#"{"nbformat":4,"cells":[{"cell_type":"code","source":["token=private"],"outputs":[]}]}"#,
         )
         .unwrap();
-        let notebook_metadata = artifact_metadata(&attachments.join(notebook_id), notebook_id).unwrap();
+        let notebook_metadata =
+            artifact_metadata(&attachments.join(notebook_id), notebook_id).unwrap();
         let notebook_request = parse_request(format!(
             "PATCH /api/artifacts/{notebook_id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 1\r\n\r\n"
         ).as_bytes()).unwrap();
@@ -826,7 +1077,9 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(notebook_response.status, 200);
-        let saved: serde_json::Value = serde_json::from_str(&fs::read_to_string(attachments.join(notebook_id)).unwrap()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(attachments.join(notebook_id)).unwrap())
+                .unwrap();
         assert_eq!(saved["cells"][0]["source"][0], "print('edited')");
 
         let upload_request = parse_request(
@@ -842,7 +1095,9 @@ mod tests {
         .unwrap();
         assert_eq!(upload.status, 201);
         assert_eq!(upload.body["mimeType"], "text/csv");
-        assert!(attachments.join(upload.body["id"].as_str().unwrap()).is_file());
+        assert!(attachments
+            .join(upload.body["id"].as_str().unwrap())
+            .is_file());
         let _ = fs::remove_dir_all(directory);
     }
 }

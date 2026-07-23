@@ -15,7 +15,6 @@ use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -24,15 +23,8 @@ use std::time::{Duration, SystemTime};
 pub struct SettingsRouteConfig {
     data_dir: PathBuf,
     root_dir: PathBuf,
-    internal_settings: Option<InternalSettingsConfig>,
     mutation_lock: Arc<Mutex<()>>,
     metrics: Arc<RouteMetrics>,
-}
-
-#[derive(Debug, Clone)]
-struct InternalSettingsConfig {
-    upstream: SocketAddr,
-    token: String,
 }
 
 struct SettingsMutationMetadata<'a> {
@@ -46,15 +38,9 @@ impl SettingsRouteConfig {
         Self {
             data_dir,
             root_dir,
-            internal_settings: None,
             mutation_lock: Arc::new(Mutex::new(())),
             metrics: Arc::new(RouteMetrics::default()),
         }
-    }
-
-    pub fn with_internal_settings(mut self, upstream: SocketAddr, token: String) -> Self {
-        self.internal_settings = Some(InternalSettingsConfig { upstream, token });
-        self
     }
 
     pub(crate) fn record_fallback(&self) {
@@ -126,8 +112,7 @@ pub fn route_settings_request(
 
     let settings = load_settings(&config.data_dir, &config.root_dir)?;
     let (body, event_type, headers) = if request.path() == "/api/settings" {
-        let public = fetch_public_settings(config)
-            .unwrap_or_else(|_| project_public_settings(&settings, &config.data_dir));
+        let public = project_public_settings(&settings, &config.data_dir);
         (
             json!({ "settings": public }),
             "settings.read",
@@ -390,8 +375,7 @@ fn update_settings(
         return Ok(response);
     }
     if is_dry_run(request) {
-        let current_public = fetch_public_settings(config)
-            .unwrap_or_else(|_| project_public_settings(&current, &config.data_dir));
+        let current_public = project_public_settings(&current, &config.data_dir);
         let mut diff = serde_json::Map::new();
         if let Some(patch) = patch.as_object() {
             for (key, value) in patch {
@@ -503,15 +487,7 @@ fn persist_and_reload(
     serialized_with_newline.push(b'\n');
     atomic_replace(&path, &serialized_with_newline)?;
 
-    let public = match reload_internal_settings(config) {
-        Ok(public) => public,
-        Err(error) => {
-            let rollback = atomic_replace(&path, &original);
-            let _ = reload_internal_settings(config);
-            rollback.context("Cannot restore settings after reload failure")?;
-            return Err(error).context("Cannot synchronize hybrid Node settings");
-        }
-    };
+    let public = project_public_settings(next, &config.data_dir);
     if let Err(error) = audit_only(
         &config.data_dir,
         request,
@@ -524,7 +500,6 @@ fn persist_and_reload(
         metadata.audit,
     ) {
         atomic_replace(&path, &original).context("Cannot restore settings after audit failure")?;
-        let _ = reload_internal_settings(config);
         return Err(error).context("Cannot audit settings mutation");
     }
     let mut response = metadata.response.as_object().cloned().unwrap_or_default();
@@ -612,53 +587,7 @@ fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn reload_internal_settings(config: &SettingsRouteConfig) -> Result<Value> {
-    let internal = config
-        .internal_settings
-        .as_ref()
-        .context("Hybrid Node settings synchronization is not configured")?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout_read(Duration::from_secs(5))
-        .timeout_write(Duration::from_secs(2))
-        .build();
-    let response = agent
-        .post(&format!(
-            "http://{}/internal/reload-settings",
-            internal.upstream
-        ))
-        .set("X-VibeLink-Internal-Token", &internal.token)
-        .call()
-        .context("Internal settings reload request failed")?;
-    response
-        .into_json::<Value>()
-        .context("Cannot parse internal settings reload response")
-}
-
-fn fetch_public_settings(config: &SettingsRouteConfig) -> Result<Value> {
-    let internal = config
-        .internal_settings
-        .as_ref()
-        .context("Hybrid Node public settings endpoint is not configured")?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout_read(Duration::from_secs(5))
-        .timeout_write(Duration::from_secs(2))
-        .build();
-    let response = agent
-        .get(&format!(
-            "http://{}/internal/public-settings",
-            internal.upstream
-        ))
-        .set("X-VibeLink-Internal-Token", &internal.token)
-        .call()
-        .context("Internal public settings request failed")?;
-    response
-        .into_json::<Value>()
-        .context("Cannot parse internal public settings response")
-}
-
-fn project_public_settings(settings: &Value, data_dir: &Path) -> Value {
+pub(crate) fn project_public_settings(settings: &Value, data_dir: &Path) -> Value {
     let defaults = default_settings(Path::new("."));
     let value = |key: &str| {
         settings
@@ -1131,8 +1060,6 @@ mod tests {
     use rusqlite::{params, Connection};
     use serde_json::Value;
     use std::fs;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1188,81 +1115,6 @@ mod tests {
         data_dir
     }
 
-    fn internal_settings_server(
-        status: u16,
-        body: &'static str,
-    ) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        let thread = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let count = stream.read(&mut buffer).unwrap();
-                if count == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..count]);
-                if request.windows(4).any(|value| value == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let reason = if status == 200 {
-                "OK"
-            } else {
-                "Internal Server Error"
-            };
-            write!(
-                stream,
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-            String::from_utf8(request).unwrap()
-        });
-        (address, thread)
-    }
-
-    fn repeated_internal_settings_server(
-        count: usize,
-        body: &'static str,
-    ) -> (std::net::SocketAddr, std::thread::JoinHandle<usize>) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        let thread = std::thread::spawn(move || {
-            for _ in 0..count {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|value| value == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .unwrap();
-            }
-            count
-        });
-        (address, thread)
-    }
-
     #[test]
     fn exports_authenticated_settings_without_secrets() {
         let data_dir = ready_data_dir();
@@ -1286,14 +1138,9 @@ mod tests {
     }
 
     #[test]
-    fn updates_settings_and_reloads_the_hybrid_node_runtime() {
+    fn updates_settings_with_rust_public_projection_without_node_reload() {
         let data_dir = ready_data_dir();
-        let (upstream, server) = internal_settings_server(
-            200,
-            r#"{"defaultCwd":"C:/new","pairingTokenConfigured":true}"#,
-        );
-        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"))
-            .with_internal_settings(upstream, "internal-secret".to_string());
+        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"));
         let request = parse_request(
             b"POST /api/settings HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer admin-token\r\nContent-Length: 23\r\n\r\n",
         )
@@ -1321,9 +1168,6 @@ mod tests {
                 "openai": "", "anthropic": "", "zhipu": ""
             })
         );
-        let internal_request = server.join().unwrap().to_ascii_lowercase();
-        assert!(internal_request.starts_with("post /internal/reload-settings "));
-        assert!(internal_request.contains("x-vibelink-internal-token: internal-secret"));
         fs::remove_dir_all(data_dir).unwrap();
     }
 
@@ -1352,12 +1196,13 @@ mod tests {
     }
 
     #[test]
-    fn reload_failure_restores_the_original_settings_without_node_replay() {
+    fn audit_failure_restores_the_original_settings_without_node_replay() {
         let data_dir = ready_data_dir();
         let original = fs::read(data_dir.join("settings.json")).unwrap();
-        let (upstream, server) = internal_settings_server(500, r#"{"error":"reload failed"}"#);
-        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"))
-            .with_internal_settings(upstream, "internal-secret".to_string());
+        let database = Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
+        database.execute("DROP TABLE audit_log", []).unwrap();
+        drop(database);
+        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"));
         let request = parse_request(
             b"POST /api/settings HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer admin-token\r\nContent-Length: 23\r\n\r\n",
         )
@@ -1372,19 +1217,13 @@ mod tests {
         .unwrap();
         assert_eq!(response.status, 500);
         assert_eq!(fs::read(data_dir.join("settings.json")).unwrap(), original);
-        server.join().unwrap();
         fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
     fn serializes_concurrent_settings_mutations() {
         let data_dir = ready_data_dir();
-        let (upstream, server) = repeated_internal_settings_server(
-            2,
-            r#"{"defaultCwd":"C:/serialized","pairingTokenConfigured":true}"#,
-        );
-        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"))
-            .with_internal_settings(upstream, "internal-secret".to_string());
+        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"));
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
         let mut workers = Vec::new();
         for cwd in ["C:/first", "C:/second"] {
@@ -1411,7 +1250,6 @@ mod tests {
         for worker in workers {
             assert_eq!(worker.join().unwrap().status, 200);
         }
-        assert_eq!(server.join().unwrap(), 2);
         let saved: Value =
             serde_json::from_str(&fs::read_to_string(data_dir.join("settings.json")).unwrap())
                 .unwrap();
@@ -1435,12 +1273,7 @@ mod tests {
     #[test]
     fn rejects_a_stale_second_device_settings_mutation() {
         let data_dir = ready_data_dir();
-        let (upstream, server) = internal_settings_server(
-            200,
-            r#"{"revision":1,"defaultCwd":"C:/first","pairingTokenConfigured":true}"#,
-        );
-        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"))
-            .with_internal_settings(upstream, "internal-secret".to_string());
+        let config = SettingsRouteConfig::new(data_dir.clone(), PathBuf::from("C:/app"));
         let first_request = parse_request(
             b"POST /api/settings HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer admin-token\r\nIf-Match: \"vibelink:settings:0\"\r\nContent-Length: 56\r\n\r\n",
         )
@@ -1467,15 +1300,6 @@ mod tests {
         assert_eq!(stale.status, 409);
         assert_eq!(stale.body["code"], "SETTINGS_CONFLICT");
         assert_eq!(stale.body["actualRevision"], 1);
-        assert_eq!(
-            server
-                .join()
-                .unwrap()
-                .to_ascii_lowercase()
-                .matches("post /internal/reload-settings")
-                .count(),
-            1
-        );
         fs::remove_dir_all(data_dir).unwrap();
     }
 

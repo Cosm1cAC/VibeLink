@@ -1,7 +1,9 @@
 use crate::device_http::apply_fields;
+use crate::settings_contract::load_settings;
+use crate::settings_http::project_public_settings;
 use crate::status_http::{
-    authenticate_route_request, prepare_route_request, read_internal_json, HttpRouteResponse,
-    ParsedRequest, RouteAuthentication, RouteMetrics, RoutePreparation,
+    authenticate_route_request, prepare_route_request, HttpRouteResponse, ParsedRequest,
+    RouteAuthentication, RouteMetrics, RoutePreparation,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -10,7 +12,6 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,14 +29,7 @@ pub struct PairingRouteConfig {
     rate_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     retryable_claims: Arc<Mutex<HashMap<String, RetryableClaim>>>,
     decision_lock: Arc<Mutex<()>>,
-    internal_settings: Option<InternalSettingsConfig>,
     metrics: Arc<RouteMetrics>,
-}
-
-#[derive(Debug, Clone)]
-struct InternalSettingsConfig {
-    upstream: SocketAddr,
-    token: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,14 +100,8 @@ impl PairingRouteConfig {
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
             retryable_claims: Arc::new(Mutex::new(HashMap::new())),
             decision_lock: Arc::new(Mutex::new(())),
-            internal_settings: None,
             metrics: Arc::new(RouteMetrics::default()),
         }
-    }
-
-    pub fn with_internal_settings(mut self, upstream: SocketAddr, token: String) -> Self {
-        self.internal_settings = Some(InternalSettingsConfig { upstream, token });
-        self
     }
 
     pub(crate) fn record_fallback(&self) {
@@ -318,9 +306,6 @@ fn route_claim_pairing(
     config: &PairingRouteConfig,
     session_id: &str,
 ) -> Result<Option<HttpRouteResponse>> {
-    let Some(internal_settings) = config.internal_settings.as_ref() else {
-        return Ok(None);
-    };
     match prepare_route_request(request, &config.data_dir)? {
         RoutePreparation::Pending => return Ok(None),
         RoutePreparation::HostDenied => {
@@ -396,7 +381,7 @@ fn route_claim_pairing(
         .map(|()| HttpRouteResponse::error(status, &message));
         return Ok(Some(claimed_result(config, response).with_headers(headers)));
     }
-    let public_settings = fetch_public_settings(internal_settings)?;
+    let public_settings = local_public_settings(config)?;
     let label = if !body.device_label.is_empty() {
         body.device_label
     } else {
@@ -464,11 +449,7 @@ fn retryable_claim_settings(
         claims.remove(&row.id);
         return Ok(None);
     }
-    Ok(config
-        .internal_settings
-        .as_ref()
-        .map(fetch_public_settings)
-        .transpose()?)
+    Ok(Some(local_public_settings(config)?))
 }
 
 fn retryable_claim_response(
@@ -802,21 +783,10 @@ fn claim_validation_error(
     None
 }
 
-fn fetch_public_settings(config: &InternalSettingsConfig) -> Result<Value> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout_read(Duration::from_secs(5))
-        .timeout_write(Duration::from_secs(2))
-        .build();
-    let response = agent
-        .get(&format!(
-            "http://{}/internal/public-settings",
-            config.upstream
-        ))
-        .set("X-VibeLink-Internal-Token", &config.token)
-        .call()
-        .context("Internal public settings request failed")?;
-    read_internal_json(response, "public settings")
+fn local_public_settings(config: &PairingRouteConfig) -> Result<Value> {
+    let settings = load_settings(&config.data_dir, Path::new("."))
+        .context("Cannot load Rust public settings for pairing")?;
+    Ok(project_public_settings(&settings, &config.data_dir))
 }
 
 fn pairing_url(request: &ParsedRequest, id: &str, code: &str) -> String {
@@ -1327,8 +1297,6 @@ mod tests {
     use rusqlite::{params, Connection};
     use serde_json::json;
     use std::fs;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1601,30 +1569,9 @@ mod tests {
     }
 
     #[test]
-    fn creates_and_claims_pairing_with_one_time_token_and_prefetched_settings() {
+    fn creates_and_claims_pairing_with_one_time_token_and_rust_settings_projection() {
         let data_dir = ready_data_dir();
-        let internal = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let internal_addr = internal.local_addr().unwrap();
-        let internal_thread = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut stream, _) = internal.accept().unwrap();
-                let mut request = [0_u8; 2048];
-                let size = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..size]);
-                assert!(request.starts_with("GET /internal/public-settings HTTP/1.1"));
-                assert!(request.contains("X-VibeLink-Internal-Token: secret"));
-                let body = r#"{"theme":"dark","hasOpenAIKey":false}"#;
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-                .unwrap();
-            }
-        });
-        let config = PairingRouteConfig::new(data_dir.clone())
-            .with_internal_settings(internal_addr, "secret".to_string());
+        let config = PairingRouteConfig::new(data_dir.clone());
         let create = request("POST", "/api/pairing-sessions", "");
         let created = route_pairing_request_with_body(
             &create,
@@ -1680,7 +1627,7 @@ mod tests {
         assert_eq!(claimed.status, 200);
         assert_eq!(claimed.body["session"]["status"], "claimed");
         assert_eq!(claimed.body["device"]["label"], "Claimed phone");
-        assert_eq!(claimed.body["settings"]["theme"], "dark");
+        assert_eq!(claimed.body["settings"]["pairingTokenConfigured"], true);
         let token = claimed.body["token"].as_str().unwrap();
         assert_eq!(token.len(), 64);
         let mut response_fields = claimed
@@ -1706,7 +1653,7 @@ mod tests {
         assert_eq!(retry.status, 200);
         assert_eq!(retry.body["token"], token);
         assert_eq!(retry.body["device"]["id"], claimed.body["device"]["id"]);
-        assert_eq!(retry.body["settings"]["theme"], "dark");
+        assert_eq!(retry.body["settings"]["pairingTokenConfigured"], true);
         let mut retry_fields = retry
             .body
             .as_object()
@@ -1716,8 +1663,6 @@ mod tests {
             .collect::<Vec<_>>();
         retry_fields.sort();
         assert_eq!(retry_fields, response_fields);
-        internal_thread.join().unwrap();
-
         let database = Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
         let code_hash = database
             .query_row(

@@ -46,8 +46,11 @@ impl TaskRouteConfig {
 }
 
 pub fn task_request_requires_body(request: &ParsedRequest) -> bool {
-    request.method == "POST"
-        && (request.path() == "/api/tasks" || request.path().starts_with("/api/tasks/"))
+    (request.method == "POST"
+        && (request.path() == "/api/tasks"
+            || request.path().starts_with("/api/tasks/")
+            || request.path() == "/api/search/saved"))
+        || (request.method == "PATCH" && request.path().starts_with("/api/search/saved/"))
 }
 
 pub fn route_task_request(
@@ -172,6 +175,36 @@ pub fn route_task_request(
             return Ok(None);
         };
         HttpRouteResponse::json(200, json!({ "items": items }))
+    } else if request.path() == "/api/search/saved" && request.method == "POST" {
+        let payload = read_json_body(body)?;
+        match create_saved_search(&connection, &payload)? {
+            Some(item) => HttpRouteResponse::json(201, item),
+            None => HttpRouteResponse::error(400, "Saved search query is required."),
+        }
+    } else if let Some(id) = request.path().strip_prefix("/api/search/saved/") {
+        match request.method.as_str() {
+            "GET" => match saved_search_by_id(&connection, id)? {
+                Some(item) => HttpRouteResponse::json(200, item),
+                None => HttpRouteResponse::error(404, "Saved search not found."),
+            },
+            "PATCH" => {
+                let payload = read_json_body(body)?;
+                match update_saved_search(&connection, id, &payload)? {
+                    Some(item) => HttpRouteResponse::json(200, item),
+                    None => HttpRouteResponse::error(404, "Saved search not found."),
+                }
+            }
+            "DELETE" => {
+                let deleted =
+                    connection.execute("DELETE FROM saved_searches WHERE id = ?1", params![id])?;
+                if deleted == 0 {
+                    HttpRouteResponse::error(404, "Saved search not found.")
+                } else {
+                    HttpRouteResponse::json(200, json!({ "ok": true, "id": id }))
+                }
+            }
+            _ => return Ok(None),
+        }
     } else if request.path() == "/api/search/history" && request.method == "GET" {
         let limit = request
             .query_parameter("limit")
@@ -182,6 +215,20 @@ pub fn route_task_request(
             return Ok(None);
         };
         HttpRouteResponse::json(200, json!({ "items": items }))
+    } else if request.path() == "/api/search/history" && request.method == "DELETE" {
+        let deleted = connection.execute("DELETE FROM search_history", [])?;
+        HttpRouteResponse::json(200, json!({ "ok": true, "deleted": deleted }))
+    } else if let Some(id) = request.path().strip_prefix("/api/search/history/") {
+        if request.method != "DELETE" {
+            return Ok(None);
+        }
+        let deleted =
+            connection.execute("DELETE FROM search_history WHERE id = ?1", params![id])?;
+        if deleted == 0 {
+            HttpRouteResponse::error(404, "Search history item not found.")
+        } else {
+            HttpRouteResponse::json(200, json!({ "ok": true, "id": id }))
+        }
     } else if request.path() == "/api/search/index" && request.method == "GET" {
         let Some(status) = search_index_status(&connection)? else {
             return Ok(None);
@@ -269,6 +316,8 @@ fn is_task_route(path: &str) -> bool {
         || path == "/api/search/history"
         || path == "/api/search/index"
         || path == "/api/search"
+        || path.starts_with("/api/search/saved/")
+        || path.starts_with("/api/search/history/")
         || path.starts_with("/api/tasks/")
         || path.starts_with("/api/task-scheduler/")
 }
@@ -332,7 +381,24 @@ fn open_task_db(data_dir: &Path) -> Result<Connection> {
           FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_task_queue_ready
-          ON task_queue(status, next_attempt_at, priority DESC, created_at);",
+          ON task_queue(status, next_attempt_at, priority DESC, created_at);
+        CREATE TABLE IF NOT EXISTS saved_searches (
+          id TEXT PRIMARY KEY,name TEXT NOT NULL,query TEXT NOT NULL,scope TEXT NOT NULL,
+          session_origin TEXT NOT NULL DEFAULT 'all',tag TEXT,favorite INTEGER NOT NULL DEFAULT 0,
+          sort TEXT NOT NULL DEFAULT 'relevance',sort_order TEXT NOT NULL DEFAULT 'desc',
+          created_at TEXT NOT NULL,updated_at TEXT NOT NULL,last_used_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_saved_searches_updated
+          ON saved_searches(updated_at DESC);
+        CREATE TABLE IF NOT EXISTS search_history (
+          id TEXT PRIMARY KEY,signature TEXT NOT NULL UNIQUE,query TEXT NOT NULL,scope TEXT NOT NULL,
+          session_origin TEXT NOT NULL DEFAULT 'all',tag TEXT,favorite INTEGER NOT NULL DEFAULT 0,
+          sort TEXT NOT NULL DEFAULT 'relevance',sort_order TEXT NOT NULL DEFAULT 'desc',
+          result_count INTEGER NOT NULL DEFAULT 0,use_count INTEGER NOT NULL DEFAULT 1,
+          searched_at TEXT NOT NULL,device_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_search_history_searched
+          ON search_history(searched_at DESC);",
     )?;
     Ok(connection)
 }
@@ -832,6 +898,165 @@ fn list_saved_searches(connection: &Connection) -> Result<Option<Vec<Value>>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Some(items))
+}
+
+fn clean_search_text(value: Option<&Value>, max: usize) -> String {
+    value
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(max)
+        .collect()
+}
+
+fn normalize_session_origin(value: &str) -> &str {
+    match value {
+        "vibelink-cli" | "codex-desktop" | "imported" | "unknown" => value,
+        _ => "all",
+    }
+}
+
+fn saved_search_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "name": row.get::<_, String>(1)?,
+        "query": row.get::<_, String>(2)?,
+        "scope": row.get::<_, String>(3)?,
+        "sessionOrigin": row.get::<_, String>(4)?,
+        "tag": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        "favorite": row.get::<_, i64>(6)? != 0,
+        "sort": row.get::<_, String>(7)?,
+        "order": row.get::<_, String>(8)?,
+        "createdAt": row.get::<_, String>(9)?,
+        "updatedAt": row.get::<_, String>(10)?,
+        "lastUsedAt": row.get::<_, Option<String>>(11)?.unwrap_or_default()
+    }))
+}
+
+fn saved_search_by_id(connection: &Connection, id: &str) -> Result<Option<Value>> {
+    connection
+        .query_row(
+            "SELECT id,name,query,scope,session_origin,tag,favorite,sort,sort_order,
+                    created_at,updated_at,last_used_at FROM saved_searches WHERE id = ?1",
+            params![id],
+            saved_search_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn create_saved_search(connection: &Connection, payload: &Value) -> Result<Option<Value>> {
+    let query = clean_search_text(payload.get("query"), 500);
+    if query.is_empty() {
+        return Ok(None);
+    }
+    let name = {
+        let value = clean_search_text(payload.get("name"), 160);
+        if value.is_empty() {
+            query.clone()
+        } else {
+            value
+        }
+    };
+    let scope = normalize_search_scope(
+        payload
+            .get("scope")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    );
+    let sort = normalize_search_sort(
+        payload
+            .get("sort")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    );
+    let order = normalize_search_order(
+        payload
+            .get("order")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        sort,
+    );
+    let origin = clean_search_text(payload.get("sessionOrigin"), 40);
+    let id = clean_search_text(payload.get("id"), 160);
+    let id = if id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        id
+    };
+    let at = now_iso();
+    connection.execute(
+        "INSERT INTO saved_searches (
+           id,name,query,scope,session_origin,tag,favorite,sort,sort_order,created_at,updated_at,last_used_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,NULL)",
+        params![
+            id, name, query, scope, normalize_session_origin(&origin),
+            clean_search_text(payload.get("tag"), 160),
+            i64::from(payload.get("favorite").and_then(Value::as_bool).unwrap_or(false)),
+            sort, order, at
+        ],
+    )?;
+    saved_search_by_id(connection, &id)
+}
+
+fn update_saved_search(connection: &Connection, id: &str, patch: &Value) -> Result<Option<Value>> {
+    let Some(existing) = saved_search_by_id(connection, id)? else {
+        return Ok(None);
+    };
+    let pick = |key: &str| patch.get(key).unwrap_or(&existing[key]).clone();
+    let merged = json!({
+        "name": pick("name"), "query": pick("query"), "scope": pick("scope"),
+        "sessionOrigin": pick("sessionOrigin"), "tag": pick("tag"),
+        "favorite": pick("favorite"), "sort": pick("sort"), "order": pick("order")
+    });
+    let query = clean_search_text(merged.get("query"), 500);
+    if query.is_empty() {
+        return Ok(None);
+    }
+    let name = clean_search_text(merged.get("name"), 160);
+    let scope = normalize_search_scope(
+        merged
+            .get("scope")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    );
+    let sort = normalize_search_sort(
+        merged
+            .get("sort")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    );
+    let order = normalize_search_order(
+        merged
+            .get("order")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        sort,
+    );
+    let origin = clean_search_text(merged.get("sessionOrigin"), 40);
+    connection.execute(
+        "UPDATE saved_searches SET name=?1,query=?2,scope=?3,session_origin=?4,tag=?5,
+                favorite=?6,sort=?7,sort_order=?8,updated_at=?9 WHERE id=?10",
+        params![
+            if name.is_empty() { query.clone() } else { name },
+            query,
+            scope,
+            normalize_session_origin(&origin),
+            clean_search_text(merged.get("tag"), 160),
+            i64::from(
+                merged
+                    .get("favorite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            ),
+            sort,
+            order,
+            now_iso(),
+            id
+        ],
+    )?;
+    saved_search_by_id(connection, id)
 }
 
 fn list_search_history(connection: &Connection, limit: i64) -> Result<Option<Vec<Value>>> {
@@ -1665,6 +1890,67 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(cursors.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(replay_response.body["nextCursor"], *cursors.last().unwrap());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mutates_saved_searches_and_history_in_rust() {
+        let (dir, config) = fixture();
+        let create = parse_request(
+            b"POST /api/search/saved HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let created = route_task_request(
+            &create,
+            Some(br#"{"name":"Rust","query":"phase three","scope":"files","sessionOrigin":"vibelink-cli"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(created.status, 201);
+        assert_eq!(created.body["query"], "phase three");
+        let id = created.body["id"].as_str().unwrap();
+        let patch = parse_request(
+            format!("PATCH /api/search/saved/{id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let updated = route_task_request(
+            &patch,
+            Some(br#"{"favorite":true,"sort":"title","order":"asc"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(updated.body["favorite"], true);
+        assert_eq!(updated.body["sort"], "title");
+        let delete = parse_request(
+            format!("DELETE /api/search/saved/{id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            route_task_request(&delete, None, &config)
+                .unwrap()
+                .unwrap()
+                .body["ok"],
+            true
+        );
+
+        let connection = open_task_db(&dir).unwrap();
+        connection
+            .execute(
+                "INSERT INTO search_history (
+               id,signature,query,scope,session_origin,tag,favorite,sort,sort_order,
+               result_count,use_count,searched_at,device_id
+             ) VALUES ('history-1','sig','phase','all','all','',0,'relevance','desc',1,1,?1,'d')",
+                params![now_iso()],
+            )
+            .unwrap();
+        let clear = parse_request(
+            b"DELETE /api/search/history HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let cleared = route_task_request(&clear, None, &config).unwrap().unwrap();
+        assert_eq!(cleared.body["deleted"], 1);
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -652,7 +652,17 @@ fn terminal_host_mutation(
             "ok": false, "error": error.message, "code": error.code, "retryable": error.retryable
         })));
     }
-    Ok(HttpRouteResponse::json(200, json!({ "ok": true, "result": response.result.unwrap_or(Value::Null) })))
+    let result = response.result.unwrap_or(Value::Null);
+    let mut output = json!({ "ok": true, "session": result });
+    if method == "execution.resize" {
+        let cols = output["session"].get("cols").cloned().unwrap_or(Value::Null);
+        let rows = output["session"].get("rows").cloned().unwrap_or(Value::Null);
+        if !cols.is_null() || !rows.is_null() {
+            output["cols"] = cols;
+            output["rows"] = rows;
+        }
+    }
+    Ok(HttpRouteResponse::json(200, output))
 }
 
 fn terminal_json_body(body: Option<&[u8]>) -> Result<Value> {

@@ -1342,4 +1342,61 @@ mod tests {
         assert_eq!(index_response.body["content"]["sessions"], 1);
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn task_identity_and_replay_cursor_survive_route_owner_restart() {
+        let (dir, config) = fixture();
+        let create = parse_request(
+            b"POST /api/tasks HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        let created =
+            route_task_request(&create, Some(br#"{"prompt":"survive restart"}"#), &config)
+                .unwrap()
+                .unwrap();
+        let id = created.body["id"].as_str().unwrap().to_string();
+        let initial = parse_request(
+            format!("GET /api/tasks/{id}/events/catch-up HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let initial_response = route_task_request(&initial, None, &config)
+            .unwrap()
+            .unwrap();
+        let initial_items = initial_response.body["items"].as_array().unwrap();
+        let acknowledged = initial_items[1]["cursor"].as_i64().unwrap();
+        drop(config);
+
+        let restarted = TaskRouteConfig::new(dir.clone());
+        let tasks = parse_request(
+            b"GET /api/tasks HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
+        )
+        .unwrap();
+        let tasks_response = route_task_request(&tasks, None, &restarted)
+            .unwrap()
+            .unwrap();
+        assert!(tasks_response.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["id"] == id));
+        let replay = parse_request(
+            format!("GET /api/tasks/{id}/events/catch-up?after={acknowledged} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let replay_response = route_task_request(&replay, None, &restarted)
+            .unwrap()
+            .unwrap();
+        let replay_items = replay_response.body["items"].as_array().unwrap();
+        assert!(!replay_items.is_empty());
+        assert!(replay_items
+            .iter()
+            .all(|event| event["cursor"].as_i64().unwrap() > acknowledged));
+        let cursors = replay_items
+            .iter()
+            .map(|event| event["cursor"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert!(cursors.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(replay_response.body["nextCursor"], *cursors.last().unwrap());
+        let _ = fs::remove_dir_all(dir);
+    }
 }

@@ -34,14 +34,20 @@
           "GET /api/tasks/:id/events/catch-up",
           "POST /api/tasks/:id/input",
           "POST /api/tasks/:id/stop",
-          "GET /api/task-scheduler"
+          "GET /api/task-scheduler",
+          "GET /api/tasks/:id/changes",
+          "GET /api/thread-state",
+          "GET /api/search/saved",
+          "GET /api/search/history",
+          "GET /api/search/index",
+          "terminal input/resize over execd"
         ],
         "remainingRoutes": [
           "GET /api/histories",
           "GET /api/histories/:provider/:id",
-          "GET/POST/DELETE /api/search*",
-          "GET /api/tasks/:id/changes",
-          "terminal input/resize over execd"
+          "GET /api/search FTS query",
+          "POST/PATCH/DELETE /api/search metadata",
+          "POST /api/search/index/refresh and index/watch ownership"
         ]
       },
       {
@@ -381,7 +387,7 @@
         "apps/windows/src/http_frontdoor.rs",
         "apps/windows/src/main.rs"
       ],
-      "nextAction": "task SSE 已由 Rust 认领；继续将 queued task projection 接到 execd provider runner，并迁移 changes、history/search 索引和 provider registry/cache 的 fresh probe 所有权。"
+      "nextAction": "task SSE、changes、thread metadata 与 search metadata 只读投影已由 Rust 认领；继续将 queued task projection 接到 execd provider runner，并迁移 history、FTS query/index/watch 和 provider registry/cache 的 fresh probe 所有权。"
     },
     {
       "id": "provider-http-route",

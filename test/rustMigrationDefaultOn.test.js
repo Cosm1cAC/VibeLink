@@ -94,6 +94,29 @@ test("the native artifact family has no OpenAPI or runtime registry gap", () => 
   assert.equal(entries.some((entry) => entry.includes("/api/attachments")), false);
 });
 
+test("Desktop Remote observations are Rust-owned without hiding Node-owned desktop control", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const byId = new Map(ownership.publicRouteFamilies.map((family) => [family.id, family]));
+  const responsibilities = new Map(ownership.responsibilities.map((responsibility) => [responsibility.id, responsibility]));
+  const readiness = nodeRuntimeReadiness(manifest);
+  const diff = readiness.blockers.find((blocker) => blocker.id === "ownership-runtime-registry-diff");
+  const entries = diff?.nodeEntries || [];
+
+  assert.equal(byId.get("desktop-remote").owner, "rust");
+  assert.deepEqual(byId.get("desktop-remote").routes, ["GET /api/desktop-remote/observations"]);
+  assert.equal(byId.get("desktop-remote-control").owner, "node");
+  assert.deepEqual(responsibilities.get("desktop-observation-runtime"), {
+    id: "desktop-observation-runtime",
+    owner: "rust",
+    status: "default-on"
+  });
+  assert.equal(responsibilities.get("desktop-remote-control-runtime").owner, "node");
+  assert.equal(readiness.blockerIds.includes("ownership-desktop-remote-not-rust-owned"), false);
+  assert.ok(readiness.blockerIds.includes("ownership-desktop-remote-control-not-rust-owned"));
+  assert.equal(entries.some((entry) => entry.includes("/api/desktop-remote")), false);
+  assert.equal(entries.some((entry) => entry.includes("/api/codex-desktop")), false);
+});
+
 test("portable packaging gates rust-only output before omitting Node assets", () => {
   const source = fs.readFileSync(new URL("../tools/windows/package-portable.ps1", import.meta.url), "utf8");
   assert.match(source, /ValidateSet\("hybrid", "rust-only"\)/);

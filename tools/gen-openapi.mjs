@@ -1290,9 +1290,61 @@ const paths = {
   )),
 
   // Desktop remote
+  ...path("/api/codex-app-server/probe", post("Probe Codex app server",
+    "Runs a bounded health probe against the Codex app-server integration.",
+    { type: "object" },
+    { type: "object", properties: { ok: { type: "boolean" }, toolRunId: { type: "string" } } }
+  )),
+  ...path("/api/codex-desktop/status", get("Codex Desktop status",
+    "Returns the observed native Codex Desktop window and composer state.",
+    { type: "object" }
+  )),
+  ...path("/api/codex-desktop/draft-probe", post("Probe Codex Desktop draft",
+    "Attempts a bounded draft-only native desktop probe without sending a message.",
+    { type: "object", properties: { text: { type: "string" } } },
+    { type: "object", properties: { ok: { type: "boolean" }, toolRunId: { type: "string" } } }
+  )),
+  ...path("/api/codex-desktop/send", post("Send Codex Desktop prompt",
+    "Sends a prompt through the native Codex Desktop bridge.",
+    { type: "object", required: ["prompt"], properties: { prompt: { type: "string" } } },
+    { type: "object" }
+  )),
+  ...path("/api/desktop-remote/status", get("Desktop Remote status",
+    "Returns Desktop Remote queue, probe, and latest desktop readiness state.",
+    { type: "object" },
+    [{ name: "fresh", in: "query", schema: { type: "integer", enum: [0, 1] } }]
+  )),
   ...path("/api/desktop-remote/observations", get("Desktop observations",
     "Returns desktop observation snapshots.",
-    { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }
+    { type: "object", properties: { items: { type: "array", items: { type: "object" } } } },
+    [{ name: "after", in: "query", schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 1000 } }]
+  )),
+  ...path("/api/desktop-remote/events", get("Stream Desktop Remote events",
+    "Streams Desktop Remote observation events using SSE catch-up semantics.",
+    { type: "object" },
+    [{ name: "after", in: "query", schema: { type: "integer", minimum: 0 } }]
+  )),
+  ...path("/api/desktop-remote/messages", post("Queue Desktop Remote message",
+    "Queues a message for guarded native Codex Desktop delivery.",
+    { type: "object", required: ["text"], properties: { text: { type: "string" }, permissionMode: { type: "string" }, model: { type: "string" }, reasoningEffort: { type: "string" }, settingsPolicy: { type: "string" }, target: { type: "object" } } },
+    { type: "object", properties: { ok: { type: "boolean" }, item: { type: "object" }, state: { type: "object" } } },
+    { "202": { description: "Accepted" } }
+  )),
+  ...path("/api/desktop-remote/retry", post("Retry Desktop Remote queue",
+    "Retries pending Desktop Remote queue items after refreshing desktop state.",
+    { type: "object" },
+    { type: "object" }
+  )),
+  ...path("/api/desktop-remote/clear", post("Clear Desktop Remote queue",
+    "Cancels pending Desktop Remote queue items.",
+    { type: "object" },
+    { type: "object" }
+  )),
+  ...path("/api/desktop-remote/focus", post("Focus Desktop Remote conversation",
+    "Focuses a visible Codex Desktop sidebar conversation by index.",
+    { type: "object", properties: { index: { type: "integer", minimum: 0 } } },
+    { type: "object" },
+    { "409": { description: "Conversation cannot be focused" } }
   )),
 
   // Terminal sessions

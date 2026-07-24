@@ -36,7 +36,8 @@
     { "id": "thread-state", "owner": "node", "status": "node-owned", "prefixes": ["/api/thread-state"] },
     { "id": "reviews", "owner": "node", "status": "node-owned", "prefixes": ["/api/reviews"] },
     { "id": "audit", "owner": "rust", "status": "default-on", "prefixes": ["/api/audit-log"] },
-    { "id": "desktop-remote", "owner": "node", "status": "node-owned", "prefixes": ["/api/desktop-remote"] },
+    { "id": "desktop-remote", "owner": "rust", "status": "default-on", "routes": ["GET /api/desktop-remote/observations"] },
+    { "id": "desktop-remote-control", "owner": "node", "status": "node-owned", "routes": ["GET /api/desktop-remote/status", "GET /api/desktop-remote/events", "POST /api/desktop-remote/messages", "POST /api/desktop-remote/retry", "POST /api/desktop-remote/clear", "POST /api/desktop-remote/focus"] },
     { "id": "terminal-sessions", "owner": "rust", "status": "phase-2-entry-owned", "prefixes": ["/api/terminal-sessions"] },
     { "id": "artifacts", "owner": "rust", "status": "default-on", "prefixes": ["/api/artifacts"] },
     { "id": "browser-sessions", "owner": "node", "status": "node-owned", "prefixes": ["/api/browser-sessions", "/api/browser"] },
@@ -61,7 +62,8 @@
     { "id": "artifact-storage-runtime", "owner": "rust", "status": "required-for-rust-only" },
     { "id": "automation-scheduler-runtime", "owner": "node", "status": "node-owned" },
     { "id": "push-notification-runtime", "owner": "node", "status": "node-owned" },
-    { "id": "desktop-remote-runtime", "owner": "node", "status": "node-owned" },
+    { "id": "desktop-observation-runtime", "owner": "rust", "status": "default-on" },
+    { "id": "desktop-remote-control-runtime", "owner": "node", "status": "node-owned" },
     { "id": "static-asset-serving", "owner": "rust", "status": "required-for-rust-only" }
   ],
   "rustOnlyAcceptance": {

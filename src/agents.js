@@ -8,7 +8,7 @@ import { bridgeAgentToolEvent } from "./agentToolBridge.js";
 import { withCodebaseMemoryPath } from "./codebaseMemoryRuntime.js";
 import { tasksDir } from "./config.js";
 import { doubaoAgentArgs, doubaoBridgeCliPath, doubaoCliPath } from "./doubaoRuntime.js";
-import { acknowledgeExecutionHostEvents, createApprovalRequest, getDefaultEventReplayLimit, ingestExecutionHostEvent, insertTaskEvent, listTaskEvents, listTaskEventsAsync, resolveEventReplayLimit, settleApprovalContinuation, upsertExecutionBinding, upsertTask } from "./db.js";
+import { acknowledgeExecutionHostEvents, createApprovalRequest, getDefaultEventReplayLimit, getPersistedTask, ingestExecutionHostEvent, insertTaskEvent, listTaskEvents, listTaskEventsAsync, resolveEventReplayLimit, settleApprovalContinuation, upsertExecutionBinding, upsertTask } from "./db.js";
 import { getExecutionHostFacade } from "./executionHostClient.js";
 import { resolveAllowedPath } from "./security.js";
 import { settingsWithSecrets } from "./store.js";
@@ -225,6 +225,30 @@ export function restoreTasks() {
       // A corrupt task log should not prevent the bridge from starting.
     }
   }
+}
+
+function taskById(id) {
+  const current = tasks.get(id);
+  if (current) return current;
+
+  const persisted = getPersistedTask(id);
+  if (!persisted) return null;
+  const events = listTaskEvents(id, { after: 0, limit: getDefaultEventReplayLimit() });
+  const task = {
+    ...persisted,
+    security: persisted.meta?.security || null,
+    sessionOrigin: SESSION_ORIGINS.VIBELINK_CLI,
+    process: null,
+    execution: null,
+    listeners: new Set(),
+    inputQueue: [],
+    events,
+    logPath: persisted.logPath || path.join(tasksDir, `${id}.jsonl`),
+    restored: true
+  };
+  delete task.meta;
+  tasks.set(id, task);
+  return task;
 }
 
 function splitCommandLine(input) {
@@ -955,7 +979,7 @@ export function applyTaskQueueTransition(job, detail = {}) {
 }
 
 export function getTask(id) {
-  const task = tasks.get(id);
+  const task = taskById(id);
   if (!task) return null;
   const persistedEvents = listTaskEvents(id, { after: 0, limit: getDefaultEventReplayLimit() });
   return {
@@ -1102,7 +1126,7 @@ export async function createTask(payload, settings) {
 }
 
 export function writeTaskInput(id, text) {
-  const task = tasks.get(id);
+  const task = taskById(id);
   const prompt = String(text || "");
   if (!task || !task.execution || task.status !== "running") return { ok: false, reason: "Task is not running." };
   if (!prompt.trim()) return { ok: false, reason: "Input is required." };
@@ -1113,7 +1137,7 @@ export function writeTaskInput(id, text) {
 }
 
 export async function stopTask(id) {
-  const task = tasks.get(id);
+  const task = taskById(id);
   if (task?.status === "queued" && taskScheduler) {
     return taskScheduler.cancel(id)?.status === "cancelled";
   }
@@ -1132,7 +1156,7 @@ export async function stopTask(id) {
 }
 
 export async function subscribeTask(id, response, { after = 0 } = {}) {
-  const task = tasks.get(id);
+  const task = taskById(id);
   if (!task) return false;
 
   response.writeHead(200, {

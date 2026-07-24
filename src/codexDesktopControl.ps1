@@ -698,10 +698,10 @@ function Get-VisibleTranscript($window, [int]$limit = 80) {
 
 function Find-CodexDesktopWindow {
   $root = [System.Windows.Automation.AutomationElement]::RootElement
-  $processes = Get-Process -Name Codex -ErrorAction SilentlyContinue |
+  $processes = Get-Process -Name Codex, ChatGPT -ErrorAction SilentlyContinue |
     Where-Object {
       $_.MainWindowHandle -ne 0 -and
-      ($_.Path -like "*OpenAI.Codex_*" -or $_.Path -like "*\OpenAI\Codex\*")
+      ($_.Path -like "*\WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe" -or $_.Path -like "*\OpenAI\Codex\*")
     } |
     Sort-Object StartTime
 
@@ -717,7 +717,7 @@ function Find-CodexDesktopWindow {
     for ($i = 0; $i -lt $windows.Count; $i++) {
       $window = $windows.Item($i)
       if ($null -eq $fallbackWindow) { $fallbackWindow = $window }
-      if ($window.Current.Name -ne "Codex") { continue }
+      if ($window.Current.Name -notin @("Codex", "ChatGPT")) { continue }
       return [ordered]@{
         process = $process
         window = $window

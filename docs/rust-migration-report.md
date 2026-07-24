@@ -19,7 +19,7 @@
 | --- | --- | --- | --- |
 | Rust HTTP 前门 | `default-on` | Rust 外部监听，Node loopback backend | 保留显式 `bridge` 回滚直到 Node blocker 清零 |
 | 状态响应契约组装 | `canary` | 公网 bridge 显式开启，Node 快照回退 | 继续作为 Status 动态快照强类型契约层 |
-| Status 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/settings projection/设备列表/响应 | 扩展 Provider 与任务动态快照 |
+| Status 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/settings projection/设备列表/响应；Web/Android rust-only E2E | 扩展 Provider 与任务动态快照 |
 | Doctor 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/checks/toolRunId/响应 | 扩展平台探测与 tool run 投影 |
 | Devices 只读原生 HTTP 路由 | `default-on` | Rust Host/鉴权/SQLite 查询/字段过滤 | 保持默认开启与故障回退观测 |
 | Devices 审计化写操作原生 HTTP 路由 | `default-on` | Rust 令牌轮换/吊销、限流和事务化审计 | 保持默认开启与事务故障测试 |

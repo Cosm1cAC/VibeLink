@@ -142,7 +142,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启；继续扩展 Provider 与任务动态快照。"
+      "nextAction": "Web/Android rust-only E2E 已通过；保持默认开启并继续扩展 Provider 与任务动态快照。"
     },
     {
       "id": "doctor-http-route",

@@ -125,6 +125,18 @@ test("OpenAPI is served by the Rust-only frontdoor for Web and Android", () => {
   });
 });
 
+test("status is consumed from the Rust-only frontdoor by Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const status = ownership.publicRouteFamilies.find((family) => family.id === "status");
+
+  assert.equal(status.owner, "rust");
+  assert.equal(status.status, "default-on");
+  assert.deepEqual(status.rustOnlyE2E, {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  });
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),

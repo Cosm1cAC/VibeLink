@@ -34,7 +34,16 @@
       }
     },
     { "id": "provider-registry", "owner": "rust", "status": "default-on", "prefixes": ["/api/provider-registry"] },
-    { "id": "status", "owner": "rust", "status": "default-on", "prefixes": ["/api/status"] },
+    {
+      "id": "status",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/status"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "doctor", "owner": "rust", "status": "default-on", "prefixes": ["/api/doctor"] },
     { "id": "agent-reach", "owner": "node", "status": "node-owned", "prefixes": ["/api/agent-reach"] },
     { "id": "doubao", "owner": "node", "status": "node-owned", "prefixes": ["/api/doubao"] },

@@ -7,6 +7,7 @@ import org.junit.Assume.assumeTrue
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 
 class ApiClientRustOnlyDiscoveryE2eTest {
     @Test
@@ -20,10 +21,13 @@ class ApiClientRustOnlyDiscoveryE2eTest {
             this.token = token
         }
         val command = client.listCommands("e2e").single()
+        val status = client.checkStatus()
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
         assertEquals("plugin", command.toolKind)
+        assertEquals(true, status.ok)
+        assertNotNull(status.settings)
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->

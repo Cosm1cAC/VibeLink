@@ -236,7 +236,17 @@
     { "id": "capabilities", "owner": "node", "status": "node-owned", "prefixes": ["/api/capabilities"] },
     { "id": "automations", "owner": "node", "status": "node-owned", "prefixes": ["/api/automations"] },
     { "id": "subagents", "owner": "node", "status": "node-owned", "prefixes": ["/api/subagents"] },
-    { "id": "cloudflare", "owner": "node", "status": "node-owned", "prefixes": ["/api/cloudflare"] },
+    {
+      "id": "cloudflare",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/cloudflare"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "push", "owner": "node", "status": "node-owned", "prefixes": ["/api/push"] },
     {
       "id": "attachments",

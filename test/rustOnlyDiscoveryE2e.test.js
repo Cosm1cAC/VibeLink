@@ -200,6 +200,13 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(terminalResponse.status, 200, `terminal-sessions: ${terminalBody}\n${logs}`);
   assert.equal(terminalResponse.headers.get("x-vibelink-control-plane"), "rust");
   assert.ok(Array.isArray(JSON.parse(terminalBody).items));
+  const cloudflareResponse = await fetch(`http://127.0.0.1:${port}/api/cloudflare/guide`, { headers });
+  const cloudflareGuide = await cloudflareResponse.json();
+  assert.equal(cloudflareResponse.status, 200);
+  assert.equal(cloudflareResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal(cloudflareGuide.host, "127.0.0.1");
+  assert.equal(cloudflareGuide.publicHost, false);
+  assert.ok(cloudflareGuide.steps.length > 0);
 
   const toolsResponse = await waitFor(`http://127.0.0.1:${port}/api/tool-registry`, { headers });
   assert.equal(toolsResponse.status, 200);

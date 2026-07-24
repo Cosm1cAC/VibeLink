@@ -37,6 +37,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         val pairingSessions = client.listPairingSessions()
         val threadState = client.getThreadState()
         val eventAcks = client.listEventAcks("task")
+        val cloudflareGuide = client.getCloudflareGuide()
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
@@ -62,6 +63,9 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals(0, pairingSessions.size)
         assertEquals(0, threadState.items.size)
         assertEquals(0, eventAcks.size)
+        assertEquals("127.0.0.1", cloudflareGuide.host)
+        assertEquals(false, cloudflareGuide.publicHost)
+        assertEquals(true, cloudflareGuide.steps.isNotEmpty())
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->

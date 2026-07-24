@@ -15,6 +15,7 @@ use std::{
 mod artifact_http;
 mod audio_pipeline_sidecar;
 mod audit_http;
+mod cloudflare_http;
 mod compression_sidecar;
 mod desktop_remote_http;
 mod device_http;
@@ -474,6 +475,10 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let discovery_route = Some(discovery_http::DiscoveryRouteConfig::new(
         route_data_dir.clone(),
     ));
+    let cloudflare_route = Some(cloudflare_http::CloudflareRouteConfig::new(
+        route_data_dir.clone(),
+        root.to_path_buf(),
+    ));
     let file_route = Some(file_http::FileRouteConfig::new(route_data_dir.clone()));
     let workspace_route = rust_workspace_http_enabled(cli)
         .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
@@ -515,6 +520,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_artifact(artifact_route)
         .with_desktop_remote(desktop_remote_route)
         .with_discovery(discovery_route)
+        .with_cloudflare(cloudflare_route)
         .with_file(file_route)
         .with_static(Some(static_route));
     let routes = routes.with_workspace(workspace_route);
@@ -583,6 +589,10 @@ fn run_rust_only_http(cli: &Cli, data_dir: Option<PathBuf>) -> Result<()> {
         )))
         .with_discovery(Some(discovery_http::DiscoveryRouteConfig::new(
             data_dir.clone(),
+        )))
+        .with_cloudflare(Some(cloudflare_http::CloudflareRouteConfig::new(
+            data_dir.clone(),
+            root.clone(),
         )))
         .with_file(Some(file_http::FileRouteConfig::new(data_dir.clone())))
         .with_static(Some(static_http::StaticRouteConfig::new(root)))

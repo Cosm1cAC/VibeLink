@@ -5,6 +5,7 @@ use crate::artifact_http::{
     ArtifactRouteConfig,
 };
 use crate::audit_http::{route_audit_request, AuditRouteConfig};
+use crate::cloudflare_http::{route_cloudflare_request, CloudflareRouteConfig};
 use crate::desktop_remote_http::{route_desktop_remote_request, DesktopRemoteRouteConfig};
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
@@ -71,6 +72,7 @@ pub struct FrontdoorRoutes {
     desktop_remote: Option<DesktopRemoteRouteConfig>,
     discovery: Option<DiscoveryRouteConfig>,
     file: Option<FileRouteConfig>,
+    cloudflare: Option<CloudflareRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -164,6 +166,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_cloudflare(mut self, route: Option<CloudflareRouteConfig>) -> Self {
+        self.cloudflare = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -183,6 +190,7 @@ impl FrontdoorRoutes {
             && self.desktop_remote.is_none()
             && self.discovery.is_none()
             && self.file.is_none()
+            && self.cloudflare.is_none()
     }
 }
 
@@ -379,6 +387,17 @@ fn handle_connection_with_upstream(
                 Err(error) => {
                     eprintln!("Rust Discovery route failed after ownership: {error:#}");
                     return HttpRouteResponse::error(500, "Discovery request failed.")
+                        .write_to(&mut client);
+                }
+            }
+        }
+        if let Some(cloudflare_route) = routes.cloudflare.as_ref() {
+            match route_cloudflare_request(&request, cloudflare_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Cloudflare route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Cloudflare guide request failed.")
                         .write_to(&mut client);
                 }
             }

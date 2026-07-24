@@ -271,6 +271,19 @@ test("terminal sessions use the Rust-only frontdoor on Web and Android", () => {
   });
 });
 
+test("Cloudflare guide uses the Rust-only frontdoor on Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const family = ownership.publicRouteFamilies.find((item) => item.id === "cloudflare");
+
+  assert.equal(family.owner, "rust");
+  assert.equal(family.status, "default-on");
+  assert.equal(family.rustRuntimeRegistry, true);
+  assert.deepEqual(family.rustOnlyE2E, {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  });
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),

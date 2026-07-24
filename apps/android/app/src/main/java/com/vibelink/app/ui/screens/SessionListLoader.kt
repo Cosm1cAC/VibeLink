@@ -11,7 +11,7 @@ data class SessionListSnapshot(
     val histories: List<HistoryItem>,
     val tasks: List<TaskSummary>,
     val threadState: ThreadStateResponse,
-    val desktop: DesktopRemoteState?,
+    val desktop: DesktopRemoteState,
 )
 
 suspend fun loadSessionListSnapshot(
@@ -23,7 +23,7 @@ suspend fun loadSessionListSnapshot(
     val histories = async { loadHistories() }
     val tasks = async { loadTasks() }
     val threadState = async { runCatching { loadThreadState() }.getOrElse { ThreadStateResponse() } }
-    val desktop = async { runCatching { loadDesktop() }.getOrNull() }
+    val desktop = async { runCatching { loadDesktop() }.getOrElse { DesktopRemoteState() } }
 
     SessionListSnapshot(
         histories = histories.await(),

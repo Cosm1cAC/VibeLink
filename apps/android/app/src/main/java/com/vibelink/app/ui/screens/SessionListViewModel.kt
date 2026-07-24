@@ -391,7 +391,7 @@ class SessionListViewModel : ViewModel() {
         histories: List<HistoryItem>,
         tasks: List<TaskSummary>,
         threadState: ThreadStateResponse,
-        desktopRemote: DesktopRemoteState?,
+        desktopRemote: DesktopRemoteState,
     ): List<ConversationItem> {
         val historyBySession = histories.associateBy { sessionKey(it.provider, it.id) }
 
@@ -464,9 +464,9 @@ class SessionListViewModel : ViewModel() {
         }
 
         val forkItems = threadState.forks.map { it.toConversationItem() }
-        val desktopEntry = desktopRemote?.toConversationItem()
+        val desktopEntry = desktopRemote.toConversationItem()
 
-        return sortManaged(listOfNotNull(desktopEntry) + withDesktopBindings + forkItems)
+        return sortManaged(listOf(desktopEntry) + withDesktopBindings + forkItems)
     }
 
     private fun applyThreadMeta(item: ConversationItem, threadState: ThreadStateResponse): ConversationItem {

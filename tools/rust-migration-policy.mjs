@@ -221,6 +221,10 @@ function familyMatchesOperation(family, operation) {
 
 export function ownershipReadiness(manifest = {}, openapi = null) {
   const families = collectOwnershipEntries(manifest);
+  const acceptance = manifest?.rustOnlyAcceptance || manifest?.rustOnlyCanary || {};
+  const requiredFamilies = acceptance.requiredFamilies || acceptance.requiredHttpFamilies || [];
+  const requiredFamilyIds = new Set(requiredFamilies);
+  const duplicateRequiredFamilies = requiredFamilies.filter((id, index) => requiredFamilies.indexOf(id) !== index);
   const operations = openapi ? collectOpenApiOperations(openapi) : [];
   const blockers = [];
   const operationOwners = new Map();
@@ -267,7 +271,7 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         operationOwners.set(operation.key, owners);
       }
     }
-    if ((family.requiredForRustOnly !== false) && owner !== "rust") {
+    if ((family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId) && owner !== "rust") {
       blockers.push({
         id: `ownership-${familyId}-not-rust-owned`,
         title: `Rust-only package still depends on ${familyId} owned by ${owner || "unknown"}`,
@@ -399,9 +403,7 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
     });
   }
 
-  const acceptance = manifest?.rustOnlyAcceptance || manifest?.rustOnlyCanary || {};
   const forbiddenNode = acceptance.forbiddenPackageEntries || [];
-  const requiredFamilies = acceptance.requiredFamilies || acceptance.requiredHttpFamilies || [];
   const requiredStreamingFamilies = acceptance.requiredStreamingFamilies || [];
   const missingAcceptance = [];
   for (const field of ["forbiddenPackageEntries", "forbiddenProcessNames", "packageSmoke"]) {
@@ -409,12 +411,16 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
     if (Array.isArray(value) ? value.length === 0 : !value) missingAcceptance.push(field);
   }
   const missingRequiredFamilies = requiredFamilies.filter((id) => !familyIds.has(id));
-  if (missingAcceptance.length || missingRequiredFamilies.length) {
+  if (missingAcceptance.length || missingRequiredFamilies.length || duplicateRequiredFamilies.length) {
     blockers.push({
       id: "ownership-rust-only-acceptance-incomplete",
       title: "Rust-only package acceptance checks are incomplete",
       status: "planned",
-      nodeEntries: missingAcceptance,
+      nodeEntries: [
+        ...missingAcceptance,
+        ...missingRequiredFamilies.map((id) => `missing family: ${id}`),
+        ...duplicateRequiredFamilies.map((id) => `duplicate family: ${id}`)
+      ],
       rustTarget: "docs/route-ownership.json"
     });
   }

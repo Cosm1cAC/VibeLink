@@ -24,9 +24,57 @@ test("every default Rust route is declared default-on and backed by the default 
 test("Node-free packaging remains blocked until every product owner is native", () => {
   const readiness = nodeRuntimeReadiness(manifest);
   assert.equal(readiness.ready, false);
-  assert.ok(readiness.blockerIds.includes("workspace-git-command-approval"));
+  assert.equal(readiness.blockerIds.includes("workspace-git-command-approval"), false);
   assert.ok(readiness.blockerIds.includes("native-release-entry"));
   assert.ok(readiness.blockerIds.some((id) => id.startsWith("ownership-")));
+});
+
+test("rust-only acceptance requires every Phase 4 product family", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const required = new Set(ownership.rustOnlyAcceptance.requiredFamilies);
+  const phase4Families = [
+    "agent-reach",
+    "artifacts",
+    "attachments",
+    "automations",
+    "browser-sessions",
+    "capabilities",
+    "desktop-remote",
+    "desktop-remote-control",
+    "discovery",
+    "doubao",
+    "files",
+    "openapi",
+    "push",
+    "reviews",
+    "subagents"
+  ];
+
+  assert.deepEqual(phase4Families.filter((id) => !required.has(id)), []);
+  assert.deepEqual(
+    ownership.publicRouteFamilies
+      .filter((family) => family.requiredForRustOnly !== false && !required.has(family.id))
+      .map((family) => family.id),
+    []
+  );
+});
+
+test("rust-only acceptance reports missing and duplicate required family declarations", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const openapi = JSON.parse(fs.readFileSync(new URL("../docs/openapi.json", import.meta.url), "utf8"));
+  const forged = {
+    ...ownership,
+    rustOnlyAcceptance: {
+      ...ownership.rustOnlyAcceptance,
+      requiredFamilies: [...ownership.rustOnlyAcceptance.requiredFamilies, "reviews", "missing-family"]
+    }
+  };
+
+  const readiness = ownershipReadiness(forged, openapi);
+  const blocker = readiness.blockers.find((item) => item.id === "ownership-rust-only-acceptance-incomplete");
+  assert.ok(blocker);
+  assert.ok(blocker.nodeEntries.includes("duplicate family: reviews"));
+  assert.ok(blocker.nodeEntries.includes("missing family: missing-family"));
 });
 
 test("artifact and attachment routes are declared Rust-owned once the native frontdoor handles them", () => {

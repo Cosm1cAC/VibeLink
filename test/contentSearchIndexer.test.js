@@ -75,6 +75,31 @@ test("content index removes missing sources and rebuilds truncated or corrupt in
   assert.deepEqual(store.contentStats(), { sessions: 0, tasks: 0, messages: 0 });
 });
 
+test("content index yields to HTTP work while refreshing a large history set", async () => {
+  const db = new DatabaseSync(":memory:");
+  const store = createSearchStore({ database: () => db });
+  const histories = Array.from({ length: 100 }, (_, index) => ({
+    id: `session-${index}`,
+    provider: "codex",
+    title: `Session ${index}`,
+    updatedAt: "2026-01-01T00:00:00Z"
+  }));
+  const indexer = createContentSearchIndexer({
+    store,
+    getHistories: () => histories,
+    getTasks: () => [],
+    listTaskEvents: () => []
+  });
+  let refreshSettled = false;
+  const refresh = indexer.refresh().then(() => { refreshSettled = true; });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(refreshSettled, false);
+  await refresh;
+  assert.equal(store.contentStats().sessions, histories.length);
+});
+
 test("content FTS relevance favors a title match", () => {
   const db = new DatabaseSync(":memory:");
   const store = createSearchStore({ database: () => db });

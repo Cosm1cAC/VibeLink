@@ -10,6 +10,7 @@ use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
     DeviceRouteConfig,
 };
+use crate::discovery_http::{route_discovery_request, DiscoveryRouteConfig};
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
 use crate::event_sync_http::{
     event_sync_request_requires_body, route_event_sync_request, EventSyncRouteConfig,
@@ -68,6 +69,7 @@ pub struct FrontdoorRoutes {
     event_sync: Option<EventSyncRouteConfig>,
     artifact: Option<ArtifactRouteConfig>,
     desktop_remote: Option<DesktopRemoteRouteConfig>,
+    discovery: Option<DiscoveryRouteConfig>,
     file: Option<FileRouteConfig>,
 }
 
@@ -152,6 +154,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_discovery(mut self, route: Option<DiscoveryRouteConfig>) -> Self {
+        self.discovery = route;
+        self
+    }
+
     pub fn with_file(mut self, route: Option<FileRouteConfig>) -> Self {
         self.file = route;
         self
@@ -174,6 +181,7 @@ impl FrontdoorRoutes {
             && self.event_sync.is_none()
             && self.artifact.is_none()
             && self.desktop_remote.is_none()
+            && self.discovery.is_none()
             && self.file.is_none()
     }
 }
@@ -184,20 +192,35 @@ pub fn serve(
     node: &mut Child,
     routes: FrontdoorRoutes,
 ) -> Result<()> {
+    serve_inner(listener, Some(upstream), Some(node), routes)
+}
+
+pub fn serve_rust_only(listener: TcpListener, routes: FrontdoorRoutes) -> Result<()> {
+    serve_inner(listener, None, None, routes)
+}
+
+fn serve_inner(
+    listener: TcpListener,
+    upstream: Option<SocketAddr>,
+    mut node: Option<&mut Child>,
+    routes: FrontdoorRoutes,
+) -> Result<()> {
     listener
         .set_nonblocking(true)
         .context("Failed to configure Rust HTTP front door")?;
     let active = Arc::new(AtomicUsize::new(0));
 
     loop {
-        if let Some(status) = node
-            .try_wait()
-            .context("Failed to inspect loopback Node bridge")?
-        {
-            if status.success() {
-                return Ok(());
+        if let Some(node) = node.as_deref_mut() {
+            if let Some(status) = node
+                .try_wait()
+                .context("Failed to inspect loopback Node bridge")?
+            {
+                if status.success() {
+                    return Ok(());
+                }
+                bail!("Loopback Node bridge exited with status {status}");
             }
-            bail!("Loopback Node bridge exited with status {status}");
         }
 
         match listener.accept() {
@@ -211,7 +234,7 @@ pub fn serve(
                 let active = Arc::clone(&active);
                 let routes = routes.clone();
                 thread::spawn(move || {
-                    if let Err(error) = handle_connection(client, upstream, &routes) {
+                    if let Err(error) = handle_connection_with_upstream(client, upstream, &routes) {
                         eprintln!("Rust HTTP front door connection failed: {error}");
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
@@ -225,13 +248,22 @@ pub fn serve(
     }
 }
 
+#[cfg(test)]
 fn handle_connection(
-    mut client: TcpStream,
+    client: TcpStream,
     upstream: SocketAddr,
     routes: &FrontdoorRoutes,
 ) -> io::Result<()> {
+    handle_connection_with_upstream(client, Some(upstream), routes)
+}
+
+fn handle_connection_with_upstream(
+    mut client: TcpStream,
+    upstream: Option<SocketAddr>,
+    routes: &FrontdoorRoutes,
+) -> io::Result<()> {
     if routes.is_empty() {
-        return proxy_connection(client, upstream);
+        return proxy_or_not_found(client, upstream, Vec::new());
     }
 
     let peer_ip = client
@@ -301,7 +333,7 @@ fn handle_connection(
                     30 * 1024 * 1024,
                 )? {
                     Some(body) => body,
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 };
                 match route_attachment_upload_request(&request, &body, artifact_route) {
                     Ok(Some(response)) => return response.write_to(&mut client),
@@ -314,7 +346,7 @@ fn handle_connection(
             if artifact_request_requires_body(&request) {
                 let body = match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => body,
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 };
                 match route_artifact_mutation_request(&request, &body, artifact_route) {
                     Ok(Some(response)) => return response.write_to(&mut client),
@@ -337,6 +369,17 @@ fn handle_connection(
                 Err(error) => {
                     provider_route.record_fallback();
                     eprintln!("Rust Provider route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(discovery_route) = routes.discovery.as_ref() {
+            match route_discovery_request(&request, discovery_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Discovery route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Discovery request failed.")
+                        .write_to(&mut client);
                 }
             }
         }
@@ -431,7 +474,7 @@ fn handle_connection(
             let body = if settings_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -454,7 +497,7 @@ fn handle_connection(
             let body = if pairing_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -477,7 +520,7 @@ fn handle_connection(
             let body = if event_sync_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -501,7 +544,7 @@ fn handle_connection(
             let body = if task_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -525,7 +568,7 @@ fn handle_connection(
             let body = if workspace_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -546,7 +589,18 @@ fn handle_connection(
             }
         }
     }
-    proxy_connection_with_prefix(client, upstream, prefix)
+    proxy_or_not_found(client, upstream, prefix)
+}
+
+fn proxy_or_not_found(
+    mut client: TcpStream,
+    upstream: Option<SocketAddr>,
+    prefix: Vec<u8>,
+) -> io::Result<()> {
+    match upstream {
+        Some(upstream) => proxy_connection_with_prefix(client, upstream, prefix),
+        None => HttpRouteResponse::error(404, "Not found.").write_to(&mut client),
+    }
 }
 
 fn read_request_body(
@@ -629,6 +683,7 @@ fn read_request_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub fn proxy_connection(client: TcpStream, upstream_addr: SocketAddr) -> io::Result<()> {
     proxy_connection_with_prefix(client, upstream_addr, Vec::new())
 }

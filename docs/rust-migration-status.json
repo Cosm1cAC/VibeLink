@@ -409,6 +409,24 @@
       "nextAction": "Rust 已持有 CLI health、Doubao bridge doctor health/fidelity probe、Zhipu/Claude catalog refresh 和 queued provider launch mapping；继续保持真实 Provider 任务与 registry freshness 观测。"
     },
     {
+      "id": "discovery-http-route",
+      "title": "Tool 与 Command Registry 原生 HTTP 路由",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary"],
+      "nodeEntry": "src/server.js#/api/tool-registry,/api/command-registry",
+      "rustEntry": "apps/windows/src/discovery_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary bridge",
+      "fallback": "内置 catalog 编译进 Rust；缓存 MCP tools 从 SQLite 读取，skills 由 Rust 扫描。认证成功后错误由 Rust 返回且不回放 Node。",
+      "tests": [
+        "apps/windows/src/discovery_http.rs",
+        "test/discoveryCatalog.test.js",
+        "test/rustOnlyDiscoveryE2e.test.js",
+        "apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"
+      ],
+      "nextAction": "保持默认开启；Web 与 Android 已通过同一无 Node backend 的 Rust-only E2E harness。"
+    },
+    {
       "id": "static-assets-openapi-route",
       "title": "Static Assets 与 OpenAPI 原生服务",
       "priority": "P1",

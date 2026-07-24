@@ -91,6 +91,28 @@ test("artifact and attachment routes are declared Rust-owned once the native fro
   );
 });
 
+test("tool and command discovery routes are Rust-owned once the native frontdoor handles them", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const discovery = ownership.publicRouteFamilies.find((family) => family.id === "discovery");
+  const readiness = nodeRuntimeReadiness(manifest);
+  const diff = readiness.blockers.find((blocker) => blocker.id === "ownership-runtime-registry-diff");
+
+  assert.equal(discovery.owner, "rust");
+  assert.equal(discovery.status, "default-on");
+  assert.deepEqual(discovery.rustOnlyE2E, {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  });
+  for (const evidence of [...discovery.rustOnlyE2E.web, ...discovery.rustOnlyE2E.android]) {
+    assert.equal(fs.existsSync(new URL(`../${evidence}`, import.meta.url)), true, evidence);
+  }
+  assert.equal(readiness.blockerIds.includes("ownership-discovery-not-rust-owned"), false);
+  assert.equal(
+    (diff?.nodeEntries || []).some((entry) => entry.includes("/api/tool-registry") || entry.includes("/api/command-registry")),
+    false
+  );
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),
@@ -121,6 +143,16 @@ test("ownership manifest, OpenAPI, and runtime registry have no bidirectional ro
 
   assert.equal(readiness.blockerIds.includes("ownership-manifest-stale"), false);
   assert.equal(readiness.blockerIds.includes("ownership-runtime-registry-diff"), false);
+});
+
+test("rust-only acceptance reports missing Web and Android E2E evidence per family", () => {
+  const readiness = nodeRuntimeReadiness(manifest);
+  const blocker = readiness.blockers.find((item) => item.id === "ownership-rust-only-e2e-incomplete");
+
+  assert.ok(blocker);
+  assert.ok(blocker.nodeEntries.includes("reviews:web: missing"));
+  assert.ok(blocker.nodeEntries.includes("reviews:android: missing"));
+  assert.equal(blocker.nodeEntries.some((entry) => entry.startsWith("discovery:")), false);
 });
 
 test("ownership comparison treats OpenAPI and runtime path parameters as the same route", () => {

@@ -231,6 +231,7 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
   const runtimeEntries = new Set();
   const familyIds = new Set();
   const duplicateFamilyIds = [];
+  const incompleteRustOnlyE2E = [];
 
   for (const family of families) {
     const familyId = family?.id || "unknown";
@@ -280,6 +281,20 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         rustTarget: family.rustTarget || family.runtime?.[0]?.path || ""
       });
     }
+    if ((family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId)) {
+      for (const client of ["web", "android"]) {
+        const evidence = family.rustOnlyE2E?.[client];
+        if (!Array.isArray(evidence) || evidence.length === 0) {
+          incompleteRustOnlyE2E.push(`${familyId}:${client}: missing`);
+          continue;
+        }
+        for (const evidencePath of evidence) {
+          if (!fs.existsSync(path.resolve(process.cwd(), evidencePath))) {
+            incompleteRustOnlyE2E.push(`${familyId}:${client}: missing file ${evidencePath}`);
+          }
+        }
+      }
+    }
     if (family.rustFlag && manifest?.windowsMain && !String(manifest.windowsMain).includes(`effective.${family.rustFlag} = true;`)) {
       blockers.push({
         id: `ownership-${familyId}-missing-rust-flag`,
@@ -297,6 +312,16 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
       title: "Ownership manifest contains duplicate family ids",
       status: "planned",
       nodeEntries: duplicateFamilyIds,
+      rustTarget: "docs/route-ownership.json"
+    });
+  }
+
+  if (incompleteRustOnlyE2E.length) {
+    blockers.push({
+      id: "ownership-rust-only-e2e-incomplete",
+      title: "Required product families are missing Web or Android rust-only E2E evidence",
+      status: "planned",
+      nodeEntries: incompleteRustOnlyE2E,
       rustTarget: "docs/route-ownership.json"
     });
   }

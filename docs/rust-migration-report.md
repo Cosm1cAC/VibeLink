@@ -21,15 +21,15 @@
 | 状态响应契约组装 | `canary` | 公网 bridge 显式开启，Node 快照回退 | 继续作为 Status 动态快照强类型契约层 |
 | Status 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/settings projection/设备列表/响应；Web/Android rust-only E2E | 扩展 Provider 与任务动态快照 |
 | Doctor 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/checks/toolRunId/响应；Web/Android rust-only E2E | 扩展平台探测与 tool run 投影 |
-| Devices 只读原生 HTTP 路由 | `default-on` | Rust Host/鉴权/SQLite 查询/字段过滤 | 保持默认开启与故障回退观测 |
+| Devices 只读原生 HTTP 路由 | `default-on` | Rust Host/鉴权/SQLite 查询/字段过滤；Web/Android rust-only E2E | 保持默认开启与故障回退观测 |
 | Devices 审计化写操作原生 HTTP 路由 | `default-on` | Rust 令牌轮换/吊销、限流和事务化审计 | 保持默认开启与事务故障测试 |
 | Pairing 原生 HTTP 路由 | `default-on` | Rust create/status/list/approve/deny/claim/settings projection | 保持 claim 幂等恢复观测 |
 | Audit Log 原生 HTTP 路由 | `default-on` | Rust 鉴权、拒绝审计、游标分页、字段投影 | 保持默认开启 |
-| Settings 原生 HTTP 路由 | `default-on` | Rust 校验/dry-run/导入导出/原子写入/DPAPI/审计；Node 仅做受保护内存重载 | 删除 Node 内存副本后移除内部重载端点 |
+| Settings 原生 HTTP 路由 | `default-on` | Rust 校验/dry-run/导入导出/原子写入/DPAPI/审计；Web/Android rust-only E2E | 删除 Node 内存副本后移除内部重载端点 |
 | Tool Events 非流式原生 HTTP 路由 | `default-on` | Rust replay/filter/fields | 保持默认开启 |
 | Tool Events SSE 原生 HTTP 路由 | `default-on` | Rust catch-up/SSE/Last-Event-ID | 监测重连与慢消费者 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
-| Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust list/create/tree/context/read/preview/batch、Git actions 与 worktree lifecycle | 继续迁移 command/terminal/approval |
+| Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust list/create/tree/context/read/preview/batch、Git actions 与 worktree lifecycle；Web/Android rust-only E2E | 继续迁移 command/terminal/approval |
 | Task 持久投影原生 HTTP 路由 | `default-on` | Rust task collection、mutation、scheduler、execution binding、事件 SSE、history/search/FTS watcher | 继续观察真实 provider 运行与 task input/stop 边界 |
 | Provider Registry 缓存投影原生 HTTP 路由 | `default-on` | Rust SQLite cache projection 已通过 Web/Android rust-only E2E；支持 CLI/Doubao bridge health probe、Zhipu/Claude model API catalog refresh | 保持真实 Provider health 与 fidelity 观测 |
 | Tool 与 Command Registry 原生 HTTP 路由 | `default-on` | Rust 内置 catalog、SQLite MCP tool cache 与本地 skill 扫描；Web/Android 无 Node E2E | 保持默认开启 |

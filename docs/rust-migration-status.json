@@ -184,7 +184,7 @@
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启并监测认证读取、字段投影与 SQLite 故障回退。"
+      "nextAction": "Web/Android rust-only E2E 已通过；保持默认开启并监测认证读取、字段投影与 SQLite 故障回退。"
     },
     {
       "id": "device-mutations-http-route",
@@ -299,7 +299,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0008-rust-settings-http-routes.md"
       ],
-      "nextAction": "保持默认开启；继续扩展本地 schema/default 初始化和审计回滚覆盖。"
+      "nextAction": "Web/Android rust-only E2E 已通过；保持默认开启并继续扩展本地 schema/default 初始化和审计回滚覆盖。"
     },
     {
       "id": "tool-events-http-route",
@@ -371,7 +371,7 @@
       "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
       "fallback": "Rust 鉴权、workspace root 或只读读取失败时可回放 Node；读取 body 后的文件、batch、Git 和 worktree mutation 失败返回 Rust 错误且不回放；关闭 --rust-workspace-http 后恢复 Node 所有权",
       "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
-      "nextAction": "Workspace list/create/tree/context/read/preview/batch、Git status/diff/actions、worktree list/create/action、command、terminal-session 入口与 approval 持久化已默认开启；继续把 terminal input/resize 与 provider approval delivery 接到 execd 的长期会话恢复。"
+      "nextAction": "Web/Android rust-only E2E 已通过；Workspace list/create/tree/context/read/preview/batch、Git status/diff/actions、worktree list/create/action、command、terminal-session 入口与 approval 持久化已默认开启；继续把 terminal input/resize 与 provider approval delivery 接到 execd 的长期会话恢复。"
     },
     {
       "id": "task-http-route",

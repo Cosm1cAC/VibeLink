@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.junit.Assume.assumeTrue
+import java.net.URLEncoder
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -24,6 +25,9 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         val status = client.checkStatus()
         val providerRegistry = client.getProviderRegistry()
         val doctor = client.getDoctor()
+        val devices = client.listDevices()
+        val settingsExport = client.exportSettings()
+        val workspaces = client.listWorkspaces()
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
@@ -35,12 +39,44 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals(listOf("codex", "claude", "doubao", "zhipu"), providerRegistry.providers.map { it.id })
         assertEquals(true, doctor.checks.isNotEmpty())
         assertEquals(true, doctor.generatedAt.isNotBlank())
+        assertEquals("device", devices.currentDeviceId)
+        assertEquals(listOf("device"), devices.items.map { it.id })
+        assertEquals("vibelink.settings.export", settingsExport.kind)
+        assertEquals(false, settingsExport.settings.containsKey("pairingToken"))
+        assertEquals(listOf("workspace"), workspaces.map { it.id })
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->
             assertEquals(200, response.code)
             assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
             assertContains(response.body!!.string(), "\"openapi\": \"3.0.3\"")
+        }
+
+        val artifactId = "11111111-1111-4111-8111-111111111111.txt"
+        val authenticatedClient = OkHttpClient()
+        listOf(
+            "/api/artifacts/$artifactId" to "\"id\":\"$artifactId\"",
+            "/api/attachments/$artifactId" to "hello from rust artifact",
+        ).forEach { (path, expected) ->
+            val authenticatedRequest = Request.Builder()
+                .url("$baseUrl$path")
+                .header("Authorization", "Bearer $token")
+                .build()
+            authenticatedClient.newCall(authenticatedRequest).execute().use { response ->
+                assertEquals(200, response.code, path)
+                assertEquals("rust", response.header("X-VibeLink-Control-Plane"), path)
+                assertContains(response.body!!.string(), expected)
+            }
+        }
+        val filePath = System.getenv("VIBELINK_RUST_ONLY_E2E_FILE").orEmpty()
+        val fileRequest = Request.Builder()
+            .url("$baseUrl/api/files?path=${URLEncoder.encode(filePath, "UTF-8")}")
+            .header("Authorization", "Bearer $token")
+            .build()
+        authenticatedClient.newCall(fileRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "hello from rust file")
         }
     }
 }

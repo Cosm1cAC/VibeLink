@@ -48,14 +48,27 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-rust-only-discovery-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const workspaceDir = path.join(directory, "workspace");
+  const artifactId = "11111111-1111-4111-8111-111111111111.txt";
   fs.mkdirSync(path.join(directory, "home", ".vibelink", "skills", "e2e"), { recursive: true });
+  fs.mkdirSync(path.join(directory, "attachments"), { recursive: true });
+  fs.mkdirSync(workspaceDir);
   fs.writeFileSync(path.join(directory, "home", ".vibelink", "skills", "e2e", "SKILL.md"), "---\nname: e2e\ndescription: E2E skill\n---\nRun E2E.");
-  fs.writeFileSync(path.join(directory, "settings.json"), JSON.stringify({ pairingToken: "PAIR", hostAllowlist: ["127.0.0.1"] }));
+  fs.writeFileSync(path.join(directory, "attachments", artifactId), "hello from rust artifact\n");
+  fs.writeFileSync(path.join(workspaceDir, "download.txt"), "hello from rust file\n");
+  fs.writeFileSync(path.join(directory, "settings.json"), JSON.stringify({
+    pairingToken: "PAIR",
+    hostAllowlist: ["127.0.0.1"],
+    defaultCwd: workspaceDir,
+    allowedRoots: [workspaceDir],
+    security: { trustedWorkspaces: [workspaceDir] }
+  }));
   const database = new DatabaseSync(path.join(directory, "mobile-agent.sqlite"));
-  database.exec("CREATE TABLE devices (id TEXT, label TEXT, token_hash TEXT, created_at TEXT, last_seen_at TEXT, revoked_at TEXT, expires_at TEXT, rotated_at TEXT, meta_json TEXT); CREATE TABLE mcp_tools (server_name TEXT, tool_name TEXT, full_name TEXT PRIMARY KEY, title TEXT, description TEXT, input_schema TEXT);");
+  database.exec("CREATE TABLE devices (id TEXT, label TEXT, token_hash TEXT, created_at TEXT, last_seen_at TEXT, revoked_at TEXT, expires_at TEXT, rotated_at TEXT, meta_json TEXT); CREATE TABLE mcp_tools (server_name TEXT, tool_name TEXT, full_name TEXT PRIMARY KEY, title TEXT, description TEXT, input_schema TEXT); CREATE TABLE workspaces (id TEXT PRIMARY KEY, path TEXT, title TEXT, allowed_root TEXT, created_at TEXT, updated_at TEXT, last_used_at TEXT); CREATE TABLE audit_log (cursor INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, event_at TEXT, device_id TEXT, ip TEXT, user_agent TEXT, method TEXT, path TEXT, success INTEGER, reason TEXT, target TEXT, meta_json TEXT, created_at TEXT);");
   const hash = crypto.createHash("sha256").update("device-token").digest("hex");
   database.prepare("INSERT INTO devices VALUES (?, ?, ?, '', '', NULL, ?, NULL, '{}')").run("device", "Web E2E", hash, "2099-01-01T00:00:00.000Z");
   database.prepare("INSERT INTO mcp_tools VALUES (?, ?, ?, ?, ?, ?)").run("memory", "search", "mcp__memory__search", "Search", "Search graph", "{\"type\":\"object\"}");
+  database.prepare("INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?)").run("workspace", workspaceDir, "Rust-only Workspace", workspaceDir, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
   database.close();
 
   const child = spawn(binary, ["--host", "127.0.0.1", "--port", "0", "rust-only", "--data-dir", directory], {
@@ -117,6 +130,28 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.ok(Array.isArray(doctor.checks) && doctor.checks.length > 0);
   assert.match(doctor.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
 
+  const devicesResponse = await fetch(`http://127.0.0.1:${port}/api/devices`, { headers });
+  assert.equal(devicesResponse.status, 200);
+  assert.equal(devicesResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const devices = await devicesResponse.json();
+  assert.equal(devices.currentDeviceId, "device");
+  assert.deepEqual(devices.items.map((device) => device.id), ["device"]);
+
+  const settingsResponse = await fetch(`http://127.0.0.1:${port}/api/settings/export`, { headers });
+  const settingsText = await settingsResponse.text();
+  assert.equal(settingsResponse.status, 200, `${settingsText}\n${logs}`);
+  assert.equal(settingsResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const settingsExport = JSON.parse(settingsText);
+  assert.equal(settingsExport.kind, "vibelink.settings.export");
+  assert.equal(settingsExport.settings.pairingToken, undefined);
+  assert.deepEqual(settingsExport.settings.allowedRoots, [workspaceDir]);
+
+  const workspacesResponse = await fetch(`http://127.0.0.1:${port}/api/workspaces`, { headers });
+  assert.equal(workspacesResponse.status, 200);
+  assert.equal(workspacesResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const workspaces = await workspacesResponse.json();
+  assert.deepEqual(workspaces.items.map((workspace) => workspace.id), ["workspace"]);
+
   const toolsResponse = await waitFor(`http://127.0.0.1:${port}/api/tool-registry`, { headers });
   assert.equal(toolsResponse.status, 200);
   assert.equal(toolsResponse.headers.get("x-vibelink-control-plane"), "rust");
@@ -126,6 +161,18 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(commandsResponse.status, 200);
   assert.equal(commandsResponse.headers.get("x-vibelink-control-plane"), "rust");
   assert.equal((await commandsResponse.json()).items[0].id, "skill:e2e");
+  const artifactResponse = await fetch(`http://127.0.0.1:${port}/api/artifacts/${artifactId}`, { headers });
+  assert.equal(artifactResponse.status, 200);
+  assert.equal(artifactResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal((await artifactResponse.json()).artifact.id, artifactId);
+  const attachmentResponse = await fetch(`http://127.0.0.1:${port}/api/attachments/${artifactId}`, { headers });
+  assert.equal(attachmentResponse.status, 200);
+  assert.equal(attachmentResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal(await attachmentResponse.text(), "hello from rust artifact\n");
+  const fileResponse = await fetch(`http://127.0.0.1:${port}/api/files?path=${encodeURIComponent(path.join(workspaceDir, "download.txt"))}`, { headers });
+  assert.equal(fileResponse.status, 200);
+  assert.equal(fileResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal(await fileResponse.text(), "hello from rust file\n");
   assert.deepEqual(descendantNodeProcesses(child.pid), []);
 
   const gradleCommand = process.platform === "win32" ? "cmd.exe" : "./gradlew";
@@ -137,7 +184,8 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     env: {
       ...process.env,
       VIBELINK_RUST_ONLY_E2E_URL: `http://127.0.0.1:${port}`,
-      VIBELINK_RUST_ONLY_E2E_TOKEN: "device-token"
+      VIBELINK_RUST_ONLY_E2E_TOKEN: "device-token",
+      VIBELINK_RUST_ONLY_E2E_FILE: path.join(workspaceDir, "download.txt")
     },
     encoding: "utf8",
     windowsHide: true,

@@ -161,6 +161,36 @@ test("doctor is consumed from the Rust-only frontdoor by Web and Android", () =>
   });
 });
 
+test("core resource lists are consumed from the Rust-only frontdoor by Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const expectedEvidence = {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  };
+
+  for (const familyId of ["devices", "settings", "workspaces"]) {
+    const family = ownership.publicRouteFamilies.find((item) => item.id === familyId);
+    assert.equal(family.owner, "rust", familyId);
+    assert.equal(family.status, "default-on", familyId);
+    assert.deepEqual(family.rustOnlyE2E, expectedEvidence, familyId);
+  }
+});
+
+test("artifact, attachment, and file reads use the Rust-only frontdoor on Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const expectedEvidence = {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  };
+
+  for (const familyId of ["artifacts", "attachments", "files"]) {
+    const family = ownership.publicRouteFamilies.find((item) => item.id === familyId);
+    assert.equal(family.owner, "rust", familyId);
+    assert.equal(family.status, "default-on", familyId);
+    assert.deepEqual(family.rustOnlyE2E, expectedEvidence, familyId);
+  }
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),
@@ -218,6 +248,35 @@ test("ownership comparison treats OpenAPI and runtime path parameters as the sam
   });
 
   assert.equal(readiness.blockerIds.includes("ownership-runtime-registry-diff"), false);
+});
+
+test("rust-owned families must be backed by Rust runtime routes, not only Node routes", () => {
+  const readiness = ownershipReadiness({
+    publicRouteFamilies: [{
+      id: "reviews",
+      owner: "rust",
+      prefixes: ["/api/reviews"],
+      rustOnlyE2E: {
+        web: ["test/rustOnlyDiscoveryE2e.test.js"],
+        android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    }],
+    rustOnlyAcceptance: {
+      requiredFamilies: ["reviews"],
+      forbiddenPackageEntries: ["runtime/node.exe"],
+      forbiddenProcessNames: ["node.exe"],
+      packageSmoke: "tools/rust-only-package-smoke.mjs"
+    },
+    runtimeRoutes: ["GET /api/reviews"],
+    rustRuntimeRoutes: []
+  }, {
+    paths: {
+      "/api/reviews": { get: { operationId: "listReviews" } }
+    }
+  });
+
+  assert.equal(readiness.blockerIds.includes("ownership-runtime-registry-diff"), false);
+  assert.ok(readiness.blockerIds.includes("ownership-reviews-missing-rust-runtime"));
 });
 
 test("the native artifact family has no OpenAPI or runtime registry gap", () => {

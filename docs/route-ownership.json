@@ -69,30 +69,84 @@
     { "id": "histories", "owner": "rust", "status": "default-on", "prefixes": ["/api/histories"] },
     { "id": "search", "owner": "rust", "status": "default-on", "prefixes": ["/api/search"] },
     { "id": "tasks", "owner": "rust", "status": "default-on", "prefixes": ["/api/tasks", "/api/task-scheduler", "/api/context-budget", "/api/compact"] },
-    { "id": "workspaces", "owner": "rust", "status": "default-on", "prefixes": ["/api/workspaces"] },
+    {
+      "id": "workspaces",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/workspaces"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "tool-runs", "owner": "rust", "status": "phase-2-persisted", "prefixes": ["/api/tool-runs"] },
     { "id": "tool-events", "owner": "rust", "status": "default-on", "prefixes": ["/api/tool-events"] },
     { "id": "approvals", "owner": "rust", "status": "phase-2-persisted", "prefixes": ["/api/approvals"] },
-    { "id": "devices", "owner": "rust", "status": "default-on", "prefixes": ["/api/devices"] },
+    {
+      "id": "devices",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/devices"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "pairing", "owner": "rust", "status": "default-on", "prefixes": ["/api/login", "/api/pairing-sessions"] },
     { "id": "events", "owner": "rust", "status": "default-on", "prefixes": ["/api/events"] },
     { "id": "live-calls", "owner": "node", "status": "node-owned", "prefixes": ["/api/live-calls"] },
-    { "id": "settings", "owner": "rust", "status": "default-on", "prefixes": ["/api/settings"] },
+    {
+      "id": "settings",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/settings"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "thread-state", "owner": "rust", "status": "default-on", "prefixes": ["/api/thread-state"] },
     { "id": "reviews", "owner": "node", "status": "node-owned", "prefixes": ["/api/reviews"] },
     { "id": "audit", "owner": "rust", "status": "default-on", "prefixes": ["/api/audit-log"] },
     { "id": "desktop-remote", "owner": "rust", "status": "default-on", "routes": ["GET /api/desktop-remote/observations"] },
     { "id": "desktop-remote-control", "owner": "node", "status": "node-owned", "routes": ["GET /api/desktop-remote/status", "GET /api/desktop-remote/events", "POST /api/desktop-remote/messages", "POST /api/desktop-remote/retry", "POST /api/desktop-remote/clear", "POST /api/desktop-remote/focus"] },
     { "id": "terminal-sessions", "owner": "rust", "status": "default-on", "prefixes": ["/api/terminal-sessions"] },
-    { "id": "artifacts", "owner": "rust", "status": "default-on", "prefixes": ["/api/artifacts"] },
+    {
+      "id": "artifacts",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/artifacts"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "browser-sessions", "owner": "node", "status": "node-owned", "prefixes": ["/api/browser-sessions", "/api/browser"] },
     { "id": "capabilities", "owner": "node", "status": "node-owned", "prefixes": ["/api/capabilities"] },
     { "id": "automations", "owner": "node", "status": "node-owned", "prefixes": ["/api/automations"] },
     { "id": "subagents", "owner": "node", "status": "node-owned", "prefixes": ["/api/subagents"] },
     { "id": "cloudflare", "owner": "node", "status": "node-owned", "prefixes": ["/api/cloudflare"] },
     { "id": "push", "owner": "node", "status": "node-owned", "prefixes": ["/api/push"] },
-    { "id": "attachments", "owner": "rust", "status": "default-on", "prefixes": ["/api/attachments"] },
-    { "id": "files", "owner": "rust", "status": "default-on", "prefixes": ["/api/files"] },
+    {
+      "id": "attachments",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/attachments"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "files",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/files"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "codex-desktop", "owner": "node", "status": "node-owned", "prefixes": ["/api/codex-desktop", "/api/codex-app-server"] }
   ],
   "internalRouteFamilies": [],

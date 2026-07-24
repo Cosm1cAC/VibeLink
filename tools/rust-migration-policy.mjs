@@ -153,7 +153,13 @@ function collectRustRuntimeRoutes(root) {
     for (const match of source.matchAll(/\(\s*"([A-Z]+)"\s*,\s*"([^"]+)"\s*\)/g)) {
       routes.push(operationKey(match[1], match[2]));
     }
-    for (const match of source.matchAll(/request\.method\s*(?:!=|==)\s*"([A-Z]+)"[\s\S]{0,120}?request\.path\(\)\s*(?:!=|==)\s*"([^"]+)"/g)) {
+    for (const match of source.matchAll(/["']([A-Z]+)\s+(\/api\/[^\s?"']+)[^"']*?\s+HTTP\/1\.1/g)) {
+      if (match[2].includes("{")) routes.push(operationKey(match[1], match[2]));
+    }
+    for (const match of source.matchAll(/request\.path\(\)\s*(?:!=|==)\s*"([^"]+)"[^\n]{0,160}?request\.method\s*(?:!=|==)\s*"([A-Z]+)"/g)) {
+      routes.push(operationKey(match[2], match[1]));
+    }
+    for (const match of source.matchAll(/request\.method\s*(?:!=|==)\s*"([A-Z]+)"[^\n]{0,120}?request\.path\(\)\s*(?:!=|==)\s*"([^"]+)"/g)) {
       routes.push(operationKey(match[1], match[2]));
     }
   }
@@ -171,6 +177,19 @@ function collectRuntimeRoutes(root = process.cwd()) {
     ...collectNodeRuntimeRoutes(nodeSource),
     ...collectRustRuntimeRoutes(root)
   ]);
+}
+
+function collectRuntimeRoutesByOwner(root = process.cwd()) {
+  const nodeSource = ["src/server.js", "src/browserSessionHttp.js"]
+    .map((relativePath) => {
+      const fullPath = path.resolve(root, relativePath);
+      return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : "";
+    })
+    .join("\n");
+  return {
+    node: collectNodeRuntimeRoutes(nodeSource),
+    rust: collectRustRuntimeRoutes(root)
+  };
 }
 
 function collectOpenApiOperations(openapi) {
@@ -226,6 +245,16 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
   const requiredFamilyIds = new Set(requiredFamilies);
   const duplicateRequiredFamilies = requiredFamilies.filter((id, index) => requiredFamilies.indexOf(id) !== index);
   const operations = openapi ? collectOpenApiOperations(openapi) : [];
+  const hasRustRuntimeRoutes = Array.isArray(manifest?.rustRuntimeRoutes);
+  const rustRuntimeRoutes = hasRustRuntimeRoutes ? manifest.rustRuntimeRoutes : [];
+  const rustRuntimeOperations = rustRuntimeRoutes.map((route) => {
+    const [method, ...pathParts] = String(route).split(" ");
+    return {
+      method: normalizeMethod(method),
+      path: normalizePath(pathParts.join(" ")),
+      key: operationKey(method, pathParts.join(" "))
+    };
+  });
   const blockers = [];
   const operationOwners = new Map();
   const runtimeEntries = new Set();
@@ -280,6 +309,21 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         nodeEntries: Array.isArray(family.nodeEntries) ? family.nodeEntries : [],
         rustTarget: family.rustTarget || family.runtime?.[0]?.path || ""
       });
+    }
+    if ((family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId) && owner === "rust" && hasRustRuntimeRoutes) {
+      const familyOperations = operations.filter((operation) => familyMatchesOperation(family, operation));
+      const missingRustOperations = familyOperations.filter((operation) => !rustRuntimeOperations.some((runtimeOperation) =>
+        operation.method === runtimeOperation.method && pathMatches(operation.path, runtimeOperation.path)
+      ));
+      if (missingRustOperations.length) {
+        blockers.push({
+          id: `ownership-${familyId}-missing-rust-runtime`,
+          title: `Rust-owned family ${familyId} is missing native runtime routes`,
+          status: "planned",
+          nodeEntries: missingRustOperations.map((operation) => operation.key),
+          rustTarget: family.rustTarget || "apps/windows/src"
+        });
+      }
     }
     if ((family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId)) {
       for (const client of ["web", "android"]) {
@@ -503,7 +547,8 @@ export function nodeRuntimeReadiness(manifest = {}) {
       {
         ...routeOwnership,
         windowsMain: fs.readFileSync(path.resolve(process.cwd(), "apps/windows/src/main.rs"), "utf8"),
-        runtimeRoutes: collectRuntimeRoutes()
+        runtimeRoutes: collectRuntimeRoutes(),
+        rustRuntimeRoutes: collectRuntimeRoutesByOwner().rust
       },
       openapi
     );

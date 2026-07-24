@@ -81,6 +81,15 @@ class ApiClientRustOnlyDiscoveryE2eTest {
             assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
             assertContains(response.body!!.string(), "\"items\":[]")
         }
+        val terminalSessionsRequest = Request.Builder()
+            .url("$baseUrl/api/terminal-sessions")
+            .header("Authorization", "Bearer $token")
+            .build()
+        authenticatedClient.newCall(terminalSessionsRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"items\":[]")
+        }
         listOf(
             "/api/artifacts/$artifactId" to "\"id\":\"$artifactId\"",
             "/api/attachments/$artifactId" to "hello from rust artifact",

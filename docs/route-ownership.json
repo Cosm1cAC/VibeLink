@@ -211,7 +211,16 @@
       }
     },
     { "id": "desktop-remote-control", "owner": "node", "status": "node-owned", "routes": ["GET /api/desktop-remote/status", "GET /api/desktop-remote/events", "POST /api/desktop-remote/messages", "POST /api/desktop-remote/retry", "POST /api/desktop-remote/clear", "POST /api/desktop-remote/focus"] },
-    { "id": "terminal-sessions", "owner": "rust", "status": "default-on", "prefixes": ["/api/terminal-sessions"] },
+    {
+      "id": "terminal-sessions",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/terminal-sessions"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     {
       "id": "artifacts",
       "owner": "rust",

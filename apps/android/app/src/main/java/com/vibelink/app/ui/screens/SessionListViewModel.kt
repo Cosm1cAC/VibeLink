@@ -88,9 +88,10 @@ class SessionListViewModel : ViewModel() {
     private val _commands = MutableStateFlow<List<CommandDefinition>>(emptyList())
     val commands: StateFlow<List<CommandDefinition>> = _commands.asStateFlow()
 
-    private val _allConversations = MutableStateFlow<List<ConversationItem>>(emptyList())
+    private val initialDesktopConversation = DesktopRemoteState().toConversationItem()
+    private val _allConversations = MutableStateFlow(listOf(initialDesktopConversation))
 
-    private val _conversations = MutableStateFlow<List<ConversationItem>>(emptyList())
+    private val _conversations = MutableStateFlow(listOf(initialDesktopConversation))
     val conversations: StateFlow<List<ConversationItem>> = _conversations.asStateFlow()
 
     private val _query = MutableStateFlow("")

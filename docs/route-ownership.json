@@ -247,7 +247,18 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "push", "owner": "node", "status": "node-owned", "prefixes": ["/api/push"] },
+    {
+      "id": "push",
+      "owner": "node",
+      "status": "node-owned",
+      "prefixes": ["/api/push"],
+      "rustReadRoutes": ["GET /api/push/public-key", "GET /api/push/subscriptions"],
+      "remainingNodeRoutes": [
+        "POST /api/push/subscriptions",
+        "DELETE /api/push/subscriptions/:id",
+        "POST /api/push/native-token"
+      ]
+    },
     {
       "id": "attachments",
       "owner": "rust",

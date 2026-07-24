@@ -61,7 +61,8 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     hostAllowlist: ["127.0.0.1"],
     defaultCwd: workspaceDir,
     allowedRoots: [workspaceDir],
-    security: { trustedWorkspaces: [workspaceDir] }
+    security: { trustedWorkspaces: [workspaceDir] },
+    webPush: { publicKey: "push-key" }
   }));
   const database = new DatabaseSync(path.join(directory, "mobile-agent.sqlite"));
   database.exec("CREATE TABLE devices (id TEXT, label TEXT, token_hash TEXT, created_at TEXT, last_seen_at TEXT, revoked_at TEXT, expires_at TEXT, rotated_at TEXT, meta_json TEXT); CREATE TABLE mcp_tools (server_name TEXT, tool_name TEXT, full_name TEXT PRIMARY KEY, title TEXT, description TEXT, input_schema TEXT); CREATE TABLE workspaces (id TEXT PRIMARY KEY, path TEXT, title TEXT, allowed_root TEXT, created_at TEXT, updated_at TEXT, last_used_at TEXT); CREATE TABLE audit_log (cursor INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, event_at TEXT, device_id TEXT, ip TEXT, user_agent TEXT, method TEXT, path TEXT, success INTEGER, reason TEXT, target TEXT, meta_json TEXT, created_at TEXT); CREATE TABLE desktop_observations (cursor INTEGER PRIMARY KEY, observed_at TEXT, hash TEXT, event_type TEXT, observation_json TEXT, event_json TEXT); CREATE TABLE tool_runs (id TEXT PRIMARY KEY, task_id TEXT, workspace_id TEXT, tool_name TEXT NOT NULL, status TEXT NOT NULL, title TEXT, input_json TEXT, result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT); CREATE TABLE tool_events (cursor INTEGER PRIMARY KEY AUTOINCREMENT, tool_run_id TEXT NOT NULL, task_id TEXT, workspace_id TEXT, event_id TEXT NOT NULL, event_type TEXT NOT NULL, event_at TEXT NOT NULL, text TEXT, payload_json TEXT, event_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(tool_run_id,event_id)); CREATE TABLE approval_requests (id TEXT PRIMARY KEY, tool_run_id TEXT, task_id TEXT, workspace_id TEXT, kind TEXT NOT NULL, status TEXT NOT NULL, title TEXT, reason TEXT, request_json TEXT, risk_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT, decided_at TEXT, decided_by_device_id TEXT, decision_reason TEXT, decision_json TEXT); CREATE TABLE pairing_sessions (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL, label TEXT, ip TEXT, user_agent TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, approved_at TEXT, approved_by_device_id TEXT, claimed_at TEXT, device_id TEXT, meta_json TEXT); CREATE TABLE threads (key TEXT PRIMARY KEY, title TEXT, group_name TEXT, pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, meta_json TEXT, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL); CREATE TABLE thread_forks (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, source_id TEXT NOT NULL, provider TEXT NOT NULL, title TEXT NOT NULL, cwd TEXT, group_name TEXT, pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE event_acks (device_id TEXT NOT NULL, stream_id TEXT NOT NULL, cursor INTEGER NOT NULL, event_id TEXT, acked_at TEXT NOT NULL, metadata_json TEXT);");
@@ -207,6 +208,14 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(cloudflareGuide.host, "127.0.0.1");
   assert.equal(cloudflareGuide.publicHost, false);
   assert.ok(cloudflareGuide.steps.length > 0);
+  const pushKeyResponse = await fetch(`http://127.0.0.1:${port}/api/push/public-key`, { headers });
+  assert.equal(pushKeyResponse.status, 200);
+  assert.equal(pushKeyResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal((await pushKeyResponse.json()).publicKey, "push-key");
+  const pushListResponse = await fetch(`http://127.0.0.1:${port}/api/push/subscriptions`, { headers });
+  assert.equal(pushListResponse.status, 200);
+  assert.equal(pushListResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.deepEqual((await pushListResponse.json()).items, []);
 
   const toolsResponse = await waitFor(`http://127.0.0.1:${port}/api/tool-registry`, { headers });
   assert.equal(toolsResponse.status, 200);

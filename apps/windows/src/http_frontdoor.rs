@@ -22,6 +22,7 @@ use crate::pairing_http::{
     PairingRouteConfig,
 };
 use crate::provider_http::{route_provider_request, ProviderRouteConfig};
+use crate::push_http::{route_push_read_request, PushRouteConfig};
 use crate::settings_http::{
     route_settings_request, route_settings_request_with_body, settings_request_requires_body,
     SettingsRouteConfig,
@@ -73,6 +74,7 @@ pub struct FrontdoorRoutes {
     discovery: Option<DiscoveryRouteConfig>,
     file: Option<FileRouteConfig>,
     cloudflare: Option<CloudflareRouteConfig>,
+    push: Option<PushRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -171,6 +173,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_push(mut self, route: Option<PushRouteConfig>) -> Self {
+        self.push = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -191,6 +198,7 @@ impl FrontdoorRoutes {
             && self.discovery.is_none()
             && self.file.is_none()
             && self.cloudflare.is_none()
+            && self.push.is_none()
     }
 }
 
@@ -400,6 +408,13 @@ fn handle_connection_with_upstream(
                     return HttpRouteResponse::error(500, "Cloudflare guide request failed.")
                         .write_to(&mut client);
                 }
+            }
+        }
+        if let Some(push_route) = routes.push.as_ref() {
+            match route_push_read_request(&request, push_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => eprintln!("Rust Push read route falling back to Node: {error:#}"),
             }
         }
         if let Some(artifact_route) = routes.artifact.as_ref() {

@@ -38,6 +38,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         val threadState = client.getThreadState()
         val eventAcks = client.listEventAcks("task")
         val cloudflareGuide = client.getCloudflareGuide()
+        val pushSubscriptions = client.listPushSubscriptions()
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
@@ -66,6 +67,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals("127.0.0.1", cloudflareGuide.host)
         assertEquals(false, cloudflareGuide.publicHost)
         assertEquals(true, cloudflareGuide.steps.isNotEmpty())
+        assertEquals(0, pushSubscriptions.size)
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->
@@ -76,6 +78,15 @@ class ApiClientRustOnlyDiscoveryE2eTest {
 
         val artifactId = "11111111-1111-4111-8111-111111111111.txt"
         val authenticatedClient = OkHttpClient()
+        val pushKeyRequest = Request.Builder()
+            .url("$baseUrl/api/push/public-key")
+            .header("Authorization", "Bearer $token")
+            .build()
+        authenticatedClient.newCall(pushKeyRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"publicKey\":\"push-key\"")
+        }
         val toolRunsRequest = Request.Builder()
             .url("$baseUrl/api/tool-runs")
             .header("Authorization", "Bearer $token")

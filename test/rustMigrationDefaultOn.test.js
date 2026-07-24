@@ -268,6 +268,7 @@ test("rust-owned families must be backed by Rust runtime routes, not only Node r
       id: "reviews",
       owner: "rust",
       prefixes: ["/api/reviews"],
+      rustRuntimeRegistry: true,
       rustOnlyE2E: {
         web: ["test/rustOnlyDiscoveryE2e.test.js"],
         android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]

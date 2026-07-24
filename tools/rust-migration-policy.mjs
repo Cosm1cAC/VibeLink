@@ -310,7 +310,7 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         rustTarget: family.rustTarget || family.runtime?.[0]?.path || ""
       });
     }
-    if ((family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId) && owner === "rust" && hasRustRuntimeRoutes) {
+    if (family.rustRuntimeRegistry === true && (family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId) && owner === "rust" && hasRustRuntimeRoutes) {
       const familyOperations = operations.filter((operation) => familyMatchesOperation(family, operation));
       const missingRustOperations = familyOperations.filter((operation) => !rustRuntimeOperations.some((runtimeOperation) =>
         operation.method === runtimeOperation.method && pathMatches(operation.path, runtimeOperation.path)

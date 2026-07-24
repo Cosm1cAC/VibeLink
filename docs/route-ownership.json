@@ -17,6 +17,7 @@
       "id": "discovery",
       "owner": "rust",
       "status": "default-on",
+      "rustRuntimeRegistry": true,
       "prefixes": ["/api/tool-registry", "/api/command-registry"],
       "rustOnlyE2E": {
         "web": ["test/rustOnlyDiscoveryE2e.test.js"],
@@ -112,6 +113,7 @@
       "id": "desktop-remote",
       "owner": "rust",
       "status": "default-on",
+      "rustRuntimeRegistry": true,
       "routes": ["GET /api/desktop-remote/observations"],
       "rustOnlyE2E": {
         "web": ["test/rustOnlyDiscoveryE2e.test.js"],
@@ -124,6 +126,7 @@
       "id": "artifacts",
       "owner": "rust",
       "status": "default-on",
+      "rustRuntimeRegistry": true,
       "prefixes": ["/api/artifacts"],
       "rustOnlyE2E": {
         "web": ["test/rustOnlyDiscoveryE2e.test.js"],
@@ -140,6 +143,7 @@
       "id": "attachments",
       "owner": "rust",
       "status": "default-on",
+      "rustRuntimeRegistry": true,
       "prefixes": ["/api/attachments"],
       "rustOnlyE2E": {
         "web": ["test/rustOnlyDiscoveryE2e.test.js"],
@@ -150,6 +154,7 @@
       "id": "files",
       "owner": "rust",
       "status": "default-on",
+      "rustRuntimeRegistry": true,
       "prefixes": ["/api/files"],
       "rustOnlyE2E": {
         "web": ["test/rustOnlyDiscoveryE2e.test.js"],

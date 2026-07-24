@@ -1,14 +1,18 @@
 use crate::settings_contract::load_settings;
 use crate::settings_http::project_public_settings;
 use crate::sidecar_protocol::now_iso;
-use anyhow::{bail, Context, Result};
+#[cfg(test)]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Read;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -595,6 +599,7 @@ fn cloudflare_guide(request: &ParsedRequest, settings: &Value) -> Value {
     })
 }
 
+#[cfg(test)]
 fn read_json_bounded(mut reader: impl Read, max_bytes: usize) -> Result<Value> {
     let mut body = Vec::new();
     reader

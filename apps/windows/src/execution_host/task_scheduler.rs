@@ -1000,7 +1000,7 @@ fn ingest_host_event(connection: &Connection, task: &ClaimedTask, event: &Value)
     let at = event
         .get("at")
         .and_then(Value::as_str)
-        .unwrap_or_else(|| "")
+        .unwrap_or("")
         .to_string();
     let payload = event.get("payload").cloned().unwrap_or_else(|| json!({}));
     connection.execute(

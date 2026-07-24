@@ -486,7 +486,7 @@ fn route_approval_request(
         .strip_prefix("/api/approvals/")
         .and_then(|value| value.strip_suffix("/decision"))
         .filter(|value| !value.is_empty());
-    if !is_list && !(decision_id.is_some() && request.method == "POST") {
+    if !(is_list || decision_id.is_some() && request.method == "POST") {
         return Ok(None);
     }
     let auth = authenticate_route_request(request, &config.data_dir)?;
@@ -738,23 +738,25 @@ fn route_tool_run_request(
     )?;
     let rows = statement
         .query_map([], |row| {
-            Ok(tool_run_json(
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                row.get::<_, Option<String>>(6)?
+            Ok(tool_run_json(ToolRunRow {
+                id: row.get::<_, String>(0)?,
+                task_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                workspace_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                tool_name: row.get::<_, String>(3)?,
+                status: row.get::<_, String>(4)?,
+                title: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                input_json: row
+                    .get::<_, Option<String>>(6)?
                     .unwrap_or_else(|| "{}".into()),
-                row.get::<_, Option<String>>(7)?
+                result_json: row
+                    .get::<_, Option<String>>(7)?
                     .unwrap_or_else(|| "null".into()),
-                row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-                row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-            ))
+                error: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                created_at: row.get::<_, String>(9)?,
+                updated_at: row.get::<_, String>(10)?,
+                started_at: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                completed_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+            }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Some(HttpRouteResponse::json(200, json!({ "items": rows }))))
@@ -778,8 +780,7 @@ fn route_terminal_session_request(
         .path()
         .strip_prefix("/api/terminal-sessions/")
         .and_then(|value| value.strip_suffix("/resize"));
-    if !list
-        && !(session_id.is_some() && request.method == "GET")
+    if !(list || session_id.is_some() && request.method == "GET")
         && input_id.is_none()
         && resize_id.is_none()
     {
@@ -1028,7 +1029,7 @@ fn terminal_json_body(body: Option<&[u8]>) -> Result<Value> {
     serde_json::from_slice(body).context("Invalid terminal request JSON.")
 }
 
-fn tool_run_json(
+struct ToolRunRow {
     id: String,
     task_id: String,
     workspace_id: String,
@@ -1042,21 +1043,23 @@ fn tool_run_json(
     updated_at: String,
     started_at: String,
     completed_at: String,
-) -> Value {
+}
+
+fn tool_run_json(row: ToolRunRow) -> Value {
     json!({
-        "id": id,
-        "taskId": task_id,
-        "workspaceId": workspace_id,
-        "toolName": tool_name,
-        "status": status,
-        "title": title,
-        "input": serde_json::from_str::<Value>(&input_json).unwrap_or(json!({})),
-        "result": serde_json::from_str::<Value>(&result_json).unwrap_or(Value::Null),
-        "error": error,
-        "createdAt": created_at,
-        "updatedAt": updated_at,
-        "startedAt": started_at,
-        "completedAt": completed_at
+        "id": row.id,
+        "taskId": row.task_id,
+        "workspaceId": row.workspace_id,
+        "toolName": row.tool_name,
+        "status": row.status,
+        "title": row.title,
+        "input": serde_json::from_str::<Value>(&row.input_json).unwrap_or(json!({})),
+        "result": serde_json::from_str::<Value>(&row.result_json).unwrap_or(Value::Null),
+        "error": row.error,
+        "createdAt": row.created_at,
+        "updatedAt": row.updated_at,
+        "startedAt": row.started_at,
+        "completedAt": row.completed_at
     })
 }
 
@@ -2174,7 +2177,7 @@ fn create_workspace_worktree(
         .unwrap_or_else(|| {
             repo_root
                 .parent()
-                .unwrap_or_else(|| repo_root.as_path())
+                .unwrap_or(repo_root.as_path())
                 .join(".vibelink-worktrees")
                 .join(repo_root.file_name().unwrap_or_default())
                 .join(&branch_name)

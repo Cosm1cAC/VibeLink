@@ -1617,7 +1617,7 @@ fn refresh_content_index(connection: &Connection) -> Result<Value> {
 fn collect_history_index_files() -> Vec<HistoryIndexFile> {
     #[cfg(test)]
     {
-        return Vec::new();
+        Vec::new()
     }
     #[cfg(not(test))]
     let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
@@ -1677,7 +1677,7 @@ fn collect_history_index_files_from_home(home: &Path) -> Vec<HistoryIndexFile> {
             }
         }
     }
-    files.sort_by(|left, right| right.mtime_ms.cmp(&left.mtime_ms));
+    files.sort_by_key(|file| std::cmp::Reverse(file.mtime_ms));
     files.truncate(600);
     files
 }

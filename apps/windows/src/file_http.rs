@@ -7,6 +7,7 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code, reason = "consumed by the runtime route registry extractor")]
 pub const FILE_RUNTIME_ROUTES: &[(&str, &str)] = &[("GET", "/api/files")];
 
 #[derive(Clone)]
@@ -35,9 +36,7 @@ pub fn stream_file_request(
         RouteAuthentication::Device(_) => {}
     }
 
-    let requested_parameter = request
-        .query_parameter("path")
-        .unwrap_or_default();
+    let requested_parameter = request.query_parameter("path").unwrap_or_default();
     let requested = requested_parameter
         .trim()
         .trim_start_matches('<')
@@ -47,12 +46,17 @@ pub fn stream_file_request(
     if !is_servable_extension(&extension) {
         return write_error(client, 400, "Unsupported file");
     }
-    let metadata = fs::metadata(&path).with_context(|| format!("Cannot stat {}", path.display()))?;
+    let metadata =
+        fs::metadata(&path).with_context(|| format!("Cannot stat {}", path.display()))?;
     if !metadata.is_file() {
         return write_error(client, 404, "File not found");
     }
     if !is_image_extension(&extension) && metadata.len() > 25 * 1024 * 1024 {
-        return write_error(client, 413, "File is too large to serve through the bridge.");
+        return write_error(
+            client,
+            413,
+            "File is too large to serve through the bridge.",
+        );
     }
     let bytes = fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
     let disposition = if is_image_extension(&extension) || extension == "pdf" {
@@ -105,7 +109,10 @@ fn allowed_file_path(value: &str, data_dir: &Path) -> Result<PathBuf> {
         bail!("Unsupported file");
     }
     let resolved = path.canonicalize().unwrap_or(path);
-    if !allowed_roots(data_dir)?.iter().any(|root| is_inside_root(&resolved, root)) {
+    if !allowed_roots(data_dir)?
+        .iter()
+        .any(|root| is_inside_root(&resolved, root))
+    {
         bail!("Path is outside allowed roots.");
     }
     Ok(resolved)
@@ -186,9 +193,28 @@ fn is_image_extension(extension: &str) -> bool {
 fn is_servable_extension(extension: &str) -> bool {
     matches!(
         extension,
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "pdf" | "txt" | "md"
-            | "csv" | "json" | "jsonl" | "yaml" | "yml" | "toml" | "doc" | "docx"
-            | "xls" | "xlsx" | "ppt" | "pptx" | "zip"
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "pdf"
+            | "txt"
+            | "md"
+            | "csv"
+            | "json"
+            | "jsonl"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "ppt"
+            | "pptx"
+            | "zip"
     )
 }
 
@@ -224,7 +250,8 @@ mod tests {
     use std::net::TcpListener;
 
     fn auth_dir() -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("vibelink-files-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-files-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         fs::write(
             directory.join("settings.json"),
@@ -244,7 +271,9 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let mut client = std::net::TcpStream::connect(address).unwrap();
         let (mut server, _) = listener.accept().unwrap();
-        stream_file_request(request, config, &mut server).unwrap().unwrap();
+        stream_file_request(request, config, &mut server)
+            .unwrap()
+            .unwrap();
         drop(server);
         let mut output = String::new();
         client.read_to_string(&mut output).unwrap();

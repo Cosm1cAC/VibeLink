@@ -186,7 +186,7 @@ pub fn accept_named_pipe(name: &str) -> Result<File> {
         return Err(std::io::Error::last_os_error())
             .context("failed to build current-owner named-pipe ACL");
     }
-    let mut attributes = SECURITY_ATTRIBUTES {
+    let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
@@ -200,7 +200,7 @@ pub fn accept_named_pipe(name: &str) -> Result<File> {
             super::protocol::MAX_FRAME_BYTES as u32 + 4,
             super::protocol::MAX_FRAME_BYTES as u32 + 4,
             0,
-            &mut attributes,
+            &attributes,
         )
     };
     unsafe { LocalFree(descriptor) };

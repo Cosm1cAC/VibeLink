@@ -12,6 +12,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
+#[allow(dead_code, reason = "consumed by the runtime route registry extractor")]
 pub const ARTIFACT_RUNTIME_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/artifacts/:id"),
     ("PATCH", "/api/artifacts/:id"),
@@ -192,7 +193,7 @@ pub fn route_artifact_preview_request(
             )));
         }
         let source = String::from_utf8_lossy(&bytes);
-        let page_count = source.matches("/Type /Page").count().max(1).min(200);
+        let page_count = source.matches("/Type /Page").count().clamp(1, 200);
         return Ok(Some(HttpRouteResponse::json(
             200,
             json!({ "preview": {

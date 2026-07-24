@@ -48,7 +48,7 @@ fn resolve_static_path(
         let path = config.root.join("docs").join("openapi.json");
         return path
             .is_file()
-            .then(|| (path, "application/json; charset=utf-8", "no-store"))
+            .then_some((path, "application/json; charset=utf-8", "no-store"))
             .map(Ok)
             .transpose();
     }

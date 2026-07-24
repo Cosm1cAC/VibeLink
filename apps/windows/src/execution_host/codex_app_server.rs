@@ -376,7 +376,7 @@ fn send_json(socket: &mut AppSocket, value: &Value) -> Result<()> {
         bail!("Codex app-server outbound message exceeds the protocol boundary");
     }
     socket
-        .send(Message::Text(payload.into()))
+        .send(Message::Text(payload))
         .context("failed to send app-server JSON-RPC message")
 }
 
@@ -1088,8 +1088,7 @@ mod tests {
                             "itemId": "item-1"
                         }
                     })
-                    .to_string()
-                    .into(),
+                    .to_string(),
                 ))
                 .unwrap();
             match socket.read().unwrap() {
@@ -1164,8 +1163,7 @@ mod tests {
                                         "turn": { "id": "turn-1", "status": "inProgress" }
                                     }
                                 })
-                                .to_string()
-                                .into(),
+                                .to_string(),
                             ))
                             .unwrap();
                     }
@@ -1176,7 +1174,7 @@ mod tests {
                     };
                     socket
                         .send(Message::Text(
-                            json!({ "id": id, "result": result }).to_string().into(),
+                            json!({ "id": id, "result": result }).to_string(),
                         ))
                         .unwrap();
                 }
@@ -1239,7 +1237,7 @@ mod tests {
                     };
                     socket
                         .send(Message::Text(
-                            json!({ "id": id, "result": result }).to_string().into(),
+                            json!({ "id": id, "result": result }).to_string(),
                         ))
                         .unwrap();
                 }

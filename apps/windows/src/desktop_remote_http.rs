@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[allow(dead_code, reason = "consumed by the runtime route registry extractor")]
 pub const DESKTOP_REMOTE_RUNTIME_ROUTES: &[(&str, &str)] =
     &[("GET", "/api/desktop-remote/observations")];
 

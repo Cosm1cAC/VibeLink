@@ -277,7 +277,7 @@ function Find-BottomActionButton($window, [string]$side) {
     if ($bounds.Y -lt ($windowBounds.Y + ($windowBounds.Height * 0.72))) { continue }
     if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * $minXRatio))) { continue }
     if ($side -eq "right") {
-      if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * 0.65))) { continue }
+      if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * 0.55))) { continue }
     }
 
     $score = $bounds.X
@@ -792,7 +792,7 @@ function Test-ComposerStopVisible($target) {
   foreach ($button in $bottomButtons) {
     $isStop = Test-IsStopName $button.name
     $inComposerActionArea =
-      $button.bounds.x -gt ($windowBounds.X + ($windowBounds.Width * 0.65)) -and
+      $button.bounds.x -gt ($windowBounds.X + ($windowBounds.Width * 0.55)) -and
       $button.bounds.y -gt ($windowBounds.Y + ($windowBounds.Height * 0.82))
     if ($isStop -and $inComposerActionArea) { return $true }
   }

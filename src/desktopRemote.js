@@ -102,7 +102,11 @@ function summarizeDesktop(result) {
 }
 
 function desktopRunningTurn(desktop) {
-  return Boolean(desktop?.sidebarHasRunning || desktop?.sidebarRunningCount > 0) || /running a turn|Stop button|composer is unavailable|thinking|loading|progress|busy/i.test(desktop?.reason || "");
+  const bottomStopVisible = Array.isArray(desktop?.bottomButtons)
+    && desktop.bottomButtons.some((button) => /^(停止|Stop|Stop generating|Cancel)$/i.test(String(button?.name || "").trim()));
+  return bottomStopVisible
+    || Boolean(desktop?.sidebarHasRunning || desktop?.sidebarRunningCount > 0)
+    || /running a turn|Stop button|composer is unavailable|thinking|loading|progress|busy/i.test(desktop?.reason || "");
 }
 
 function targetConversation(desktop, target = {}) {

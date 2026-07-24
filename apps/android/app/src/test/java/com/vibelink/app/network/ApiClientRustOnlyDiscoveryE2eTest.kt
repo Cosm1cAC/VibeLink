@@ -78,5 +78,14 @@ class ApiClientRustOnlyDiscoveryE2eTest {
             assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
             assertContains(response.body!!.string(), "hello from rust file")
         }
+        val desktopRequest = Request.Builder()
+            .url("$baseUrl/api/desktop-remote/observations?after=0&limit=1")
+            .header("Authorization", "Bearer $token")
+            .build()
+        authenticatedClient.newCall(desktopRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"ready\":true")
+        }
     }
 }

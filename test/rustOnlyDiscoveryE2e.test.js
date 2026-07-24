@@ -64,11 +64,12 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     security: { trustedWorkspaces: [workspaceDir] }
   }));
   const database = new DatabaseSync(path.join(directory, "mobile-agent.sqlite"));
-  database.exec("CREATE TABLE devices (id TEXT, label TEXT, token_hash TEXT, created_at TEXT, last_seen_at TEXT, revoked_at TEXT, expires_at TEXT, rotated_at TEXT, meta_json TEXT); CREATE TABLE mcp_tools (server_name TEXT, tool_name TEXT, full_name TEXT PRIMARY KEY, title TEXT, description TEXT, input_schema TEXT); CREATE TABLE workspaces (id TEXT PRIMARY KEY, path TEXT, title TEXT, allowed_root TEXT, created_at TEXT, updated_at TEXT, last_used_at TEXT); CREATE TABLE audit_log (cursor INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, event_at TEXT, device_id TEXT, ip TEXT, user_agent TEXT, method TEXT, path TEXT, success INTEGER, reason TEXT, target TEXT, meta_json TEXT, created_at TEXT);");
+  database.exec("CREATE TABLE devices (id TEXT, label TEXT, token_hash TEXT, created_at TEXT, last_seen_at TEXT, revoked_at TEXT, expires_at TEXT, rotated_at TEXT, meta_json TEXT); CREATE TABLE mcp_tools (server_name TEXT, tool_name TEXT, full_name TEXT PRIMARY KEY, title TEXT, description TEXT, input_schema TEXT); CREATE TABLE workspaces (id TEXT PRIMARY KEY, path TEXT, title TEXT, allowed_root TEXT, created_at TEXT, updated_at TEXT, last_used_at TEXT); CREATE TABLE audit_log (cursor INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, event_at TEXT, device_id TEXT, ip TEXT, user_agent TEXT, method TEXT, path TEXT, success INTEGER, reason TEXT, target TEXT, meta_json TEXT, created_at TEXT); CREATE TABLE desktop_observations (cursor INTEGER PRIMARY KEY, observed_at TEXT, hash TEXT, event_type TEXT, observation_json TEXT, event_json TEXT);");
   const hash = crypto.createHash("sha256").update("device-token").digest("hex");
   database.prepare("INSERT INTO devices VALUES (?, ?, ?, '', '', NULL, ?, NULL, '{}')").run("device", "Web E2E", hash, "2099-01-01T00:00:00.000Z");
   database.prepare("INSERT INTO mcp_tools VALUES (?, ?, ?, ?, ?, ?)").run("memory", "search", "mcp__memory__search", "Search", "Search graph", "{\"type\":\"object\"}");
   database.prepare("INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?)").run("workspace", workspaceDir, "Rust-only Workspace", workspaceDir, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+  database.prepare("INSERT INTO desktop_observations VALUES (?, ?, ?, ?, ?, ?)").run(1, "2026-07-01T00:00:00.000Z", "desktop-hash", "desktop.snapshot", "{\"ready\":true}", "null");
   database.close();
 
   const child = spawn(binary, ["--host", "127.0.0.1", "--port", "0", "rust-only", "--data-dir", directory], {
@@ -173,6 +174,10 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(fileResponse.status, 200);
   assert.equal(fileResponse.headers.get("x-vibelink-control-plane"), "rust");
   assert.equal(await fileResponse.text(), "hello from rust file\n");
+  const desktopResponse = await fetch(`http://127.0.0.1:${port}/api/desktop-remote/observations?after=0&limit=1`, { headers });
+  assert.equal(desktopResponse.status, 200);
+  assert.equal(desktopResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal((await desktopResponse.json()).items[0].desktop.ready, true);
   assert.deepEqual(descendantNodeProcesses(child.pid), []);
 
   const gradleCommand = process.platform === "win32" ? "cmd.exe" : "./gradlew";

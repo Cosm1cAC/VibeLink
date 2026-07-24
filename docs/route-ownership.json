@@ -108,7 +108,16 @@
     { "id": "thread-state", "owner": "rust", "status": "default-on", "prefixes": ["/api/thread-state"] },
     { "id": "reviews", "owner": "node", "status": "node-owned", "prefixes": ["/api/reviews"] },
     { "id": "audit", "owner": "rust", "status": "default-on", "prefixes": ["/api/audit-log"] },
-    { "id": "desktop-remote", "owner": "rust", "status": "default-on", "routes": ["GET /api/desktop-remote/observations"] },
+    {
+      "id": "desktop-remote",
+      "owner": "rust",
+      "status": "default-on",
+      "routes": ["GET /api/desktop-remote/observations"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "desktop-remote-control", "owner": "node", "status": "node-owned", "routes": ["GET /api/desktop-remote/status", "GET /api/desktop-remote/events", "POST /api/desktop-remote/messages", "POST /api/desktop-remote/retry", "POST /api/desktop-remote/clear", "POST /api/desktop-remote/focus"] },
     { "id": "terminal-sessions", "owner": "rust", "status": "default-on", "prefixes": ["/api/terminal-sessions"] },
     {

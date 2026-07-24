@@ -351,8 +351,12 @@ const schemas = {
 // ── Helpers ──
 
 function path(url, methods) {
-  return { [url]: methods };
+  const merged = { ...(pendingPathMethods.get(url) || {}), ...methods };
+  pendingPathMethods.set(url, merged);
+  return { [url]: merged };
 }
+
+const pendingPathMethods = new Map();
 
 function get(summary, description, responseSchema, params = []) {
   return {
@@ -1450,6 +1454,75 @@ const paths = {
   ...path("/api/automations/{id}", { ...mutation("patch", "Update automation", "Updates an automation.", { type: "object" }, null, [{ name: "id", in: "path", required: true, schema: { type: "string" } }]), ...mutation("delete", "Delete automation", "Deletes an automation.", { type: "object" }, null, [{ name: "id", in: "path", required: true, schema: { type: "string" } }]) }),
   ...path("/api/automations/{id}/run", post("Run automation", "Runs an automation immediately.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
   ...path("/api/subagents", post("Start subagent", "Starts a task linked to a parent.", { type: "object" }, { type: "object" }, { "201": { description: "Created" } })),
+
+  // Runtime registry supplements
+  ...path("/api/openapi.json", get("OpenAPI document", "Returns this OpenAPI document from the active runtime.", { type: "object" })),
+  ...path("/api/files", get("List files", "Returns files visible to the bridge file picker.", { type: "object", properties: { items: { type: "array", items: { type: "object" } } } })),
+  ...path("/api/browser/fetch", post("Browser fetch", "Fetches a bounded URL through the bridge browser fetch policy.", { type: "object", properties: { url: { type: "string" }, method: { type: "string" }, headers: { type: "object" }, body: { type: "string" } }, required: ["url"] }, { type: "object" })),
+  ...path("/api/command-registry/refresh", post("Refresh command registry", "Refreshes discovered command and skill metadata.", { type: "object" }, { type: "object" })),
+  ...path("/api/tool-events/stats", get("Tool event stats", "Returns tool event store counters and replay health.", { type: "object" })),
+  ...path("/api/tool-runs/{id}", get("Get tool run", "Returns one tool run record.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/tool-runs/{id}/stop", post("Stop tool run", "Requests cancellation of a running tool run.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+
+  ...path("/api/events/acks", get("List event acknowledgements", "Returns event acknowledgement cursors for a stream.", { type: "object" }, [{ name: "streamId", in: "query", schema: { type: "string" } }])),
+  ...path("/api/events/retention-plan", get("Event retention plan", "Returns retention and compaction planning data for a stream.", { type: "object" }, [{ name: "streamId", in: "query", schema: { type: "string" } }, { name: "retentionDays", in: "query", schema: { type: "integer" } }, { name: "keepLatest", in: "query", schema: { type: "integer" } }])),
+  ...path("/api/events/compaction-markers", get("Event compaction markers", "Returns event compaction markers with cursor pagination.", { type: "object" }, [{ name: "streamId", in: "query", schema: { type: "string" } }, { name: "after", in: "query", schema: { type: "integer" } }, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 1000 } }])),
+  ...path("/api/events/ack", post("Acknowledge event stream", "Persists an acknowledgement cursor for an event stream.", { type: "object" }, { type: "object" })),
+  ...path("/api/events/compact", post("Compact event stream", "Compacts an event stream according to retention policy.", { type: "object" }, { type: "object" })),
+
+  ...path("/api/login", post("Login with pairing token", "Exchanges a legacy pairing token for a device token.", { type: "object" }, { type: "object" })),
+  ...path("/api/pairing-sessions", {
+    ...get("List pairing sessions", "Returns pending and recent pairing sessions.", { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }),
+    ...post("Create pairing session", "Creates a pairing session and QR pairing URL.", { type: "object" }, { type: "object" }, { "201": { description: "Created" } })
+  }),
+  ...path("/api/pairing-sessions/{id}", get("Get pairing session", "Returns public pairing session status.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/pairing-sessions/{id}/claim", post("Claim pairing session", "Claims an approved pairing session with a code.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/pairing-sessions/{id}/approve", post("Approve pairing session", "Approves a pending pairing session.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/pairing-sessions/{id}/deny", post("Deny pairing session", "Denies a pending pairing session.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+
+  ...path("/api/devices/current/rotate", post("Rotate current device token", "Rotates the authenticated device token.", { type: "object" }, { type: "object" })),
+  ...path("/api/devices/{id}/rotate", post("Rotate device token", "Rotates a device token by id.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/devices/{id}/revoke", post("Revoke device", "Revokes a device by id.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+
+  ...path("/api/push/public-key", get("Push public key", "Returns the configured Web Push public key.", { type: "object" })),
+  ...path("/api/push/subscriptions", {
+    ...get("List push subscriptions", "Returns registered push subscriptions.", { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }),
+    ...post("Register push subscription", "Registers or updates a Web Push subscription.", { type: "object" }, { type: "object" }, { "201": { description: "Created" } })
+  }),
+  ...path("/api/push/subscriptions/{id}", mutation("delete", "Revoke push subscription", "Revokes a push subscription by id.", { type: "object" }, null, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/push/native-token", post("Register native push token", "Registers or updates a native mobile push token.", { type: "object" }, { type: "object" }, { "201": { description: "Created" } })),
+
+  ...path("/api/settings/export", get("Export settings", "Exports encrypted or public settings payloads.", { type: "object" })),
+  ...path("/api/settings/import", post("Import settings", "Imports settings with validation and revision checks.", { type: "object" }, { type: "object" })),
+  ...path("/api/thread-state/forks", post("Create thread fork", "Creates metadata for a forked thread.", { type: "object" }, { type: "object" })),
+
+  ...path("/api/workspaces/{id}/tree", get("Workspace tree", "Returns a bounded workspace tree snapshot.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "dir", in: "query", schema: { type: "string" } }])),
+  ...path("/api/workspaces/{id}/context", post("Workspace context", "Builds a workspace context bundle from selected files and tree samples.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/workspaces/{id}/open-explorer", post("Open workspace explorer", "Requests the native shell to open a workspace path.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/workspaces/{id}/git/status", get("Git status", "Returns git porcelain status for a workspace.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/workspaces/{id}/git/diff", get("Git diff", "Returns a bounded git diff for a workspace.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+
+  ...path("/api/tasks/{id}/events", get("Stream task events", "Streams task events using SSE semantics.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", schema: { type: "integer" } }])),
+  ...path("/api/tasks/{id}/events/catch-up", get("Catch up task events", "Returns replayable task events after a cursor.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", schema: { type: "integer" } }])),
+  ...path("/api/tasks/{id}/changes", get("Task changes", "Returns workspace changes associated with a task.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/tasks/{id}/input", post("Send task input", "Writes stdin or prompt input to a running task.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/tasks/{id}/stop", post("Stop task", "Requests cancellation of a running task.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+
+  ...path("/api/terminal-sessions/{id}", get("Get terminal session", "Returns one terminal session.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/terminal-sessions/{id}/input", post("Write terminal input", "Writes text to an interactive terminal session.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/terminal-sessions/{id}/resize", post("Resize terminal session", "Resizes an interactive terminal session.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+
+  ...path("/api/live-calls/{id}", get("Get live call", "Returns one live call session.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/stop", post("Stop live call", "Stops a live call session.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/pause", post("Pause live call", "Pauses live call capture.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/resume", post("Resume live call", "Resumes live call capture.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/level", post("Ingest live call audio level", "Ingests a live call audio level sample.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/transcript", post("Append live call transcript", "Appends transcript text to a live call session.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/answer", post("Answer live call prompt", "Records an answer generated for a live call prompt.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/asr-checkpoints", get("Live call ASR checkpoints", "Returns ASR checkpoint state for a live call.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/asr-recover", post("Recover live call ASR", "Recovers ASR state from checkpoints.", { type: "object" }, { type: "object" }, {}, [{ name: "id", in: "path", required: true, schema: { type: "string" } }])),
+  ...path("/api/live-calls/{id}/events", get("Stream live call events", "Streams live call events using SSE semantics.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", schema: { type: "integer" } }])),
+  ...path("/api/live-calls/{id}/events/catch-up", get("Catch up live call events", "Returns replayable live call events after a cursor.", { type: "object" }, [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", schema: { type: "integer" } }])),
 
   // Other
   ...path("/api/cloudflare/guide", get("Cloudflare tunnel guide",

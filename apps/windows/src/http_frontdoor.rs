@@ -14,6 +14,7 @@ use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
 use crate::event_sync_http::{
     event_sync_request_requires_body, route_event_sync_request, EventSyncRouteConfig,
 };
+use crate::file_http::{stream_file_request, FileRouteConfig};
 use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
@@ -67,6 +68,7 @@ pub struct FrontdoorRoutes {
     event_sync: Option<EventSyncRouteConfig>,
     artifact: Option<ArtifactRouteConfig>,
     desktop_remote: Option<DesktopRemoteRouteConfig>,
+    file: Option<FileRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -150,6 +152,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_file(mut self, route: Option<FileRouteConfig>) -> Self {
+        self.file = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -167,6 +174,7 @@ impl FrontdoorRoutes {
             && self.event_sync.is_none()
             && self.artifact.is_none()
             && self.desktop_remote.is_none()
+            && self.file.is_none()
     }
 }
 
@@ -348,6 +356,13 @@ fn handle_connection(
                 Err(error) => {
                     eprintln!("Rust Desktop Remote route falling back to Node: {error:#}")
                 }
+            }
+        }
+        if let Some(file_route) = routes.file.as_ref() {
+            match stream_file_request(&request, file_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => eprintln!("Rust file route falling back to Node: {error:#}"),
             }
         }
         if let Some(status_route) = routes.status.as_ref() {

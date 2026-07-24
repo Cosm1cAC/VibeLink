@@ -52,7 +52,13 @@ function pathMatches(pattern, candidate) {
   if (normalizedPattern.endsWith("/*")) {
     return normalizedCandidate === normalizedPattern.slice(0, -2) || normalizedCandidate.startsWith(`${normalizedPattern.slice(0, -1)}/`);
   }
-  return normalizedCandidate === normalizedPattern;
+  const patternParts = normalizedPattern.split("/");
+  const candidateParts = normalizedCandidate.split("/");
+  if (patternParts.length !== candidateParts.length) return false;
+  return patternParts.every((part, index) => {
+    const candidatePart = candidateParts[index];
+    return part === candidatePart || part === ":param" || candidatePart === ":param";
+  });
 }
 
 function operationKey(method, route) {
@@ -67,13 +73,77 @@ function collectNodeRuntimeRoutes(source) {
   const routes = [];
   const pathFirst = /url\.pathname\s*(?:===|==)\s*["`]([^"`]+)["`]\s*&&\s*request\.method\s*(?:===|==)\s*["`]([A-Z]+)["`]/g;
   const methodFirst = /request\.method\s*(?:===|==)\s*["`]([A-Z]+)["`]\s*&&\s*url\.pathname\s*(?:===|==)\s*["`]([^"`]+)["`]/g;
+  const regexRoute = /const\s+(\w+)\s*=\s*url\.pathname\.match\(\/\^([\s\S]*?)\$\/\);/g;
+  const literalTupleRoute = /\[\s*["`]([A-Z]+)["`]\s*,\s*["`]([^"`]+)["`]\s*\]/g;
+  for (const match of source.matchAll(literalTupleRoute)) {
+    if (String(match[2] || "").startsWith("/api/")) routes.push(operationKey(match[1], match[2]));
+  }
   for (const match of source.matchAll(pathFirst)) {
     routes.push(operationKey(match[2], match[1]));
   }
   for (const match of source.matchAll(methodFirst)) {
     routes.push(operationKey(match[1], match[2]));
   }
+  for (const match of source.matchAll(regexRoute)) {
+    const [fullMatch, variableName, pattern] = match;
+    const start = match.index + fullMatch.length;
+    const nextRoute = source.slice(start).search(/\n\s*const\s+\w+\s*=\s*url\.pathname\.match\(\/\^/);
+    const block = source.slice(start, nextRoute === -1 ? start + 2500 : start + nextRoute);
+    const methodPattern = new RegExp(variableName + '\\s*&&\\s*request\\.method\\s*(?:===|==)\\s*["`]' + '([A-Z]+)' + '["`][^\n{]*', 'g');
+    const paths = regexPatternToRoutes(pattern);
+    for (const methodMatch of block.matchAll(methodPattern)) {
+      const conditionStart = Math.max(0, methodMatch.index - 80);
+      const condition = block.slice(conditionStart, methodMatch.index + methodMatch[0].length);
+      for (const routePath of filterRegexRoutesForCondition(paths, condition)) {
+        routes.push(operationKey(methodMatch[1], routePath));
+      }
+    }
+  }
   return sortedRoutes(routes);
+}
+
+function filterRegexRoutesForCondition(paths, condition) {
+  const actionMatch = String(condition || '').match(/action\s*===\s*["']([^"']+)["']/);
+  if (!actionMatch) {
+    if (/!\w+\[\d+\]/.test(String(condition || ""))) return paths.filter((routePath) => !routePath.includes('/:param/'));
+    const captureAction = String(condition || "").match(/\w+\[\d+\]\s*===\s*["']([^"']+)["']/);
+    if (captureAction) return paths.filter((routePath) => routePath.endsWith('/' + captureAction[1]));
+    return paths;
+  }
+  if (actionMatch[1] === 'detail') return paths.filter((routePath) => !routePath.includes('/:param/') && !routePath.endsWith('/detail'));
+  const suffix = '/' + actionMatch[1];
+  return paths.filter((routePath) => routePath.endsWith(suffix));
+}
+
+function regexPatternToRoutes(pattern) {
+  let value = String(pattern || '')
+    .replace(/\\\//g, '/')
+    .replace(/\[\^\/\]\+/g, ':param')
+    .replace(/\(\?:/g, '(');
+
+  const optionalAlternation = value.match(/\(\/\(([^()]+)\)\)\?$/);
+  if (optionalAlternation) {
+    const base = value.slice(0, optionalAlternation.index);
+    return [base, ...optionalAlternation[1].split('|').map((item) => base + '/' + item)].map(cleanRegexRoutePath);
+  }
+
+  const groups = [...value.matchAll(/\(([^()]+)\)/g)];
+  let routes = [value];
+  for (const group of groups) {
+    const alternatives = group[1].split('|');
+    routes = routes.flatMap((route) => alternatives.map((alternative) => route.replace(group[0], alternatives.length > 1 ? alternative : ':param')));
+  }
+  return routes.map(cleanRegexRoutePath);
+}
+
+function cleanRegexRoutePath(value) {
+  return String(value || '')
+    .replace(/\^|\$/g, '')
+    .replace(/\/\?/g, '/')
+    .replace(/\(\?:/g, '')
+    .replace(/[()]/g, '')
+    .replace(/\/+/g, '/')
+    .replace(/\/+$/, '') || '/';
 }
 
 function collectRustRuntimeRoutes(root) {
@@ -91,7 +161,12 @@ function collectRustRuntimeRoutes(root) {
 }
 
 function collectRuntimeRoutes(root = process.cwd()) {
-  const nodeSource = fs.readFileSync(path.resolve(root, "src/server.js"), "utf8");
+  const nodeSource = ["src/server.js", "src/browserSessionHttp.js"]
+    .map((relativePath) => {
+      const fullPath = path.resolve(root, relativePath);
+      return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : "";
+    })
+    .join("\n");
   return sortedRoutes([
     ...collectNodeRuntimeRoutes(nodeSource),
     ...collectRustRuntimeRoutes(root)
@@ -276,10 +351,13 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         const [method, ...pathParts] = String(route).split(" ");
         return operationKey(method, pathParts.join(" "));
       });
-    const openapiKeys = new Set(operations.map((operation) => operation.key));
-    const runtimeKeys = new Set(runtimeApiRoutes);
-    const openapiOnly = operations.filter((operation) => !runtimeKeys.has(operation.key));
-    const runtimeOnly = runtimeApiRoutes.filter((route) => !openapiKeys.has(route));
+    const runtimeOperations = runtimeApiRoutes.map((route) => {
+      const [method, ...pathParts] = String(route).split(" ");
+      return { method: normalizeMethod(method), path: normalizePath(pathParts.join(" ")), key: operationKey(method, pathParts.join(" ")) };
+    });
+    const operationsMatch = (left, right) => left.method === right.method && pathMatches(left.path, right.path);
+    const openapiOnly = operations.filter((operation) => !runtimeOperations.some((runtimeOperation) => operationsMatch(operation, runtimeOperation)));
+    const runtimeOnly = runtimeOperations.filter((runtimeOperation) => !operations.some((operation) => operationsMatch(operation, runtimeOperation))).map((operation) => operation.key);
     if (unownedRuntime.length || openapiOnly.length || runtimeOnly.length) {
       blockers.push({
         id: "ownership-runtime-registry-diff",
@@ -371,7 +449,12 @@ export function defaultOnPolicyErrors(manifest = {}, windowsMain = "") {
 }
 
 export function nodeRuntimeReadiness(manifest = {}) {
-  const blockers = Array.isArray(manifest.nodeRuntime?.blockers) ? [...manifest.nodeRuntime.blockers] : [];
+  const blockers = Array.isArray(manifest.nodeRuntime?.blockers)
+    ? manifest.nodeRuntime.blockers.filter((blocker) => {
+        if (!Array.isArray(blocker.remainingRoutes)) return true;
+        return blocker.remainingRoutes.length > 0;
+      })
+    : [];
   if (manifest.nodeRuntime?.packaging !== "removable") {
     blockers.push({
       id: "native-release-entry",

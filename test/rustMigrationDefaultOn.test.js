@@ -68,6 +68,13 @@ test("ownership readiness rejects forged manifests with incomplete coverage", ()
   assert.ok(readiness.blockerIds.includes("ownership-openapi-unowned") || readiness.blockerIds.includes("ownership-manifest-stale"));
 });
 
+test("ownership manifest, OpenAPI, and runtime registry have no bidirectional route diff", () => {
+  const readiness = nodeRuntimeReadiness(manifest);
+
+  assert.equal(readiness.blockerIds.includes("ownership-manifest-stale"), false);
+  assert.equal(readiness.blockerIds.includes("ownership-runtime-registry-diff"), false);
+});
+
 test("ownership comparison treats OpenAPI and runtime path parameters as the same route", () => {
   const readiness = ownershipReadiness({
     publicRouteFamilies: [{
@@ -115,6 +122,16 @@ test("Desktop Remote observations are Rust-owned without hiding Node-owned deskt
   assert.ok(readiness.blockerIds.includes("ownership-desktop-remote-control-not-rust-owned"));
   assert.equal(entries.some((entry) => entry.includes("/api/desktop-remote")), false);
   assert.equal(entries.some((entry) => entry.includes("/api/codex-desktop")), false);
+});
+
+test("local file downloads are declared Rust-owned once the native frontdoor streams them", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const byId = new Map(ownership.publicRouteFamilies.map((family) => [family.id, family]));
+  const readiness = nodeRuntimeReadiness(manifest);
+
+  assert.equal(byId.get("files").owner, "rust");
+  assert.equal(byId.get("files").status, "default-on");
+  assert.equal(readiness.blockerIds.includes("ownership-files-not-rust-owned"), false);
 });
 
 test("portable packaging gates rust-only output before omitting Node assets", () => {

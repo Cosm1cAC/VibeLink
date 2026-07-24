@@ -22,6 +22,7 @@ mod doctor_http;
 mod event_store_sidecar;
 mod event_sync_http;
 mod execution_host;
+mod file_http;
 mod http_frontdoor;
 mod mcp_session_sidecar;
 mod pairing_http;
@@ -463,6 +464,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let desktop_remote_route = Some(desktop_remote_http::DesktopRemoteRouteConfig::new(
         route_data_dir.clone(),
     ));
+    let file_route = Some(file_http::FileRouteConfig::new(route_data_dir.clone()));
     let workspace_route = rust_workspace_http_enabled(cli)
         .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
@@ -502,6 +504,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_pairing(pairing_route)
         .with_artifact(artifact_route)
         .with_desktop_remote(desktop_remote_route)
+        .with_file(file_route)
         .with_static(Some(static_route));
     let routes = routes.with_workspace(workspace_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);

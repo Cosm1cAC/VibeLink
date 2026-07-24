@@ -33,7 +33,16 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "provider-registry", "owner": "rust", "status": "default-on", "prefixes": ["/api/provider-registry"] },
+    {
+      "id": "provider-registry",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/provider-registry"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     {
       "id": "status",
       "owner": "rust",

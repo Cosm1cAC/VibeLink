@@ -102,6 +102,14 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(status.ok, true);
   assert.ok(status.security.devices.some((device) => device.id === "device"));
 
+  const providerResponse = await fetch(`http://127.0.0.1:${port}/api/provider-registry`, { headers });
+  assert.equal(providerResponse.status, 200);
+  assert.equal(providerResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const providerRegistry = await providerResponse.json();
+  assert.equal(providerRegistry.version, 2);
+  assert.equal(providerRegistry.defaultProvider, "codex");
+  assert.deepEqual(providerRegistry.providers.map((provider) => provider.id), ["codex", "claude", "doubao", "zhipu"]);
+
   const toolsResponse = await waitFor(`http://127.0.0.1:${port}/api/tool-registry`, { headers });
   assert.equal(toolsResponse.status, 200);
   assert.equal(toolsResponse.headers.get("x-vibelink-control-plane"), "rust");

@@ -31,7 +31,7 @@
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
 | Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust list/create/tree/context/read/preview/batch、Git actions 与 worktree lifecycle | 继续迁移 command/terminal/approval |
 | Task 持久投影原生 HTTP 路由 | `default-on` | Rust task collection、mutation、scheduler、execution binding、事件 SSE、history/search/FTS watcher | 继续观察真实 provider 运行与 task input/stop 边界 |
-| Provider Registry 缓存投影原生 HTTP 路由 | `default-on` | Rust SQLite cache projection、CLI/Doubao bridge health probe、Zhipu/Claude model API catalog refresh | 保持真实 Provider health 与 fidelity 观测 |
+| Provider Registry 缓存投影原生 HTTP 路由 | `default-on` | Rust SQLite cache projection 已通过 Web/Android rust-only E2E；支持 CLI/Doubao bridge health probe、Zhipu/Claude model API catalog refresh | 保持真实 Provider health 与 fidelity 观测 |
 | Tool 与 Command Registry 原生 HTTP 路由 | `default-on` | Rust 内置 catalog、SQLite MCP tool cache 与本地 skill 扫描；Web/Android 无 Node E2E | 保持默认开启 |
 | Static Assets 与 OpenAPI 原生服务 | `default-on` | `/api/openapi.json` 已通过 Web/Android rust-only E2E；Rust 服务白名单 public assets | 连接 package smoke，并补齐 Web/Android 无 Node 首屏证据 |
 | 统一事件同步原生 HTTP 路由 | `default-on` | Rust unified replay、设备 ack、retention/compaction 与 marker | 保持客户端 ack 与多设备冲突观测 |

@@ -137,6 +137,18 @@ test("status is consumed from the Rust-only frontdoor by Web and Android", () =>
   });
 });
 
+test("provider registry is consumed from the Rust-only frontdoor by Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const providerRegistry = ownership.publicRouteFamilies.find((family) => family.id === "provider-registry");
+
+  assert.equal(providerRegistry.owner, "rust");
+  assert.equal(providerRegistry.status, "default-on");
+  assert.deepEqual(providerRegistry.rustOnlyE2E, {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  });
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),

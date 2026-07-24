@@ -406,7 +406,7 @@
         "apps/windows/src/main.rs",
         "test/providerRegistry.test.js"
       ],
-      "nextAction": "Rust 已持有 CLI health、Doubao bridge doctor health/fidelity probe、Zhipu/Claude catalog refresh 和 queued provider launch mapping；继续保持真实 Provider 任务与 registry freshness 观测。"
+      "nextAction": "Web/Android rust-only E2E 已通过；继续保持真实 Provider 任务与 registry freshness 观测。"
     },
     {
       "id": "discovery-http-route",

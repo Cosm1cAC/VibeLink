@@ -203,6 +203,62 @@ test("Desktop Remote observations use the Rust-only frontdoor on Web and Android
   });
 });
 
+test("audit records use the Rust-only frontdoor on Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const family = ownership.publicRouteFamilies.find((item) => item.id === "audit");
+
+  assert.equal(family.owner, "rust");
+  assert.equal(family.status, "default-on");
+  assert.deepEqual(family.rustOnlyE2E, {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  });
+});
+
+test("histories, search, and tasks use the Rust-only frontdoor on Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const expectedEvidence = {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  };
+
+  for (const familyId of ["histories", "search", "tasks"]) {
+    const family = ownership.publicRouteFamilies.find((item) => item.id === familyId);
+    assert.equal(family.owner, "rust", familyId);
+    assert.equal(family.status, "default-on", familyId);
+    assert.deepEqual(family.rustOnlyE2E, expectedEvidence, familyId);
+  }
+});
+
+test("tool runs, tool events, and approvals use the Rust-only frontdoor on Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const expectedEvidence = {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  };
+
+  for (const familyId of ["tool-runs", "tool-events", "approvals"]) {
+    const family = ownership.publicRouteFamilies.find((item) => item.id === familyId);
+    assert.equal(family.owner, "rust", familyId);
+    assert.deepEqual(family.rustOnlyE2E, expectedEvidence, familyId);
+  }
+});
+
+test("pairing, event sync, and thread state use the Rust-only frontdoor on Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const expectedEvidence = {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  };
+
+  for (const familyId of ["pairing", "events", "thread-state"]) {
+    const family = ownership.publicRouteFamilies.find((item) => item.id === familyId);
+    assert.equal(family.owner, "rust", familyId);
+    assert.equal(family.status, "default-on", familyId);
+    assert.deepEqual(family.rustOnlyE2E, expectedEvidence, familyId);
+  }
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),

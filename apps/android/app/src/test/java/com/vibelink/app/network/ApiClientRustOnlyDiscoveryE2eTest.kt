@@ -28,6 +28,15 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         val devices = client.listDevices()
         val settingsExport = client.exportSettings()
         val workspaces = client.listWorkspaces()
+        val auditLogs = client.listAuditLogs()
+        val histories = client.listHistories()
+        val searchResults = client.search("rust-only", record = false)
+        val tasks = client.listTasks()
+        val toolEvents = client.fetchToolEvents("task")
+        val approvals = client.listApprovals()
+        val pairingSessions = client.listPairingSessions()
+        val threadState = client.getThreadState()
+        val eventAcks = client.listEventAcks("task")
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
@@ -44,6 +53,15 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals("vibelink.settings.export", settingsExport.kind)
         assertEquals(false, settingsExport.settings.containsKey("pairingToken"))
         assertEquals(listOf("workspace"), workspaces.map { it.id })
+        assertEquals(true, auditLogs.any { it.type == "settings.export" })
+        assertEquals(0, histories.size)
+        assertEquals(0, searchResults.items.size)
+        assertEquals(0, tasks.size)
+        assertEquals(0, toolEvents.size)
+        assertEquals(0, approvals.size)
+        assertEquals(0, pairingSessions.size)
+        assertEquals(0, threadState.items.size)
+        assertEquals(0, eventAcks.size)
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->
@@ -54,6 +72,15 @@ class ApiClientRustOnlyDiscoveryE2eTest {
 
         val artifactId = "11111111-1111-4111-8111-111111111111.txt"
         val authenticatedClient = OkHttpClient()
+        val toolRunsRequest = Request.Builder()
+            .url("$baseUrl/api/tool-runs")
+            .header("Authorization", "Bearer $token")
+            .build()
+        authenticatedClient.newCall(toolRunsRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"items\":[]")
+        }
         listOf(
             "/api/artifacts/$artifactId" to "\"id\":\"$artifactId\"",
             "/api/attachments/$artifactId" to "hello from rust artifact",

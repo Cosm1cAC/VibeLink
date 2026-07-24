@@ -67,9 +67,36 @@
     { "id": "agent-reach", "owner": "node", "status": "node-owned", "prefixes": ["/api/agent-reach"] },
     { "id": "doubao", "owner": "node", "status": "node-owned", "prefixes": ["/api/doubao"] },
     { "id": "mcp", "owner": "node", "status": "node-owned", "prefixes": ["/api/mcp"] },
-    { "id": "histories", "owner": "rust", "status": "default-on", "prefixes": ["/api/histories"] },
-    { "id": "search", "owner": "rust", "status": "default-on", "prefixes": ["/api/search"] },
-    { "id": "tasks", "owner": "rust", "status": "default-on", "prefixes": ["/api/tasks", "/api/task-scheduler", "/api/context-budget", "/api/compact"] },
+    {
+      "id": "histories",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/histories"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "search",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/search"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "tasks",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/tasks", "/api/task-scheduler", "/api/context-budget", "/api/compact"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     {
       "id": "workspaces",
       "owner": "rust",
@@ -80,9 +107,36 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "tool-runs", "owner": "rust", "status": "phase-2-persisted", "prefixes": ["/api/tool-runs"] },
-    { "id": "tool-events", "owner": "rust", "status": "default-on", "prefixes": ["/api/tool-events"] },
-    { "id": "approvals", "owner": "rust", "status": "phase-2-persisted", "prefixes": ["/api/approvals"] },
+    {
+      "id": "tool-runs",
+      "owner": "rust",
+      "status": "phase-2-persisted",
+      "prefixes": ["/api/tool-runs"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "tool-events",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/tool-events"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "approvals",
+      "owner": "rust",
+      "status": "phase-2-persisted",
+      "prefixes": ["/api/approvals"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     {
       "id": "devices",
       "owner": "rust",
@@ -93,8 +147,26 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "pairing", "owner": "rust", "status": "default-on", "prefixes": ["/api/login", "/api/pairing-sessions"] },
-    { "id": "events", "owner": "rust", "status": "default-on", "prefixes": ["/api/events"] },
+    {
+      "id": "pairing",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/login", "/api/pairing-sessions"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "events",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/events"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "live-calls", "owner": "node", "status": "node-owned", "prefixes": ["/api/live-calls"] },
     {
       "id": "settings",
@@ -106,9 +178,27 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "thread-state", "owner": "rust", "status": "default-on", "prefixes": ["/api/thread-state"] },
+    {
+      "id": "thread-state",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/thread-state"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "reviews", "owner": "node", "status": "node-owned", "prefixes": ["/api/reviews"] },
-    { "id": "audit", "owner": "rust", "status": "default-on", "prefixes": ["/api/audit-log"] },
+    {
+      "id": "audit",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/audit-log"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     {
       "id": "desktop-remote",
       "owner": "rust",

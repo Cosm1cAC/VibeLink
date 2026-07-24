@@ -110,6 +110,13 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(providerRegistry.defaultProvider, "codex");
   assert.deepEqual(providerRegistry.providers.map((provider) => provider.id), ["codex", "claude", "doubao", "zhipu"]);
 
+  const doctorResponse = await fetch(`http://127.0.0.1:${port}/api/doctor`, { headers });
+  assert.equal(doctorResponse.status, 200);
+  assert.equal(doctorResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const doctor = await doctorResponse.json();
+  assert.ok(Array.isArray(doctor.checks) && doctor.checks.length > 0);
+  assert.match(doctor.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
+
   const toolsResponse = await waitFor(`http://127.0.0.1:${port}/api/tool-registry`, { headers });
   assert.equal(toolsResponse.status, 200);
   assert.equal(toolsResponse.headers.get("x-vibelink-control-plane"), "rust");

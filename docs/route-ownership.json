@@ -53,7 +53,16 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "doctor", "owner": "rust", "status": "default-on", "prefixes": ["/api/doctor"] },
+    {
+      "id": "doctor",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/doctor"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "agent-reach", "owner": "node", "status": "node-owned", "prefixes": ["/api/agent-reach"] },
     { "id": "doubao", "owner": "node", "status": "node-owned", "prefixes": ["/api/doubao"] },
     { "id": "mcp", "owner": "node", "status": "node-owned", "prefixes": ["/api/mcp"] },

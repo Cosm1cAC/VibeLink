@@ -23,6 +23,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         val command = client.listCommands("e2e").single()
         val status = client.checkStatus()
         val providerRegistry = client.getProviderRegistry()
+        val doctor = client.getDoctor()
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
@@ -32,6 +33,8 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals(2, providerRegistry.version)
         assertEquals("codex", providerRegistry.defaultProvider)
         assertEquals(listOf("codex", "claude", "doubao", "zhipu"), providerRegistry.providers.map { it.id })
+        assertEquals(true, doctor.checks.isNotEmpty())
+        assertEquals(true, doctor.generatedAt.isNotBlank())
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->

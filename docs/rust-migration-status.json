@@ -164,7 +164,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "继续扩展平台探测与 tool run 投影，并保持 route-level 兼容。"
+      "nextAction": "Web/Android rust-only E2E 已通过；继续扩展平台探测与 tool run 投影，并保持 route-level 兼容。"
     },
     {
       "id": "devices-http-route",

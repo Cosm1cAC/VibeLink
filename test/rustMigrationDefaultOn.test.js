@@ -113,6 +113,18 @@ test("tool and command discovery routes are Rust-owned once the native frontdoor
   );
 });
 
+test("OpenAPI is served by the Rust-only frontdoor for Web and Android", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const openapi = ownership.publicRouteFamilies.find((family) => family.id === "openapi");
+
+  assert.equal(openapi.owner, "rust");
+  assert.equal(openapi.status, "default-on");
+  assert.deepEqual(openapi.rustOnlyE2E, {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  });
+});
+
 test("the release gate refuses a rust-only package and reports concrete blockers", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),

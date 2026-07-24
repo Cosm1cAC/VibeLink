@@ -23,7 +23,16 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "openapi", "owner": "rust", "status": "default-on", "prefixes": ["/api/openapi.json"] },
+    {
+      "id": "openapi",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/openapi.json"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "provider-registry", "owner": "rust", "status": "default-on", "prefixes": ["/api/provider-registry"] },
     { "id": "status", "owner": "rust", "status": "default-on", "prefixes": ["/api/status"] },
     { "id": "doctor", "owner": "rust", "status": "default-on", "prefixes": ["/api/doctor"] },

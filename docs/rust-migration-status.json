@@ -440,7 +440,7 @@
         "apps/windows/src/static_http.rs",
         "apps/windows/src/http_frontdoor.rs"
       ],
-      "nextAction": "将 packaged public root 与 rust-only package smoke 连接，并为 Web/Android 采集不经过 Node 静态服务的首屏证据。"
+      "nextAction": "OpenAPI 已通过 Web/Android rust-only E2E；继续将 packaged public root 与 rust-only package smoke 连接，并采集不经过 Node 静态服务的首屏证据。"
     },
     {
       "id": "execution-host",

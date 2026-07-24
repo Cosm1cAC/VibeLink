@@ -1,8 +1,11 @@
 package com.vibelink.app.network
 
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.junit.Assume.assumeTrue
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 
 class ApiClientRustOnlyDiscoveryE2eTest {
@@ -21,5 +24,12 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
         assertEquals("plugin", command.toolKind)
+
+        val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
+        OkHttpClient().newCall(request).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"openapi\": \"3.0.3\"")
+        }
     }
 }

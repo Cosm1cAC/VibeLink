@@ -85,6 +85,15 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     if (port === 0) await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(port > 0, `Rust-only discovery server did not become ready.\n${logs}`);
+  const openApiResponse = await fetch(`http://127.0.0.1:${port}/api/openapi.json`);
+  assert.equal(openApiResponse.status, 200);
+  assert.equal(openApiResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.match(openApiResponse.headers.get("content-type") || "", /^application\/json/);
+  const openApi = await openApiResponse.json();
+  assert.equal(openApi.openapi, "3.0.3");
+  assert.equal(openApi.info.title, "VibeLink HTTP API");
+  assert.ok(openApi.paths["/api/status"]);
+
   const headers = { Authorization: "Bearer device-token" };
   const toolsResponse = await waitFor(`http://127.0.0.1:${port}/api/tool-registry`, { headers });
   assert.equal(toolsResponse.status, 200);

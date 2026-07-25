@@ -154,7 +154,7 @@ class MessageListViewModel : ViewModel() {
             try {
                 loadProviderRegistry(apiClient)
                 when {
-                    conversation.kind == "desktop" || conversation.desktopLinked -> loadDesktopRemote(
+                    AgentDrawerPolicy.isRemoteConversation(conversation) -> loadDesktopRemote(
                         apiClient,
                         seq,
                         fresh = DesktopRemoteLoadPolicy.freshObservation(freshDesktopObservation),
@@ -167,7 +167,7 @@ class MessageListViewModel : ViewModel() {
                     conversation.kind == "fork" -> loadFork(apiClient, conversation, seq)
                     else -> loadHistory(apiClient, conversation, seq)
                 }
-                if (conversation.kind != "desktop" && !conversation.desktopLinked && conversation.id.isNotBlank()) {
+                if (!AgentDrawerPolicy.isRemoteConversation(conversation) && conversation.id.isNotBlank()) {
                     _taskChanges.value = apiClient.getTaskChanges(conversation.id)
                 }
                 applyPersistedMessageOverrides(apiClient, conversation.key)
@@ -234,7 +234,7 @@ class MessageListViewModel : ViewModel() {
             _messages.value = appendDisplayMessages(_messages.value, ChatMessage(role = "user", text = trimmed))
             try {
                 when {
-                    conversation.kind == "desktop" || conversation.desktopLinked -> sendDesktopRemote(apiClient, conversation, trimmed)
+                    AgentDrawerPolicy.isRemoteConversation(conversation) -> sendDesktopRemote(apiClient, conversation, trimmed)
                     conversation.kind == "task" && _running.value && conversation.id.isNotBlank() -> {
                         val result = apiClient.sendTaskInput(conversation.id, trimmed)
                         if (!result.ok) appendError("The running CLI task did not accept live input. Wait for this turn to finish, then continue.")

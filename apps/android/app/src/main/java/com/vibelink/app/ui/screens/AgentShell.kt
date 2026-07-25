@@ -109,6 +109,8 @@ object AgentDrawerPolicy {
 
     fun consumesBackPress(drawerOpen: Boolean): Boolean = drawerOpen
 
+    fun isRemoteConversation(item: ConversationItem): Boolean = item.kind == "desktop" || item.desktopLinked
+
     fun filterAndSort(
         conversations: List<ConversationItem>,
         query: String,
@@ -119,9 +121,10 @@ object AgentDrawerPolicy {
             .asSequence()
             .filterNot { it.archived }
             .filter { item ->
+                val isRemote = isRemoteConversation(item)
                 when (space) {
-                    ConversationSpace.Remote -> item.kind == "desktop" || item.desktopLinked
-                    ConversationSpace.Agent -> item.kind != "desktop" && !item.desktopLinked
+                    ConversationSpace.Remote -> isRemote
+                    ConversationSpace.Agent -> !isRemote
                 }
             }
             .filter { item ->

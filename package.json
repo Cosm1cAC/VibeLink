@@ -35,6 +35,7 @@
         "design:export:dtcg": "designmd export --format dtcg DESIGN.md",
         "design:spec": "designmd spec",
         "openapi:gen": "node tools/gen-openapi.mjs > docs/openapi.json",
+        "discovery:gen": "node tools/gen-discovery-catalog.mjs",
         "rust:migration:check": "node tools/check-rust-migration-status.mjs",
         "rust:node-removal:check": "node tools/check-node-removal-readiness.mjs",
         "rust:test": "cargo test --manifest-path apps/windows/Cargo.toml",

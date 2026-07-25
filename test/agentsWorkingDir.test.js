@@ -123,6 +123,18 @@ test("persistent queue payload excludes runtime objects and environment secrets"
   );
 });
 
+test("restored Rust queue inputs retain only explicitly durable input events", () => {
+  assert.deepEqual(
+    __testInternals.queuedDurableInputs([
+      { type: "stdin", text: "initial prompt", payload: {} },
+      { type: "stdin", text: "resume after restart", payload: { queued: true } },
+      { type: "system", text: "Input queued for the next resume turn." },
+      { type: "stdin", text: "", payload: { queued: true } }
+    ]),
+    ["resume after restart"]
+  );
+});
+
 test("agent output normalizer preserves split UTF-8 JSONL", () => {
   const events = [];
   const normalizer = __testInternals.createOutputNormalizer((event) => events.push(event));

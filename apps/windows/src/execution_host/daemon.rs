@@ -6,7 +6,7 @@ use super::{
         PROTOCOL_VERSION,
     },
     spool::{write_json_atomic, EventSpool},
-    windows,
+    task_scheduler, windows,
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -27,9 +27,9 @@ use uuid::Uuid;
 use std::os::windows::process::CommandExt;
 
 #[derive(Debug, Clone)]
-struct Route {
+pub(super) struct Route {
     manifest_path: PathBuf,
-    manifest: ExecutionManifest,
+    pub(super) manifest: ExecutionManifest,
     reachable: bool,
 }
 
@@ -44,7 +44,7 @@ struct WorkerProof {
     process_started_at_ticks: Option<u64>,
 }
 
-struct HostState {
+pub(super) struct HostState {
     executions_dir: PathBuf,
     routes: Mutex<BTreeMap<String, Route>>,
     starts: Mutex<HashMap<String, StartRecord>>,
@@ -68,6 +68,9 @@ pub fn run(data_dir: &Path, pipe_override: Option<&str>) -> Result<()> {
         starts: Mutex::new(HashMap::new()),
     });
     reconcile_all(&state)?;
+    if env::var("VIBELINK_TASK_SCHEDULER_OWNER").as_deref() == Ok("rust") {
+        task_scheduler::spawn(Arc::clone(&state), data_dir.to_path_buf())?;
+    }
     let pipe_name = pipe_override
         .map(str::to_string)
         .unwrap_or_else(|| windows::execd_pipe_name(data_dir));
@@ -94,7 +97,7 @@ fn serve_connection(mut pipe: fs::File, state: Arc<HostState>) -> Result<()> {
     Ok(())
 }
 
-fn dispatch(state: &HostState, request: RequestEnvelope) -> ResponseEnvelope {
+pub(super) fn dispatch(state: &HostState, request: RequestEnvelope) -> ResponseEnvelope {
     let request_id = request.request_id.clone();
     if let Err(error) = validate_request(&request) {
         let code = if request.protocol_version != PROTOCOL_VERSION {
@@ -153,7 +156,7 @@ fn dispatch(state: &HostState, request: RequestEnvelope) -> ResponseEnvelope {
     }
 }
 
-fn dispatch_local(
+pub(super) fn dispatch_local(
     state: &HostState,
     method: &str,
     raw_params: Value,
@@ -297,7 +300,10 @@ fn dispatch_local(
     Ok(ResponseEnvelope::success(request_id, result))
 }
 
-fn start_execution(state: &HostState, mut start: StartParams) -> Result<ExecutionSnapshot> {
+pub(super) fn start_execution(
+    state: &HostState,
+    mut start: StartParams,
+) -> Result<ExecutionSnapshot> {
     start.validate()?;
     let fingerprint = start_fingerprint(&start)?;
     if let Some(record) = state
@@ -659,7 +665,7 @@ fn refresh_routes(state: &HostState) {
     }
 }
 
-fn route_for(state: &HostState, execution_id: &str) -> Result<Route> {
+pub(super) fn route_for(state: &HostState, execution_id: &str) -> Result<Route> {
     let execution_id = Uuid::parse_str(execution_id)
         .context("MESSAGE_INVALID: executionId must be a UUID")?
         .to_string();

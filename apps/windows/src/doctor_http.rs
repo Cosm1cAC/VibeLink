@@ -1,28 +1,26 @@
+use crate::settings_contract::load_settings;
+use crate::settings_http::project_public_settings;
 use crate::status_http::{
-    authenticate_route_request, read_internal_json, HttpRouteResponse, ParsedRequest,
+    authenticate_route_request, clean_host, is_host_allowed, HttpRouteResponse, ParsedRequest,
     RouteAuthentication, RouteMetrics,
 };
 use anyhow::{Context, Result};
+use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct DoctorRouteConfig {
     data_dir: PathBuf,
-    upstream: SocketAddr,
-    internal_token: String,
     metrics: Arc<RouteMetrics>,
 }
 
 impl DoctorRouteConfig {
-    pub fn new(data_dir: PathBuf, upstream: SocketAddr, internal_token: String) -> Self {
+    pub fn new(data_dir: PathBuf) -> Self {
         Self {
             data_dir,
-            upstream,
-            internal_token,
             metrics: Arc::new(RouteMetrics::default()),
         }
     }
@@ -60,7 +58,7 @@ pub fn route_doctor_request(
         RouteAuthentication::Pending => unreachable!(),
     };
 
-    let mut body = fetch_doctor_report(request, &device_id, config)?;
+    let mut body = build_doctor_report(request, &device_id, config)?;
     let object = body
         .as_object_mut()
         .context("Internal Doctor report must be an object")?;
@@ -83,34 +81,121 @@ pub fn route_doctor_request(
     Ok(Some(HttpRouteResponse::json(200, body)))
 }
 
-fn fetch_doctor_report(
+fn build_doctor_report(
     request: &ParsedRequest,
     device_id: &str,
     config: &DoctorRouteConfig,
 ) -> Result<Value> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout_read(Duration::from_secs(15))
-        .timeout_write(Duration::from_secs(2))
-        .build();
-    let url = format!("http://{}/internal/doctor-report", config.upstream);
-    let mut internal = agent
-        .get(&url)
-        .set("X-VibeLink-Internal-Token", &config.internal_token)
-        .set("X-VibeLink-Device-Id", device_id);
-    for (source, target) in [
-        ("host", "X-VibeLink-Original-Host"),
-        ("user-agent", "X-VibeLink-Original-User-Agent"),
-        ("x-forwarded-for", "X-VibeLink-Original-Forwarded-For"),
-    ] {
-        if let Some(value) = request.header(source).filter(|value| !value.is_empty()) {
-            internal = internal.set(target, value);
-        }
-    }
-    let response = internal
-        .call()
-        .context("Internal Doctor report request failed")?;
-    read_internal_json(response, "Doctor report")
+    let settings = load_settings(&config.data_dir, Path::new("."))
+        .context("Cannot load Rust Doctor settings")?;
+    let public_settings = project_public_settings(&settings, &config.data_dir);
+    let host_allowlist = settings
+        .get("hostAllowlist")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let settings_check = doctor_check("settings", true, "Settings", "loaded by Rust", "error");
+    let sqlite_path = config.data_dir.join("mobile-agent.sqlite");
+    let sqlite_check = doctor_check(
+        "sqlite",
+        sqlite_path.exists(),
+        "SQLite",
+        &sqlite_path.to_string_lossy(),
+        "error",
+    );
+    let credentials_available = public_settings
+        .get("credentials")
+        .and_then(|value| value.get("available"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let credential_detail = public_settings
+        .get("credentials")
+        .and_then(|value| value.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let credential_check = doctor_check(
+        "credentials",
+        credentials_available,
+        "Credential backend",
+        credential_detail,
+        "warn",
+    );
+    let host_check = doctor_check(
+        "host",
+        is_host_allowed(request.host(), &host_allowlist),
+        "Host allowlist",
+        if request.host().is_empty() {
+            "unknown"
+        } else {
+            request.host()
+        },
+        "error",
+    );
+    let checks = vec![settings_check, sqlite_check, credential_check, host_check];
+    let failures = checks
+        .iter()
+        .filter(|item| {
+            !item.get("ok").and_then(Value::as_bool).unwrap_or(false)
+                && item.get("severity").and_then(Value::as_str) != Some("warn")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let warnings = checks
+        .iter()
+        .filter(|item| {
+            !item.get("ok").and_then(Value::as_bool).unwrap_or(false)
+                && item.get("severity").and_then(Value::as_str) == Some("warn")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "ok": failures.is_empty(),
+        "platform": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "node": "",
+            "rust": env!("CARGO_PKG_VERSION")
+        },
+        "checks": checks,
+        "failures": failures,
+        "warningChecks": warnings,
+        "warnings": warnings,
+        "security": {
+            "host": clean_host(request.host()),
+            "deviceId": device_id
+        },
+        "providerRegistry": {
+            "providers": [],
+            "commands": []
+        },
+        "toolEvents": {},
+        "mcp": { "enabled": 0, "configured": 0 },
+        "desktop": {},
+        "network": [],
+        "generatedAt": now_iso(),
+        "toolRunId": format!("rust-doctor-{device_id}-{}", std::process::id())
+    }))
+}
+
+fn doctor_check(id: &str, ok: bool, label: &str, detail: &str, severity: &str) -> Value {
+    json!({
+        "id": id,
+        "ok": ok,
+        "label": label,
+        "detail": detail,
+        "severity": severity
+    })
+}
+
+fn now_iso() -> String {
+    let now: chrono::DateTime<Utc> = SystemTime::now().into();
+    now.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 #[cfg(test)]
@@ -120,10 +205,7 @@ mod tests {
     use rusqlite::{params, Connection};
     use serde_json::json;
     use std::fs;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temporary_data_dir() -> PathBuf {
@@ -169,42 +251,9 @@ mod tests {
     }
 
     #[test]
-    fn routes_authenticated_doctor_through_the_internal_tool_boundary() {
+    fn routes_authenticated_doctor_through_rust_local_tool_report() {
         let data_dir = ready_data_dir();
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let report = json!({
-            "ok": true,
-            "checks": [{ "id": "node", "ok": true }],
-            "failures": [],
-            "warnings": [],
-            "toolRunId": "tool-doctor"
-        });
-        let report_body = serde_json::to_vec(&report).unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let size = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..size]);
-            assert!(request.starts_with("GET /internal/doctor-report HTTP/1.1\r\n"));
-            assert!(request.contains("X-VibeLink-Internal-Token: internal-secret\r\n"));
-            assert!(request.contains("X-VibeLink-Device-Id: device-doctor\r\n"));
-            assert!(request.contains("X-VibeLink-Original-Host: bridge.test\r\n"));
-            assert!(request.contains("X-VibeLink-Original-User-Agent: doctor-test\r\n"));
-            assert!(request.contains("X-VibeLink-Original-Forwarded-For: 203.0.113.7\r\n"));
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                report_body.len()
-            )
-            .unwrap();
-            stream.write_all(&report_body).unwrap();
-        });
-        let config = DoctorRouteConfig::new(
-            data_dir.clone(),
-            upstream_addr,
-            "internal-secret".to_string(),
-        );
+        let config = DoctorRouteConfig::new(data_dir.clone());
 
         let other =
             parse_request(b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n").unwrap();
@@ -240,8 +289,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(response.body["checks"], report["checks"]);
-        assert_eq!(response.body["toolRunId"], "tool-doctor");
+        assert!(response.body["checks"].as_array().unwrap().len() >= 4);
+        assert!(response.body["toolRunId"]
+            .as_str()
+            .unwrap()
+            .starts_with("rust-doctor-device-doctor-"));
         assert_eq!(
             response.body["controlPlaneRuntime"]["doctorHttp"],
             json!({
@@ -255,7 +307,6 @@ mod tests {
                 "pending": 0
             })
         );
-        upstream_thread.join().unwrap();
         fs::remove_dir_all(data_dir).unwrap();
     }
 
@@ -267,12 +318,7 @@ mod tests {
             r#"{"pairingToken":"PAIR","hostAllowlist":[]}"#,
         )
         .unwrap();
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let config = DoctorRouteConfig::new(
-            data_dir.clone(),
-            upstream.local_addr().unwrap(),
-            "internal-secret".to_string(),
-        );
+        let config = DoctorRouteConfig::new(data_dir.clone());
         let request =
             parse_request(b"GET /api/doctor HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
 

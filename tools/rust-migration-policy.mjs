@@ -13,6 +13,8 @@ const DEFAULT_ROUTE_FIELDS = new Map([
   ["tool-events-http-route", "rust_tool_events_http"],
   ["tool-events-sse-http-route", "rust_tool_events_sse"],
   ["event-sync-http-route", "rust_event_sync_http"],
+  ["task-http-route", "rust_task_http"],
+  ["provider-http-route", "rust_provider_http"],
   ["workspace-http", "rust_workspace_http"]
 ]);
 
@@ -38,7 +40,10 @@ function normalizeMethod(method) {
 }
 
 function normalizePath(value) {
-  return String(value || "").trim().replace(/\/+$/, "") || "/";
+  return String(value || "")
+    .trim()
+    .replace(/\/(?:\{[^/}]+\}|:[^/]+)/g, "/:param")
+    .replace(/\/+$/, "") || "/";
 }
 
 function pathMatches(pattern, candidate) {
@@ -47,7 +52,13 @@ function pathMatches(pattern, candidate) {
   if (normalizedPattern.endsWith("/*")) {
     return normalizedCandidate === normalizedPattern.slice(0, -2) || normalizedCandidate.startsWith(`${normalizedPattern.slice(0, -1)}/`);
   }
-  return normalizedCandidate === normalizedPattern;
+  const patternParts = normalizedPattern.split("/");
+  const candidateParts = normalizedCandidate.split("/");
+  if (patternParts.length !== candidateParts.length) return false;
+  return patternParts.every((part, index) => {
+    const candidatePart = candidateParts[index];
+    return part === candidatePart || part === ":param" || candidatePart === ":param";
+  });
 }
 
 function operationKey(method, route) {
@@ -62,13 +73,77 @@ function collectNodeRuntimeRoutes(source) {
   const routes = [];
   const pathFirst = /url\.pathname\s*(?:===|==)\s*["`]([^"`]+)["`]\s*&&\s*request\.method\s*(?:===|==)\s*["`]([A-Z]+)["`]/g;
   const methodFirst = /request\.method\s*(?:===|==)\s*["`]([A-Z]+)["`]\s*&&\s*url\.pathname\s*(?:===|==)\s*["`]([^"`]+)["`]/g;
+  const regexRoute = /const\s+(\w+)\s*=\s*url\.pathname\.match\(\/\^([\s\S]*?)\$\/\);/g;
+  const literalTupleRoute = /\[\s*["`]([A-Z]+)["`]\s*,\s*["`]([^"`]+)["`]\s*\]/g;
+  for (const match of source.matchAll(literalTupleRoute)) {
+    if (String(match[2] || "").startsWith("/api/")) routes.push(operationKey(match[1], match[2]));
+  }
   for (const match of source.matchAll(pathFirst)) {
     routes.push(operationKey(match[2], match[1]));
   }
   for (const match of source.matchAll(methodFirst)) {
     routes.push(operationKey(match[1], match[2]));
   }
+  for (const match of source.matchAll(regexRoute)) {
+    const [fullMatch, variableName, pattern] = match;
+    const start = match.index + fullMatch.length;
+    const nextRoute = source.slice(start).search(/\n\s*const\s+\w+\s*=\s*url\.pathname\.match\(\/\^/);
+    const block = source.slice(start, nextRoute === -1 ? start + 2500 : start + nextRoute);
+    const methodPattern = new RegExp(variableName + '\\s*&&\\s*request\\.method\\s*(?:===|==)\\s*["`]' + '([A-Z]+)' + '["`][^\n{]*', 'g');
+    const paths = regexPatternToRoutes(pattern);
+    for (const methodMatch of block.matchAll(methodPattern)) {
+      const conditionStart = Math.max(0, methodMatch.index - 80);
+      const condition = block.slice(conditionStart, methodMatch.index + methodMatch[0].length);
+      for (const routePath of filterRegexRoutesForCondition(paths, condition)) {
+        routes.push(operationKey(methodMatch[1], routePath));
+      }
+    }
+  }
   return sortedRoutes(routes);
+}
+
+function filterRegexRoutesForCondition(paths, condition) {
+  const actionMatch = String(condition || '').match(/action\s*===\s*["']([^"']+)["']/);
+  if (!actionMatch) {
+    if (/!\w+\[\d+\]/.test(String(condition || ""))) return paths.filter((routePath) => !routePath.includes('/:param/'));
+    const captureAction = String(condition || "").match(/\w+\[\d+\]\s*===\s*["']([^"']+)["']/);
+    if (captureAction) return paths.filter((routePath) => routePath.endsWith('/' + captureAction[1]));
+    return paths;
+  }
+  if (actionMatch[1] === 'detail') return paths.filter((routePath) => !routePath.includes('/:param/') && !routePath.endsWith('/detail'));
+  const suffix = '/' + actionMatch[1];
+  return paths.filter((routePath) => routePath.endsWith(suffix));
+}
+
+function regexPatternToRoutes(pattern) {
+  let value = String(pattern || '')
+    .replace(/\\\//g, '/')
+    .replace(/\[\^\/\]\+/g, ':param')
+    .replace(/\(\?:/g, '(');
+
+  const optionalAlternation = value.match(/\(\/\(([^()]+)\)\)\?$/);
+  if (optionalAlternation) {
+    const base = value.slice(0, optionalAlternation.index);
+    return [base, ...optionalAlternation[1].split('|').map((item) => base + '/' + item)].map(cleanRegexRoutePath);
+  }
+
+  const groups = [...value.matchAll(/\(([^()]+)\)/g)];
+  let routes = [value];
+  for (const group of groups) {
+    const alternatives = group[1].split('|');
+    routes = routes.flatMap((route) => alternatives.map((alternative) => route.replace(group[0], alternatives.length > 1 ? alternative : ':param')));
+  }
+  return routes.map(cleanRegexRoutePath);
+}
+
+function cleanRegexRoutePath(value) {
+  return String(value || '')
+    .replace(/\^|\$/g, '')
+    .replace(/\/\?/g, '/')
+    .replace(/\(\?:/g, '')
+    .replace(/[()]/g, '')
+    .replace(/\/+/g, '/')
+    .replace(/\/+$/, '') || '/';
 }
 
 function collectRustRuntimeRoutes(root) {
@@ -78,7 +153,13 @@ function collectRustRuntimeRoutes(root) {
     for (const match of source.matchAll(/\(\s*"([A-Z]+)"\s*,\s*"([^"]+)"\s*\)/g)) {
       routes.push(operationKey(match[1], match[2]));
     }
-    for (const match of source.matchAll(/request\.method\s*(?:!=|==)\s*"([A-Z]+)"[\s\S]{0,120}?request\.path\(\)\s*(?:!=|==)\s*"([^"]+)"/g)) {
+    for (const match of source.matchAll(/["']([A-Z]+)\s+(\/api\/[^\s?"']+)[^"']*?\s+HTTP\/1\.1/g)) {
+      if (match[2].includes("{")) routes.push(operationKey(match[1], match[2]));
+    }
+    for (const match of source.matchAll(/request\.path\(\)\s*(?:!=|==)\s*"([^"]+)"[^\n]{0,160}?request\.method\s*(?:!=|==)\s*"([A-Z]+)"/g)) {
+      routes.push(operationKey(match[2], match[1]));
+    }
+    for (const match of source.matchAll(/request\.method\s*(?:!=|==)\s*"([A-Z]+)"[^\n]{0,120}?request\.path\(\)\s*(?:!=|==)\s*"([^"]+)"/g)) {
       routes.push(operationKey(match[1], match[2]));
     }
   }
@@ -86,11 +167,29 @@ function collectRustRuntimeRoutes(root) {
 }
 
 function collectRuntimeRoutes(root = process.cwd()) {
-  const nodeSource = fs.readFileSync(path.resolve(root, "src/server.js"), "utf8");
+  const nodeSource = ["src/server.js", "src/browserSessionHttp.js"]
+    .map((relativePath) => {
+      const fullPath = path.resolve(root, relativePath);
+      return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : "";
+    })
+    .join("\n");
   return sortedRoutes([
     ...collectNodeRuntimeRoutes(nodeSource),
     ...collectRustRuntimeRoutes(root)
   ]);
+}
+
+function collectRuntimeRoutesByOwner(root = process.cwd()) {
+  const nodeSource = ["src/server.js", "src/browserSessionHttp.js"]
+    .map((relativePath) => {
+      const fullPath = path.resolve(root, relativePath);
+      return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : "";
+    })
+    .join("\n");
+  return {
+    node: collectNodeRuntimeRoutes(nodeSource),
+    rust: collectRustRuntimeRoutes(root)
+  };
 }
 
 function collectOpenApiOperations(openapi) {
@@ -141,12 +240,27 @@ function familyMatchesOperation(family, operation) {
 
 export function ownershipReadiness(manifest = {}, openapi = null) {
   const families = collectOwnershipEntries(manifest);
+  const acceptance = manifest?.rustOnlyAcceptance || manifest?.rustOnlyCanary || {};
+  const requiredFamilies = acceptance.requiredFamilies || acceptance.requiredHttpFamilies || [];
+  const requiredFamilyIds = new Set(requiredFamilies);
+  const duplicateRequiredFamilies = requiredFamilies.filter((id, index) => requiredFamilies.indexOf(id) !== index);
   const operations = openapi ? collectOpenApiOperations(openapi) : [];
+  const hasRustRuntimeRoutes = Array.isArray(manifest?.rustRuntimeRoutes);
+  const rustRuntimeRoutes = hasRustRuntimeRoutes ? manifest.rustRuntimeRoutes : [];
+  const rustRuntimeOperations = rustRuntimeRoutes.map((route) => {
+    const [method, ...pathParts] = String(route).split(" ");
+    return {
+      method: normalizeMethod(method),
+      path: normalizePath(pathParts.join(" ")),
+      key: operationKey(method, pathParts.join(" "))
+    };
+  });
   const blockers = [];
   const operationOwners = new Map();
   const runtimeEntries = new Set();
   const familyIds = new Set();
   const duplicateFamilyIds = [];
+  const incompleteRustOnlyE2E = [];
 
   for (const family of families) {
     const familyId = family?.id || "unknown";
@@ -187,7 +301,7 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         operationOwners.set(operation.key, owners);
       }
     }
-    if ((family.requiredForRustOnly !== false) && owner !== "rust") {
+    if ((family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId) && owner !== "rust") {
       blockers.push({
         id: `ownership-${familyId}-not-rust-owned`,
         title: `Rust-only package still depends on ${familyId} owned by ${owner || "unknown"}`,
@@ -195,6 +309,35 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         nodeEntries: Array.isArray(family.nodeEntries) ? family.nodeEntries : [],
         rustTarget: family.rustTarget || family.runtime?.[0]?.path || ""
       });
+    }
+    if (family.rustRuntimeRegistry === true && (family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId) && owner === "rust" && hasRustRuntimeRoutes) {
+      const familyOperations = operations.filter((operation) => familyMatchesOperation(family, operation));
+      const missingRustOperations = familyOperations.filter((operation) => !rustRuntimeOperations.some((runtimeOperation) =>
+        operation.method === runtimeOperation.method && pathMatches(operation.path, runtimeOperation.path)
+      ));
+      if (missingRustOperations.length) {
+        blockers.push({
+          id: `ownership-${familyId}-missing-rust-runtime`,
+          title: `Rust-owned family ${familyId} is missing native runtime routes`,
+          status: "planned",
+          nodeEntries: missingRustOperations.map((operation) => operation.key),
+          rustTarget: family.rustTarget || "apps/windows/src"
+        });
+      }
+    }
+    if ((family.requiredForRustOnly !== false) && requiredFamilyIds.has(familyId)) {
+      for (const client of ["web", "android"]) {
+        const evidence = family.rustOnlyE2E?.[client];
+        if (!Array.isArray(evidence) || evidence.length === 0) {
+          incompleteRustOnlyE2E.push(`${familyId}:${client}: missing`);
+          continue;
+        }
+        for (const evidencePath of evidence) {
+          if (!fs.existsSync(path.resolve(process.cwd(), evidencePath))) {
+            incompleteRustOnlyE2E.push(`${familyId}:${client}: missing file ${evidencePath}`);
+          }
+        }
+      }
     }
     if (family.rustFlag && manifest?.windowsMain && !String(manifest.windowsMain).includes(`effective.${family.rustFlag} = true;`)) {
       blockers.push({
@@ -213,6 +356,16 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
       title: "Ownership manifest contains duplicate family ids",
       status: "planned",
       nodeEntries: duplicateFamilyIds,
+      rustTarget: "docs/route-ownership.json"
+    });
+  }
+
+  if (incompleteRustOnlyE2E.length) {
+    blockers.push({
+      id: "ownership-rust-only-e2e-incomplete",
+      title: "Required product families are missing Web or Android rust-only E2E evidence",
+      status: "planned",
+      nodeEntries: incompleteRustOnlyE2E,
       rustTarget: "docs/route-ownership.json"
     });
   }
@@ -265,11 +418,19 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
         })
       );
     });
-    const runtimeApiRoutes = runtimeRoutes.filter((route) => String(route).includes(" /api/"));
-    const openapiKeys = new Set(operations.map((operation) => operation.key));
-    const runtimeKeys = new Set(runtimeApiRoutes);
-    const openapiOnly = operations.filter((operation) => !runtimeKeys.has(operation.key));
-    const runtimeOnly = runtimeApiRoutes.filter((route) => !openapiKeys.has(route));
+    const runtimeApiRoutes = runtimeRoutes
+      .filter((route) => String(route).includes(" /api/"))
+      .map((route) => {
+        const [method, ...pathParts] = String(route).split(" ");
+        return operationKey(method, pathParts.join(" "));
+      });
+    const runtimeOperations = runtimeApiRoutes.map((route) => {
+      const [method, ...pathParts] = String(route).split(" ");
+      return { method: normalizeMethod(method), path: normalizePath(pathParts.join(" ")), key: operationKey(method, pathParts.join(" ")) };
+    });
+    const operationsMatch = (left, right) => left.method === right.method && pathMatches(left.path, right.path);
+    const openapiOnly = operations.filter((operation) => !runtimeOperations.some((runtimeOperation) => operationsMatch(operation, runtimeOperation)));
+    const runtimeOnly = runtimeOperations.filter((runtimeOperation) => !operations.some((operation) => operationsMatch(operation, runtimeOperation))).map((operation) => operation.key);
     if (unownedRuntime.length || openapiOnly.length || runtimeOnly.length) {
       blockers.push({
         id: "ownership-runtime-registry-diff",
@@ -311,9 +472,7 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
     });
   }
 
-  const acceptance = manifest?.rustOnlyAcceptance || manifest?.rustOnlyCanary || {};
   const forbiddenNode = acceptance.forbiddenPackageEntries || [];
-  const requiredFamilies = acceptance.requiredFamilies || acceptance.requiredHttpFamilies || [];
   const requiredStreamingFamilies = acceptance.requiredStreamingFamilies || [];
   const missingAcceptance = [];
   for (const field of ["forbiddenPackageEntries", "forbiddenProcessNames", "packageSmoke"]) {
@@ -321,12 +480,16 @@ export function ownershipReadiness(manifest = {}, openapi = null) {
     if (Array.isArray(value) ? value.length === 0 : !value) missingAcceptance.push(field);
   }
   const missingRequiredFamilies = requiredFamilies.filter((id) => !familyIds.has(id));
-  if (missingAcceptance.length || missingRequiredFamilies.length) {
+  if (missingAcceptance.length || missingRequiredFamilies.length || duplicateRequiredFamilies.length) {
     blockers.push({
       id: "ownership-rust-only-acceptance-incomplete",
       title: "Rust-only package acceptance checks are incomplete",
       status: "planned",
-      nodeEntries: missingAcceptance,
+      nodeEntries: [
+        ...missingAcceptance,
+        ...missingRequiredFamilies.map((id) => `missing family: ${id}`),
+        ...duplicateRequiredFamilies.map((id) => `duplicate family: ${id}`)
+      ],
       rustTarget: "docs/route-ownership.json"
     });
   }
@@ -361,7 +524,12 @@ export function defaultOnPolicyErrors(manifest = {}, windowsMain = "") {
 }
 
 export function nodeRuntimeReadiness(manifest = {}) {
-  const blockers = Array.isArray(manifest.nodeRuntime?.blockers) ? [...manifest.nodeRuntime.blockers] : [];
+  const blockers = Array.isArray(manifest.nodeRuntime?.blockers)
+    ? manifest.nodeRuntime.blockers.filter((blocker) => {
+        if (!Array.isArray(blocker.remainingRoutes)) return true;
+        return blocker.remainingRoutes.length > 0;
+      })
+    : [];
   if (manifest.nodeRuntime?.packaging !== "removable") {
     blockers.push({
       id: "native-release-entry",
@@ -379,7 +547,8 @@ export function nodeRuntimeReadiness(manifest = {}) {
       {
         ...routeOwnership,
         windowsMain: fs.readFileSync(path.resolve(process.cwd(), "apps/windows/src/main.rs"), "utf8"),
-        runtimeRoutes: collectRuntimeRoutes()
+        runtimeRoutes: collectRuntimeRoutes(),
+        rustRuntimeRoutes: collectRuntimeRoutesByOwner().rust
       },
       openapi
     );

@@ -1,22 +1,38 @@
+use crate::artifact_http::{
+    artifact_request_requires_body, attachment_upload_requires_body,
+    route_artifact_mutation_request, route_artifact_preview_request, route_artifact_request,
+    route_attachment_upload_request, stream_artifact_content_request, stream_attachment_request,
+    ArtifactRouteConfig,
+};
 use crate::audit_http::{route_audit_request, AuditRouteConfig};
+use crate::cloudflare_http::{route_cloudflare_request, CloudflareRouteConfig};
+use crate::desktop_remote_http::{route_desktop_remote_request, DesktopRemoteRouteConfig};
 use crate::device_http::{
     route_device_mutation_request, route_device_request, DeviceMutationRouteConfig,
     DeviceRouteConfig,
 };
+use crate::discovery_http::{route_discovery_request, DiscoveryRouteConfig};
 use crate::doctor_http::{route_doctor_request, DoctorRouteConfig};
 use crate::event_sync_http::{
     event_sync_request_requires_body, route_event_sync_request, EventSyncRouteConfig,
 };
+use crate::file_http::{stream_file_request, FileRouteConfig};
 use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
 };
+use crate::provider_http::{route_provider_request, ProviderRouteConfig};
+use crate::push_http::{push_request_requires_body, route_push_request, PushRouteConfig};
 use crate::settings_http::{
     route_settings_request, route_settings_request_with_body, settings_request_requires_body,
     SettingsRouteConfig,
 };
+use crate::static_http::{stream_static_request, StaticRouteConfig};
 use crate::status_http::{
     parse_request, route_status_request, HttpRouteResponse, StatusRouteConfig, MAX_HEADER_BYTES,
+};
+use crate::task_http::{
+    route_task_request, stream_task_events_request, task_request_requires_body, TaskRouteConfig,
 };
 use crate::tool_events_http::{
     route_tool_events_request, stream_tool_events_request, ToolEventsRouteConfig,
@@ -48,8 +64,17 @@ pub struct FrontdoorRoutes {
     tool_events_sse: Option<ToolEventsRouteConfig>,
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
+    provider: Option<ProviderRouteConfig>,
+    static_route: Option<StaticRouteConfig>,
+    task: Option<TaskRouteConfig>,
     workspace: Option<WorkspaceRouteConfig>,
     event_sync: Option<EventSyncRouteConfig>,
+    artifact: Option<ArtifactRouteConfig>,
+    desktop_remote: Option<DesktopRemoteRouteConfig>,
+    discovery: Option<DiscoveryRouteConfig>,
+    file: Option<FileRouteConfig>,
+    cloudflare: Option<CloudflareRouteConfig>,
+    push: Option<PushRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -98,6 +123,21 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_provider(mut self, route: Option<ProviderRouteConfig>) -> Self {
+        self.provider = route;
+        self
+    }
+
+    pub fn with_static(mut self, route: Option<StaticRouteConfig>) -> Self {
+        self.static_route = route;
+        self
+    }
+
+    pub fn with_task(mut self, route: Option<TaskRouteConfig>) -> Self {
+        self.task = route;
+        self
+    }
+
     pub fn with_workspace(mut self, route: Option<WorkspaceRouteConfig>) -> Self {
         self.workspace = route;
         self
@@ -105,6 +145,36 @@ impl FrontdoorRoutes {
 
     pub fn with_event_sync(mut self, route: Option<EventSyncRouteConfig>) -> Self {
         self.event_sync = route;
+        self
+    }
+
+    pub fn with_artifact(mut self, route: Option<ArtifactRouteConfig>) -> Self {
+        self.artifact = route;
+        self
+    }
+
+    pub fn with_desktop_remote(mut self, route: Option<DesktopRemoteRouteConfig>) -> Self {
+        self.desktop_remote = route;
+        self
+    }
+
+    pub fn with_discovery(mut self, route: Option<DiscoveryRouteConfig>) -> Self {
+        self.discovery = route;
+        self
+    }
+
+    pub fn with_file(mut self, route: Option<FileRouteConfig>) -> Self {
+        self.file = route;
+        self
+    }
+
+    pub fn with_cloudflare(mut self, route: Option<CloudflareRouteConfig>) -> Self {
+        self.cloudflare = route;
+        self
+    }
+
+    pub fn with_push(mut self, route: Option<PushRouteConfig>) -> Self {
+        self.push = route;
         self
     }
 
@@ -118,8 +188,17 @@ impl FrontdoorRoutes {
             && self.tool_events_sse.is_none()
             && self.settings.is_none()
             && self.pairing.is_none()
+            && self.provider.is_none()
+            && self.static_route.is_none()
+            && self.task.is_none()
             && self.workspace.is_none()
             && self.event_sync.is_none()
+            && self.artifact.is_none()
+            && self.desktop_remote.is_none()
+            && self.discovery.is_none()
+            && self.file.is_none()
+            && self.cloudflare.is_none()
+            && self.push.is_none()
     }
 }
 
@@ -129,20 +208,35 @@ pub fn serve(
     node: &mut Child,
     routes: FrontdoorRoutes,
 ) -> Result<()> {
+    serve_inner(listener, Some(upstream), Some(node), routes)
+}
+
+pub fn serve_rust_only(listener: TcpListener, routes: FrontdoorRoutes) -> Result<()> {
+    serve_inner(listener, None, None, routes)
+}
+
+fn serve_inner(
+    listener: TcpListener,
+    upstream: Option<SocketAddr>,
+    mut node: Option<&mut Child>,
+    routes: FrontdoorRoutes,
+) -> Result<()> {
     listener
         .set_nonblocking(true)
         .context("Failed to configure Rust HTTP front door")?;
     let active = Arc::new(AtomicUsize::new(0));
 
     loop {
-        if let Some(status) = node
-            .try_wait()
-            .context("Failed to inspect loopback Node bridge")?
-        {
-            if status.success() {
-                return Ok(());
+        if let Some(node) = node.as_deref_mut() {
+            if let Some(status) = node
+                .try_wait()
+                .context("Failed to inspect loopback Node bridge")?
+            {
+                if status.success() {
+                    return Ok(());
+                }
+                bail!("Loopback Node bridge exited with status {status}");
             }
-            bail!("Loopback Node bridge exited with status {status}");
         }
 
         match listener.accept() {
@@ -156,7 +250,7 @@ pub fn serve(
                 let active = Arc::clone(&active);
                 let routes = routes.clone();
                 thread::spawn(move || {
-                    if let Err(error) = handle_connection(client, upstream, &routes) {
+                    if let Err(error) = handle_connection_with_upstream(client, upstream, &routes) {
                         eprintln!("Rust HTTP front door connection failed: {error}");
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
@@ -170,13 +264,22 @@ pub fn serve(
     }
 }
 
+#[cfg(test)]
 fn handle_connection(
-    mut client: TcpStream,
+    client: TcpStream,
     upstream: SocketAddr,
     routes: &FrontdoorRoutes,
 ) -> io::Result<()> {
+    handle_connection_with_upstream(client, Some(upstream), routes)
+}
+
+fn handle_connection_with_upstream(
+    mut client: TcpStream,
+    upstream: Option<SocketAddr>,
+    routes: &FrontdoorRoutes,
+) -> io::Result<()> {
     if routes.is_empty() {
-        return proxy_connection(client, upstream);
+        return proxy_or_not_found(client, upstream, Vec::new());
     }
 
     let peer_ip = client
@@ -185,6 +288,38 @@ fn handle_connection(
         .unwrap_or_default();
     let mut prefix = read_request_head(&mut client)?;
     if let Ok(request) = parse_request(&prefix) {
+        if let Some(static_route) = routes.static_route.as_ref() {
+            match stream_static_request(&request, static_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust static route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            match stream_attachment_request(&request, artifact_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => eprintln!("Rust Attachment route falling back to Node: {error:#}"),
+            }
+            match stream_artifact_content_request(&request, artifact_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Artifact content route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            match route_artifact_preview_request(&request, artifact_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Artifact preview route falling back to Node: {error:#}")
+                }
+            }
+        }
         if let Some(tool_events_sse) = routes.tool_events_sse.as_ref() {
             match stream_tool_events_request(&request, &peer_ip, tool_events_sse, &mut client) {
                 Ok(Some(())) => return Ok(()),
@@ -193,6 +328,136 @@ fn handle_connection(
                     tool_events_sse.record_fallback();
                     eprintln!("Rust Tool Events SSE route falling back to Node: {error:#}");
                 }
+            }
+        }
+        if let Some(task_route) = routes.task.as_ref() {
+            match stream_task_events_request(&request, task_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    task_route.record_fallback();
+                    eprintln!("Rust Task SSE route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            if attachment_upload_requires_body(&request) {
+                let body = match read_request_body_with_limit(
+                    &mut client,
+                    &mut prefix,
+                    &request,
+                    30 * 1024 * 1024,
+                )? {
+                    Some(body) => body,
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                };
+                match route_attachment_upload_request(&request, &body, artifact_route) {
+                    Ok(Some(response)) => return response.write_to(&mut client),
+                    Ok(None) | Err(_) => {
+                        return HttpRouteResponse::error(500, "Attachment upload failed.")
+                            .write_to(&mut client)
+                    }
+                }
+            }
+            if artifact_request_requires_body(&request) {
+                let body = match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => body,
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                };
+                match route_artifact_mutation_request(&request, &body, artifact_route) {
+                    Ok(Some(response)) => return response.write_to(&mut client),
+                    Ok(None) => {
+                        return HttpRouteResponse::error(500, "Artifact mutation failed.")
+                            .write_to(&mut client)
+                    }
+                    Err(error) => {
+                        eprintln!("Rust Artifact mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Artifact mutation failed.")
+                            .write_to(&mut client);
+                    }
+                }
+            }
+        }
+        if let Some(provider_route) = routes.provider.as_ref() {
+            match route_provider_request(&request, provider_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    provider_route.record_fallback();
+                    eprintln!("Rust Provider route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(discovery_route) = routes.discovery.as_ref() {
+            match route_discovery_request(&request, discovery_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Discovery route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Discovery request failed.")
+                        .write_to(&mut client);
+                }
+            }
+        }
+        if let Some(cloudflare_route) = routes.cloudflare.as_ref() {
+            match route_cloudflare_request(&request, cloudflare_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Cloudflare route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Cloudflare guide request failed.")
+                        .write_to(&mut client);
+                }
+            }
+        }
+        if let Some(push_route) = routes.push.as_ref() {
+            let body = if push_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let rust_owned_mutation = body.is_some()
+                || request.method == "DELETE"
+                    && request.path().starts_with("/api/push/subscriptions/");
+            match route_push_request(&request, &peer_ip, body.as_deref(), push_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    if rust_owned_mutation {
+                        eprintln!("Rust Push mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Push mutation failed.")
+                            .write_to(&mut client);
+                    }
+                    eprintln!("Rust Push route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(artifact_route) = routes.artifact.as_ref() {
+            match route_artifact_request(&request, artifact_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Artifact route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(desktop_remote_route) = routes.desktop_remote.as_ref() {
+            match route_desktop_remote_request(&request, desktop_remote_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Desktop Remote route falling back to Node: {error:#}")
+                }
+            }
+        }
+        if let Some(file_route) = routes.file.as_ref() {
+            match stream_file_request(&request, file_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => eprintln!("Rust file route falling back to Node: {error:#}"),
             }
         }
         if let Some(status_route) = routes.status.as_ref() {
@@ -261,7 +526,7 @@ fn handle_connection(
             let body = if settings_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -284,7 +549,7 @@ fn handle_connection(
             let body = if pairing_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -307,7 +572,7 @@ fn handle_connection(
             let body = if event_sync_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -327,11 +592,35 @@ fn handle_connection(
                 }
             }
         }
+        if let Some(task_route) = routes.task.as_ref() {
+            let body = if task_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let rust_owned_mutation = body.is_some();
+            match route_task_request(&request, body.as_deref(), task_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    task_route.record_fallback();
+                    if rust_owned_mutation {
+                        eprintln!("Rust Task mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Task mutation failed.")
+                            .write_to(&mut client);
+                    }
+                    eprintln!("Rust Task route falling back before ownership: {error:#}");
+                }
+            }
+        }
         if let Some(workspace_route) = routes.workspace.as_ref() {
             let body = if workspace_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
                     Some(body) => Some(body),
-                    None => return proxy_connection_with_prefix(client, upstream, prefix),
+                    None => return proxy_or_not_found(client, upstream, prefix),
                 }
             } else {
                 None
@@ -352,7 +641,18 @@ fn handle_connection(
             }
         }
     }
-    proxy_connection_with_prefix(client, upstream, prefix)
+    proxy_or_not_found(client, upstream, prefix)
+}
+
+fn proxy_or_not_found(
+    mut client: TcpStream,
+    upstream: Option<SocketAddr>,
+    prefix: Vec<u8>,
+) -> io::Result<()> {
+    match upstream {
+        Some(upstream) => proxy_connection_with_prefix(client, upstream, prefix),
+        None => HttpRouteResponse::error(404, "Not found.").write_to(&mut client),
+    }
 }
 
 fn read_request_body(
@@ -360,12 +660,21 @@ fn read_request_body(
     prefix: &mut Vec<u8>,
     request: &crate::status_http::ParsedRequest,
 ) -> io::Result<Option<Vec<u8>>> {
+    read_request_body_with_limit(client, prefix, request, MAX_DIRECT_JSON_BODY_BYTES)
+}
+
+fn read_request_body_with_limit(
+    client: &mut TcpStream,
+    prefix: &mut Vec<u8>,
+    request: &crate::status_http::ParsedRequest,
+    max_bytes: usize,
+) -> io::Result<Option<Vec<u8>>> {
     if request.header("transfer-encoding").is_some() {
         return Ok(None);
     }
     let content_length = match request.header("content-length") {
         Some(value) => match value.parse::<usize>() {
-            Ok(length) if length <= MAX_DIRECT_JSON_BODY_BYTES => length,
+            Ok(length) if length <= max_bytes => length,
             _ => return Ok(None),
         },
         None => 0,
@@ -426,6 +735,7 @@ fn read_request_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub fn proxy_connection(client: TcpStream, upstream_addr: SocketAddr) -> io::Result<()> {
     proxy_connection_with_prefix(client, upstream_addr, Vec::new())
 }
@@ -625,11 +935,7 @@ mod tests {
         ));
         fs::create_dir_all(&invalid_data_dir).unwrap();
         fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
-        let status_route = StatusRouteConfig::new(
-            invalid_data_dir.clone(),
-            upstream_addr,
-            "secret".to_string(),
-        );
+        let status_route = StatusRouteConfig::new(invalid_data_dir.clone());
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
             let routes = FrontdoorRoutes::default().with_status(Some(status_route));
@@ -681,8 +987,7 @@ mod tests {
             std::process::id()
         ));
         assert!(!missing_data_dir.exists());
-        let doctor_route =
-            DoctorRouteConfig::new(missing_data_dir, upstream_addr, "secret".to_string());
+        let doctor_route = DoctorRouteConfig::new(missing_data_dir);
         let proxy_thread = thread::spawn(move || {
             let (client, _) = frontend.accept().unwrap();
             let routes = FrontdoorRoutes::default().with_doctor(Some(doctor_route));

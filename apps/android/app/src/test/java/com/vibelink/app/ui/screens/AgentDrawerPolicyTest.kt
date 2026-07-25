@@ -27,12 +27,13 @@ class AgentDrawerPolicyTest {
     fun separatesDesktopRemoteFromAgentConversations() {
         val conversations = listOf(
             ConversationItem(key = "desktop", kind = "desktop", title = "Codex Desktop remote"),
+            ConversationItem(key = "linked", kind = "history", title = "ChatGPT", desktopLinked = true),
             ConversationItem(key = "task", kind = "task", title = "Agent task"),
             ConversationItem(key = "history", kind = "history", title = "Agent history"),
         )
 
         assertEquals(
-            listOf("desktop"),
+            listOf("desktop", "linked"),
             AgentDrawerPolicy.filterAndSort(conversations, "", ConversationSpace.Remote).map { it.key },
         )
         assertEquals(

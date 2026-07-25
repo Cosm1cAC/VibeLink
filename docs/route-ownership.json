@@ -13,77 +13,329 @@
     }
   },
   "publicRouteFamilies": [
-    { "id": "discovery", "owner": "node", "status": "node-owned", "prefixes": ["/api/tool-registry", "/api/provider-registry", "/api/command-registry", "/api/openapi.json"] },
-    { "id": "status", "owner": "rust", "status": "default-on", "prefixes": ["/api/status"] },
-    { "id": "doctor", "owner": "rust", "status": "default-on", "prefixes": ["/api/doctor"] },
+    {
+      "id": "discovery",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/tool-registry", "/api/command-registry"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "openapi",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/openapi.json"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "provider-registry",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/provider-registry"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "status",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/status"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "doctor",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/doctor"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "agent-reach", "owner": "node", "status": "node-owned", "prefixes": ["/api/agent-reach"] },
     { "id": "doubao", "owner": "node", "status": "node-owned", "prefixes": ["/api/doubao"] },
     { "id": "mcp", "owner": "node", "status": "node-owned", "prefixes": ["/api/mcp"] },
-    { "id": "histories", "owner": "node", "status": "node-owned", "prefixes": ["/api/histories"] },
-    { "id": "search", "owner": "node", "status": "node-owned", "prefixes": ["/api/search"] },
-    { "id": "tasks", "owner": "node", "status": "node-owned", "prefixes": ["/api/tasks", "/api/task-scheduler", "/api/context-budget", "/api/compact"] },
-    { "id": "workspaces", "owner": "mixed", "status": "in-progress", "prefixes": ["/api/workspaces"] },
-    { "id": "tool-runs", "owner": "node", "status": "node-owned", "prefixes": ["/api/tool-runs"] },
-    { "id": "tool-events", "owner": "mixed", "status": "in-progress", "prefixes": ["/api/tool-events"] },
-    { "id": "approvals", "owner": "node", "status": "node-owned", "prefixes": ["/api/approvals"] },
-    { "id": "devices", "owner": "rust", "status": "default-on", "prefixes": ["/api/devices"] },
-    { "id": "pairing", "owner": "rust", "status": "default-on", "prefixes": ["/api/login", "/api/pairing-sessions"] },
-    { "id": "events", "owner": "rust", "status": "default-on", "prefixes": ["/api/events"] },
+    {
+      "id": "histories",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/histories"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "search",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/search"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "tasks",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/tasks", "/api/task-scheduler", "/api/context-budget", "/api/compact"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "workspaces",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/workspaces"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "tool-runs",
+      "owner": "rust",
+      "status": "phase-2-persisted",
+      "prefixes": ["/api/tool-runs"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "tool-events",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/tool-events"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "approvals",
+      "owner": "rust",
+      "status": "phase-2-persisted",
+      "prefixes": ["/api/approvals"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "devices",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/devices"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "pairing",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/login", "/api/pairing-sessions"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "events",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/events"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "live-calls", "owner": "node", "status": "node-owned", "prefixes": ["/api/live-calls"] },
-    { "id": "settings", "owner": "mixed", "status": "in-progress", "prefixes": ["/api/settings"] },
-    { "id": "thread-state", "owner": "node", "status": "node-owned", "prefixes": ["/api/thread-state"] },
+    {
+      "id": "settings",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/settings"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "thread-state",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/thread-state"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "reviews", "owner": "node", "status": "node-owned", "prefixes": ["/api/reviews"] },
-    { "id": "audit", "owner": "rust", "status": "default-on", "prefixes": ["/api/audit-log"] },
-    { "id": "desktop-remote", "owner": "node", "status": "node-owned", "prefixes": ["/api/desktop-remote"] },
-    { "id": "terminal-sessions", "owner": "node", "status": "node-owned", "prefixes": ["/api/terminal-sessions"] },
-    { "id": "artifacts", "owner": "node", "status": "node-owned", "prefixes": ["/api/artifacts"] },
+    {
+      "id": "audit",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/audit-log"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "desktop-remote",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "routes": ["GET /api/desktop-remote/observations"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    { "id": "desktop-remote-control", "owner": "node", "status": "node-owned", "routes": ["GET /api/desktop-remote/status", "GET /api/desktop-remote/events", "POST /api/desktop-remote/messages", "POST /api/desktop-remote/retry", "POST /api/desktop-remote/clear", "POST /api/desktop-remote/focus"] },
+    {
+      "id": "terminal-sessions",
+      "owner": "rust",
+      "status": "default-on",
+      "prefixes": ["/api/terminal-sessions"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "artifacts",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/artifacts"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "browser-sessions", "owner": "node", "status": "node-owned", "prefixes": ["/api/browser-sessions", "/api/browser"] },
     { "id": "capabilities", "owner": "node", "status": "node-owned", "prefixes": ["/api/capabilities"] },
     { "id": "automations", "owner": "node", "status": "node-owned", "prefixes": ["/api/automations"] },
     { "id": "subagents", "owner": "node", "status": "node-owned", "prefixes": ["/api/subagents"] },
-    { "id": "cloudflare", "owner": "node", "status": "node-owned", "prefixes": ["/api/cloudflare"] },
-    { "id": "push", "owner": "node", "status": "node-owned", "prefixes": ["/api/push"] },
-    { "id": "attachments", "owner": "node", "status": "node-owned", "prefixes": ["/api/attachments"] },
-    { "id": "files", "owner": "node", "status": "node-owned", "prefixes": ["/api/files"] },
+    {
+      "id": "cloudflare",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/cloudflare"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "push",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/push"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "attachments",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/attachments"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
+    {
+      "id": "files",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/files"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
+    },
     { "id": "codex-desktop", "owner": "node", "status": "node-owned", "prefixes": ["/api/codex-desktop", "/api/codex-app-server"] }
   ],
-  "internalRouteFamilies": [
-    { "id": "internal-status-snapshot", "owner": "node", "status": "hybrid-required", "routes": ["GET /internal/status-snapshot"] },
-    { "id": "internal-doctor-report", "owner": "node", "status": "hybrid-required", "routes": ["GET /internal/doctor-report"] },
-    { "id": "internal-public-settings", "owner": "node", "status": "hybrid-required", "routes": ["GET /internal/public-settings"] },
-    { "id": "internal-reload-settings", "owner": "node", "status": "hybrid-required", "routes": ["POST /internal/reload-settings"] }
-  ],
+  "internalRouteFamilies": [],
   "responsibilities": [
-    { "id": "workspace-command-execution", "owner": "node", "status": "node-owned" },
-    { "id": "approval-continuation", "owner": "node", "status": "node-owned" },
-    { "id": "task-history-terminal-runtime", "owner": "node", "status": "node-owned" },
-    { "id": "provider-registry-runtime", "owner": "node", "status": "node-owned" },
+    { "id": "workspace-command-execution", "owner": "rust", "status": "phase-2-persisted" },
+    { "id": "approval-continuation", "owner": "rust", "status": "phase-2-persisted" },
+    { "id": "task-history-terminal-runtime", "owner": "rust", "status": "default-on" },
+    { "id": "provider-registry-runtime", "owner": "rust", "status": "default-on" },
     { "id": "live-call-asr-audio-runtime", "owner": "node", "status": "node-owned" },
     { "id": "search-index-runtime", "owner": "node", "status": "node-owned" },
     { "id": "browser-session-runtime", "owner": "node", "status": "node-owned" },
-    { "id": "artifact-storage-runtime", "owner": "node", "status": "node-owned" },
+    { "id": "artifact-storage-runtime", "owner": "rust", "status": "required-for-rust-only" },
     { "id": "automation-scheduler-runtime", "owner": "node", "status": "node-owned" },
     { "id": "push-notification-runtime", "owner": "node", "status": "node-owned" },
-    { "id": "desktop-remote-runtime", "owner": "node", "status": "node-owned" },
+    { "id": "desktop-observation-runtime", "owner": "rust", "status": "default-on" },
+    { "id": "desktop-remote-control-runtime", "owner": "node", "status": "node-owned" },
     { "id": "static-asset-serving", "owner": "rust", "status": "required-for-rust-only" }
   ],
   "rustOnlyAcceptance": {
     "requiredFamilies": [
       "discovery",
+      "openapi",
+      "provider-registry",
       "status",
       "doctor",
+      "agent-reach",
+      "doubao",
+      "mcp",
+      "histories",
+      "search",
+      "tasks",
+      "workspaces",
+      "tool-runs",
+      "tool-events",
+      "approvals",
       "devices",
       "pairing",
       "events",
-      "tool-events",
-      "workspaces",
-      "approvals",
-      "tasks",
       "live-calls",
       "settings",
+      "thread-state",
+      "reviews",
+      "audit",
+      "desktop-remote",
+      "desktop-remote-control",
+      "terminal-sessions",
       "artifacts",
       "browser-sessions",
-      "desktop-remote"
+      "capabilities",
+      "automations",
+      "subagents",
+      "cloudflare",
+      "push",
+      "attachments",
+      "files",
+      "codex-desktop"
     ],
     "requiredTransports": ["http", "sse", "websocket"],
     "packageSmoke": "tools/rust-only-package-smoke.mjs",

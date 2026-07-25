@@ -1,6 +1,6 @@
 # VibeLink Rust 迁移报告
 
-最后更新：2026-07-15
+最后更新：2026-07-23
 
 本文是 Rust 迁移唯一的人工维护报告。机器可读状态保存在 `docs/rust-migration-status.json`，架构决策记录在 `docs/decisions/ADR-0001` 至 `ADR-0008`。
 
@@ -19,19 +19,23 @@
 | --- | --- | --- | --- |
 | Rust HTTP 前门 | `default-on` | Rust 外部监听，Node loopback backend | 保留显式 `bridge` 回滚直到 Node blocker 清零 |
 | 状态响应契约组装 | `canary` | 公网 bridge 显式开启，Node 快照回退 | 继续作为 Status 动态快照强类型契约层 |
-| Status 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/状态码/响应，Node 仅供受保护快照 | 迁移动态快照后删除 Node 内部端点 |
-| Doctor 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/状态码/响应，Node 保留受保护诊断执行器 | 迁移诊断执行器与 tool run |
-| Devices 只读原生 HTTP 路由 | `default-on` | Rust Host/鉴权/SQLite 查询/字段过滤 | 保持默认开启与故障回退观测 |
+| Status 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/settings projection/设备列表/响应；Web/Android rust-only E2E | 扩展 Provider 与任务动态快照 |
+| Doctor 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/checks/toolRunId/响应；Web/Android rust-only E2E | 扩展平台探测与 tool run 投影 |
+| Devices 只读原生 HTTP 路由 | `default-on` | Rust Host/鉴权/SQLite 查询/字段过滤；Web/Android rust-only E2E | 保持默认开启与故障回退观测 |
 | Devices 审计化写操作原生 HTTP 路由 | `default-on` | Rust 令牌轮换/吊销、限流和事务化审计 | 保持默认开启与事务故障测试 |
-| Pairing 原生 HTTP 路由 | `default-on` | Rust create/status/list/approve/deny/claim，Node 仅供提交前 settings 快照 | 删除兼容 settings 快照依赖 |
+| Pairing 原生 HTTP 路由 | `default-on` | Rust create/status/list/approve/deny/claim/settings projection | 保持 claim 幂等恢复观测 |
 | Audit Log 原生 HTTP 路由 | `default-on` | Rust 鉴权、拒绝审计、游标分页、字段投影 | 保持默认开启 |
-| Settings 原生 HTTP 路由 | `default-on` | Rust 校验/dry-run/导入导出/原子写入/DPAPI/审计；Node 仅做受保护内存重载 | 删除 Node 内存副本后移除内部重载端点 |
+| Settings 原生 HTTP 路由 | `default-on` | Rust 校验/dry-run/导入导出/原子写入/DPAPI/审计；Web/Android rust-only E2E | 删除 Node 内存副本后移除内部重载端点 |
 | Tool Events 非流式原生 HTTP 路由 | `default-on` | Rust replay/filter/fields | 保持默认开启 |
 | Tool Events SSE 原生 HTTP 路由 | `default-on` | Rust catch-up/SSE/Last-Event-ID | 监测重连与慢消费者 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
-| Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust allowed-root 文件操作、Git status/diff/actions 与 worktree list，Node 回退 | 继续迁移 worktree actions、command/approval |
+| Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust list/create/tree/context/read/preview/batch、Git actions 与 worktree lifecycle；Web/Android rust-only E2E | 继续迁移 command/terminal/approval |
+| Task 持久投影原生 HTTP 路由 | `default-on` | Rust task collection、mutation、scheduler、execution binding、事件 SSE、history/search/FTS watcher | 继续观察真实 provider 运行与 task input/stop 边界 |
+| Provider Registry 缓存投影原生 HTTP 路由 | `default-on` | Rust SQLite cache projection 已通过 Web/Android rust-only E2E；支持 CLI/Doubao bridge health probe、Zhipu/Claude model API catalog refresh | 保持真实 Provider health 与 fidelity 观测 |
+| Tool 与 Command Registry 原生 HTTP 路由 | `default-on` | Rust 内置 catalog、SQLite MCP tool cache 与本地 skill 扫描；Web/Android 无 Node E2E | 保持默认开启 |
+| Static Assets 与 OpenAPI 原生服务 | `default-on` | `/api/openapi.json` 已通过 Web/Android rust-only E2E；Rust 服务白名单 public assets | 连接 package smoke，并补齐 Web/Android 无 Node 首屏证据 |
 | 统一事件同步原生 HTTP 路由 | `default-on` | Rust unified replay、设备 ack、retention/compaction 与 marker | 保持客户端 ack 与多设备冲突观测 |
-| Durable Execution Host | `default-on` | Rust execd/worker 持有 ConPTY、stdio、app-server backend 与 host event spool | 继续迁移 Provider registry、任务投影与剩余 HTTP 编排 |
+| Durable Execution Host | `default-on` | Rust execd/worker 持有 ConPTY、stdio、app-server backend、task scheduler 与 host event spool | 继续迁移剩余 Live Call/ASR 生命周期 |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |
 | 事件存储 append/replay sidecar | `canary` | `auto`/显式开启，可回退 Worker/同步 SQLite | 有限真人运行会话并采集统计 |
 | 实时音频低延迟管线 | `contract` | 无 | 仅在新证据表明 Node 成为瓶颈时重评 |
@@ -39,7 +43,7 @@
 
 2026-07-20 起，普通 `vibelink.exe` 用户入口实际启用的 Rust HTTP route family 全部登记为 `default-on`；显式 `vibelink.exe bridge` 仍提供进程级 Node 回滚。Audio 和 Compression 不是“尚未接线”，而是测量结果明确不支持增加生产 sidecar 边界。
 
-`default-on` 只表示外部路由所有权默认归 Rust，不等于 Node runtime 已可删除。Node-free 打包由机器门禁控制，当前 blocker 为 Workspace Git/command/approval、task/history/terminal、Provider runtime、Live Call/ASR/录音生命周期，以及不依赖 `src/server.js` 的 native release entry。`package-portable.ps1 -RuntimeFlavor rust-only` 会在下载或构建前运行该门禁并拒绝不完整产品包。
+`default-on` 只表示外部路由所有权默认归 Rust，不等于 Node runtime 已可删除。Node-free 打包由机器门禁控制，当前 blocker 已缩小到 Workspace command/approval continuation、Live Call/ASR/录音生命周期，以及不依赖 `src/server.js` 的 native release entry。`package-portable.ps1 -RuntimeFlavor rust-only` 会在下载或构建前运行该门禁并拒绝不完整产品包。
 
 ## Rust HTTP 前门
 
@@ -61,7 +65,7 @@ Rust 在 canary 模式下直接占用外部 `host:port`，Node 只绑定每次�
 
 ### Status 原生 HTTP 路由
 
-`--rust-status-http` 仅在 Rust HTTP 前门开启时生效。Rust 对 `GET /api/status` 执行 64KiB 有界解析、Host allowlist、SQLite 设备 token 鉴权和最终 JSON 响应；Node 只通过 loopback-only、进程随机 token 保护的 `/internal/status-snapshot` 提供动态快照。内部 JSON 采用 16MiB 流式上限；读取、超限、快照或强类型校验失败时，前门逐字节重放原请求给 Node。关闭该独立开关即可恢复全量透明转发。
+`--rust-status-http` 仅在 Rust HTTP 前门开启时生效。Rust 对 `GET /api/status` 执行 64KiB 有界解析、Host allowlist、SQLite 设备 token 鉴权、settings projection、设备列表和最终 JSON 响应；该默认路由不再调用 Node internal endpoint。关闭该独立开关即可恢复全量透明转发到 Node 公共路由。
 
 2026-07-13 本地真实进程 canary 经 Rust 前门完成代理登录、一次 Rust 匿名拒绝、三次认证 Status 和一次 Node Doctor 转发。Rust Status failure、fallback、pending 均为 0，Doctor 返回 24 项检查。远端 Windows CI 已通过；该 slice 当前为 `opt-in`，待公网认证 canary 通过后晋级 `canary`。
 
@@ -69,7 +73,7 @@ Rust 在 canary 模式下直接占用外部 `host:port`，Node 只绑定每次�
 
 ### Doctor 原生 HTTP 路由
 
-`--rust-doctor-http` 仅在 Rust HTTP 前门开启时生效。Rust 对 `GET /api/doctor` 执行与 Status 相同的有界解析、Host allowlist 和 SQLite 设备鉴权，再通过 loopback-only、进程随机 token 保护的 `/internal/doctor-report` 调用现有诊断执行器。Node 继续负责 24 项平台探测、`system.doctor` tool run 和审计写入；Rust 在共享的 16MiB 内部 JSON 上限内校验报告契约、附加 `controlPlaneRuntime.doctorHttp` 指标并生成最终 HTTP 响应。关闭独立开关或内部执行失败时恢复 Node 路由。
+`--rust-doctor-http` 仅在 Rust HTTP 前门开启时生效。Rust 对 `GET /api/doctor` 执行 Host allowlist、SQLite 设备鉴权、本地 checks、Rust toolRunId 和最终 JSON 响应；该默认路由不再调用 Node internal endpoint。关闭独立开关后恢复 Node 公共 Doctor 路由。
 
 2026-07-13 本地 debug 与 release 真实进程 canary 均通过一次 Rust 匿名拒绝和一次认证 Doctor，返回 24 项检查；attempts/responses 为 2/2，failure、fallback、pending 为 0。canary 同时回查 `toolRunId` 和 `system.doctor` 审计记录，设备 ID 与 `/api/doctor` 路径均保持。该 slice 当前为 `opt-in`，待远端 CI 与公网认证 canary 通过后晋级。
 
@@ -97,7 +101,7 @@ Rust 在 canary 模式下直接占用外部 `host:port`，Node 只绑定每次�
 
 `--rust-pairing-http` 第一阶段接管公开 `GET /api/pairing-sessions/:id`、认证 `GET /api/pairing-sessions` 以及 approve/deny。公开轮询只执行设置/数据库/Host 前置检查，不因附带 token 改写设备 `last_seen`；过期 `pending` 映射、stored-status 过滤、20 条上限、嵌套 `fields`、每 IP/session 每分钟 60 次轮询限流均保持 Node 合同。批准/拒绝与审计位于同一 SQLite immediate transaction，认领后失败不回放 Node。
 
-create/claim 使用 1 MiB 有界 `Content-Length` body reader；已读取 body 始终追加到原请求 prefix，unsupported transfer encoding、非法长度和超限 body 在 canary 阶段仍可完整回放 Node。创建由 Rust 生成 UUIDv4、六位大写 code、五分钟 expiry 和 220px SVG QR；领取在事务前通过 loopback-only、进程随机 token 保护的 `/internal/public-settings` 取得安全设置投影，再原子创建 90 天设备 token、更新 session 并写审计。code/token 明文只出现在各自单次响应，SQLite 只保存 SHA-256。
+create/claim 使用 1 MiB 有界 `Content-Length` body reader；已读取 body 始终追加到原请求 prefix，unsupported transfer encoding、非法长度和超限 body 在 canary 阶段仍可完整回放 Node。创建由 Rust 生成 UUIDv4、六位大写 code、五分钟 expiry 和 220px SVG QR；领取直接从 Rust settings projection 取得公开设置，再原子创建 90 天设备 token、更新 session 并写审计。code/token 明文只出现在各自单次响应，SQLite 只保存 SHA-256。
 
 完整 release canary 已完成 Rust create、pending status、认证 list、approve、claim 和 claimed status；批准与领取审计连续可查，旧 Node create/claim 不再处理正常 Web/Android `Content-Length` 请求。分片 body 测试证明跨 TCP read 的 JSON 可正确拼合并保留重放字节，故障注入继续证明认领后的决策/审计失败会回滚且不触达 Node。前门可选路由同时重构为 `FrontdoorRoutes` 配置对象，避免后续迁移继续扩张函数参数列表。
 
@@ -121,7 +125,7 @@ Audit 提交 `841a3dbcfa4a4df0a9498ae084657ce697a7b8ae` 的 6 条远端 workflow
 
 Windows API key 与 FCM 服务账号继续使用当前用户 DPAPI，Rust 显式加载系统 `Microsoft.PowerShell.Security` 模块，明文只通过子进程环境传递。设置文件和每个受影响的 `.dpapi` 文件在写入前分别快照；Node 内存重载或审计失败时全部恢复。Rust 读取 mutation body 后拥有请求，后续失败只返回 Rust `500`，绝不向 Node 重放；故障测试和并发测试分别证明文件回滚及两个同时写入的事务串行提交。
 
-混合阶段的 Node 仍有未迁移路由缓存 `settings`，因此 Rust 成功落盘后调用随机内部 token 保护、仅 loopback 可达的 `POST /internal/reload-settings`。该端点只重新载入兼容内存副本和执行现有通知设置归一化，不是 Web 管理后台，也不负责公开请求的验证、凭据或审计策略。删除 Node 前必须把通知密钥初始化迁入 Rust 并删除该兼容端点。
+Rust Settings 路由现在直接负责 schema/default 初始化、settings projection、凭据快照、原子落盘、审计和失败回滚；不再调用 Node reload endpoint。Node 只保留未迁移公共 Settings 路由的内存状态，用于显式 fallback。
 
 本地 71 项 Rust 单测全绿；完整 release HTTP canary 累计通过 39 项检查，其中 Settings 覆盖匿名 `401`、无 secret 导出、无落盘 dry-run、DPAPI 更新、导入预览/提交、三类成功审计和受控关闭。2026-07-15 的公网切换进一步证明 Settings export 匿名请求由 Rust 拒绝，未迁 Tool Registry 仍由 Node 透明处理；当前仍缺远端 CI、可分发包和受控公网认证成功路径，因此该 route family 继续保持 `opt-in`。
 
@@ -151,7 +155,7 @@ Rust 对 ack 与 compact 分别执行每分钟 240/20 次的设备级限流并�
 
 同一默认开启的 route family 现已接管 `GET /api/workspaces/:id/git/status`、`/git/diff`、`/worktrees` 与 `POST /git/file-action`、`/git/action`。Rust 使用参数化 workspace 查询和 canonical 工作目录执行固定 Git 参数，保持 branch/files/changedCount/stdout/stderr/exitCode/workspace/cwd 合同、10 MiB 输出上限，以及 Node 的 workspace 最近使用时间更新语义。Diff 路由还保持未初始化仓库的 HEAD fallback、最多 6 个未跟踪文本预览、512 KiB 单文件预览上限和文件级增删行统计；worktree list 保持 main/detached/bare/locked/prunable 元数据与已注册 workspace 关联。Git file-action 支持 stage/accept、restore/reject、unstage、冲突侧选择、mark-resolved 和单文件 stage/unstage hunk；仓库级 action 支持 stage/unstage all、branch create/switch、stash push/pop、commit、push、ff-only pull 和 `gh pr create`，并保持 dry-run。两类写操作均持久化 tool.created/started/completed/error、tool run 终态和成功/失败审计；失败响应在 Rust 内终止，不会把已开始的 mutation 重放给 Node。Worktree action、command 与 approval continuation 仍由 Node 持有。
 
-当前本地 122 项 Rust 测试覆盖文件写入、重命名、删除、Git status/diff/file-action/action/worktree list 合同、首次提交前 diff、单文件 hunk 边界、失败 tool-run/audit、未跟踪文件拒绝、dry-run、branch/stash 往返、worktree 元数据、路径穿越拒绝和现有控制面回归。该切片已纳入默认 `vibelink.exe` Rust 前门 profile；其余 worktree/command/approval 仍由 Node 负责，直到后续 workspace/tool slices 完成。
+当前本地 126 项 Rust 测试覆盖 Workspace list/create/tree/context/read/preview/batch、文件写入、重命名、删除、Git status/diff/file-action/action、worktree list/create/action、首次提交前 diff、单文件 hunk 边界、失败 tool-run/audit、未跟踪文件拒绝、dry-run、branch/stash 往返、worktree 元数据、路径穿越拒绝和现有控制面回归。该切片已纳入默认 `vibelink.exe` Rust 前门 profile；其余 command/terminal/approval continuation 仍由 Node 负责，直到后续 workspace/tool slices 完成。
 
 实现：`src/workspaces.js`、`src/workspaceTreeSidecarClient.js`、`apps/windows/src/workspace_tree.rs`、`vibelink workspace-tree-sidecar`，一次性回退命令为 `vibelink workspace-tree`。
 

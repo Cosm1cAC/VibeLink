@@ -1,0 +1,1480 @@
+{
+  "tools": [
+    {
+      "name": "agent.task",
+      "kind": "agent",
+      "label": "Agent task",
+      "permission": "agent.run",
+      "risk": "medium",
+      "description": "Create or resume a VibeLink Agent task through a configured provider adapter.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude",
+              "doubao",
+              "zhipu"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoningEffort": {
+            "type": "string"
+          },
+          "security": {
+            "type": "object"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Task ID"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "Session ID for SSE event streaming"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ],
+            "description": "Task lifecycle status"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace.command",
+      "kind": "shell",
+      "label": "Workspace command",
+      "permission": "workspace.command",
+      "risk": "high",
+      "description": "Run a non-interactive command in a trusted workspace.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "stdout": {
+            "type": "string",
+            "description": "Captured standard output"
+          },
+          "stderr": {
+            "type": "string",
+            "description": "Captured standard error"
+          },
+          "exitCode": {
+            "type": "integer",
+            "description": "Process exit code"
+          },
+          "timedOut": {
+            "type": "boolean",
+            "description": "Whether the command timed out"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace.test",
+      "kind": "shell",
+      "label": "Workspace test",
+      "permission": "workspace.test",
+      "risk": "medium",
+      "description": "Run a test command in a trusted workspace.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "stdout": {
+            "type": "string",
+            "description": "Captured standard output"
+          },
+          "stderr": {
+            "type": "string",
+            "description": "Captured standard error"
+          },
+          "exitCode": {
+            "type": "integer",
+            "description": "Process exit code"
+          },
+          "timedOut": {
+            "type": "boolean",
+            "description": "Whether the test timed out"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace.terminal_session",
+      "kind": "shell",
+      "label": "Terminal session",
+      "permission": "workspace.terminal",
+      "risk": "high",
+      "description": "Start an interactive workspace terminal session on the durable execution host with ConPTY control and output replay.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": "string"
+          },
+          "shell": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "pty",
+              "spawn"
+            ]
+          },
+          "cols": {
+            "type": "number"
+          },
+          "rows": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "workspaceId"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Terminal session ID"
+          },
+          "cols": {
+            "type": "integer",
+            "description": "Terminal width in columns"
+          },
+          "rows": {
+            "type": "integer",
+            "description": "Terminal height in rows"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace.git_action",
+      "kind": "git",
+      "label": "Git action",
+      "permission": "workspace.git",
+      "risk": "medium",
+      "description": "Run a workspace-level Git operation such as stage, commit, pull, push, or PR.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "stdout": {
+            "type": "string",
+            "description": "Git command output"
+          },
+          "exitCode": {
+            "type": "integer",
+            "description": "Process exit code"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace.git_file_action",
+      "kind": "git",
+      "label": "Git file action",
+      "permission": "workspace.git",
+      "risk": "medium",
+      "description": "Run a Git operation for one changed file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "path"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "Whether the file operation was applied"
+          },
+          "patch": {
+            "type": "string",
+            "description": "Resulting diff output"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace.git_worktree",
+      "kind": "git",
+      "label": "Git worktree",
+      "permission": "workspace.git",
+      "risk": "medium",
+      "description": "Create a permanent Git worktree for a workspace and register it as a new workspace.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "branchName": {
+            "type": "string"
+          },
+          "baseRef": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "branchName"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace": {
+            "type": "object",
+            "description": "Registered workspace for the new worktree"
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute worktree path"
+          },
+          "branchName": {
+            "type": "string",
+            "description": "Created or checked-out branch name"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace.git_worktree_action",
+      "kind": "git",
+      "label": "Git worktree lifecycle",
+      "permission": "workspace.git",
+      "risk": "medium",
+      "description": "Remove, prune, lock, or unlock a Git worktree.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "remove",
+              "prune",
+              "lock",
+              "unlock"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "force": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "expire": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "action"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "worktrees": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "toolRunId": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "system.doctor",
+      "kind": "system",
+      "label": "Doctor",
+      "permission": "system.diagnose",
+      "risk": "low",
+      "description": "Run local bridge health checks for VibeLink Agent, CLI adapters, Git, credentials, network, Codex Desktop Remote, and event storage.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "runtime": {
+            "type": "object",
+            "description": "Node.js version, platform, uptime"
+          },
+          "cli": {
+            "type": "object",
+            "description": "Installed CLI tools and versions"
+          },
+          "git": {
+            "type": "object",
+            "description": "Git configuration status"
+          },
+          "credentials": {
+            "type": "object",
+            "description": "API key availability"
+          },
+          "network": {
+            "type": "object",
+            "description": "Network reachability"
+          },
+          "desktop": {
+            "type": "object",
+            "description": "Codex Desktop Remote status"
+          },
+          "events": {
+            "type": "object",
+            "description": "Event storage health"
+          }
+        }
+      }
+    },
+    {
+      "name": "system.codex_app_server_probe",
+      "kind": "system",
+      "label": "Codex app-server probe",
+      "permission": "system.probe",
+      "risk": "medium",
+      "description": "Run the Codex app-server compatibility probe and record structured results.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "object",
+            "description": "Probe result with capabilities and compatibility"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "desktop.draft_probe",
+      "kind": "desktop",
+      "label": "Desktop draft probe",
+      "permission": "desktop.probe",
+      "risk": "medium",
+      "description": "Probe Codex Desktop composer access without sending a user task.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "object",
+            "description": "Probe result with composer state"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "mcp.status",
+      "kind": "plugin",
+      "label": "MCP status",
+      "permission": "plugin.mcp",
+      "risk": "low",
+      "description": "List configured MCP servers known to VibeLink.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "servers": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Configured MCP server names and status"
+          }
+        }
+      }
+    },
+    {
+      "name": "mcp.probe",
+      "kind": "plugin",
+      "label": "MCP probe",
+      "permission": "plugin.mcp",
+      "risk": "medium",
+      "description": "Connect to configured MCP servers and read their tools/list metadata through the VibeLink runtime.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Per-server probe results with discovered tools"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "mcp.call",
+      "kind": "plugin",
+      "label": "MCP tool call",
+      "permission": "plugin.mcp",
+      "risk": "medium",
+      "description": "Call a configured MCP tool through the VibeLink runtime and record the result.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string",
+            "description": "Optional full VibeLink MCP tool name, e.g. mcp__server__tool."
+          },
+          "arguments": {
+            "type": "object"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "server": {
+            "type": "object"
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_reach.status",
+      "kind": "agent",
+      "label": "Agent Reach status",
+      "permission": "agent_reach.read",
+      "risk": "low",
+      "description": "Run Agent Reach doctor/status and return installed channel availability.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeoutMs": {
+            "type": "number"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          },
+          "channels": {
+            "type": "object"
+          },
+          "install": {
+            "type": "object"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_reach.skill",
+      "kind": "agent",
+      "label": "Agent Reach skill",
+      "permission": "agent_reach.manage",
+      "risk": "medium",
+      "description": "Install or uninstall the Agent Reach skill into local agent skill directories.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "install",
+              "uninstall"
+            ]
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_reach.format",
+      "kind": "agent",
+      "label": "Agent Reach format",
+      "permission": "agent_reach.read",
+      "risk": "low",
+      "description": "Format raw platform output through Agent Reach formatters.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "type": "string",
+            "enum": [
+              "xhs"
+            ]
+          },
+          "input": {
+            "description": "Raw platform output as JSON value or JSON string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_reach.transcribe",
+      "kind": "agent",
+      "label": "Agent Reach transcribe",
+      "permission": "agent_reach.read",
+      "risk": "medium",
+      "description": "Transcribe an audio/video URL or local file through Agent Reach.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "groq",
+              "openai"
+            ]
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "doubao.status",
+      "kind": "agent",
+      "label": "Doubao status",
+      "permission": "doubao.read",
+      "risk": "low",
+      "description": "Check the local browser bridge used by the Doubao web CLI.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "Chrome DevTools endpoint, e.g. http://127.0.0.1:9222"
+          },
+          "url": {
+            "type": "string",
+            "description": "Doubao web chat URL"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "browser": {
+            "type": "object"
+          },
+          "target": {
+            "type": "object"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "doubao.configure",
+      "kind": "agent",
+      "label": "Configure Doubao",
+      "permission": "doubao.manage",
+      "risk": "medium",
+      "description": "Configure the standalone Doubao extension-bridge CLI for one-command agent setup.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "noDaemon": {
+            "type": "boolean",
+            "description": "Write config without starting the bridge daemon"
+          },
+          "noOpen": {
+            "type": "boolean",
+            "description": "Write config without opening the Doubao web page"
+          },
+          "port": {
+            "type": "number",
+            "description": "Local bridge port, default 45771"
+          },
+          "url": {
+            "type": "string",
+            "description": "Doubao web chat URL"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "doubao.ask",
+      "kind": "agent",
+      "label": "Doubao ask",
+      "permission": "doubao.read",
+      "risk": "medium",
+      "description": "Send a prompt to the logged-in Doubao web page through the local browser CLI.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Chrome DevTools endpoint, e.g. http://127.0.0.1:9222"
+          },
+          "url": {
+            "type": "string",
+            "description": "Doubao web chat URL"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "browser.fetch",
+      "kind": "browser",
+      "label": "Browser fetch",
+      "permission": "browser.operate",
+      "risk": "medium",
+      "description": "Fetch an HTTP or HTTPS page, extract metadata and text summary, and record the operation as a runtime tool.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST"
+            ]
+          },
+          "headers": {
+            "type": "object"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "html": {
+            "type": "string",
+            "description": "Raw HTML content"
+          },
+          "text": {
+            "type": "string",
+            "description": "Extracted text summary"
+          },
+          "url": {
+            "type": "string",
+            "description": "Final URL after redirects"
+          },
+          "statusCode": {
+            "type": "integer",
+            "description": "HTTP response status code"
+          },
+          "toolRunId": {
+            "type": "string",
+            "description": "ID of the recorded tool run"
+          }
+        }
+      }
+    },
+    {
+      "name": "shell_command",
+      "kind": "shell",
+      "label": "Shell command",
+      "permission": "agent.tool.shell",
+      "risk": "high",
+      "description": "Observed upstream shell command tool call.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "stdout": {
+            "type": "string",
+            "description": "Standard output from the command"
+          },
+          "stderr": {
+            "type": "string",
+            "description": "Standard error from the command"
+          },
+          "exitCode": {
+            "type": "integer",
+            "description": "Command exit code"
+          }
+        }
+      }
+    },
+    {
+      "name": "exec_command",
+      "kind": "shell",
+      "label": "Exec command",
+      "permission": "agent.tool.shell",
+      "risk": "high",
+      "description": "Observed upstream command execution tool call.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "stdout": {
+            "type": "string",
+            "description": "Standard output from the command"
+          },
+          "stderr": {
+            "type": "string",
+            "description": "Standard error from the command"
+          },
+          "exitCode": {
+            "type": "integer",
+            "description": "Command exit code"
+          }
+        }
+      }
+    },
+    {
+      "name": "apply_patch",
+      "kind": "file",
+      "label": "Patch edit",
+      "permission": "agent.tool.file.write",
+      "risk": "medium",
+      "description": "Observed upstream patch edit tool call.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "Whether the patch was applied"
+          },
+          "path": {
+            "type": "string",
+            "description": "Target file path"
+          },
+          "diff": {
+            "type": "string",
+            "description": "Resulting diff"
+          }
+        }
+      }
+    },
+    {
+      "name": "mcp.*",
+      "kind": "plugin",
+      "label": "MCP tool",
+      "permission": "plugin.mcp",
+      "risk": "medium",
+      "description": "Observed MCP or plugin tool call.",
+      "outputSchema": null
+    },
+    {
+      "name": "browser.*",
+      "kind": "browser",
+      "label": "Browser tool",
+      "permission": "browser.operate",
+      "risk": "medium",
+      "description": "Observed browser automation tool call.",
+      "outputSchema": null
+    },
+    {
+      "name": "approval.*",
+      "kind": "approval",
+      "label": "Approval",
+      "permission": "approval.decide",
+      "risk": "high",
+      "description": "Approval request or decision event.",
+      "outputSchema": null
+    }
+  ],
+  "commands": [
+    {
+      "id": "navigate.sessions",
+      "name": "Sessions",
+      "description": "Open the session list",
+      "args": [],
+      "usage": "Sessions",
+      "permission": "none",
+      "toolKind": "navigation",
+      "icon": "MessageSquare",
+      "action": {
+        "type": "navigate",
+        "route": "sessionList"
+      }
+    },
+    {
+      "id": "search.global",
+      "name": "Search everywhere",
+      "description": "Search sessions, tasks, messages, and workspace files",
+      "args": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "usage": "Search everywhere <query>",
+      "permission": "none",
+      "toolKind": "search",
+      "icon": "Search",
+      "action": {
+        "type": "search"
+      }
+    },
+    {
+      "id": "session.new",
+      "name": "New session",
+      "description": "Create a new agent session",
+      "args": [],
+      "usage": "New session",
+      "permission": "none",
+      "toolKind": "session",
+      "icon": "Plus",
+      "action": {
+        "type": "new-session"
+      }
+    },
+    {
+      "id": "sessions.refresh",
+      "name": "Refresh sessions",
+      "description": "Reload sessions and thread metadata",
+      "args": [],
+      "usage": "Refresh sessions",
+      "permission": "none",
+      "toolKind": "session",
+      "icon": "RefreshCw",
+      "action": {
+        "type": "refresh"
+      }
+    },
+    {
+      "id": "thread.favorite",
+      "name": "Toggle favorite",
+      "description": "Pin/favorite or unpin the current session",
+      "args": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "usage": "Toggle favorite <thread-key>",
+      "permission": "none",
+      "toolKind": "thread",
+      "icon": "Star",
+      "ui": {
+        "label": "Toggle favorite",
+        "detail": "Pin/favorite or unpin the current session"
+      },
+      "action": {
+        "type": "thread-patch",
+        "patch": "favorite"
+      }
+    },
+    {
+      "id": "workspace.open",
+      "name": "Open Workspace",
+      "description": "Browse files and Git state in a Workspace",
+      "args": [],
+      "usage": "Open Workspace",
+      "permission": "none",
+      "toolKind": "workspace",
+      "icon": "FolderOpen",
+      "action": {
+        "type": "navigate",
+        "route": "workspace"
+      }
+    },
+    {
+      "id": "live-call.open",
+      "name": "Open Live Call",
+      "description": "Open the live transcription and call assistant",
+      "args": [],
+      "usage": "Open Live Call",
+      "permission": "none",
+      "toolKind": "navigation",
+      "icon": "AudioLines",
+      "action": {
+        "type": "navigate",
+        "route": "call"
+      }
+    },
+    {
+      "id": "review.open",
+      "name": "Open PR Review",
+      "description": "Open the pull request review workspace",
+      "args": [],
+      "usage": "Open PR Review",
+      "permission": "none",
+      "toolKind": "navigation",
+      "icon": "MessagesSquare",
+      "action": {
+        "type": "navigate",
+        "route": "review"
+      }
+    },
+    {
+      "id": "settings.open",
+      "name": "Open Settings",
+      "description": "Open bridge, security, and device settings",
+      "args": [],
+      "usage": "Open Settings",
+      "permission": "none",
+      "toolKind": "navigation",
+      "icon": "Settings",
+      "action": {
+        "type": "navigate",
+        "route": "settings"
+      }
+    },
+    {
+      "id": "approvals.review",
+      "name": "Review approvals",
+      "description": "Review pending high-risk actions",
+      "args": [],
+      "usage": "Review approvals",
+      "permission": "none",
+      "toolKind": "approval",
+      "icon": "ShieldCheck",
+      "action": {
+        "type": "navigate",
+        "route": "settings?section=approvals"
+      }
+    },
+    {
+      "id": "workspace.command",
+      "name": "Run Workspace command",
+      "description": "Execute a command in a Workspace after risk checks",
+      "args": [
+        {
+          "name": "command",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "usage": "Run Workspace command <command>",
+      "permission": "ask",
+      "requiresApproval": true,
+      "toolKind": "workspace",
+      "icon": "Terminal",
+      "action": {
+        "type": "workspace-command"
+      }
+    },
+    {
+      "id": "image",
+      "name": "/image",
+      "description": "Attach an image from your device",
+      "args": [
+        {
+          "name": "file",
+          "type": "file",
+          "required": true
+        }
+      ],
+      "usage": "/image",
+      "permission": "none",
+      "toolKind": "file",
+      "icon": "ImageIcon",
+      "ui": {
+        "label": "Attach image",
+        "detail": "Select or paste an image"
+      }
+    },
+    {
+      "id": "file",
+      "name": "/file",
+      "description": "Attach a file (PDF, text, data, code)",
+      "args": [
+        {
+          "name": "file",
+          "type": "file",
+          "required": true
+        }
+      ],
+      "usage": "/file",
+      "permission": "none",
+      "toolKind": "file",
+      "icon": "FileText",
+      "ui": {
+        "label": "Attach file",
+        "detail": "Upload PDF, text, data, or code"
+      }
+    },
+    {
+      "id": "folder",
+      "name": "/folder",
+      "description": "Upload files from a local folder",
+      "args": [
+        {
+          "name": "folder",
+          "type": "folder",
+          "required": true
+        }
+      ],
+      "usage": "/folder",
+      "permission": "none",
+      "toolKind": "file",
+      "icon": "Folder",
+      "ui": {
+        "label": "Attach folder",
+        "detail": "Upload files from a local folder"
+      }
+    },
+    {
+      "id": "workspace",
+      "name": "/workspace",
+      "description": "Pick files from workspace as LLM context",
+      "args": [],
+      "usage": "/workspace",
+      "permission": "none",
+      "toolKind": "workspace",
+      "icon": "FolderOpen",
+      "ui": {
+        "label": "Workspace context",
+        "detail": "Pick files from this computer"
+      }
+    },
+    {
+      "id": "model",
+      "name": "/model",
+      "description": "Set the AI model (e.g. /model gpt-5.5)",
+      "args": [
+        {
+          "name": "model",
+          "type": "string",
+          "required": true,
+          "hint": "Model identifier"
+        }
+      ],
+      "usage": "/model <name>",
+      "permission": "none",
+      "toolKind": "settings",
+      "icon": "SlidersHorizontal",
+      "ui": {
+        "label": "Model",
+        "detail": "Set Codex/Claude model"
+      }
+    },
+    {
+      "id": "effort",
+      "name": "/effort",
+      "description": "Set reasoning effort (low/medium/high/xhigh/max)",
+      "args": [
+        {
+          "name": "level",
+          "type": "enum",
+          "values": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "required": true
+        }
+      ],
+      "usage": "/effort <level>",
+      "permission": "none",
+      "toolKind": "settings",
+      "icon": "Target",
+      "ui": {
+        "label": "Reasoning effort",
+        "detail": "Set low, medium, high, xhigh, max"
+      }
+    },
+    {
+      "id": "agent",
+      "name": "/agent",
+      "description": "Switch AI provider (codex/claude/zhipu/doubao)",
+      "args": [
+        {
+          "name": "provider",
+          "type": "enum",
+          "values": [
+            "codex",
+            "claude",
+            "zhipu",
+            "doubao"
+          ],
+          "required": true
+        }
+      ],
+      "usage": "/agent <provider>",
+      "permission": "none",
+      "toolKind": "settings",
+      "icon": "Monitor",
+      "ui": {
+        "label": "Agent",
+        "detail": "Switch provider"
+      }
+    },
+    {
+      "id": "permissions",
+      "name": "/permissions",
+      "description": "Set permission mode (default/workspace-write/full-access)",
+      "args": [
+        {
+          "name": "mode",
+          "type": "enum",
+          "values": [
+            "default",
+            "workspace-write",
+            "full-access"
+          ],
+          "required": true
+        }
+      ],
+      "usage": "/permissions <mode>",
+      "permission": "none",
+      "toolKind": "settings",
+      "icon": "CheckSquare",
+      "ui": {
+        "label": "Full access",
+        "detail": "Switch permission mode"
+      }
+    },
+    {
+      "id": "history",
+      "name": "/history",
+      "description": "Reuse a previous prompt from history",
+      "args": [],
+      "usage": "/history",
+      "permission": "none",
+      "toolKind": "settings",
+      "icon": "History",
+      "ui": {
+        "label": "Prompt history",
+        "detail": "Reuse a previous prompt"
+      }
+    },
+    {
+      "id": "clear",
+      "name": "/clear",
+      "description": "Clear the current input draft",
+      "args": [],
+      "usage": "/clear",
+      "permission": "none",
+      "toolKind": "settings",
+      "icon": "X",
+      "ui": {
+        "label": "Clear input",
+        "detail": "Remove current draft"
+      }
+    }
+  ]
+}

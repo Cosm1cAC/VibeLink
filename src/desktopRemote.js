@@ -54,6 +54,25 @@ function pathBaseName(value = "") {
   return String(value || "").split(/[\\/]/).filter(Boolean).pop() || "";
 }
 
+function isCodexDesktopProcessPath(processPath) {
+  const value = String(processPath || "");
+  const processName = pathBaseName(value);
+  if (/^codex(?:\.exe)?$/i.test(processName)) return true;
+  return /^chatgpt(?:\.exe)?$/i.test(processName)
+    && /[\\/]WindowsApps[\\/]OpenAI\.Codex_[^\\/]+[\\/]app[\\/]ChatGPT\.exe$/i.test(value);
+}
+
+function isCodexDesktopWindowTitle(windowTitle, processPath) {
+  const title = compactText(windowTitle);
+  if (/^Codex(?:\b|$)/i.test(title)) return true;
+  return /^ChatGPT(?:\b|$)/i.test(title) && isCodexDesktopProcessPath(processPath);
+}
+
+function isCodexDesktopIdentity(desktop) {
+  return isCodexDesktopProcessPath(desktop?.processPath)
+    && isCodexDesktopWindowTitle(desktop?.windowTitle, desktop?.processPath);
+}
+
 function summarizeDesktop(result) {
   const desktop = normalizeDesktopTarget(result);
   const draftLength = desktop.draftLength || 0;
@@ -83,7 +102,11 @@ function summarizeDesktop(result) {
 }
 
 function desktopRunningTurn(desktop) {
-  return Boolean(desktop?.sidebarHasRunning || desktop?.sidebarRunningCount > 0) || /running a turn|Stop button|composer is unavailable|thinking|loading|progress|busy/i.test(desktop?.reason || "");
+  const bottomStopVisible = Array.isArray(desktop?.bottomButtons)
+    && desktop.bottomButtons.some((button) => /^(停止|Stop|Stop generating|Cancel)$/i.test(String(button?.name || "").trim()));
+  return bottomStopVisible
+    || Boolean(desktop?.sidebarHasRunning || desktop?.sidebarRunningCount > 0)
+    || /running a turn|Stop button|composer is unavailable|thinking|loading|progress|busy/i.test(desktop?.reason || "");
 }
 
 function targetConversation(desktop, target = {}) {
@@ -157,12 +180,11 @@ function evaluateDesktopPreflight(desktop, item) {
 
   if (!desktop?.found) failures.push({ code: "window_missing", message: "Codex Desktop window was not found.", retryable: true });
 
-  const processName = pathBaseName(desktop?.processPath || "");
-  if (desktop?.found && !/^codex(?:\.exe)?$/i.test(processName)) {
-    failures.push({ code: "process_mismatch", message: `Detected process is not Codex.exe: ${desktop?.processPath || "unknown"}` });
+  if (desktop?.found && !isCodexDesktopProcessPath(desktop?.processPath)) {
+    failures.push({ code: "process_mismatch", message: `Detected process is not a recognized Codex Desktop host: ${desktop?.processPath || "unknown"}` });
   }
 
-  if (desktop?.found && !/^Codex(?:\b|$)/i.test(compactText(desktop.windowTitle))) {
+  if (desktop?.found && !isCodexDesktopWindowTitle(desktop?.windowTitle, desktop?.processPath)) {
     failures.push({ code: "window_mismatch", message: `Detected window is not the Codex window: ${desktop.windowTitle || "untitled"}` });
   }
 
@@ -170,13 +192,16 @@ function evaluateDesktopPreflight(desktop, item) {
     failures.push({ code: "remote_page_visible", message: "The remote control page is open inside Codex Desktop." });
   }
 
+  const runningTurn = desktopRunningTurn(desktop);
   if (desktop?.minimized) warnings.push({ code: "minimized", message: "Codex Desktop is minimized; it must be restored and re-checked before sending." });
   if (!desktop?.composerReady) failures.push({ code: "composer_unready", message: desktop?.reason || "Codex Desktop composer is not ready.", retryable: true });
-  if (!desktop?.inputName) failures.push({ code: "input_missing", message: "Composer input selector was not found.", retryable: Boolean(desktop?.minimized) });
   if (desktop?.inputSynthetic) warnings.push({ code: "synthetic_input", message: "Using bottom-composer geometry fallback because a named input was not exposed." });
-  if (!desktop?.sendName) failures.push({ code: "send_missing", message: "Send button selector was not found.", retryable: Boolean(desktop?.minimized) });
-  if (desktop?.sendEnabled) failures.push({ code: "send_enabled_before_paste", message: "Send button is already enabled before paste; refusing to risk sending an existing draft." });
-  if (Number(desktop?.draftLength || 0) > 0 || desktop?.inputHasText) failures.push({ code: "draft_present", message: "Codex Desktop composer already contains text." });
+  if (!runningTurn) {
+    if (!desktop?.inputName) failures.push({ code: "input_missing", message: "Composer input selector was not found.", retryable: Boolean(desktop?.minimized) });
+    if (!desktop?.sendName) failures.push({ code: "send_missing", message: "Send button selector was not found.", retryable: Boolean(desktop?.minimized) });
+    if (desktop?.sendEnabled) failures.push({ code: "send_enabled_before_paste", message: "Send button is already enabled before paste; refusing to risk sending an existing draft." });
+    if (Number(desktop?.draftLength || 0) > 0 || desktop?.inputHasText) failures.push({ code: "draft_present", message: "Codex Desktop composer already contains text." });
+  }
 
   if (desktop?.sidebarHasRunning || Number(desktop?.sidebarRunningCount || 0) > 0) {
     failures.push({ code: "sidebar_running", message: `Codex Desktop sidebar shows ${desktop.sidebarRunningCount || 1} running conversation(s).`, retryable: true });
@@ -623,3 +648,8 @@ export async function focusDesktopRemoteConversation(index) {
     result
   };
 }
+
+export const __testInternals = {
+  evaluateDesktopPreflight,
+  isCodexDesktopIdentity
+};

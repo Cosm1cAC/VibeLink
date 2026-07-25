@@ -698,6 +698,13 @@ class ApiClient(
         return gson.fromJson(json, DesktopRemoteState::class.java)
     }
 
+    suspend fun getDesktopRemoteObservations(after: Long = 0, limit: Int = 100): DesktopObservationListResponse {
+        val boundedAfter = after.coerceAtLeast(0)
+        val boundedLimit = limit.coerceIn(1, 1000)
+        val json = get("/api/desktop-remote/observations?after=" + boundedAfter + "&limit=" + boundedLimit)
+        return gson.fromJson(json, DesktopObservationListResponse::class.java)
+    }
+
     suspend fun sendDesktopRemoteMessage(text: String, target: DesktopRemoteTarget? = null): DesktopRemoteMessageResponse {
         val json = post(
             "/api/desktop-remote/messages",

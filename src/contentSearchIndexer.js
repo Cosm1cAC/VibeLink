@@ -3,6 +3,11 @@ import { historySearchEntry } from "./history.js";
 
 const DEFAULT_REFRESH_INTERVAL_MS = 15_000;
 const PAGE_SIZE = 1000;
+const YIELD_EVERY_SOURCES = 1;
+
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 function sourceKey(kind, provider, id) {
   return `${kind}:${provider}:${id}`;
@@ -33,7 +38,7 @@ export function createContentSearchIndexer({ store, getHistories, getTasks, list
 
   async function refresh() {
     if (refreshPromise) return refreshPromise;
-    refreshPromise = Promise.resolve().then(() => {
+    refreshPromise = Promise.resolve().then(async () => {
       running = true;
       store.checkContentIndex();
       const histories = getHistories() || [];
@@ -78,6 +83,7 @@ export function createContentSearchIndexer({ store, getHistories, getTasks, list
           sourceSize: stat?.size || 0, sourceMtimeMs: Math.trunc(stat?.mtimeMs || 0)
         }, { upserts, reset });
         changed += upserts.length;
+        if (activeKeys.length % YIELD_EVERY_SOURCES === 0) await yieldToEventLoop();
       }
 
       for (const task of tasks) {
@@ -121,6 +127,7 @@ export function createContentSearchIndexer({ store, getHistories, getTasks, list
           eventCursor: cursor
         }, { upserts });
         changed += upserts.length;
+        if (activeKeys.length % YIELD_EVERY_SOURCES === 0) await yieldToEventLoop();
       }
       const removed = store.removeMissingContentSources(activeKeys);
       return { changed, removed, sources: activeKeys.length };
@@ -132,9 +139,6 @@ export function createContentSearchIndexer({ store, getHistories, getTasks, list
     await refresh();
     timer = setInterval(() => void refresh().catch((error) => logger.error(`[content-search-index] ${error.message}`)), refreshIntervalMs);
     timer.unref?.();
-    setImmediate(() => {
-      if (timer) void refresh().catch((error) => logger.error(`[content-search-index] ${error.message}`));
-    });
     return status();
   }
 

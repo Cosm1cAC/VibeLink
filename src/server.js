@@ -149,7 +149,6 @@ import { buildProviderRegistry, createProviderCatalogResolver, createProviderHea
 import { createPersistentProviderCacheLoader } from "./providerCacheLoader.js";
 import { createProviderCacheStore } from "./providerCacheStore.js";
 import { createProviderRuntimeLoaders } from "./providerRuntimeLoaders.js";
-import { internalControlAuthorized, originalHostRequest } from "./internalControl.js";
 import { applyRuntimeBindingOverrides } from "./runtimeBinding.js";
 import { closeStatusRuntime, getStatusRuntimeStats, renderStatusPayload } from "./statusRuntime.js";
 import { startSupervisorMonitor } from "./supervisorMonitor.js";
@@ -214,21 +213,28 @@ if (process.env.VIBELINK_PROVIDER_CACHE_STARTUP !== "0") {
     console.error(`[provider-cache] startup hydration failed: ${error.message}`);
   });
 }
-if (process.env.VIBELINK_SEARCH_INDEX_STARTUP !== "0") startSearchIndex({
-    getWorkspaces: () => {
-      const workspaces = getWorkspaces(settings);
-      if (process.env.VIBELINK_SEARCH_INDEX_ONLY_DEFAULT_CWD !== "1") return workspaces;
-      const defaultCwd = path.resolve(String(settings.defaultCwd || ""));
-      return workspaces.filter((workspace) => path.resolve(workspace.path) === defaultCwd);
-    },
-    refreshIntervalMs: Number(process.env.VIBELINK_SEARCH_INDEX_REFRESH_MS || 60_000)
-  }).catch((error) => {
-    console.error(`[search-index] startup refresh failed: ${error.message}`);
-  });
+const startSearchIndexAfterListening = () => {
+  if (process.env.VIBELINK_SEARCH_INDEX_STARTUP === "0") return;
+  const timer = setTimeout(() => {
+    startSearchIndex({
+      getWorkspaces: () => {
+        const workspaces = getWorkspaces(settings);
+        if (process.env.VIBELINK_SEARCH_INDEX_ONLY_DEFAULT_CWD !== "1") return workspaces;
+        const defaultCwd = path.resolve(String(settings.defaultCwd || ""));
+        return workspaces.filter((workspace) => path.resolve(workspace.path) === defaultCwd);
+      },
+      refreshIntervalMs: Number(process.env.VIBELINK_SEARCH_INDEX_REFRESH_MS || 60_000)
+    }).catch((error) => {
+      console.error(`[search-index] startup refresh failed: ${error.message}`);
+    });
+  }, 1000);
+  timer.unref?.();
+};
 restoreTasks();
 const taskScheduler = createTaskScheduler({
   store: createTaskQueuePersistence({ database: initDb }),
   execute: (job) => executeQueuedTask(job, settings),
+  passive: process.env.VIBELINK_TASK_SCHEDULER_OWNER === "rust",
   concurrency: Number(process.env.VIBELINK_TASK_CONCURRENCY || 2),
   pollIntervalMs: Number(process.env.VIBELINK_TASK_SCHEDULER_MS || 250),
   retryBaseMs: Number(process.env.VIBELINK_TASK_RETRY_BASE_MS || 1000),
@@ -3375,7 +3381,8 @@ async function routeApi(request, response, url) {
       const result = await mutateWorkspaceFile(workspaceFileMatch[1], settings, body);
       const workspace = getWorkspaces(settings).find((item) => item.id === workspaceFileMatch[1]);
       if (workspace) {
-        await refreshWorkspaceSearchPaths(workspace, [result.previousPath || "", result.path || body.path || ""].filter(Boolean));
+        refreshWorkspaceSearchPaths(workspace, [result.previousPath || "", result.path || body.path || ""].filter(Boolean))
+          .catch((error) => console.error(`[search-index] workspace file refresh failed: ${error.message}`));
       }
       audit(request, url, auth, {
         type: "workspace.file",
@@ -3436,7 +3443,10 @@ async function routeApi(request, response, url) {
       const result = await mutateWorkspaceFilesBatch(workspaceId, settings, body);
       const workspace = getWorkspaces(settings).find((item) => item.id === workspaceId);
       const changedPaths = result.items.flatMap((item) => [item.previousPath || "", item.path || ""]).filter(Boolean);
-      if (workspace && changedPaths.length) await refreshWorkspaceSearchPaths(workspace, changedPaths);
+      if (workspace && changedPaths.length) {
+        refreshWorkspaceSearchPaths(workspace, changedPaths)
+          .catch((error) => console.error(`[search-index] workspace batch refresh failed: ${error.message}`));
+      }
       audit(request, url, auth, {
         type: "workspace.file_batch",
         success: result.ok,
@@ -4531,57 +4541,6 @@ const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
 
   try {
-    if (url.pathname === "/internal/doctor-report" && request.method === "GET") {
-      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
-        sendError(response, 404, "Unknown API route");
-        return;
-      }
-      const deviceIdHeader = request.headers["x-vibelink-device-id"];
-      const deviceId = typeof deviceIdHeader === "string" ? deviceIdHeader.trim() : "";
-      if (!deviceId || deviceId.length > 160) {
-        sendError(response, 400, "Authenticated device context is required.");
-        return;
-      }
-      const originalRequest = originalHostRequest(request);
-      const doctorUrl = new URL("http://localhost/api/doctor");
-      sendJson(response, 200, await runDoctorToolRequest(originalRequest, doctorUrl, {
-        ok: true,
-        device: { id: deviceId }
-      }));
-      return;
-    }
-
-    if (url.pathname === "/internal/status-snapshot" && request.method === "GET") {
-      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
-        sendError(response, 404, "Unknown API route");
-        return;
-      }
-      sendJson(response, 200, await buildStatusSnapshot(originalHostRequest(request)));
-      return;
-    }
-
-    if (url.pathname === "/internal/public-settings" && request.method === "GET") {
-      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
-        sendError(response, 404, "Unknown API route");
-        return;
-      }
-      sendJson(response, 200, await publicSettings(settings));
-      return;
-    }
-
-    if (url.pathname === "/internal/reload-settings" && request.method === "POST") {
-      if (!internalControlAuthorized(request, process.env.VIBELINK_INTERNAL_CONTROL_TOKEN)) {
-        sendError(response, 404, "Unknown API route");
-        return;
-      }
-      settings = ensureNotificationSettings(await loadSettings());
-      await saveSettings(settings);
-      ensureDefaultWorkspaces(settings);
-      scheduleToolEventsPrune();
-      sendJson(response, 200, await publicSettings(settings));
-      return;
-    }
-
     if (!isHostAllowed(request, settings)) {
       sendError(response, 403, "Host is not allowed.");
       return;
@@ -4737,8 +4696,11 @@ const attachedTaskIds = listExecutionBindings({ activeOnly: true })
 taskScheduler.start({ preserveTaskIds: attachedTaskIds });
 
 server.listen(settings.port, settings.host, () => {
-  const local = `http://localhost:${settings.port}`;
+  const boundAddress = server.address();
+  const boundPort = typeof boundAddress === "object" && boundAddress ? boundAddress.port : settings.port;
+  const local = `http://localhost:${boundPort}`;
   console.log(`VibeLink listening on ${local}`);
   console.log(`Pairing token: ${pairingTokenLogValue({ settings, devices: listDevices() })}`);
-  for (const item of getNetworkAddresses(settings.port)) console.log(`LAN: ${item.url}`);
+  for (const item of getNetworkAddresses(boundPort)) console.log(`LAN: ${item.url}`);
+  startSearchIndexAfterListening();
 });

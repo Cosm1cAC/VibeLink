@@ -1139,6 +1139,18 @@ data class DesktopRemoteState(
     @SerializedName("updatedAt") val updatedAt: String = "",
 )
 
+data class DesktopObservationListResponse(
+    val items: List<DesktopObservation> = emptyList(),
+)
+
+data class DesktopObservation(
+    val type: String = "",
+    val cursor: Long = 0,
+    @SerializedName("observedAt") val observedAt: String = "",
+    val hash: String = "",
+    val desktop: DesktopSnapshot? = null,
+)
+
 data class DesktopSnapshot(
     val ok: Boolean = false,
     val found: Boolean = false,

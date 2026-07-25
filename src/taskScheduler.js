@@ -8,6 +8,7 @@ function boundedInteger(value, fallback, min, max) {
 export function createTaskScheduler({
   store,
   execute,
+  passive = false,
   concurrency = 2,
   pollIntervalMs = 250,
   retryBaseMs = 1000,
@@ -55,6 +56,7 @@ export function createTaskScheduler({
   }
 
   function drain() {
+    if (passive) return;
     if (draining) return;
     draining = true;
     try {
@@ -77,6 +79,7 @@ export function createTaskScheduler({
     },
     start({ preserveTaskIds = [] } = {}) {
       if (timer) return;
+      if (passive) return;
       for (const taskId of preserveTaskIds) if (taskId) reservedTaskIds.add(taskId);
       store.recoverRunning({ preserveTaskIds });
       timer = setInterval(drain, Math.max(25, Number(pollIntervalMs || 250)));
@@ -128,7 +131,13 @@ export function createTaskScheduler({
       const jobs = store.list();
       const storedCounts = store.counts?.() || {};
       const counts = Object.fromEntries(["queued", "running", "completed", "failed", "cancelled"].map((key) => [key, Number(storedCounts[key] || 0)]));
-      return { concurrency: limit, active: active.size + reservedTaskIds.size, counts, items: jobs };
+      return {
+        owner: passive ? "rust-execd" : "node",
+        concurrency: limit,
+        active: active.size + reservedTaskIds.size,
+        counts,
+        items: jobs
+      };
     },
     drain
   };

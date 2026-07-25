@@ -88,9 +88,10 @@ class SessionListViewModel : ViewModel() {
     private val _commands = MutableStateFlow<List<CommandDefinition>>(emptyList())
     val commands: StateFlow<List<CommandDefinition>> = _commands.asStateFlow()
 
-    private val _allConversations = MutableStateFlow<List<ConversationItem>>(emptyList())
+    private val initialDesktopConversation = DesktopRemoteState().toConversationItem()
+    private val _allConversations = MutableStateFlow(listOf(initialDesktopConversation))
 
-    private val _conversations = MutableStateFlow<List<ConversationItem>>(emptyList())
+    private val _conversations = MutableStateFlow(listOf(initialDesktopConversation))
     val conversations: StateFlow<List<ConversationItem>> = _conversations.asStateFlow()
 
     private val _query = MutableStateFlow("")
@@ -391,7 +392,7 @@ class SessionListViewModel : ViewModel() {
         histories: List<HistoryItem>,
         tasks: List<TaskSummary>,
         threadState: ThreadStateResponse,
-        desktopRemote: DesktopRemoteState?,
+        desktopRemote: DesktopRemoteState,
     ): List<ConversationItem> {
         val historyBySession = histories.associateBy { sessionKey(it.provider, it.id) }
 
@@ -456,6 +457,7 @@ class SessionListViewModel : ViewModel() {
         val withDesktopBindings = localItems.map { item ->
             val match = desktopMatches[item.key] ?: return@map item
             item.copy(
+                kind = "desktop",
                 status = if (match.running) "running" else item.status,
                 desktopIndex = match.index,
                 desktopTitle = match.title,
@@ -464,9 +466,15 @@ class SessionListViewModel : ViewModel() {
         }
 
         val forkItems = threadState.forks.map { it.toConversationItem() }
-        val desktopEntry = desktopRemote?.toConversationItem()
+        val matchedDesktopIndices = desktopMatches.values.map { it.index }.toSet()
+        val desktopEntries = desktopConversationItems(desktopRemote, matchedDesktopIndices)
+        val fallbackDesktopEntries = if (desktopEntries.isEmpty() && desktopMatches.isEmpty()) {
+            listOf(desktopRemote.toConversationItem())
+        } else {
+            emptyList()
+        }
 
-        return sortManaged(listOfNotNull(desktopEntry) + withDesktopBindings + forkItems)
+        return sortManaged(desktopEntries + fallbackDesktopEntries + withDesktopBindings + forkItems)
     }
 
     private fun applyThreadMeta(item: ConversationItem, threadState: ThreadStateResponse): ConversationItem {
@@ -679,6 +687,32 @@ class SessionListViewModel : ViewModel() {
             return items.filter { result ->
                 seen.add(listOf(result.kind, result.id, result.turnId, result.path).joinToString(":"))
             }
+        }
+
+        fun desktopConversationItems(
+            state: DesktopRemoteState,
+            excludedIndices: Set<Int> = emptySet(),
+        ): List<ConversationItem> {
+            val updatedAt = state.updatedAt.ifBlank { state.desktop?.updatedAt.orEmpty() }
+            return state.desktop?.conversations.orEmpty()
+                .filterNot { it.index in excludedIndices }
+                .map { desktop ->
+                    val title = desktop.title.ifBlank { desktop.rawName }.ifBlank { "Codex Desktop" }
+                    ConversationItem(
+                        key = "desktop:conversation:${desktop.index}",
+                        kind = "desktop",
+                        id = "desktop:${desktop.index}",
+                        provider = "codex",
+                        title = title,
+                        status = if (desktop.running) "running" else "desktop",
+                        updatedAt = updatedAt,
+                        preview = desktop.projectTitle,
+                        pinned = true,
+                        desktopIndex = desktop.index,
+                        desktopTitle = title,
+                        desktopLinked = true,
+                    )
+                }
         }
 
         private fun providerLabel(value: String): String = when (value) {

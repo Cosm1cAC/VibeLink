@@ -194,8 +194,7 @@ fn write_secret(data_dir: &Path, key: &str, value: &str) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(test)]
-fn read_secret(data_dir: &Path, key: &str) -> Result<String> {
+pub(crate) fn read_secret(data_dir: &Path, key: &str) -> Result<String> {
     let target = secret_file(data_dir, key)?;
     if !target.exists() {
         return Ok(String::new());

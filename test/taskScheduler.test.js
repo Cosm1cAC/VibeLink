@@ -85,3 +85,24 @@ test("startup recovers orphaned running jobs but preserves reattached tasks", ()
   assert.equal(store.get("task-1").status, "queued");
   assert.equal(store.get("task-2").status, "running");
 });
+
+test("passive scheduler persists work without claiming Rust-owned jobs", async () => {
+  const { store } = fixture();
+  let calls = 0;
+  const scheduler = createTaskScheduler({
+    store,
+    passive: true,
+    pollIntervalMs: 5,
+    execute: async () => {
+      calls += 1;
+      return { status: "done" };
+    }
+  });
+  scheduler.enqueue({ taskId: "task-1", payload: { prompt: "rust owns this" } });
+  scheduler.start();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(calls, 0);
+  assert.equal(store.get("task-1").status, "queued");
+  assert.equal(scheduler.status().owner, "rust-execd");
+  scheduler.stop();
+});

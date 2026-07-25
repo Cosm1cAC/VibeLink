@@ -1,5 +1,17 @@
 const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
 
+export const BROWSER_SESSION_RUNTIME_ROUTES = [
+  ["GET", "/api/browser-sessions"],
+  ["POST", "/api/browser-sessions"],
+  ["GET", "/api/browser-sessions/:id"],
+  ["DELETE", "/api/browser-sessions/:id"],
+  ["POST", "/api/browser-sessions/:id/pages"],
+  ["DELETE", "/api/browser-sessions/:id/pages/:pageId"],
+  ["POST", "/api/browser-sessions/:id/navigate"],
+  ["POST", "/api/browser-sessions/:id/screenshot"],
+  ["GET", "/api/browser-sessions/:id/trace"]
+];
+
 function decode(value) {
   try { return decodeURIComponent(value); } catch { return ""; }
 }

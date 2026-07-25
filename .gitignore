@@ -1,5 +1,6 @@
 # Local runtime state and temporary files
 .agent-mobile-terminal/
+.artifacts/
 .tmp/
 .codebase-memory/
 

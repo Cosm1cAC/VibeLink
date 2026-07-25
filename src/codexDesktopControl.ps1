@@ -277,7 +277,7 @@ function Find-BottomActionButton($window, [string]$side) {
     if ($bounds.Y -lt ($windowBounds.Y + ($windowBounds.Height * 0.72))) { continue }
     if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * $minXRatio))) { continue }
     if ($side -eq "right") {
-      if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * 0.65))) { continue }
+      if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * 0.55))) { continue }
     }
 
     $score = $bounds.X
@@ -698,10 +698,10 @@ function Get-VisibleTranscript($window, [int]$limit = 80) {
 
 function Find-CodexDesktopWindow {
   $root = [System.Windows.Automation.AutomationElement]::RootElement
-  $processes = Get-Process -Name Codex -ErrorAction SilentlyContinue |
+  $processes = Get-Process -Name Codex, ChatGPT -ErrorAction SilentlyContinue |
     Where-Object {
       $_.MainWindowHandle -ne 0 -and
-      ($_.Path -like "*OpenAI.Codex_*" -or $_.Path -like "*\OpenAI\Codex\*")
+      ($_.Path -like "*\WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe" -or $_.Path -like "*\OpenAI\Codex\*")
     } |
     Sort-Object StartTime
 
@@ -717,7 +717,7 @@ function Find-CodexDesktopWindow {
     for ($i = 0; $i -lt $windows.Count; $i++) {
       $window = $windows.Item($i)
       if ($null -eq $fallbackWindow) { $fallbackWindow = $window }
-      if ($window.Current.Name -ne "Codex") { continue }
+      if ($window.Current.Name -notin @("Codex", "ChatGPT")) { continue }
       return [ordered]@{
         process = $process
         window = $window
@@ -792,7 +792,7 @@ function Test-ComposerStopVisible($target) {
   foreach ($button in $bottomButtons) {
     $isStop = Test-IsStopName $button.name
     $inComposerActionArea =
-      $button.bounds.x -gt ($windowBounds.X + ($windowBounds.Width * 0.65)) -and
+      $button.bounds.x -gt ($windowBounds.X + ($windowBounds.Width * 0.55)) -and
       $button.bounds.y -gt ($windowBounds.Y + ($windowBounds.Height * 0.82))
     if ($isStop -and $inComposerActionArea) { return $true }
   }

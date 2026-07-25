@@ -14,6 +14,18 @@ import kotlin.test.assertEquals
 
 class SessionListLoaderTest {
     @Test
+    fun desktopFailureFallsBackToEmptyDesktopState() = runBlocking {
+        val snapshot = loadSessionListSnapshot(
+            loadHistories = { emptyList() },
+            loadTasks = { emptyList() },
+            loadThreadState = { ThreadStateResponse() },
+            loadDesktop = { error("desktop unavailable") },
+        )
+
+        assertEquals(DesktopRemoteState(), snapshot.desktop)
+    }
+
+    @Test
     fun startsIndependentSessionRequestsConcurrently() = runBlocking {
         val started = Channel<String>(capacity = 4)
         val release = CompletableDeferred<Unit>()

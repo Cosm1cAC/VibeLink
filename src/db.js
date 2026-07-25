@@ -1374,6 +1374,26 @@ export function upsertTask(task) {
     );
 }
 
+export function getPersistedTask(id) {
+  const row = database().prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  if (!row) return null;
+  return {
+    id: row.id,
+    agent: row.agent,
+    title: row.title,
+    cwd: row.cwd || "",
+    workspaceId: row.workspace_id || "",
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    exitCode: row.exit_code ?? null,
+    sessionId: row.session_id || "",
+    commandLabel: row.command_label || "",
+    logPath: row.log_path || "",
+    meta: fromJson(row.meta_json, {}) || {}
+  };
+}
+
 export function insertTaskEvent(taskId, event) {
   return eventStoreSyncCall("insertTaskEvent", () => sqliteEventStore().insertTaskEvent(taskId, event));
 }

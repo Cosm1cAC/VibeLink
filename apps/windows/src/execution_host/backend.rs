@@ -17,13 +17,14 @@ use super::protocol::StartParams;
 
 pub(super) type EventCallback = Arc<dyn Fn(&str, Value) + Send + Sync + 'static>;
 pub(super) type ExitCallback = Arc<dyn Fn(u32) + Send + Sync + 'static>;
+type SharedTerminal = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
 
 pub struct BackendControl {
     kind: BackendKind,
     pid: u32,
     process_started_at_ticks: u64,
     input: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
-    terminal: Option<Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>>,
+    terminal: Option<SharedTerminal>,
     approval: Option<codex_app_server::ApprovalControl>,
     job: Arc<Job>,
     activation: Arc<(Mutex<bool>, Condvar)>,

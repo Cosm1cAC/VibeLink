@@ -8,7 +8,7 @@
       {
         "id": "workspace-git-command-approval",
         "title": "Workspace Git、command 与 approval 所有权",
-        "status": "in-progress",
+        "status": "default-on",
         "nodeEntries": ["src/workspaces.js", "src/toolRuntime.js"],
         "rustTarget": "apps/windows/src/workspace_http.rs",
         "completedRoutes": [
@@ -19,26 +19,50 @@
           "POST /api/workspaces/:id/git/file-action",
           "POST /api/workspaces/:id/git/action"
         ],
-        "remainingRoutes": [
-          "POST /api/workspaces/:id/worktrees",
-          "POST /api/workspaces/:id/worktrees/action",
-          "POST /api/workspaces/:id/command",
-          "approval continuation"
-        ]
+        "remainingRoutes": []
       },
       {
         "id": "task-history-terminal",
         "title": "Task、history 与 terminal 所有权",
-        "status": "planned",
+        "status": "default-on",
         "nodeEntries": ["src/agents.js", "src/history.js", "src/terminalRuntime.js"],
-        "rustTarget": "apps/windows/src/execution_host"
+        "rustTarget": "apps/windows/src/task_http.rs",
+        "completedRoutes": [
+          "GET /api/tasks",
+          "POST /api/tasks",
+          "GET /api/tasks/:id/events SSE",
+          "GET /api/tasks/:id/events/catch-up",
+          "POST /api/tasks/:id/input",
+          "POST /api/tasks/:id/stop",
+          "GET /api/task-scheduler",
+          "GET /api/tasks/:id/changes",
+          "GET /api/thread-state",
+          "GET /api/search/saved",
+          "GET /api/search/history",
+          "GET /api/search/index",
+          "GET /api/histories",
+          "GET /api/histories/:provider/:id",
+          "GET /api/search FTS query",
+          "POST/PATCH/DELETE /api/search metadata",
+          "POST /api/search/index/refresh and index/watch ownership",
+          "task queue/scheduler execution ownership over execd",
+          "terminal input/resize over execd"
+        ],
+        "remainingRoutes": []
       },
       {
         "id": "provider-runtime",
         "title": "Provider registry 与执行所有权",
-        "status": "planned",
+        "status": "in-progress",
         "nodeEntries": ["src/providerRegistry.js", "src/providerRuntimeLoaders.js"],
-        "rustTarget": "apps/windows/src/execution_host"
+        "rustTarget": "apps/windows/src/provider_http.rs",
+        "completedRoutes": [
+          "GET /api/provider-registry (cached projection)",
+          "GET /api/provider-registry?fresh=1 CLI health probe",
+          "Zhipu/Claude model API catalog refresh",
+          "provider launch mapping from queued tasks to execd",
+          "Doubao browser bridge doctor health/fidelity probe"
+        ]
       },
       {
         "id": "live-call-runtime",
@@ -96,7 +120,7 @@
         "test/statusServerCanary.test.js",
         "test/serverStatusRuntime.test.js"
       ],
-      "nextAction": "继续作为 Status 动态快照的强类型契约层，并保持 Node 快照回退。"
+      "nextAction": "继续扩展 provider 与 task 动态投影，并保持 route-level 兼容。"
     },
     {
       "id": "status-http-route",
@@ -108,7 +132,7 @@
         "--rust-status-http",
         "VIBELINK_INTERNAL_CONTROL_TOKEN"
       ],
-      "nodeEntry": "src/server.js#/internal/status-snapshot",
+      "nodeEntry": "src/statusRuntime.js (Node fallback only)",
       "rustEntry": "apps/windows/src/status_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-status-http bridge",
       "fallback": "Rust 解析/快照/校验失败后逐字节重放原请求到 Node；关闭 --rust-status-http 后所有 Status 请求透明转发",
@@ -118,7 +142,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启；迁移 Node 动态快照后删除内部 Status 端点。"
+      "nextAction": "Web/Android rust-only E2E 已通过；保持默认开启并继续扩展 Provider 与任务动态快照。"
     },
     {
       "id": "doctor-http-route",
@@ -130,7 +154,7 @@
         "--rust-doctor-http",
         "VIBELINK_INTERNAL_CONTROL_TOKEN"
       ],
-      "nodeEntry": "src/server.js#/internal/doctor-report",
+      "nodeEntry": "src/server.js#/api/doctor (Node fallback only)",
       "rustEntry": "apps/windows/src/doctor_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-doctor-http bridge",
       "fallback": "Rust 解析/内部诊断/契约校验失败后逐字节重放原请求到 Node；关闭 --rust-doctor-http 后所有 Doctor 请求透明转发",
@@ -140,7 +164,7 @@
         "test/internalControl.test.js",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启；迁移 Node 诊断执行器、tool run 与审计写入。"
+      "nextAction": "Web/Android rust-only E2E 已通过；继续扩展平台探测与 tool run 投影，并保持 route-level 兼容。"
     },
     {
       "id": "devices-http-route",
@@ -160,7 +184,7 @@
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启并监测认证读取、字段投影与 SQLite 故障回退。"
+      "nextAction": "Web/Android rust-only E2E 已通过；保持默认开启并监测认证读取、字段投影与 SQLite 故障回退。"
     },
     {
       "id": "device-mutations-http-route",
@@ -222,14 +246,14 @@
       "nodeEntry": "src/server.js#/api/pairing-sessions",
       "rustEntry": "apps/windows/src/pairing_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-pairing-http bridge",
-      "fallback": "初始化、只读查询、unsupported/chunked/超限 body 或 claim 的提交前 settings 快照失败可完整回放 Node；Rust 认领写事务后 domain 与审计同事务，失败返回 Rust 500 且不回放",
+      "fallback": "初始化、只读查询、unsupported/chunked/超限 body 可完整回放 Node；Rust 认领写事务后 domain 与审计同事务，失败返回 Rust 500 且不回放",
       "tests": [
         "apps/windows/src/pairing_http.rs",
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0006-rust-pairing-http-routes.md"
       ],
-      "nextAction": "保持默认开启；移除提交前 Node settings 快照依赖。"
+      "nextAction": "保持默认开启；维持 Rust settings projection 和 claim 有界恢复。"
     },
     {
       "id": "audit-http-route",
@@ -262,7 +286,7 @@
         "--rust-settings-http",
         "VIBELINK_INTERNAL_CONTROL_TOKEN"
       ],
-      "nodeEntry": "src/server.js#/internal/reload-settings",
+      "nodeEntry": "src/store.js (Node fallback settings state)",
       "rustEntry": "apps/windows/src/settings_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-settings-http bridge",
       "fallback": "初始化、鉴权前错误或 unsupported/chunked/超限 body 可回放 Node；Rust 认领 mutation body 后设置/DPAPI/Node 内存同步/审计失败全部回滚并返回 Rust 500，绝不重放",
@@ -275,7 +299,7 @@
         "tools/status/http-canary.mjs",
         "docs/decisions/ADR-0008-rust-settings-http-routes.md"
       ],
-      "nextAction": "保持默认开启；Node 设置内存副本移除后删除内部 reload 端点。"
+      "nextAction": "Web/Android rust-only E2E 已通过；保持默认开启并继续扩展本地 schema/default 初始化和审计回滚覆盖。"
     },
     {
       "id": "tool-events-http-route",
@@ -342,12 +366,81 @@
       "priority": "P1",
       "status": "default-on",
       "featureFlags": ["--rust-http-canary", "--rust-workspace-http"],
-      "nodeEntry": "src/server.js#/api/workspaces/:id/(file|git/status|git/diff|git/file-action|git/action|worktrees)",
+      "nodeEntry": "src/server.js#/api/workspaces",
       "rustEntry": "apps/windows/src/workspace_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
-      "fallback": "Rust 鉴权、workspace root、body 或文件操作失败时逐字节回放 Node；关闭 --rust-workspace-http 后恢复 Node 所有权",
+      "fallback": "Rust 鉴权、workspace root 或只读读取失败时可回放 Node；读取 body 后的文件、batch、Git 和 worktree mutation 失败返回 Rust 错误且不回放；关闭 --rust-workspace-http 后恢复 Node 所有权",
       "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
-      "nextAction": "文件 mutation、Git status/diff/actions 与 worktree list 已默认开启；继续迁移 worktree actions 和 command/approval。"
+      "nextAction": "Web/Android rust-only E2E 已通过；Workspace list/create/tree/context/read/preview/batch、Git status/diff/actions、worktree list/create/action、command、terminal-session 入口与 approval 持久化已默认开启；继续把 terminal input/resize 与 provider approval delivery 接到 execd 的长期会话恢复。"
+    },
+    {
+      "id": "task-http-route",
+      "title": "Task 持久投影原生 HTTP 路由",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary", "--rust-task-http"],
+      "nodeEntry": "src/server.js#/api/tasks",
+      "rustEntry": "apps/windows/src/task_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-task-http bridge",
+      "fallback": "只读请求在响应前失败可回放 Node；Rust 认领 create/input/stop body 后直接写 tasks/task_events，失败返回 Rust 500 且不回放；provider turn 启动仍由后续 execd task runner 切片接管。",
+      "tests": [
+        "apps/windows/src/task_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "apps/windows/src/main.rs"
+      ],
+      "nextAction": "Rust execd 已消费 durable queue，并持有 task/provider execution binding、event replay/ack、history/search/FTS watcher；继续扩大真实 Provider 任务与 resume/input/stop 观测。"
+    },
+    {
+      "id": "provider-http-route",
+      "title": "Provider Registry 缓存投影原生 HTTP 路由",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary", "--rust-provider-http"],
+      "nodeEntry": "src/server.js#/api/provider-registry",
+      "rustEntry": "apps/windows/src/provider_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary --rust-provider-http bridge",
+      "fallback": "Rust 返回 SQLite cache 与静态 fidelity；fresh=1 和任何 Rust 读取失败均在响应前回放 Node，维持现有真实 probe 的执行语义。",
+      "tests": [
+        "apps/windows/src/provider_http.rs",
+        "apps/windows/src/http_frontdoor.rs",
+        "apps/windows/src/main.rs",
+        "test/providerRegistry.test.js"
+      ],
+      "nextAction": "Web/Android rust-only E2E 已通过；继续保持真实 Provider 任务与 registry freshness 观测。"
+    },
+    {
+      "id": "discovery-http-route",
+      "title": "Tool 与 Command Registry 原生 HTTP 路由",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary"],
+      "nodeEntry": "src/server.js#/api/tool-registry,/api/command-registry",
+      "rustEntry": "apps/windows/src/discovery_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary bridge",
+      "fallback": "内置 catalog 编译进 Rust；缓存 MCP tools 从 SQLite 读取，skills 由 Rust 扫描。认证成功后错误由 Rust 返回且不回放 Node。",
+      "tests": [
+        "apps/windows/src/discovery_http.rs",
+        "test/discoveryCatalog.test.js",
+        "test/rustOnlyDiscoveryE2e.test.js",
+        "apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"
+      ],
+      "nextAction": "保持默认开启；Web 与 Android 已通过同一无 Node backend 的 Rust-only E2E harness。"
+    },
+    {
+      "id": "static-assets-openapi-route",
+      "title": "Static Assets 与 OpenAPI 原生服务",
+      "priority": "P1",
+      "status": "default-on",
+      "featureFlags": ["--rust-http-canary"],
+      "nodeEntry": "src/server.js static/OpenAPI fallback",
+      "rustEntry": "apps/windows/src/static_http.rs",
+      "sidecarCommand": "vibelink --rust-http-canary bridge",
+      "fallback": "仅白名单的根页面、public asset、icons 和 /api/openapi.json 由 Rust 认领；不匹配路径或读取失败在写响应前回放 Node。",
+      "tests": [
+        "apps/windows/src/static_http.rs",
+        "apps/windows/src/http_frontdoor.rs"
+      ],
+      "nextAction": "OpenAPI 已通过 Web/Android rust-only E2E；继续将 packaged public root 与 rust-only package smoke 连接，并采集不经过 Node 静态服务的首屏证据。"
     },
     {
       "id": "execution-host",
@@ -372,7 +465,7 @@
         "test/executionStartupReconciliation.test.js",
         "tools/execution-host/reliability-canary.mjs"
       ],
-      "nextAction": "execd、per-execution worker、ConPTY/stdio/app-server backend、durable binding、event spool 和 approval delivery 已接入；继续迁移 Provider registry、任务投影与剩余 HTTP 编排所有权。"
+      "nextAction": "execd、per-execution worker、task scheduler、ConPTY/stdio/app-server backend、durable binding、event spool、ack drain 和 approval outbox delivery 已接入；继续迁移 Live Call/ASR 生命周期。"
     },
     {
       "id": "mcp-session-sidecar",

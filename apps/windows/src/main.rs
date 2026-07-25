@@ -12,24 +12,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod artifact_http;
 mod audio_pipeline_sidecar;
 mod audit_http;
+mod cloudflare_http;
 mod compression_sidecar;
+mod desktop_remote_http;
 mod device_http;
+mod discovery_http;
 mod doctor_http;
 mod event_store_sidecar;
 mod event_sync_http;
 mod execution_host;
+mod file_http;
 mod http_frontdoor;
 mod mcp_session_sidecar;
 mod pairing_http;
+mod provider_http;
 mod public_tunnel;
+mod push_http;
 mod settings_contract;
 mod settings_credentials;
 mod settings_http;
 mod sidecar_protocol;
+mod static_http;
 mod status_http;
 mod status_sidecar;
+mod task_http;
 mod tool_events_http;
 mod tool_events_store;
 mod workspace_http;
@@ -94,6 +103,12 @@ struct Cli {
 
     #[arg(long, global = true)]
     rust_workspace_http: bool,
+
+    #[arg(long, global = true)]
+    rust_task_http: bool,
+
+    #[arg(long, global = true)]
+    rust_provider_http: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -102,6 +117,11 @@ enum Mode {
     Run,
     /// Internal role: host the existing bridge process.
     Bridge,
+    /// Serve only routes whose product owner has migrated to Rust.
+    RustOnly {
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
     /// Create and print a QR pairing session for a running bridge.
     Pair,
     /// Check bridge health.
@@ -149,6 +169,7 @@ enum Mode {
         max_samples_per_chunk: usize,
     },
     /// Run the durable local execution router and worker discovery daemon.
+    #[command(name = "execd", visible_alias = "execution-host")]
     Execd {
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -198,6 +219,7 @@ fn run() -> Result<()> {
     match cli.command.clone().unwrap_or(Mode::Run) {
         Mode::Run => run_user_entry(&cli),
         Mode::Bridge => run_bridge_role(&cli),
+        Mode::RustOnly { data_dir } => run_rust_only_http(&cli, data_dir),
         Mode::Pair => run_pairing_flow(&cli),
         Mode::Doctor => run_doctor(&cli),
         Mode::Tunnel {
@@ -359,6 +381,14 @@ fn rust_event_sync_http_enabled(cli: &Cli) -> bool {
     cli.rust_http_canary && cli.rust_event_sync_http
 }
 
+fn rust_task_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_task_http
+}
+
+fn rust_provider_http_enabled(cli: &Cli) -> bool {
+    cli.rust_http_canary && cli.rust_provider_http
+}
+
 fn default_rust_profile(cli: &Cli) -> Cli {
     let mut effective = cli.clone();
     effective.rust_canary = true;
@@ -374,6 +404,8 @@ fn default_rust_profile(cli: &Cli) -> Cli {
     effective.rust_tool_events_sse = true;
     effective.rust_event_sync_http = true;
     effective.rust_workspace_http = true;
+    effective.rust_task_http = true;
+    effective.rust_provider_http = true;
     effective
 }
 
@@ -400,12 +432,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     let internal_port = reserve_loopback_port()?;
     let plan = node_bridge_plan(cli, internal_port);
     let upstream = SocketAddr::from(([127, 0, 0, 1], plan.runtime.port));
-    let internal_token = (rust_status_http_enabled(cli)
-        || rust_doctor_http_enabled(cli)
-        || rust_pairing_http_enabled(cli)
-        || rust_settings_http_enabled(cli))
-    .then(generate_internal_control_token)
-    .transpose()?;
+    let internal_token: Option<String> = None;
     let route_data_dir = resolve_data_dir(
         root,
         env::var_os("VIBELINK_DATA_DIR"),
@@ -413,24 +440,12 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         Path::exists,
     );
     let status_route = if rust_status_http_enabled(cli) {
-        Some(status_http::StatusRouteConfig::new(
-            route_data_dir.clone(),
-            upstream,
-            internal_token
-                .clone()
-                .context("Status route internal token is missing")?,
-        ))
+        Some(status_http::StatusRouteConfig::new(route_data_dir.clone()))
     } else {
         None
     };
     let doctor_route = if rust_doctor_http_enabled(cli) {
-        Some(doctor_http::DoctorRouteConfig::new(
-            route_data_dir.clone(),
-            upstream,
-            internal_token
-                .clone()
-                .context("Doctor route internal token is missing")?,
-        ))
+        Some(doctor_http::DoctorRouteConfig::new(route_data_dir.clone()))
     } else {
         None
     };
@@ -446,33 +461,48 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .then(|| tool_events_http::ToolEventsRouteConfig::new(route_data_dir.clone()));
     let event_sync_route = rust_event_sync_http_enabled(cli)
         .then(|| event_sync_http::EventSyncRouteConfig::new(route_data_dir.clone()));
+    let task_route = rust_task_http_enabled(cli).then(|| {
+        task_http::start_search_watcher(route_data_dir.clone());
+        task_http::TaskRouteConfig::new(route_data_dir.clone())
+    });
+    let provider_route = rust_provider_http_enabled(cli)
+        .then(|| provider_http::ProviderRouteConfig::new(route_data_dir.clone()));
+    let artifact_route = Some(artifact_http::ArtifactRouteConfig::new(
+        route_data_dir.clone(),
+    ));
+    let desktop_remote_route = Some(desktop_remote_http::DesktopRemoteRouteConfig::new(
+        route_data_dir.clone(),
+    ));
+    let discovery_route = Some(discovery_http::DiscoveryRouteConfig::new(
+        route_data_dir.clone(),
+    ));
+    let cloudflare_route = Some(cloudflare_http::CloudflareRouteConfig::new(
+        route_data_dir.clone(),
+        root.to_path_buf(),
+    ));
+    let push_route = Some(push_http::PushRouteConfig::new(
+        route_data_dir.clone(),
+        root.to_path_buf(),
+    ));
+    let file_route = Some(file_http::FileRouteConfig::new(route_data_dir.clone()));
     let workspace_route = rust_workspace_http_enabled(cli)
         .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
     let settings_route = if rust_settings_http_enabled(cli) {
-        Some(
-            settings_http::SettingsRouteConfig::new(route_data_dir.clone(), root.to_path_buf())
-                .with_internal_settings(
-                    upstream,
-                    internal_token
-                        .clone()
-                        .context("Settings route internal token is missing")?,
-                ),
-        )
+        Some(settings_http::SettingsRouteConfig::new(
+            route_data_dir.clone(),
+            root.to_path_buf(),
+        ))
     } else {
         None
     };
     let pairing_route = if rust_pairing_http_enabled(cli) {
-        Some(
-            pairing_http::PairingRouteConfig::new(route_data_dir.clone()).with_internal_settings(
-                upstream,
-                internal_token
-                    .clone()
-                    .context("Pairing route internal token is missing")?,
-            ),
-        )
+        Some(pairing_http::PairingRouteConfig::new(
+            route_data_dir.clone(),
+        ))
     } else {
         None
     };
+    let static_route = static_http::StaticRouteConfig::new(root.to_path_buf());
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
     println!(
@@ -488,8 +518,17 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_tool_events(tool_events_route)
         .with_tool_events_sse(tool_events_sse_route)
         .with_event_sync(event_sync_route)
+        .with_task(task_route)
+        .with_provider(provider_route)
         .with_settings(settings_route)
-        .with_pairing(pairing_route);
+        .with_pairing(pairing_route)
+        .with_artifact(artifact_route)
+        .with_desktop_remote(desktop_remote_route)
+        .with_discovery(discovery_route)
+        .with_cloudflare(cloudflare_route)
+        .with_push(push_route)
+        .with_file(file_route)
+        .with_static(Some(static_route));
     let routes = routes.with_workspace(workspace_route);
     let result = http_frontdoor::serve(listener, upstream, &mut node, routes);
     if node
@@ -501,6 +540,75 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         let _ = node.wait();
     }
     result
+}
+
+fn run_rust_only_http(cli: &Cli, data_dir: Option<PathBuf>) -> Result<()> {
+    let root = project_root()?;
+    let data_dir = data_dir.unwrap_or_else(|| {
+        resolve_data_dir(
+            &root,
+            env::var_os("VIBELINK_DATA_DIR"),
+            env::var_os("LOCALAPPDATA"),
+            Path::exists,
+        )
+    });
+    let listener = TcpListener::bind((cli.host.as_str(), cli.port)).with_context(|| {
+        format!(
+            "Failed to bind Rust-only HTTP server on {}:{}",
+            cli.host, cli.port
+        )
+    })?;
+    let bound_address = listener
+        .local_addr()
+        .context("Failed to resolve Rust-only HTTP listener address")?;
+    task_http::start_search_watcher(data_dir.clone());
+    let tool_events = tool_events_http::ToolEventsRouteConfig::new(data_dir.clone());
+    let routes = http_frontdoor::FrontdoorRoutes::default()
+        .with_status(Some(status_http::StatusRouteConfig::new(data_dir.clone())))
+        .with_doctor(Some(doctor_http::DoctorRouteConfig::new(data_dir.clone())))
+        .with_device(Some(device_http::DeviceRouteConfig::new(data_dir.clone())))
+        .with_device_mutation(Some(device_http::DeviceMutationRouteConfig::new(
+            data_dir.clone(),
+        )))
+        .with_audit(Some(audit_http::AuditRouteConfig::new(data_dir.clone())))
+        .with_tool_events(Some(tool_events.clone()))
+        .with_tool_events_sse(Some(tool_events))
+        .with_event_sync(Some(event_sync_http::EventSyncRouteConfig::new(
+            data_dir.clone(),
+        )))
+        .with_task(Some(task_http::TaskRouteConfig::new(data_dir.clone())))
+        .with_provider(Some(provider_http::ProviderRouteConfig::new(
+            data_dir.clone(),
+        )))
+        .with_settings(Some(settings_http::SettingsRouteConfig::new(
+            data_dir.clone(),
+            root.clone(),
+        )))
+        .with_pairing(Some(pairing_http::PairingRouteConfig::new(
+            data_dir.clone(),
+        )))
+        .with_artifact(Some(artifact_http::ArtifactRouteConfig::new(
+            data_dir.clone(),
+        )))
+        .with_desktop_remote(Some(desktop_remote_http::DesktopRemoteRouteConfig::new(
+            data_dir.clone(),
+        )))
+        .with_discovery(Some(discovery_http::DiscoveryRouteConfig::new(
+            data_dir.clone(),
+        )))
+        .with_cloudflare(Some(cloudflare_http::CloudflareRouteConfig::new(
+            data_dir.clone(),
+            root.clone(),
+        )))
+        .with_push(Some(push_http::PushRouteConfig::new(
+            data_dir.clone(),
+            root.clone(),
+        )))
+        .with_file(Some(file_http::FileRouteConfig::new(data_dir.clone())))
+        .with_static(Some(static_http::StaticRouteConfig::new(root)))
+        .with_workspace(Some(workspace_http::WorkspaceRouteConfig::new(data_dir)));
+    println!("Rust-only HTTP server listening on {bound_address}");
+    http_frontdoor::serve_rust_only(listener, routes)
 }
 
 fn spawn_node_bridge(
@@ -543,6 +651,11 @@ fn spawn_node_bridge(
         command
             .env("VIBELINK_RUNTIME_HOST", &plan.runtime.host)
             .env("VIBELINK_RUNTIME_PORT", plan.runtime.port.to_string());
+    }
+    if rust_task_http_enabled(cli) {
+        command
+            .env("VIBELINK_TASK_SCHEDULER_OWNER", "rust")
+            .env("VIBELINK_SEARCH_INDEX_STARTUP", "0");
     }
     if let Some(token) = internal_control_token {
         command.env("VIBELINK_INTERNAL_CONTROL_TOKEN", token);
@@ -688,6 +801,12 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     if cli.rust_event_sync_http {
         command.arg("--rust-event-sync-http");
     }
+    if cli.rust_task_http {
+        command.arg("--rust-task-http");
+    }
+    if cli.rust_provider_http {
+        command.arg("--rust-provider-http");
+    }
     if cli.rust_workspace_http {
         command.arg("--rust-workspace-http");
     }
@@ -701,13 +820,6 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     command.creation_flags(CREATE_NO_WINDOW);
 
     command.spawn().context("Failed to start bridge role")
-}
-
-fn generate_internal_control_token() -> Result<String> {
-    let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|error| anyhow::anyhow!("Cannot generate internal Status route token: {error}"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn print_pairing_qr(api_base_url: &str, pairing_base_url: &str, label: &str) -> Result<()> {
@@ -933,6 +1045,8 @@ mod tests {
         assert!(effective.rust_settings_http);
         assert!(effective.rust_tool_events_http);
         assert!(effective.rust_workspace_http);
+        assert!(effective.rust_task_http);
+        assert!(effective.rust_provider_http);
         assert!(effective.rust_tool_events_sse);
         assert!(effective.rust_event_sync_http);
     }
@@ -1135,6 +1249,39 @@ mod tests {
         let route_only =
             Cli::try_parse_from(["vibelink", "--rust-workspace-http", "bridge"]).unwrap();
         assert!(!rust_workspace_http_enabled(&route_only));
+    }
+
+    #[test]
+    fn rust_task_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-task-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_task_http);
+        assert!(rust_task_http_enabled(&enabled));
+
+        let route_only = Cli::try_parse_from(["vibelink", "--rust-task-http", "bridge"]).unwrap();
+        assert!(route_only.rust_task_http);
+        assert!(!rust_task_http_enabled(&route_only));
+    }
+
+    #[test]
+    fn rust_provider_http_requires_the_rust_frontdoor() {
+        let enabled = Cli::try_parse_from([
+            "vibelink",
+            "--rust-http-canary",
+            "--rust-provider-http",
+            "bridge",
+        ])
+        .unwrap();
+        assert!(enabled.rust_provider_http);
+        assert!(rust_provider_http_enabled(&enabled));
+        let route_only =
+            Cli::try_parse_from(["vibelink", "--rust-provider-http", "bridge"]).unwrap();
+        assert!(!rust_provider_http_enabled(&route_only));
     }
 
     #[test]

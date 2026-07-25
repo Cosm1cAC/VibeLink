@@ -3,13 +3,16 @@
   "report": "docs/rust-migration-report.md",
   "routeOwnership": "docs/route-ownership.json",
   "nodeRuntime": {
-    "packaging": "required",
+    "packaging": "removable",
     "blockers": [
       {
         "id": "workspace-git-command-approval",
         "title": "Workspace Git、command 与 approval 所有权",
         "status": "default-on",
-        "nodeEntries": ["src/workspaces.js", "src/toolRuntime.js"],
+        "nodeEntries": [
+          "src/workspaces.js",
+          "src/toolRuntime.js"
+        ],
         "rustTarget": "apps/windows/src/workspace_http.rs",
         "completedRoutes": [
           "POST /api/workspaces/:id/file",
@@ -25,7 +28,11 @@
         "id": "task-history-terminal",
         "title": "Task、history 与 terminal 所有权",
         "status": "default-on",
-        "nodeEntries": ["src/agents.js", "src/history.js", "src/terminalRuntime.js"],
+        "nodeEntries": [
+          "src/agents.js",
+          "src/history.js",
+          "src/terminalRuntime.js"
+        ],
         "rustTarget": "apps/windows/src/task_http.rs",
         "completedRoutes": [
           "GET /api/tasks",
@@ -53,27 +60,49 @@
       {
         "id": "provider-runtime",
         "title": "Provider registry 与执行所有权",
-        "status": "in-progress",
-        "nodeEntries": ["src/providerRegistry.js", "src/providerRuntimeLoaders.js"],
+        "status": "default-on",
+        "nodeEntries": [
+          "src/providerRegistry.js",
+          "src/providerRuntimeLoaders.js"
+        ],
         "rustTarget": "apps/windows/src/provider_http.rs",
         "completedRoutes": [
           "GET /api/provider-registry (cached projection)",
           "GET /api/provider-registry?fresh=1 CLI health probe",
           "Zhipu/Claude model API catalog refresh",
           "provider launch mapping from queued tasks to execd",
-          "Doubao browser bridge doctor health/fidelity probe"
-        ]
+          "Doubao browser bridge doctor health/fidelity probe",
+          "Rust-only product route ownership"
+        ],
+        "remainingRoutes": [],
+        "nextAction": "Rust-only frontdoor owns this Phase 4 surface; keep hybrid Node fallback only outside rust-only packaging."
       },
       {
         "id": "live-call-runtime",
         "title": "Live Call、ASR 与录音生命周期所有权",
-        "status": "planned",
-        "nodeEntries": ["src/liveCall.js", "src/liveCallAsr.js", "src/liveCallAudio.js"],
-        "rustTarget": "apps/windows/src/live_call"
+        "status": "default-on",
+        "nodeEntries": [
+          "src/liveCall.js",
+          "src/liveCallAsr.js",
+          "src/liveCallAudio.js"
+        ],
+        "rustTarget": "apps/windows/src/live_call",
+        "remainingRoutes": [],
+        "completedRoutes": [
+          "Rust-only product route ownership"
+        ],
+        "nextAction": "Rust-only frontdoor owns this Phase 4 surface; keep hybrid Node fallback only outside rust-only packaging."
       }
     ]
   },
-  "statusOrder": ["planned", "contract", "opt-in", "canary", "default-on", "deprecated-node-path"],
+  "statusOrder": [
+    "planned",
+    "contract",
+    "opt-in",
+    "canary",
+    "default-on",
+    "deprecated-node-path"
+  ],
   "slices": [
     {
       "id": "rust-http-frontdoor",
@@ -329,7 +358,10 @@
       "title": "Tool Events SSE 原生 HTTP 路由",
       "priority": "P0",
       "status": "default-on",
-      "featureFlags": ["--rust-http-canary", "--rust-tool-events-sse"],
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-tool-events-sse"
+      ],
       "nodeEntry": "src/server.js#/api/tool-events?stream=1",
       "rustEntry": "apps/windows/src/tool_events_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-tool-events-sse bridge",
@@ -346,7 +378,10 @@
       "title": "统一事件同步原生 HTTP 路由",
       "priority": "P1",
       "status": "default-on",
-      "featureFlags": ["--rust-http-canary", "--rust-event-sync-http"],
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-event-sync-http"
+      ],
       "nodeEntry": "src/server.js#/api/events/*",
       "rustEntry": "apps/windows/src/event_sync_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-event-sync-http bridge",
@@ -365,12 +400,18 @@
       "title": "Workspace 文件与 Git 原生 HTTP 路由",
       "priority": "P1",
       "status": "default-on",
-      "featureFlags": ["--rust-http-canary", "--rust-workspace-http"],
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-workspace-http"
+      ],
       "nodeEntry": "src/server.js#/api/workspaces",
       "rustEntry": "apps/windows/src/workspace_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-workspace-http bridge",
       "fallback": "Rust 鉴权、workspace root 或只读读取失败时可回放 Node；读取 body 后的文件、batch、Git 和 worktree mutation 失败返回 Rust 错误且不回放；关闭 --rust-workspace-http 后恢复 Node 所有权",
-      "tests": ["apps/windows/src/workspace_http.rs", "apps/windows/src/http_frontdoor.rs"],
+      "tests": [
+        "apps/windows/src/workspace_http.rs",
+        "apps/windows/src/http_frontdoor.rs"
+      ],
       "nextAction": "Web/Android rust-only E2E 已通过；Workspace list/create/tree/context/read/preview/batch、Git status/diff/actions、worktree list/create/action、command、terminal-session 入口与 approval 持久化已默认开启；继续把 terminal input/resize 与 provider approval delivery 接到 execd 的长期会话恢复。"
     },
     {
@@ -378,7 +419,10 @@
       "title": "Task 持久投影原生 HTTP 路由",
       "priority": "P1",
       "status": "default-on",
-      "featureFlags": ["--rust-http-canary", "--rust-task-http"],
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-task-http"
+      ],
       "nodeEntry": "src/server.js#/api/tasks",
       "rustEntry": "apps/windows/src/task_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-task-http bridge",
@@ -395,7 +439,10 @@
       "title": "Provider Registry 缓存投影原生 HTTP 路由",
       "priority": "P1",
       "status": "default-on",
-      "featureFlags": ["--rust-http-canary", "--rust-provider-http"],
+      "featureFlags": [
+        "--rust-http-canary",
+        "--rust-provider-http"
+      ],
       "nodeEntry": "src/server.js#/api/provider-registry",
       "rustEntry": "apps/windows/src/provider_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary --rust-provider-http bridge",
@@ -413,7 +460,9 @@
       "title": "Tool 与 Command Registry 原生 HTTP 路由",
       "priority": "P1",
       "status": "default-on",
-      "featureFlags": ["--rust-http-canary"],
+      "featureFlags": [
+        "--rust-http-canary"
+      ],
       "nodeEntry": "src/server.js#/api/tool-registry,/api/command-registry",
       "rustEntry": "apps/windows/src/discovery_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary bridge",
@@ -431,7 +480,9 @@
       "title": "Static Assets 与 OpenAPI 原生服务",
       "priority": "P1",
       "status": "default-on",
-      "featureFlags": ["--rust-http-canary"],
+      "featureFlags": [
+        "--rust-http-canary"
+      ],
       "nodeEntry": "src/server.js static/OpenAPI fallback",
       "rustEntry": "apps/windows/src/static_http.rs",
       "sidecarCommand": "vibelink --rust-http-canary bridge",
@@ -531,7 +582,10 @@
       "priority": "P1",
       "status": "contract",
       "featureFlags": [
-        { "name": "VIBELINK_AUDIO_RUST_PIPELINE", "requiredInCode": false }
+        {
+          "name": "VIBELINK_AUDIO_RUST_PIPELINE",
+          "requiredInCode": false
+        }
       ],
       "nodeEntry": "src/liveCallAudioPipeline.js",
       "rustEntry": "apps/windows/src/audio_pipeline_sidecar.rs",
@@ -551,7 +605,10 @@
       "priority": "P2",
       "status": "contract",
       "featureFlags": [
-        { "name": "VIBELINK_RUST_COMPRESSION", "requiredInCode": false }
+        {
+          "name": "VIBELINK_RUST_COMPRESSION",
+          "requiredInCode": false
+        }
       ],
       "nodeEntry": "src/compressionContract.js",
       "rustEntry": "apps/windows/src/compression_sidecar.rs",

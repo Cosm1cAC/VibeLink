@@ -21,6 +21,7 @@ use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
 };
+use crate::product_http::{route_product_request, ProductRouteConfig};
 use crate::provider_http::{route_provider_request, ProviderRouteConfig};
 use crate::push_http::{push_request_requires_body, route_push_request, PushRouteConfig};
 use crate::review_http::{
@@ -79,6 +80,7 @@ pub struct FrontdoorRoutes {
     file: Option<FileRouteConfig>,
     cloudflare: Option<CloudflareRouteConfig>,
     push: Option<PushRouteConfig>,
+    product: Option<ProductRouteConfig>,
     review: Option<ReviewRouteConfig>,
 }
 
@@ -183,6 +185,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_product(mut self, route: Option<ProductRouteConfig>) -> Self {
+        self.product = route;
+        self
+    }
+
     pub fn with_review(mut self, route: Option<ReviewRouteConfig>) -> Self {
         self.review = route;
         self
@@ -209,6 +216,7 @@ impl FrontdoorRoutes {
             && self.file.is_none()
             && self.cloudflare.is_none()
             && self.push.is_none()
+            && self.product.is_none()
             && self.review.is_none()
     }
 }
@@ -467,6 +475,17 @@ fn handle_connection_with_upstream(
                             .write_to(&mut client);
                     }
                     eprintln!("Rust Push route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(product_route) = routes.product.as_ref() {
+            match route_product_request(&request, product_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Product route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Product request failed.")
+                        .write_to(&mut client);
                 }
             }
         }

@@ -285,6 +285,61 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(desktopResponse.status, 200);
   assert.equal(desktopResponse.headers.get("x-vibelink-control-plane"), "rust");
   assert.equal((await desktopResponse.json()).items[0].desktop.ready, true);
+
+  for (const [family, route, collection] of [
+    ["agent-reach", "/api/agent-reach/status", "channels"],
+    ["mcp", "/api/mcp/status", "servers"],
+    ["live-calls", "/api/live-calls", "items"],
+    ["browser-sessions", "/api/browser-sessions", "items"]
+  ]) {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { headers });
+    const body = await response.text();
+    assert.equal(response.status, 200, `${family}: ${body}\n${logs}`);
+    assert.equal(response.headers.get("x-vibelink-control-plane"), "rust", family);
+    assert.ok(Array.isArray(JSON.parse(body)[collection]), family);
+  }
+
+  for (const [family, route] of [
+    ["doubao", "/api/doubao/status"],
+    ["codex-desktop", "/api/codex-desktop/status"],
+    ["desktop-remote-control", "/api/desktop-remote/status"]
+  ]) {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { headers });
+    const body = await response.text();
+    assert.equal(response.status, 200, `${family}: ${body}\n${logs}`);
+    assert.equal(response.headers.get("x-vibelink-control-plane"), "rust", family);
+    assert.equal(JSON.parse(body).owner, "rust", family);
+  }
+
+  const browserCreateResponse = await fetch(`http://127.0.0.1:${port}/api/browser-sessions`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ maxTraceEvents: 10 })
+  });
+  assert.equal(browserCreateResponse.status, 201);
+  assert.equal(browserCreateResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const browserSession = await browserCreateResponse.json();
+  assert.equal(browserSession.session.owner, "rust");
+  const browserTraceResponse = await fetch(`http://127.0.0.1:${port}/api/browser-sessions/${browserSession.session.id}/trace?after=0&limit=10`, { headers });
+  assert.equal(browserTraceResponse.status, 200);
+  assert.equal(browserTraceResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal((await browserTraceResponse.json()).hasMore, false);
+
+  for (const [family, route] of [
+    ["capabilities", "/api/capabilities/automations"],
+    ["automations", "/api/automations"],
+    ["subagents", "/api/subagents"],
+    ["browser-fetch", "/api/browser/fetch"]
+  ]) {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+      method: family === "capabilities" ? "GET" : "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: family === "capabilities" ? undefined : JSON.stringify({ url: "https://example.test", prompt: "rust-only" })
+    });
+    const body = await response.text();
+    assert.ok(response.status === 200 || response.status === 201, `${family}: ${body}\n${logs}`);
+    assert.equal(response.headers.get("x-vibelink-control-plane"), "rust", family);
+  }
   assert.deepEqual(descendantNodeProcesses(child.pid), []);
 
   if (process.env.VIBELINK_RUST_ONLY_E2E_SKIP_ANDROID === "1") return;

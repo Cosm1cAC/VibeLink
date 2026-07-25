@@ -186,5 +186,61 @@ class ApiClientRustOnlyDiscoveryE2eTest {
             assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
             assertContains(response.body!!.string(), "\"ready\":true")
         }
+        listOf(
+            "/api/agent-reach/status" to "\"channels\":[]",
+            "/api/doubao/status" to "\"owner\":\"rust\"",
+            "/api/mcp/status" to "\"servers\":[]",
+            "/api/live-calls" to "\"items\":[]",
+            "/api/browser-sessions" to "\"items\":[]",
+            "/api/capabilities/automations" to "\"category\":\"automations\"",
+            "/api/codex-desktop/status" to "\"owner\":\"rust\"",
+            "/api/desktop-remote/status" to "\"owner\":\"rust\""
+        ).forEach { (path, expected) ->
+            val productRequest = Request.Builder()
+                .url("$baseUrl$path")
+                .header("Authorization", "Bearer $token")
+                .build()
+            authenticatedClient.newCall(productRequest).execute().use { response ->
+                assertEquals(200, response.code, path)
+                assertEquals("rust", response.header("X-VibeLink-Control-Plane"), path)
+                assertContains(response.body!!.string(), expected)
+            }
+        }
+        val browserCreateRequest = Request.Builder()
+            .url("$baseUrl/api/browser-sessions")
+            .header("Authorization", "Bearer $token")
+            .post("""{"maxTraceEvents":10}""".toRequestBody(jsonMediaType))
+            .build()
+        val browserSessionId = authenticatedClient.newCall(browserCreateRequest).execute().use { response ->
+            assertEquals(201, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            val body = response.body!!.string()
+            assertContains(body, "\"owner\":\"rust\"")
+            Regex(""""id":"([^"]+)"""").find(body)!!.groupValues[1]
+        }
+        val browserTraceRequest = Request.Builder()
+            .url("$baseUrl/api/browser-sessions/$browserSessionId/trace?after=0&limit=10")
+            .header("Authorization", "Bearer $token")
+            .build()
+        authenticatedClient.newCall(browserTraceRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"hasMore\":false")
+        }
+        listOf(
+            "/api/automations" to """{"title":"Rust automation"}""",
+            "/api/subagents" to """{"prompt":"Rust subagent"}""",
+            "/api/browser/fetch" to """{"url":"https://example.test"}"""
+        ).forEach { (path, payload) ->
+            val productMutation = Request.Builder()
+                .url("$baseUrl$path")
+                .header("Authorization", "Bearer $token")
+                .post(payload.toRequestBody(jsonMediaType))
+                .build()
+            authenticatedClient.newCall(productMutation).execute().use { response ->
+                assertEquals(200, response.code, path)
+                assertEquals("rust", response.header("X-VibeLink-Control-Plane"), path)
+            }
+        }
     }
 }

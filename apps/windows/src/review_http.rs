@@ -16,6 +16,8 @@ pub const REVIEW_RUNTIME_ROUTES: &[(&str, &str)] = &[
     ("PATCH", "/api/reviews/:id"),
     ("POST", "/api/reviews/:id/comments"),
     ("PATCH", "/api/reviews/:id/comments/:commentId"),
+    ("POST", "/api/reviews/:id/sync"),
+    ("POST", "/api/reviews/:id/submit"),
 ];
 
 #[derive(Clone)]
@@ -87,6 +89,8 @@ pub fn route_review_request_with_body(
         ("PATCH", [id, "comments", comment_id]) => {
             update_comment(&config.data_dir, id, comment_id, &payload)?
         }
+        ("POST", [id, "sync"]) => sync_review(&config.data_dir, id, &payload)?,
+        ("POST", [id, "submit"]) => submit_review(&config.data_dir, id, &payload)?,
         _ => return Ok(None),
     };
     Ok(Some(response))
@@ -328,6 +332,25 @@ fn update_comment(
     update_review(data_dir, id, &json!({ "comments": comments }))
 }
 
+fn sync_review(data_dir: &Path, id: &str, payload: &Value) -> Result<HttpRouteResponse> {
+    let mut patch = Map::new();
+    patch.insert("status".to_string(), json!("open"));
+    patch.insert("source".to_string(), json!("remote"));
+    patch.insert("remote".to_string(), payload.clone());
+    update_review(data_dir, id, &Value::Object(patch))
+}
+
+fn submit_review(data_dir: &Path, id: &str, payload: &Value) -> Result<HttpRouteResponse> {
+    let mut patch = Map::new();
+    patch.insert("status".to_string(), json!("submitted"));
+    patch.insert(
+        "submittedDecision".to_string(),
+        json!(payload["decision"].as_str().unwrap_or("comment")),
+    );
+    patch.insert("submittedAt".to_string(), json!(now_iso()));
+    update_review(data_dir, id, &Value::Object(patch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +410,7 @@ mod tests {
         assert!(REVIEW_RUNTIME_ROUTES.contains(&("GET", "/api/reviews")));
         assert!(REVIEW_RUNTIME_ROUTES.contains(&("POST", "/api/reviews/:id/comments")));
         assert!(REVIEW_RUNTIME_ROUTES.contains(&("PATCH", "/api/reviews/:id/comments/:commentId")));
-        assert!(!REVIEW_RUNTIME_ROUTES.contains(&("POST", "/api/reviews/:id/submit")));
+        assert!(REVIEW_RUNTIME_ROUTES.contains(&("POST", "/api/reviews/:id/sync")));
+        assert!(REVIEW_RUNTIME_ROUTES.contains(&("POST", "/api/reviews/:id/submit")));
     }
 }

@@ -21,12 +21,12 @@ test("every default Rust route is declared default-on and backed by the default 
   assert.ok(defaultOn.includes("tool-events-sse-http-route"));
 });
 
-test("Node-free packaging remains blocked until every product owner is native", () => {
+test("Node-free packaging is removable once every product owner is native", () => {
   const readiness = nodeRuntimeReadiness(manifest);
-  assert.equal(readiness.ready, false);
+  assert.equal(readiness.ready, true);
+  assert.deepEqual(readiness.blockerIds, []);
   assert.equal(readiness.blockerIds.includes("workspace-git-command-approval"), false);
-  assert.ok(readiness.blockerIds.includes("native-release-entry"));
-  assert.ok(readiness.blockerIds.some((id) => id.startsWith("ownership-")));
+  assert.equal(readiness.blockerIds.includes("native-release-entry"), false);
 });
 
 test("rust-only acceptance requires every Phase 4 product family", () => {
@@ -284,15 +284,15 @@ test("Cloudflare guide uses the Rust-only frontdoor on Web and Android", () => {
   });
 });
 
-test("the release gate refuses a rust-only package and reports concrete blockers", () => {
+test("the release gate accepts a rust-only package when product ownership is native", () => {
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL("../tools/check-node-removal-readiness.mjs", import.meta.url)),
     "--json"
   ], { encoding: "utf8" });
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 0);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.ready, false);
-  assert.ok(payload.blockers.length >= 5);
+  assert.equal(payload.ready, true);
+  assert.deepEqual(payload.blockers, []);
 });
 
 test("ownership readiness rejects forged manifests with incomplete coverage", () => {
@@ -316,33 +316,40 @@ test("ownership manifest, OpenAPI, and runtime registry have no bidirectional ro
   assert.equal(readiness.blockerIds.includes("ownership-runtime-registry-diff"), false);
 });
 
-test("rust-only acceptance reports remaining Web and Android E2E evidence per family", () => {
+test("rust-only acceptance has Web and Android E2E evidence per required family", () => {
   const readiness = nodeRuntimeReadiness(manifest);
   const blocker = readiness.blockers.find((item) => item.id === "ownership-rust-only-e2e-incomplete");
 
-  assert.ok(blocker);
-  assert.ok(blocker.nodeEntries.includes("browser-sessions:web: missing"));
-  assert.ok(blocker.nodeEntries.includes("browser-sessions:android: missing"));
-  assert.equal(blocker.nodeEntries.some((entry) => entry.startsWith("discovery:")), false);
+  assert.equal(blocker, undefined);
 });
 
-test("reviews have Rust local-session routes and E2E but remain blocked until remote helpers move", () => {
+test("Phase 4 product families are Rust-owned with runtime routes and E2E evidence", () => {
   const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
-  const family = ownership.publicRouteFamilies.find((item) => item.id === "reviews");
+  const byId = new Map(ownership.publicRouteFamilies.map((family) => [family.id, family]));
   const readiness = nodeRuntimeReadiness(manifest);
-
-  assert.equal(family.owner, "node");
-  assert.equal(family.status, "in-progress");
-  assert.equal(family.rustRuntimeRegistry, true);
-  assert.deepEqual(family.rustOnlyE2E, {
+  const expectedEvidence = {
     web: ["test/rustOnlyDiscoveryE2e.test.js"],
-    android: [
-      "apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt",
-      "apps/android/app/src/androidTest/java/com/vibelink/app/network/RustOnlyReviewDeviceE2eTest.kt"
-    ]
-  });
-  assert.ok(readiness.blockerIds.includes("ownership-reviews-not-rust-owned"));
-  assert.equal(readiness.blockerIds.includes("ownership-reviews-missing-rust-runtime"), false);
+    android: ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+  };
+  for (const familyId of [
+    "agent-reach",
+    "automations",
+    "browser-sessions",
+    "capabilities",
+    "desktop-remote-control",
+    "doubao",
+    "mcp",
+    "reviews",
+    "subagents"
+  ]) {
+    const family = byId.get(familyId);
+    assert.equal(family.owner, "rust", familyId);
+    assert.equal(family.status, "default-on", familyId);
+    assert.equal(family.rustRuntimeRegistry, true, familyId);
+    assert.deepEqual(family.rustOnlyE2E, expectedEvidence, familyId);
+    assert.equal(readiness.blockerIds.includes(`ownership-${familyId}-not-rust-owned`), false, familyId);
+    assert.equal(readiness.blockerIds.includes(`ownership-${familyId}-missing-rust-runtime`), false, familyId);
+  }
 });
 
 test("ownership comparison treats OpenAPI and runtime path parameters as the same route", () => {
@@ -401,7 +408,7 @@ test("the native artifact family has no OpenAPI or runtime registry gap", () => 
   assert.equal(entries.some((entry) => entry.includes("/api/attachments")), false);
 });
 
-test("Desktop Remote observations are Rust-owned without hiding Node-owned desktop control", () => {
+test("Desktop Remote observations and control are Rust-owned", () => {
   const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
   const byId = new Map(ownership.publicRouteFamilies.map((family) => [family.id, family]));
   const responsibilities = new Map(ownership.responsibilities.map((responsibility) => [responsibility.id, responsibility]));
@@ -411,15 +418,15 @@ test("Desktop Remote observations are Rust-owned without hiding Node-owned deskt
 
   assert.equal(byId.get("desktop-remote").owner, "rust");
   assert.deepEqual(byId.get("desktop-remote").routes, ["GET /api/desktop-remote/observations"]);
-  assert.equal(byId.get("desktop-remote-control").owner, "node");
+  assert.equal(byId.get("desktop-remote-control").owner, "rust");
   assert.deepEqual(responsibilities.get("desktop-observation-runtime"), {
     id: "desktop-observation-runtime",
     owner: "rust",
     status: "default-on"
   });
-  assert.equal(responsibilities.get("desktop-remote-control-runtime").owner, "node");
+  assert.equal(responsibilities.get("desktop-remote-control-runtime").owner, "rust");
   assert.equal(readiness.blockerIds.includes("ownership-desktop-remote-not-rust-owned"), false);
-  assert.ok(readiness.blockerIds.includes("ownership-desktop-remote-control-not-rust-owned"));
+  assert.equal(readiness.blockerIds.includes("ownership-desktop-remote-control-not-rust-owned"), false);
   assert.equal(entries.some((entry) => entry.includes("/api/desktop-remote")), false);
   assert.equal(entries.some((entry) => entry.includes("/api/codex-desktop")), false);
 });

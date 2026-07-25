@@ -28,6 +28,7 @@ mod file_http;
 mod http_frontdoor;
 mod mcp_session_sidecar;
 mod pairing_http;
+mod product_http;
 mod provider_http;
 mod public_tunnel;
 mod push_http;
@@ -529,6 +530,9 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_discovery(discovery_route)
         .with_cloudflare(cloudflare_route)
         .with_push(push_route)
+        .with_product(Some(product_http::ProductRouteConfig::new(
+            route_data_dir.clone(),
+        )))
         .with_review(review_route)
         .with_file(file_route)
         .with_static(Some(static_route));
@@ -606,6 +610,9 @@ fn run_rust_only_http(cli: &Cli, data_dir: Option<PathBuf>) -> Result<()> {
         .with_push(Some(push_http::PushRouteConfig::new(
             data_dir.clone(),
             root.clone(),
+        )))
+        .with_product(Some(product_http::ProductRouteConfig::new(
+            data_dir.clone(),
         )))
         .with_review(Some(review_http::ReviewRouteConfig::new(data_dir.clone())))
         .with_file(Some(file_http::FileRouteConfig::new(data_dir.clone())))

@@ -10,4 +10,10 @@ class ComposerLayoutPolicyTest {
         assertTrue(ComposerLayoutPolicy.showSupplementalContent(imeVisible = false))
         assertFalse(ComposerLayoutPolicy.showSupplementalContent(imeVisible = true))
     }
+
+    @Test
+    fun desktopRemoteKeepsSendActionWhileDesktopIsRunning() {
+        assertFalse(ComposerLayoutPolicy.showStopAction(isDesktopRemote = true, running = true))
+        assertTrue(ComposerLayoutPolicy.showStopAction(isDesktopRemote = false, running = true))
+    }
 }

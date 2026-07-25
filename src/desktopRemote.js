@@ -172,7 +172,10 @@ function evaluateDesktopPreflight(desktop, item) {
     windowTitle: desktop?.windowTitle || "",
     inputName: desktop?.inputName || "",
     inputSynthetic: Boolean(desktop?.inputSynthetic),
+    inputBounds: desktop?.inputBounds || null,
     sendName: desktop?.sendName || "",
+    sendBounds: desktop?.sendBounds || null,
+    sendHasInvokePattern: Boolean(desktop?.sendHasInvokePattern),
     sendEnabled: Boolean(desktop?.sendEnabled),
     draftLength: Number(desktop?.draftLength || 0),
     target: item.target || null
@@ -193,13 +196,15 @@ function evaluateDesktopPreflight(desktop, item) {
   }
 
   const runningTurn = desktopRunningTurn(desktop);
+  const hasInputSelector = Boolean(desktop?.inputName || desktop?.inputSynthetic || desktop?.inputBounds);
+  const hasSendSelector = Boolean(desktop?.sendName || desktop?.sendBounds || desktop?.sendHasInvokePattern);
   if (desktop?.minimized) warnings.push({ code: "minimized", message: "Codex Desktop is minimized; it must be restored and re-checked before sending." });
   if (!desktop?.composerReady) failures.push({ code: "composer_unready", message: desktop?.reason || "Codex Desktop composer is not ready.", retryable: true });
   if (desktop?.inputSynthetic) warnings.push({ code: "synthetic_input", message: "Using bottom-composer geometry fallback because a named input was not exposed." });
-  if (!runningTurn) {
-    if (!desktop?.inputName) failures.push({ code: "input_missing", message: "Composer input selector was not found.", retryable: Boolean(desktop?.minimized) });
-    if (!desktop?.sendName) failures.push({ code: "send_missing", message: "Send button selector was not found.", retryable: Boolean(desktop?.minimized) });
-    if (desktop?.sendEnabled) failures.push({ code: "send_enabled_before_paste", message: "Send button is already enabled before paste; refusing to risk sending an existing draft." });
+  if (!runningTurn && desktop?.composerReady) {
+    if (!hasInputSelector) failures.push({ code: "input_missing", message: "Composer input selector was not found.", retryable: Boolean(desktop?.minimized) });
+    if (!hasSendSelector) failures.push({ code: "send_missing", message: "Send button selector was not found.", retryable: Boolean(desktop?.minimized) });
+    if (hasInputSelector && hasSendSelector && desktop?.sendEnabled) failures.push({ code: "send_enabled_before_paste", message: "Send button is already enabled before paste; refusing to risk sending an existing draft." });
     if (Number(desktop?.draftLength || 0) > 0 || desktop?.inputHasText) failures.push({ code: "draft_present", message: "Codex Desktop composer already contains text." });
   }
 
@@ -207,9 +212,7 @@ function evaluateDesktopPreflight(desktop, item) {
     failures.push({ code: "sidebar_running", message: `Codex Desktop sidebar shows ${desktop.sidebarRunningCount || 1} running conversation(s).`, retryable: true });
   }
 
-  if (!item.target || !Number.isFinite(Number(item.target.desktopIndex))) {
-    failures.push({ code: "target_missing", message: "Codex Desktop Remote requires a bound visible Codex conversation target." });
-  } else {
+  if (item.target && Number.isFinite(Number(item.target.desktopIndex))) {
     const conversation = targetConversation(desktop, item.target);
     if (!conversation) {
       failures.push({ code: "target_not_visible", message: "Expected Codex Desktop sidebar conversation is no longer visible.", retryable: true });

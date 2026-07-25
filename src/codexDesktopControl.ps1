@@ -145,12 +145,21 @@ function Test-IsStopName([string]$name) {
   return $value -eq $stopNameZh -or $value -match "^(Stop|Stop generating|Cancel)$"
 }
 
+function Test-RectInsideWindow($bounds, $windowBounds) {
+  if (-not (Test-RectUsable $bounds) -or -not (Test-RectUsable $windowBounds)) { return $false }
+  return $bounds.X -ge $windowBounds.X -and
+    $bounds.Y -ge $windowBounds.Y -and
+    ($bounds.X + $bounds.Width) -le ($windowBounds.X + $windowBounds.Width) -and
+    ($bounds.Y + $bounds.Height) -le ($windowBounds.Y + $windowBounds.Height)
+}
+
 function Test-IsComposerSendCandidate($element) {
   if ($null -eq $element) { return $false }
   $bounds = $element.Current.BoundingRectangle
   $name = ([string]$element.Current.Name).Trim()
   if ($bounds.Width -lt 25 -or $bounds.Height -lt 25) { return $false }
   if ($bounds.Width -gt 52 -or $bounds.Height -gt 52) { return $false }
+  if ($name -and $name -notin $fallbackSendNames -and -not (Test-IsStopName $name)) { return $false }
   if ($name -match "^(自定义|任务设置|设置|思考|强度|模型|模式|完全访问|默认|Custom|Settings|Thinking|Reasoning|Model|Mode|Access|Default)$") { return $false }
   return $true
 }
@@ -211,8 +220,10 @@ function Find-BottomEdit($window) {
     $element = $items.Item($i)
     if (Test-IsOwnRemoteElement $element) { continue }
     $bounds = $element.Current.BoundingRectangle
+    if (-not (Test-RectInsideWindow $bounds $windowBounds)) { continue }
     if ($bounds.Width -lt 180 -or $bounds.Height -lt 24) { continue }
-    if ($bounds.Y -lt ($windowBounds.Y + ($windowBounds.Height * 0.55))) { continue }
+    if ($bounds.Y -lt ($windowBounds.Y + ($windowBounds.Height * 0.72))) { continue }
+    if ($bounds.X -gt ($windowBounds.X + ($windowBounds.Width * 0.55))) { continue }
     $candidates += [ordered]@{
       element = $element
       score = ($bounds.Y * 10000) + $bounds.Width
@@ -224,9 +235,6 @@ function Find-BottomEdit($window) {
 }
 
 function Find-BottomSendButton($window, $input) {
-  $named = Find-DescendantByControlTypeAndName $window ([System.Windows.Automation.ControlType]::Button) $fallbackSendNames
-  if ($null -ne $named) { return $named }
-
   $condition = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::Button
@@ -239,6 +247,7 @@ function Find-BottomSendButton($window, $input) {
     $element = $items.Item($i)
     if (Test-IsOwnRemoteElement $element) { continue }
     $bounds = $element.Current.BoundingRectangle
+    if (-not (Test-RectInsideWindow $bounds $window.Current.BoundingRectangle)) { continue }
     if (-not (Test-IsComposerSendCandidate $element)) { continue }
     $verticalDistance = [Math]::Abs(($bounds.Y + ($bounds.Height / 2)) - ($inputBounds.Y + ($inputBounds.Height / 2)))
     if ($verticalDistance -gt 90) { continue }
@@ -261,27 +270,25 @@ function Find-BottomActionButton($window, [string]$side) {
   $items = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
   $windowBounds = $window.Current.BoundingRectangle
   $candidates = @()
-  $minXRatio = 0.45
-  if ($side -eq "left") { $minXRatio = 0.25 }
 
   for ($i = 0; $i -lt $items.Count; $i++) {
     $element = $items.Item($i)
     if (Test-IsOwnRemoteElement $element) { continue }
     $bounds = $element.Current.BoundingRectangle
     $name = ([string]$element.Current.Name).Trim()
+    if (-not (Test-RectInsideWindow $bounds $windowBounds)) { continue }
     if ($side -eq "right") {
       if (-not (Test-IsComposerSendCandidate $element)) { continue }
     } elseif ($bounds.Width -lt 32 -or $bounds.Height -lt 32) {
       continue
     }
-    if ($bounds.Y -lt ($windowBounds.Y + ($windowBounds.Height * 0.72))) { continue }
-    if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * $minXRatio))) { continue }
-    if ($side -eq "right") {
-      if ($bounds.X -lt ($windowBounds.X + ($windowBounds.Width * 0.55))) { continue }
-    }
+    if ($bounds.Y -lt ($windowBounds.Y + ($windowBounds.Height * 0.82))) { continue }
 
-    $score = $bounds.X
-    if ($side -eq "left") { $score = -1 * $bounds.X }
+    $score = ($bounds.Y * 10000) + $bounds.X
+    if ($side -eq "right" -and ($name -in $fallbackSendNames -or (Test-IsStopName $name))) {
+      $score += 1000000
+    }
+    if ($side -eq "left") { $score = ($bounds.Y * 10000) - $bounds.X }
 
     $candidates += [ordered]@{
       element = $element
@@ -791,9 +798,7 @@ function Test-ComposerStopVisible($target) {
   $windowBounds = $target.window.Current.BoundingRectangle
   foreach ($button in $bottomButtons) {
     $isStop = Test-IsStopName $button.name
-    $inComposerActionArea =
-      $button.bounds.x -gt ($windowBounds.X + ($windowBounds.Width * 0.55)) -and
-      $button.bounds.y -gt ($windowBounds.Y + ($windowBounds.Height * 0.82))
+    $inComposerActionArea = $button.bounds.y -gt ($windowBounds.Y + ($windowBounds.Height * 0.82))
     if ($isStop -and $inComposerActionArea) { return $true }
   }
   return $false

@@ -15,9 +15,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -124,6 +126,17 @@ import java.util.Locale
 
 object ComposerLayoutPolicy {
     fun showSupplementalContent(imeVisible: Boolean): Boolean = !imeVisible
+    fun showStopAction(isDesktopRemote: Boolean, running: Boolean): Boolean = running && !isDesktopRemote
+}
+
+@Composable
+internal fun RowScope.ComposerModeSlot(content: @Composable BoxScope.() -> Unit) {
+    Box(
+        modifier = Modifier
+            .padding(start = 6.dp)
+            .weight(1f),
+        content = content,
+    )
 }
 
 object MessageListScrollTarget {
@@ -342,7 +355,7 @@ fun MessageListScreen(
                     onAttachWorkspaceContext = {
                         prompt = listOf(prompt.trim(), workspaceContext.trim()).filter { it.isNotBlank() }.joinToString("\n\n")
                     },
-                    running = running,
+                    running = ComposerLayoutPolicy.showStopAction(isDesktopRemote, running),
                     sending = sending,
                     canSend = canSend,
                     onSend = {
@@ -562,9 +575,10 @@ private fun ComposerBar(
                         }
                     }
                 }
-                Box(modifier = Modifier.padding(start = 6.dp)) {
+                ComposerModeSlot {
                     Surface(
                         onClick = { modeMenuOpen = true },
+                        modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(20.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
                     ) {
@@ -574,6 +588,7 @@ private fun ComposerBar(
                         ) {
                             Text(
                                 if (isDesktopRemote) strings.codexRemoteCurrentSettings else modeLabel,
+                                modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.labelLarge,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -627,7 +642,6 @@ private fun ComposerBar(
                     }
                 }
 
-                Spacer(Modifier.weight(1f))
                 if (!isDesktopRemote) {
                     IconButton(onClick = onOpenLiveCall, modifier = Modifier.size(42.dp)) {
                         Icon(Icons.Default.Mic, contentDescription = strings.openLiveCall)

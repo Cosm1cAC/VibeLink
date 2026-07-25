@@ -59,6 +59,68 @@ test("Desktop Remote waits while Codex is running instead of reporting a draft h
   assert.deepEqual(result.failures.map((failure) => failure.code), ["composer_unready"]);
 });
 
+test("Desktop Remote can use the current Codex conversation without a sidebar target", () => {
+  const result = __testInternals.evaluateDesktopPreflight(
+    {
+      found: true,
+      processPath: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.715.4045.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe",
+      windowTitle: "ChatGPT",
+      composerReady: true,
+      inputName: "Ask Codex",
+      sendName: "Send",
+      sendEnabled: false,
+      conversations: []
+    },
+    { target: null }
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.failures, []);
+});
+
+test("Desktop Remote waits on a running current Codex conversation without a sidebar target", () => {
+  const result = __testInternals.evaluateDesktopPreflight(
+    {
+      found: true,
+      processPath: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.715.4045.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe",
+      windowTitle: "ChatGPT",
+      composerReady: false,
+      reason: "Codex Desktop composer shows a Stop button, so the current window is running a turn.",
+      inputName: "",
+      sendName: "停止",
+      sendEnabled: true,
+      conversations: []
+    },
+    { target: null }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.retryable, true);
+  assert.deepEqual(result.failures.map((failure) => failure.code), ["composer_unready"]);
+});
+
+test("Desktop Remote retries a transient missing composer instead of failing the queue item", () => {
+  const result = __testInternals.evaluateDesktopPreflight(
+    {
+      found: true,
+      processPath: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.715.4045.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe",
+      windowTitle: "ChatGPT",
+      composerReady: false,
+      reason: "Codex Desktop composer input was not found.",
+      inputName: "",
+      inputSynthetic: false,
+      sendName: "",
+      sendEnabled: true,
+      conversations: []
+    },
+    { target: null }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.retryable, true);
+  assert.deepEqual(result.failures.map((failure) => failure.code), ["composer_unready"]);
+});
+
 test("Desktop Remote recognizes the current bottom Stop button as a running turn", () => {
   const result = __testInternals.evaluateDesktopPreflight(
     {
@@ -87,5 +149,8 @@ test("the Windows desktop probe enumerates the current ChatGPT-hosted Codex wind
   assert.match(source, /Get-Process -Name Codex, ChatGPT/);
   assert.match(source, /OpenAI\.Codex_/);
   assert.match(source, /\$window\.Current\.Name -notin @\("Codex", "ChatGPT"\)/);
-  assert.match(source, /\$windowBounds\.Width \* 0\.55/);
+  assert.match(source, /\$name -and \$name -notin \$fallbackSendNames/);
+  assert.match(source, /Test-RectInsideWindow \$bounds \$windowBounds/);
+  assert.match(source, /\$bounds\.Y -lt \(\$windowBounds\.Y \+ \(\$windowBounds\.Height \* 0\.72\)\)/);
+  assert.match(source, /\$inComposerActionArea = \$button\.bounds\.y -gt/);
 });

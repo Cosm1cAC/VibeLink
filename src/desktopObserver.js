@@ -79,10 +79,34 @@ function findPreviousTranscriptItem(item, previousItems, usedTrackIds, index) {
   return best;
 }
 
-function normalizeVisibleTranscript(items = [], previousItems = []) {
+function rectNumber(bounds = {}, name) {
+  const pascalName = `${name.slice(0, 1).toUpperCase()}${name.slice(1)}`;
+  return Number(bounds?.[name] ?? bounds?.[pascalName] ?? 0);
+}
+
+function rectUsable(bounds = null) {
+  return Boolean(bounds)
+    && Number.isFinite(rectNumber(bounds, "x"))
+    && Number.isFinite(rectNumber(bounds, "y"))
+    && rectNumber(bounds, "width") > 0
+    && rectNumber(bounds, "height") > 0;
+}
+
+function transcriptRightLimit(target = {}) {
+  if (!rectUsable(target.windowBounds) || !rectUsable(target.sendBounds)) return Infinity;
+  const windowY = rectNumber(target.windowBounds, "y");
+  const windowHeight = rectNumber(target.windowBounds, "height");
+  const sendY = rectNumber(target.sendBounds, "y");
+  if (sendY < windowY + windowHeight * 0.82) return Infinity;
+  return rectNumber(target.sendBounds, "x") + rectNumber(target.sendBounds, "width") + 80;
+}
+
+function normalizeVisibleTranscript(items = [], previousItems = [], target = {}) {
   const seen = new Set();
   const result = [];
+  const rightLimit = transcriptRightLimit(target);
   for (const [index, item] of items.entries()) {
+    if (rectUsable(item?.bounds) && rectNumber(item.bounds, "x") > rightLimit) continue;
     const text = compactText(item?.text);
     if (!text) continue;
     const role = item.role === "user" || item.role === "assistant" || item.role === "error" ? item.role : "system";
@@ -113,7 +137,7 @@ export function normalizeDesktopTarget(result, previousTranscript = []) {
   const target = result?.target || {};
   const conversations = Array.isArray(target.sidebarConversations) ? target.sidebarConversations : [];
   const projects = Array.isArray(target.sidebarProjects) ? target.sidebarProjects : [];
-  const visibleTranscript = normalizeVisibleTranscript(target.visibleTranscript, previousTranscript);
+  const visibleTranscript = normalizeVisibleTranscript(target.visibleTranscript, previousTranscript, target);
   const visibleTranscriptHash = crypto
     .createHash("sha1")
     .update(visibleTranscript.map((item) => `${item.trackId || item.id}:${item.role}:${item.text}`).join("\n"))

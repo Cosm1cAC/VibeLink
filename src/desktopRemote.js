@@ -2,10 +2,12 @@ import crypto from "node:crypto";
 import { focusCodexDesktopConversation, getCodexDesktopStatus, probeCodexDesktopDraft, restoreCodexDesktopWindow, sendToCodexDesktop } from "./codexDesktopControl.js";
 import { listDesktopRemoteQueue, recordDesktopObservation, upsertDesktopRemoteQueueItem } from "./db.js";
 import { normalizeDesktopTarget } from "./desktopObserver.js";
+import { resolveDesktopHistoryTranscript } from "./desktopRemoteHistory.js";
+import { getHistory, listHistories } from "./history.js";
 
 const MAX_ITEMS = 120;
 const queue = listDesktopRemoteQueue({ limit: MAX_ITEMS }).map(restoreQueueItem);
-const STATUS_CACHE_MS = 1500;
+const STATUS_CACHE_MS = 30_000;
 const RETRY_MS = 2500;
 const POST_SEND_VERIFY_ATTEMPTS = 5;
 const POST_SEND_VERIFY_MS = 1100;
@@ -71,6 +73,23 @@ function isCodexDesktopWindowTitle(windowTitle, processPath) {
 function isCodexDesktopIdentity(desktop) {
   return isCodexDesktopProcessPath(desktop?.processPath)
     && isCodexDesktopWindowTitle(desktop?.windowTitle, desktop?.processPath);
+}
+
+function attachStructuredHistory(desktop) {
+  const historyMatch = resolveDesktopHistoryTranscript({
+    desktop,
+    histories: listHistories(),
+    getHistory,
+    workspacePath: process.cwd()
+  });
+  if (historyMatch?.transcript?.length) {
+    desktop.visibleTranscript = historyMatch.transcript;
+    desktop.visibleTranscriptCount = historyMatch.transcript.length;
+    desktop.visibleTranscriptSource = historyMatch.source;
+    desktop.visibleTranscriptSessionId = historyMatch.sessionId;
+    desktop.visibleTranscriptTitle = historyMatch.title;
+  }
+  return desktop;
 }
 
 function summarizeDesktop(result) {
@@ -606,7 +625,7 @@ export function enqueueDesktopRemoteMessage(text, options = {}) {
 }
 
 export async function getDesktopRemoteState({ fresh = false } = {}) {
-  const desktop = await refreshDesktopStatus(fresh);
+  const desktop = attachStructuredHistory({ ...(await refreshDesktopStatus(fresh)) });
   return {
     ok: true,
     mode: "desktop-remote",

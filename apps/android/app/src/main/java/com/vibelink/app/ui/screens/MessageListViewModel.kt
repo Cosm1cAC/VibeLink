@@ -46,6 +46,13 @@ private fun messageOperationKey(message: ChatMessage): String = when {
 
 object DesktopRemoteLoadPolicy {
     fun freshObservation(manualRefresh: Boolean): Boolean = manualRefresh
+    fun shouldReload(sameConversation: Boolean, isDesktopRemote: Boolean): Boolean =
+        !sameConversation || isDesktopRemote
+}
+
+object DesktopRemoteMessagePolicy {
+    fun displayedMessages(transcript: List<ChatMessage>, status: ChatMessage): List<ChatMessage> =
+        transcript.ifEmpty { listOf(status) }
 }
 
 class MessageListViewModel : ViewModel() {
@@ -180,7 +187,8 @@ class MessageListViewModel : ViewModel() {
     }
 
     fun ensureConversationLoaded(apiClient: ApiClient, conversation: ConversationItem) {
-        if (activeConversation?.key == conversation.key) return
+        val sameConversation = activeConversation?.key == conversation.key
+        if (!DesktopRemoteLoadPolicy.shouldReload(sameConversation, AgentDrawerPolicy.isRemoteConversation(conversation))) return
         loadConversation(apiClient, conversation)
     }
 
@@ -519,12 +527,8 @@ class MessageListViewModel : ViewModel() {
         }
         _title.value = desktop?.windowTitle?.ifBlank { _title.value } ?: _title.value.ifBlank { "Codex Desktop Remote" }
         val transcriptMessages = messagesFromDesktopTranscript(desktop?.visibleTranscript.orEmpty())
-        val queueMessages = state.items.takeLast(6).map { item ->
-            val suffix = if (item.error.isNotBlank()) ": ${item.error}" else ""
-            ChatMessage(role = "system", text = "Remote queue ${item.status}$suffix")
-        }
         val statusMessage = ChatMessage(role = "system", text = notice.ifBlank { _remoteStatus.value })
-        _messages.value = (transcriptMessages + queueMessages).ifEmpty { listOf(statusMessage) }
+        _messages.value = DesktopRemoteMessagePolicy.displayedMessages(transcriptMessages, statusMessage)
     }
 
     private suspend fun createOrResumeTask(

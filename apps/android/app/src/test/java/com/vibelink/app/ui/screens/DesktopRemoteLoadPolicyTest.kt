@@ -14,4 +14,10 @@ class DesktopRemoteLoadPolicyTest {
     fun requestsFreshObservationForExplicitRefresh() {
         assertTrue(DesktopRemoteLoadPolicy.freshObservation(manualRefresh = true))
     }
+
+    @Test
+    fun reloadsRemoteHistoryWhenReturningToTheSameConversation() {
+        assertTrue(DesktopRemoteLoadPolicy.shouldReload(sameConversation = true, isDesktopRemote = true))
+        assertFalse(DesktopRemoteLoadPolicy.shouldReload(sameConversation = true, isDesktopRemote = false))
+    }
 }

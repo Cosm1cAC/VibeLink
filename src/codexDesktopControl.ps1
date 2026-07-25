@@ -153,8 +153,39 @@ function Test-RectInsideWindow($bounds, $windowBounds) {
     ($bounds.Y + $bounds.Height) -le ($windowBounds.Y + $windowBounds.Height)
 }
 
+function Test-IsEmbeddedDocumentElement($element) {
+  if ($null -eq $element) { return $false }
+  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  $ancestor = $element
+  $documentCount = 0
+  for ($ancestorIndex = 0; $ancestorIndex -lt 14; $ancestorIndex++) {
+    $ancestor = $walker.GetParent($ancestor)
+    if ($null -eq $ancestor) { break }
+    $controlType = [string]$ancestor.Current.ControlType.ProgrammaticName
+    $className = ([string]$ancestor.Current.ClassName).ToLowerInvariant()
+    if ($controlType -eq "ControlType.Document") { $documentCount++ }
+    if ($className -match "iframe|web-office|wps-|wo-") { return $true }
+    if ($documentCount -gt 1) { return $true }
+  }
+  return $false
+}
+
+function Find-ThreadContainerForElement($element) {
+  if ($null -eq $element) { return $null }
+  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  $ancestor = $element
+  for ($ancestorIndex = 0; $ancestorIndex -lt 16; $ancestorIndex++) {
+    $ancestor = $walker.GetParent($ancestor)
+    if ($null -eq $ancestor) { break }
+    $className = ([string]$ancestor.Current.ClassName).ToLowerInvariant()
+    if ($className -like "*thread-scroll-container*") { return $ancestor }
+  }
+  return $null
+}
+
 function Test-IsComposerSendCandidate($element) {
   if ($null -eq $element) { return $false }
+  if (Test-IsEmbeddedDocumentElement $element) { return $false }
   $bounds = $element.Current.BoundingRectangle
   $name = ([string]$element.Current.Name).Trim()
   if ($bounds.Width -lt 25 -or $bounds.Height -lt 25) { return $false }
@@ -200,6 +231,7 @@ function Find-DescendantByControlTypeAndName($root, $controlType, $names) {
   for ($i = 0; $i -lt $items.Count; $i++) {
     $element = $items.Item($i)
     if (Test-IsOwnRemoteElement $element) { continue }
+    if (Test-IsEmbeddedDocumentElement $element) { continue }
     foreach ($name in $names) {
       if ($element.Current.Name -eq $name) { return $element }
     }
@@ -628,10 +660,29 @@ function Get-VisibleTranscript($window, [int]$limit = 80) {
   $windowBounds = $window.Current.BoundingRectangle
   if (-not (Test-RectUsable $windowBounds)) { return @() }
 
-  $items = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-  $leftLimit = $windowBounds.X + ($windowBounds.Width * 0.36)
-  $topLimit = $windowBounds.Y + 65
-  $bottomLimit = $windowBounds.Y + ($windowBounds.Height * 0.86)
+  $leftLimit = $windowBounds.X
+  $rightLimit = $windowBounds.X + $windowBounds.Width
+  $bottomAction = Find-BottomActionButton $window "right"
+  $transcriptRoot = $window
+  if ($null -ne $bottomAction) {
+    $actionBounds = $bottomAction.Current.BoundingRectangle
+    if (Test-RectUsable $actionBounds) {
+      $rightLimit = $actionBounds.X + $actionBounds.Width + 80
+      $threadContainer = Find-ThreadContainerForElement $bottomAction
+      if ($null -ne $threadContainer) { $transcriptRoot = $threadContainer }
+      $leftAction = Find-ComposerLeftButton $window $bottomAction
+      if ($null -ne $leftAction) {
+        $leftActionBounds = $leftAction.Current.BoundingRectangle
+        if (Test-RectUsable $leftActionBounds) {
+          $leftLimit = [Math]::Max($windowBounds.X, $leftActionBounds.X - 80)
+        }
+      }
+    }
+  }
+  $rootBounds = $transcriptRoot.Current.BoundingRectangle
+  $items = $transcriptRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+  $topLimit = $rootBounds.Y
+  $bottomLimit = if ($null -ne $bottomAction) { $bottomAction.Current.BoundingRectangle.Y - 20 } else { $rootBounds.Y + ($rootBounds.Height * 0.90) }
   $candidates = @()
   $allowedControlTypes = @(
     "ControlType.Text",
@@ -646,13 +697,14 @@ function Get-VisibleTranscript($window, [int]$limit = 80) {
     $bounds = $element.Current.BoundingRectangle
     if (-not (Test-RectUsable $bounds)) { continue }
     if ($bounds.X -lt $leftLimit) { continue }
+    if ($bounds.X -gt $rightLimit) { continue }
     if ($bounds.Y -lt $topLimit -or $bounds.Y -gt $bottomLimit) { continue }
     if ($bounds.Width -lt 20 -or $bounds.Height -lt 8) { continue }
 
     $controlType = ""
     try { $controlType = [string]$element.Current.ControlType.ProgrammaticName } catch {}
     if (-not ($allowedControlTypes -contains $controlType)) { continue }
-    if ($controlType -eq "ControlType.Edit" -and $bounds.Y -gt ($windowBounds.Y + ($windowBounds.Height * 0.78))) { continue }
+    if ($controlType -eq "ControlType.Edit" -and $bounds.Y -gt ($rootBounds.Y + ($rootBounds.Height * 0.78))) { continue }
 
     $name = ([string]$element.Current.Name).Trim()
     $value = Read-Value $element
@@ -663,7 +715,7 @@ function Get-VisibleTranscript($window, [int]$limit = 80) {
     if ($text -like "*$remoteComposerName*") { continue }
 
     $role = "system"
-    if ($bounds.X -gt ($windowBounds.X + ($windowBounds.Width * 0.70))) { $role = "user" }
+    if ($bounds.X -gt ($leftLimit + (($rightLimit - $leftLimit) * 0.70))) { $role = "user" }
     elseif ($controlType -eq "ControlType.Button" -or $text -match "^(Tool|Command|Patch|Apply|Run|Bash|Shell|Error|Exited|Starting)") { $role = "system" }
     else { $role = "assistant" }
 

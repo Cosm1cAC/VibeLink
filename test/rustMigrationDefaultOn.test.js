@@ -316,14 +316,33 @@ test("ownership manifest, OpenAPI, and runtime registry have no bidirectional ro
   assert.equal(readiness.blockerIds.includes("ownership-runtime-registry-diff"), false);
 });
 
-test("rust-only acceptance reports missing Web and Android E2E evidence per family", () => {
+test("rust-only acceptance reports remaining Web and Android E2E evidence per family", () => {
   const readiness = nodeRuntimeReadiness(manifest);
   const blocker = readiness.blockers.find((item) => item.id === "ownership-rust-only-e2e-incomplete");
 
   assert.ok(blocker);
-  assert.ok(blocker.nodeEntries.includes("reviews:web: missing"));
-  assert.ok(blocker.nodeEntries.includes("reviews:android: missing"));
+  assert.ok(blocker.nodeEntries.includes("browser-sessions:web: missing"));
+  assert.ok(blocker.nodeEntries.includes("browser-sessions:android: missing"));
   assert.equal(blocker.nodeEntries.some((entry) => entry.startsWith("discovery:")), false);
+});
+
+test("reviews have Rust local-session routes and E2E but remain blocked until remote helpers move", () => {
+  const ownership = JSON.parse(fs.readFileSync(new URL("../docs/route-ownership.json", import.meta.url), "utf8"));
+  const family = ownership.publicRouteFamilies.find((item) => item.id === "reviews");
+  const readiness = nodeRuntimeReadiness(manifest);
+
+  assert.equal(family.owner, "node");
+  assert.equal(family.status, "in-progress");
+  assert.equal(family.rustRuntimeRegistry, true);
+  assert.deepEqual(family.rustOnlyE2E, {
+    web: ["test/rustOnlyDiscoveryE2e.test.js"],
+    android: [
+      "apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt",
+      "apps/android/app/src/androidTest/java/com/vibelink/app/network/RustOnlyReviewDeviceE2eTest.kt"
+    ]
+  });
+  assert.ok(readiness.blockerIds.includes("ownership-reviews-not-rust-owned"));
+  assert.equal(readiness.blockerIds.includes("ownership-reviews-missing-rust-runtime"), false);
 });
 
 test("ownership comparison treats OpenAPI and runtime path parameters as the same route", () => {

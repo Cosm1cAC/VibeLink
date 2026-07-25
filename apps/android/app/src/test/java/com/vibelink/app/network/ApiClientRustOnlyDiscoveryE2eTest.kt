@@ -41,6 +41,8 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         val eventAcks = client.listEventAcks("task")
         val cloudflareGuide = client.getCloudflareGuide()
         val pushSubscriptions = client.listPushSubscriptions("native")
+        val review = client.createReview(ReviewCreateRequest("workspace", "feature/android-review", "Android Rust-only review"))
+        val reviews = client.listReviews()
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
@@ -70,6 +72,8 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals(false, cloudflareGuide.publicHost)
         assertEquals(true, cloudflareGuide.steps.isNotEmpty())
         assertEquals(true, pushSubscriptions.any { it.kind == "native" })
+        assertEquals("Android Rust-only review", review.title)
+        assertEquals(true, reviews.any { it.id == review.id })
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->

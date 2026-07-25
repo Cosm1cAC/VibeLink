@@ -188,7 +188,20 @@
         "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
       }
     },
-    { "id": "reviews", "owner": "node", "status": "node-owned", "prefixes": ["/api/reviews"] },
+    {
+      "id": "reviews",
+      "owner": "node",
+      "status": "in-progress",
+      "rustRuntimeRegistry": true,
+      "prefixes": ["/api/reviews"],
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": [
+          "apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt",
+          "apps/android/app/src/androidTest/java/com/vibelink/app/network/RustOnlyReviewDeviceE2eTest.kt"
+        ]
+      }
+    },
     {
       "id": "audit",
       "owner": "rust",

@@ -23,6 +23,10 @@ use crate::pairing_http::{
 };
 use crate::provider_http::{route_provider_request, ProviderRouteConfig};
 use crate::push_http::{push_request_requires_body, route_push_request, PushRouteConfig};
+use crate::review_http::{
+    review_request_requires_body, route_review_request, route_review_request_with_body,
+    ReviewRouteConfig,
+};
 use crate::settings_http::{
     route_settings_request, route_settings_request_with_body, settings_request_requires_body,
     SettingsRouteConfig,
@@ -75,6 +79,7 @@ pub struct FrontdoorRoutes {
     file: Option<FileRouteConfig>,
     cloudflare: Option<CloudflareRouteConfig>,
     push: Option<PushRouteConfig>,
+    review: Option<ReviewRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -178,6 +183,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_review(mut self, route: Option<ReviewRouteConfig>) -> Self {
+        self.review = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -199,6 +209,7 @@ impl FrontdoorRoutes {
             && self.file.is_none()
             && self.cloudflare.is_none()
             && self.push.is_none()
+            && self.review.is_none()
     }
 }
 
@@ -385,6 +396,30 @@ fn handle_connection_with_upstream(
                 Err(error) => {
                     provider_route.record_fallback();
                     eprintln!("Rust Provider route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(review_route) = routes.review.as_ref() {
+            let body = if review_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let result = if let Some(body) = body.as_deref() {
+                route_review_request_with_body(&request, body, review_route)
+            } else {
+                route_review_request(&request, review_route)
+            };
+            match result {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Review route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Review request failed.")
+                        .write_to(&mut client);
                 }
             }
         }

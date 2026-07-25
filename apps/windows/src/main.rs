@@ -31,6 +31,7 @@ mod pairing_http;
 mod provider_http;
 mod public_tunnel;
 mod push_http;
+mod review_http;
 mod settings_contract;
 mod settings_credentials;
 mod settings_http;
@@ -484,6 +485,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         route_data_dir.clone(),
         root.to_path_buf(),
     ));
+    let review_route = Some(review_http::ReviewRouteConfig::new(route_data_dir.clone()));
     let file_route = Some(file_http::FileRouteConfig::new(route_data_dir.clone()));
     let workspace_route = rust_workspace_http_enabled(cli)
         .then(|| workspace_http::WorkspaceRouteConfig::new(route_data_dir.clone()));
@@ -527,6 +529,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_discovery(discovery_route)
         .with_cloudflare(cloudflare_route)
         .with_push(push_route)
+        .with_review(review_route)
         .with_file(file_route)
         .with_static(Some(static_route));
     let routes = routes.with_workspace(workspace_route);
@@ -604,6 +607,7 @@ fn run_rust_only_http(cli: &Cli, data_dir: Option<PathBuf>) -> Result<()> {
             data_dir.clone(),
             root.clone(),
         )))
+        .with_review(Some(review_http::ReviewRouteConfig::new(data_dir.clone())))
         .with_file(Some(file_http::FileRouteConfig::new(data_dir.clone())))
         .with_static(Some(static_http::StaticRouteConfig::new(root)))
         .with_workspace(Some(workspace_http::WorkspaceRouteConfig::new(data_dir)));

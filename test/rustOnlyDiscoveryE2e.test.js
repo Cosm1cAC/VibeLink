@@ -158,6 +158,20 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   const workspaces = await workspacesResponse.json();
   assert.deepEqual(workspaces.items.map((workspace) => workspace.id), ["workspace"]);
 
+  const reviewCreateResponse = await fetch(`http://127.0.0.1:${port}/api/reviews`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ workspaceId: "workspace", branch: "feature/rust-review", title: "Rust-only review" })
+  });
+  assert.equal(reviewCreateResponse.status, 201);
+  assert.equal(reviewCreateResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const review = await reviewCreateResponse.json();
+  assert.equal(review.source, "local");
+  const reviewListResponse = await fetch(`http://127.0.0.1:${port}/api/reviews`, { headers });
+  assert.equal(reviewListResponse.status, 200);
+  assert.equal(reviewListResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.ok((await reviewListResponse.json()).items.some((item) => item.id === review.id));
+
   for (const [family, route] of [
     ["histories", "/api/histories"],
     ["search", "/api/search?q=rust-only&record=0"],

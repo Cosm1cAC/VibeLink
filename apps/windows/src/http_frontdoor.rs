@@ -22,7 +22,7 @@ use crate::pairing_http::{
     PairingRouteConfig,
 };
 use crate::provider_http::{route_provider_request, ProviderRouteConfig};
-use crate::push_http::{route_push_read_request, PushRouteConfig};
+use crate::push_http::{push_request_requires_body, route_push_request, PushRouteConfig};
 use crate::settings_http::{
     route_settings_request, route_settings_request_with_body, settings_request_requires_body,
     SettingsRouteConfig,
@@ -411,10 +411,28 @@ fn handle_connection_with_upstream(
             }
         }
         if let Some(push_route) = routes.push.as_ref() {
-            match route_push_read_request(&request, push_route) {
+            let body = if push_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            let rust_owned_mutation = body.is_some()
+                || request.method == "DELETE"
+                    && request.path().starts_with("/api/push/subscriptions/");
+            match route_push_request(&request, &peer_ip, body.as_deref(), push_route) {
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
-                Err(error) => eprintln!("Rust Push read route falling back to Node: {error:#}"),
+                Err(error) => {
+                    if rust_owned_mutation {
+                        eprintln!("Rust Push mutation failed after ownership: {error:#}");
+                        return HttpRouteResponse::error(500, "Push mutation failed.")
+                            .write_to(&mut client);
+                    }
+                    eprintln!("Rust Push route falling back to Node: {error:#}");
+                }
             }
         }
         if let Some(artifact_route) = routes.artifact.as_ref() {

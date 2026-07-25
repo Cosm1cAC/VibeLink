@@ -249,15 +249,14 @@
     },
     {
       "id": "push",
-      "owner": "node",
-      "status": "node-owned",
+      "owner": "rust",
+      "status": "default-on",
+      "rustRuntimeRegistry": true,
       "prefixes": ["/api/push"],
-      "rustReadRoutes": ["GET /api/push/public-key", "GET /api/push/subscriptions"],
-      "remainingNodeRoutes": [
-        "POST /api/push/subscriptions",
-        "DELETE /api/push/subscriptions/:id",
-        "POST /api/push/native-token"
-      ]
+      "rustOnlyE2E": {
+        "web": ["test/rustOnlyDiscoveryE2e.test.js"],
+        "android": ["apps/android/app/src/test/java/com/vibelink/app/network/ApiClientRustOnlyDiscoveryE2eTest.kt"]
+      }
     },
     {
       "id": "attachments",

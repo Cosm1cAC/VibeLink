@@ -1,8 +1,10 @@
 package com.vibelink.app.network
 
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.junit.Assume.assumeTrue
 import java.net.URLEncoder
 import kotlin.test.Test
@@ -38,7 +40,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         val threadState = client.getThreadState()
         val eventAcks = client.listEventAcks("task")
         val cloudflareGuide = client.getCloudflareGuide()
-        val pushSubscriptions = client.listPushSubscriptions()
+        val pushSubscriptions = client.listPushSubscriptions("native")
 
         assertEquals("skill:e2e", command.id)
         assertEquals("/skill e2e", command.name)
@@ -67,7 +69,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         assertEquals("127.0.0.1", cloudflareGuide.host)
         assertEquals(false, cloudflareGuide.publicHost)
         assertEquals(true, cloudflareGuide.steps.isNotEmpty())
-        assertEquals(0, pushSubscriptions.size)
+        assertEquals(true, pushSubscriptions.any { it.kind == "native" })
 
         val request = Request.Builder().url("$baseUrl/api/openapi.json").build()
         OkHttpClient().newCall(request).execute().use { response ->
@@ -86,6 +88,48 @@ class ApiClientRustOnlyDiscoveryE2eTest {
             assertEquals(200, response.code)
             assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
             assertContains(response.body!!.string(), "\"publicKey\":\"push-key\"")
+        }
+        val jsonMediaType = "application/json".toMediaType()
+        val pushRegisterRequest = Request.Builder()
+            .url("$baseUrl/api/push/subscriptions")
+            .header("Authorization", "Bearer $token")
+            .post("""{"subscription":{"endpoint":"https://push.example/android-e2e","keys":{"p256dh":"key"}}}""".toRequestBody(jsonMediaType))
+            .build()
+        val registeredPushId = authenticatedClient.newCall(pushRegisterRequest).execute().use { response ->
+            assertEquals(201, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            val body = response.body!!.string()
+            assertContains(body, "\"ok\":true")
+            Regex(""""id":"([^"]+)"""").find(body)!!.groupValues[1]
+        }
+        val nativePushRequest = Request.Builder()
+            .url("$baseUrl/api/push/native-token")
+            .header("Authorization", "Bearer $token")
+            .post("""{"provider":"fcm","token":"native-token-android-e2e","platform":"android","appId":"app","installationId":"install"}""".toRequestBody(jsonMediaType))
+            .build()
+        authenticatedClient.newCall(nativePushRequest).execute().use { response ->
+            assertEquals(201, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"kind\":\"native\"")
+        }
+        val nativePushListRequest = Request.Builder()
+            .url("$baseUrl/api/push/subscriptions?kind=native")
+            .header("Authorization", "Bearer $token")
+            .build()
+        authenticatedClient.newCall(nativePushListRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"kind\":\"native\"")
+        }
+        val pushDeleteRequest = Request.Builder()
+            .url("$baseUrl/api/push/subscriptions/$registeredPushId")
+            .header("Authorization", "Bearer $token")
+            .delete()
+            .build()
+        authenticatedClient.newCall(pushDeleteRequest).execute().use { response ->
+            assertEquals(200, response.code)
+            assertEquals("rust", response.header("X-VibeLink-Control-Plane"))
+            assertContains(response.body!!.string(), "\"ok\":true")
         }
         val toolRunsRequest = Request.Builder()
             .url("$baseUrl/api/tool-runs")

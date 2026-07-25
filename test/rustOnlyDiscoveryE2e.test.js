@@ -216,6 +216,35 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(pushListResponse.status, 200);
   assert.equal(pushListResponse.headers.get("x-vibelink-control-plane"), "rust");
   assert.deepEqual((await pushListResponse.json()).items, []);
+  const pushRegisterResponse = await fetch(`http://127.0.0.1:${port}/api/push/subscriptions`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ subscription: { endpoint: "https://push.example/e2e", keys: { p256dh: "key" } } })
+  });
+  assert.equal(pushRegisterResponse.status, 201);
+  assert.equal(pushRegisterResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const pushSubscription = await pushRegisterResponse.json();
+  assert.equal(pushSubscription.ok, true);
+  assert.equal(pushSubscription.subscription.kind, "web");
+  const nativePushResponse = await fetch(`http://127.0.0.1:${port}/api/push/native-token`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ provider: "fcm", token: "native-token-e2e", platform: "android", appId: "app", installationId: "install" })
+  });
+  assert.equal(nativePushResponse.status, 201);
+  assert.equal(nativePushResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal((await nativePushResponse.json()).subscription.kind, "native");
+  const nativePushListResponse = await fetch(`http://127.0.0.1:${port}/api/push/subscriptions?kind=native`, { headers });
+  assert.equal(nativePushListResponse.status, 200);
+  assert.equal(nativePushListResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal((await nativePushListResponse.json()).items.length, 1);
+  const pushDeleteResponse = await fetch(`http://127.0.0.1:${port}/api/push/subscriptions/${encodeURIComponent(pushSubscription.subscription.id)}`, {
+    method: "DELETE",
+    headers
+  });
+  assert.equal(pushDeleteResponse.status, 200);
+  assert.equal(pushDeleteResponse.headers.get("x-vibelink-control-plane"), "rust");
+  assert.equal((await pushDeleteResponse.json()).ok, true);
 
   const toolsResponse = await waitFor(`http://127.0.0.1:${port}/api/tool-registry`, { headers });
   assert.equal(toolsResponse.status, 200);

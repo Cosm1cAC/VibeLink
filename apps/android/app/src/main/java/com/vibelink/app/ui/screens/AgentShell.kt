@@ -120,8 +120,8 @@ object AgentDrawerPolicy {
             .filterNot { it.archived }
             .filter { item ->
                 when (space) {
-                    ConversationSpace.Remote -> item.kind == "desktop"
-                    ConversationSpace.Agent -> item.kind != "desktop"
+                    ConversationSpace.Remote -> item.kind == "desktop" || item.desktopLinked
+                    ConversationSpace.Agent -> item.kind != "desktop" && !item.desktopLinked
                 }
             }
             .filter { item ->

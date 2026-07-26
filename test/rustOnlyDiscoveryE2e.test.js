@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,6 +14,19 @@ import { rustBinaryIsCurrent } from "./rustTestSupport.js";
 const root = path.resolve(import.meta.dirname, "..");
 const sourceRoot = path.join(root, "apps", "windows", "src");
 const binary = path.join(root, "apps", "windows", "target", "debug", process.platform === "win32" ? "vibelink.exe" : "vibelink");
+const nativeFetch = globalThis.fetch;
+const checkpointPath = process.env.VIBELINK_RUST_ONLY_E2E_CHECKPOINT || "";
+
+function checkpoint(stage) {
+  if (checkpointPath) fs.writeFileSync(checkpointPath, `${new Date().toISOString()} ${stage}\n`);
+}
+
+function fetch(input, init = {}) {
+  return nativeFetch(input, {
+    ...init,
+    signal: init.signal || AbortSignal.timeout(15_000)
+  });
+}
 
 async function waitFor(url, options) {
   const deadline = Date.now() + 15_000;
@@ -36,6 +50,7 @@ function descendantNodeProcesses(pid) {
 }
 
 test("Web and Android consume Rust-owned discovery without a Node backend", { timeout: 300_000 }, async (t) => {
+  checkpoint("test-start");
   const cargo = process.env.CARGO || path.join(os.homedir(), ".cargo", "bin", process.platform === "win32" ? "cargo.exe" : "cargo");
   if (!fs.existsSync(cargo)) return t.skip("cargo is not available");
   if (!rustBinaryIsCurrent(binary, sourceRoot)) {
@@ -48,7 +63,15 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   }
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-rust-only-discovery-"));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const browserFixture = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    response.end("Rust-only browser fixture");
+  });
+  await new Promise((resolve, reject) => {
+    browserFixture.once("error", reject);
+    browserFixture.listen(0, "127.0.0.1", resolve);
+  });
+  const browserFixturePort = browserFixture.address().port;
   const workspaceDir = path.join(directory, "workspace");
   const artifactId = "11111111-1111-4111-8111-111111111111.txt";
   fs.mkdirSync(path.join(directory, "home", ".vibelink", "skills", "e2e"), { recursive: true });
@@ -83,13 +106,28 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   let logs = "";
   child.stdout.on("data", (chunk) => { logs += chunk; });
   child.stderr.on("data", (chunk) => { logs += chunk; });
-  t.after(() => {
-    if (child.exitCode !== null) return;
-    if (process.platform === "win32") {
-      spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-    } else {
-      child.kill("SIGTERM");
+  t.after(async () => {
+    checkpoint("cleanup-start");
+    if (child.exitCode === null) {
+      if (process.platform === "win32") {
+        spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      } else {
+        child.kill("SIGTERM");
+      }
+      await Promise.race([
+        new Promise((resolve) => child.once("exit", resolve)),
+        new Promise((resolve) => setTimeout(resolve, 5_000))
+      ]);
     }
+    checkpoint("cleanup-child-complete");
+    browserFixture.closeAllConnections();
+    await Promise.race([
+      new Promise((resolve) => browserFixture.close(resolve)),
+      new Promise((resolve) => setTimeout(resolve, 5_000))
+    ]);
+    checkpoint("cleanup-fixture-complete");
+    fs.rmSync(directory, { recursive: true, force: true });
+    checkpoint("cleanup-complete");
   });
 
   const startupDeadline = Date.now() + 15_000;
@@ -101,6 +139,7 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     if (port === 0) await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(port > 0, `Rust-only discovery server did not become ready.\n${logs}`);
+  checkpoint("server-ready");
   const openApiResponse = await fetch(`http://127.0.0.1:${port}/api/openapi.json`);
   assert.equal(openApiResponse.status, 200);
   assert.equal(openApiResponse.headers.get("x-vibelink-control-plane"), "rust");
@@ -139,6 +178,7 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   const devices = await devicesResponse.json();
   assert.equal(devices.currentDeviceId, "device");
   assert.deepEqual(devices.items.map((device) => device.id), ["device"]);
+  checkpoint("core-routes-complete");
 
   const settingsResponse = await fetch(`http://127.0.0.1:${port}/api/settings/export`, { headers });
   const settingsText = await settingsResponse.text();
@@ -311,10 +351,21 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   const liveSession = JSON.parse(liveCreateBody).session;
   const audioMessages = await new Promise((resolve, reject) => {
     const received = [];
-    const timeout = setTimeout(() => reject(new Error(`Rust Live Call WebSocket timed out: ${JSON.stringify(received)}\n${logs}`)), 15_000);
+    let settled = false;
     const socket = new WebSocket(`ws://127.0.0.1:${port}/api/live-calls/${encodeURIComponent(liveSession.id)}/audio`, {
       headers: { Authorization: "Bearer device-token" }
     });
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+      if (error) reject(error);
+      else resolve(received);
+    };
+    const timeout = setTimeout(() => {
+      finish(new Error(`Rust Live Call WebSocket timed out: ${JSON.stringify(received)}\n${logs}`));
+    }, 15_000);
     socket.on("open", () => socket.send(JSON.stringify({ sampleRate: 16000, channels: 1, encoding: "pcm16le", device: "remote" })));
     socket.on("message", (raw) => {
       const message = JSON.parse(raw.toString());
@@ -325,13 +376,12 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
         socket.send(JSON.stringify({ type: "flush" }));
       } else if (message.type === "flushed") {
         socket.send(JSON.stringify({ type: "stop" }));
+      } else if (message.type === "stopped") {
+        finish();
       }
     });
-    socket.on("error", reject);
-    socket.on("close", () => {
-      clearTimeout(timeout);
-      resolve(received);
-    });
+    socket.on("error", finish);
+    socket.on("close", () => finish());
   });
   assert.ok(audioMessages.some((message) => message.type === "ready"));
   assert.ok(audioMessages.some((message) => message.type === "ack" && message.seq === 20 && message.bytes === 6400));
@@ -345,6 +395,7 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   const pcmFiles = fs.readdirSync(path.join(directory, "live-call", "pcm")).filter((name) => name.endsWith(".pcm"));
   assert.equal(pcmFiles.length, 1);
   assert.equal(fs.statSync(path.join(directory, "live-call", "pcm", pcmFiles[0])).size, 6400);
+  checkpoint("live-call-complete");
 
   for (const [family, route] of [
     ["doubao", "/api/doubao/status"],
@@ -371,6 +422,7 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(browserTraceResponse.status, 200);
   assert.equal(browserTraceResponse.headers.get("x-vibelink-control-plane"), "rust");
   assert.equal((await browserTraceResponse.json()).hasMore, false);
+  checkpoint("browser-session-complete");
 
   for (const [family, route] of [
     ["capabilities", "/api/capabilities/automations"],
@@ -381,15 +433,24 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     const response = await fetch(`http://127.0.0.1:${port}${route}`, {
       method: family === "capabilities" ? "GET" : "POST",
       headers: { ...headers, "content-type": "application/json" },
-      body: family === "capabilities" ? undefined : JSON.stringify({ url: "https://example.test", prompt: "rust-only" })
+      body: family === "capabilities" ? undefined : JSON.stringify({
+        url: `http://127.0.0.1:${browserFixturePort}/fixture`,
+        prompt: "rust-only"
+      })
     });
     const body = await response.text();
     assert.ok(response.status === 200 || response.status === 201, `${family}: ${body}\n${logs}`);
     assert.equal(response.headers.get("x-vibelink-control-plane"), "rust", family);
+    checkpoint(`family-${family}-complete`);
   }
+  checkpoint("process-tree-check-start");
   assert.deepEqual(descendantNodeProcesses(child.pid), []);
+  checkpoint("process-tree-check-complete");
 
-  if (process.env.VIBELINK_RUST_ONLY_E2E_SKIP_ANDROID === "1") return;
+  if (process.env.VIBELINK_RUST_ONLY_E2E_SKIP_ANDROID === "1") {
+    checkpoint("test-return-web-only");
+    return;
+  }
 
   const gradleCommand = process.platform === "win32" ? "cmd.exe" : "./gradlew";
   const gradleArgs = process.platform === "win32"
@@ -401,7 +462,8 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
       ...process.env,
       VIBELINK_RUST_ONLY_E2E_URL: `http://127.0.0.1:${port}`,
       VIBELINK_RUST_ONLY_E2E_TOKEN: "device-token",
-      VIBELINK_RUST_ONLY_E2E_FILE: path.join(workspaceDir, "download.txt")
+      VIBELINK_RUST_ONLY_E2E_FILE: path.join(workspaceDir, "download.txt"),
+      VIBELINK_RUST_ONLY_E2E_BROWSER_URL: `http://127.0.0.1:${browserFixturePort}/android-fixture`
     },
     encoding: "utf8",
     windowsHide: true,

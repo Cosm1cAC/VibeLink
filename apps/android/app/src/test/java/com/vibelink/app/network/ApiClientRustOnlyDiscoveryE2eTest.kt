@@ -190,7 +190,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
             "/api/agent-reach/status" to "\"channels\":[]",
             "/api/doubao/status" to "\"owner\":\"rust\"",
             "/api/mcp/status" to "\"servers\":[]",
-            "/api/live-calls" to "\"items\":[]",
+            "/api/live-calls" to "\"owner\":\"rust\"",
             "/api/browser-sessions" to "\"items\":[]",
             "/api/capabilities/automations" to "\"category\":\"automations\"",
             "/api/codex-desktop/status" to "\"owner\":\"rust\"",
@@ -230,7 +230,7 @@ class ApiClientRustOnlyDiscoveryE2eTest {
         listOf(
             "/api/automations" to """{"title":"Rust automation"}""",
             "/api/subagents" to """{"prompt":"Rust subagent"}""",
-            "/api/browser/fetch" to """{"url":"https://example.test"}"""
+            "/api/browser/fetch" to """{"url":"${System.getenv("VIBELINK_RUST_ONLY_E2E_BROWSER_URL")}"}"""
         ).forEach { (path, payload) ->
             val productMutation = Request.Builder()
                 .url("$baseUrl$path")

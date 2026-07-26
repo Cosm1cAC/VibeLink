@@ -919,6 +919,43 @@ fn record_transcript(
         )?;
         let question_id = event["id"].as_str().context("question event id missing")?;
         config.queue_question(session_id, question_id, &text)?;
+        let current = session_by_id(connection, session_id)?.context("live call missing")?;
+        match crate::task_http::create_live_call_task(
+            &config.data_dir,
+            session_id,
+            &text,
+            current["workspaceId"].as_str().unwrap_or(""),
+            input["agent"].as_str().unwrap_or("codex"),
+            input["model"].as_str().unwrap_or(""),
+        ) {
+            Ok(task) => {
+                let task_id = task["id"].as_str().context("Live Call task id missing")?;
+                connection.execute(
+                    "UPDATE live_calls SET agent_task_id=?1 WHERE id=?2",
+                    params![task_id, session_id],
+                )?;
+                insert_event(
+                    connection,
+                    session_id,
+                    "live_call.agent.thinking",
+                    json!({
+                        "question": text, "questionId": question_id,
+                        "questionCursor": event["cursor"], "taskId": task_id
+                    }),
+                )?;
+            }
+            Err(error) => {
+                insert_event(
+                    connection,
+                    session_id,
+                    "live_call.agent.error",
+                    json!({
+                        "question": text, "questionId": question_id,
+                        "questionCursor": event["cursor"], "error": format!("{error:#}")
+                    }),
+                )?;
+            }
+        }
     }
     Ok(HttpRouteResponse::json(
         200,
@@ -1036,6 +1073,17 @@ mod tests {
         .unwrap()
         .unwrap();
 
+        let database = Connection::open(directory.join("mobile-agent.sqlite")).unwrap();
+        let task_count: i64 = database
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(task_count, 1);
+        let task_id: String = database
+            .query_row("SELECT id FROM tasks LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert!(!task_id.is_empty());
+        drop(database);
+
         route_live_call_request(
             &request("POST", &format!("/api/live-calls/{id}/answer")),
             Some(br#"{"text":"The runtime moved to Rust."}"#),
@@ -1075,9 +1123,11 @@ mod tests {
                 "live_call.started",
                 "live_call.transcript.final",
                 "live_call.question.detected",
+                "live_call.agent.thinking",
                 "live_call.agent.done"
             ]
         );
+        assert_eq!(session.body["session"]["agentTaskId"], task_id);
         assert_eq!(restarted.pending_question_count(&id), 0);
         assert_eq!(
             types

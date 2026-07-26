@@ -576,6 +576,36 @@ fn create_queued_task(connection: &mut Connection, payload: &Value) -> Result<Va
     task_by_id(connection, &id)?.ok_or_else(|| anyhow::anyhow!("Created task is missing."))
 }
 
+pub(crate) fn create_live_call_task(
+    data_dir: &Path,
+    session_id: &str,
+    question: &str,
+    workspace_id: &str,
+    agent: &str,
+    model: &str,
+) -> Result<Value> {
+    let mut connection = open_task_db(data_dir)?;
+    let prompt = format!(
+        "You are assisting a live call. Answer the detected question directly and concisely.\n\nQuestion:\n{}",
+        question.trim()
+    );
+    create_queued_task(
+        &mut connection,
+        &json!({
+            "agent": if agent.trim().is_empty() { "codex" } else { agent.trim() },
+            "title": format!("Live Call Q: {}", question.chars().take(60).collect::<String>()),
+            "prompt": prompt,
+            "workspaceId": workspace_id,
+            "mode": "new",
+            "model": model,
+            "reasoningEffort": "low",
+            "permissionMode": "default",
+            "sessionId": session_id,
+            "security": { "networkAccess": false, "sandboxMode": "workspace-write" }
+        }),
+    )
+}
+
 fn task_launch_payload(payload: &Value) -> Value {
     let mut launch_payload = serde_json::Map::new();
     for key in [

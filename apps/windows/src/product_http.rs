@@ -17,24 +17,11 @@ pub const PRODUCT_RUNTIME_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/mcp/status"),
     ("POST", "/api/mcp/probe"),
     ("POST", "/api/mcp/call"),
-    ("GET", "/api/live-calls"),
-    ("POST", "/api/live-calls"),
     ("GET", "/api/live-calls/asr-providers"),
     ("GET", "/api/live-calls/audio-metrics"),
     ("GET", "/api/live-calls/asr-metrics"),
     ("GET", "/api/live-calls/audio-files"),
     ("DELETE", "/api/live-calls/audio-files/:name"),
-    ("GET", "/api/live-calls/:id"),
-    ("POST", "/api/live-calls/:id/stop"),
-    ("POST", "/api/live-calls/:id/pause"),
-    ("POST", "/api/live-calls/:id/resume"),
-    ("POST", "/api/live-calls/:id/level"),
-    ("POST", "/api/live-calls/:id/transcript"),
-    ("POST", "/api/live-calls/:id/answer"),
-    ("GET", "/api/live-calls/:id/asr-checkpoints"),
-    ("POST", "/api/live-calls/:id/asr-recover"),
-    ("GET", "/api/live-calls/:id/events"),
-    ("GET", "/api/live-calls/:id/events/catch-up"),
     ("POST", "/api/codex-app-server/probe"),
     ("GET", "/api/codex-desktop/status"),
     ("POST", "/api/codex-desktop/draft-probe"),
@@ -128,7 +115,6 @@ fn route_authenticated_product_request(request: &ParsedRequest) -> HttpRouteResp
                 "rustSidecar": { "enabled": true, "starts": 0, "failures": 0, "fallbacks": 0 }
             }),
         ),
-        ("GET", "/api/live-calls") => HttpRouteResponse::json(200, json!({ "items": [] })),
         ("GET", "/api/live-calls/asr-providers") => {
             HttpRouteResponse::json(200, json!({ "items": [] }))
         }
@@ -264,25 +250,6 @@ fn route_parameterized_product_request(request: &ParsedRequest) -> HttpRouteResp
     if path.starts_with("/api/automations/") {
         return HttpRouteResponse::json(200, json!({ "ok": true, "owner": "rust" }));
     }
-    if let Some(rest) = path.strip_prefix("/api/live-calls/") {
-        let parts = rest.split('/').collect::<Vec<_>>();
-        if request.method == "GET" && parts.len() == 1 {
-            return HttpRouteResponse::json(200, json!({ "session": live_call(parts[0]) }));
-        }
-        if request.method == "GET" && parts.get(1) == Some(&"events") {
-            return HttpRouteResponse::json(200, json!({ "items": [] }));
-        }
-        if request.method == "GET" && parts.get(1) == Some(&"asr-checkpoints") {
-            return HttpRouteResponse::json(200, json!({ "items": [] }));
-        }
-        if request.method == "GET"
-            && parts.get(1) == Some(&"events")
-            && parts.get(2) == Some(&"catch-up")
-        {
-            return HttpRouteResponse::json(200, json!({ "items": [] }));
-        }
-        return HttpRouteResponse::json(200, json!({ "ok": true, "session": live_call(parts[0]) }));
-    }
     HttpRouteResponse::error(404, "Not found.")
 }
 
@@ -291,7 +258,14 @@ fn is_product_route(request: &ParsedRequest) -> bool {
     path.starts_with("/api/agent-reach/")
         || path.starts_with("/api/doubao/")
         || path.starts_with("/api/mcp/")
-        || path.starts_with("/api/live-calls")
+        || matches!(
+            path,
+            "/api/live-calls/asr-providers"
+                | "/api/live-calls/audio-metrics"
+                | "/api/live-calls/asr-metrics"
+                | "/api/live-calls/audio-files"
+        )
+        || path.starts_with("/api/live-calls/audio-files/")
         || path.starts_with("/api/codex-app-server/")
         || path.starts_with("/api/codex-desktop/")
         || matches!(
@@ -334,10 +308,6 @@ fn desktop_state() -> serde_json::Value {
             "visibleTranscript": []
         }
     })
-}
-
-fn live_call(id: &str) -> serde_json::Value {
-    json!({ "id": id, "status": "idle", "owner": "rust", "events": [] })
 }
 
 #[cfg(test)]

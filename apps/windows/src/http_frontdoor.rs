@@ -17,6 +17,10 @@ use crate::event_sync_http::{
     event_sync_request_requires_body, route_event_sync_request, EventSyncRouteConfig,
 };
 use crate::file_http::{stream_file_request, FileRouteConfig};
+use crate::live_call_http::{
+    is_live_call_audio_request, live_call_request_requires_body, route_live_call_request,
+    stream_live_call_audio_request, stream_live_call_events_request, LiveCallRouteConfig,
+};
 use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
@@ -82,6 +86,7 @@ pub struct FrontdoorRoutes {
     push: Option<PushRouteConfig>,
     product: Option<ProductRouteConfig>,
     review: Option<ReviewRouteConfig>,
+    live_call: Option<LiveCallRouteConfig>,
 }
 
 impl FrontdoorRoutes {
@@ -195,6 +200,11 @@ impl FrontdoorRoutes {
         self
     }
 
+    pub fn with_live_call(mut self, route: Option<LiveCallRouteConfig>) -> Self {
+        self.live_call = route;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.doctor.is_none()
@@ -209,6 +219,7 @@ impl FrontdoorRoutes {
             && self.static_route.is_none()
             && self.task.is_none()
             && self.workspace.is_none()
+            && self.live_call.is_none()
             && self.event_sync.is_none()
             && self.artifact.is_none()
             && self.desktop_remote.is_none()
@@ -307,6 +318,12 @@ fn handle_connection_with_upstream(
         .unwrap_or_default();
     let mut prefix = read_request_head(&mut client)?;
     if let Ok(request) = parse_request(&prefix) {
+        if let Some(live_call_route) = routes.live_call.as_ref() {
+            if is_live_call_audio_request(&request) {
+                return stream_live_call_audio_request(&request, live_call_route, client, prefix)
+                    .map_err(|error| io::Error::other(format!("{error:#}")));
+            }
+        }
         if let Some(static_route) = routes.static_route.as_ref() {
             match stream_static_request(&request, static_route, &mut client) {
                 Ok(Some(())) => return Ok(()),
@@ -356,6 +373,16 @@ fn handle_connection_with_upstream(
                 Err(error) => {
                     task_route.record_fallback();
                     eprintln!("Rust Task SSE route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(live_call_route) = routes.live_call.as_ref() {
+            match stream_live_call_events_request(&request, live_call_route, &mut client) {
+                Ok(Some(())) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Live Call SSE failed after ownership: {error:#}");
+                    return Ok(());
                 }
             }
         }
@@ -475,6 +502,25 @@ fn handle_connection_with_upstream(
                             .write_to(&mut client);
                     }
                     eprintln!("Rust Push route falling back to Node: {error:#}");
+                }
+            }
+        }
+        if let Some(live_call_route) = routes.live_call.as_ref() {
+            let body = if live_call_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            match route_live_call_request(&request, body.as_deref(), live_call_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Rust Live Call route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Live Call request failed.")
+                        .write_to(&mut client);
                 }
             }
         }

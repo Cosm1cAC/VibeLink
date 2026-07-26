@@ -5,14 +5,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AudioAcceptance {
+pub(crate) enum AudioAcceptance {
     Accepted,
     Duplicate,
     Gap { missing: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct PendingQuestion {
+pub(crate) struct PendingQuestion {
     id: String,
     text: String,
 }
@@ -26,14 +26,14 @@ struct LiveCallSnapshot {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct LiveCallRuntime {
+pub(crate) struct LiveCallRuntime {
     sessions: BTreeMap<String, LiveCallSnapshot>,
     #[serde(skip)]
     max_pending_questions: usize,
 }
 
 impl LiveCallRuntime {
-    fn new(max_pending_questions: usize) -> Self {
+    pub(crate) fn new(max_pending_questions: usize) -> Self {
         Self {
             sessions: BTreeMap::new(),
             max_pending_questions: max_pending_questions.max(1),
@@ -71,7 +71,22 @@ impl LiveCallRuntime {
         Ok(acceptance)
     }
 
-    fn queue_question(&mut self, session_id: &str, id: &str, text: &str) -> Result<()> {
+    pub(crate) fn accept_next_audio(
+        &mut self,
+        session_id: &str,
+        bytes: u64,
+    ) -> Result<(u64, AudioAcceptance)> {
+        let next = self
+            .sessions
+            .get(session_id)
+            .and_then(|snapshot| snapshot.last_audio_sequence)
+            .and_then(|sequence| sequence.checked_add(1))
+            .unwrap_or(1);
+        let acceptance = self.accept_audio(session_id, next, bytes)?;
+        Ok((next, acceptance))
+    }
+
+    pub(crate) fn queue_question(&mut self, session_id: &str, id: &str, text: &str) -> Result<()> {
         if session_id.trim().is_empty() || id.trim().is_empty() || text.trim().is_empty() {
             bail!("session id, question id, and text are required");
         }
@@ -93,14 +108,16 @@ impl LiveCallRuntime {
         Ok(())
     }
 
-    fn pending_questions(&self, session_id: &str) -> &[PendingQuestion] {
+    #[cfg(test)]
+    pub(crate) fn pending_questions(&self, session_id: &str) -> &[PendingQuestion] {
         self.sessions
             .get(session_id)
             .map(|snapshot| snapshot.pending_questions.as_slice())
             .unwrap_or(&[])
     }
 
-    fn acknowledge_question(&mut self, session_id: &str, id: &str) -> Result<bool> {
+    #[cfg(test)]
+    pub(crate) fn acknowledge_question(&mut self, session_id: &str, id: &str) -> Result<bool> {
         let Some(snapshot) = self.sessions.get_mut(session_id) else {
             return Ok(false);
         };
@@ -111,11 +128,21 @@ impl LiveCallRuntime {
         Ok(snapshot.pending_questions.len() != before)
     }
 
+    pub(crate) fn acknowledge_all_questions(&mut self, session_id: &str) -> usize {
+        let Some(snapshot) = self.sessions.get_mut(session_id) else {
+            return 0;
+        };
+        let acknowledged = snapshot.pending_questions.len();
+        snapshot.pending_questions.clear();
+        acknowledged
+    }
+
+    #[cfg(test)]
     fn snapshot(&self, session_id: &str) -> Option<&LiveCallSnapshot> {
         self.sessions.get(session_id)
     }
 
-    fn save(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -146,7 +173,7 @@ impl LiveCallRuntime {
         Ok(())
     }
 
-    fn load(path: &Path, max_pending_questions: usize) -> Result<Self> {
+    pub(crate) fn load(path: &Path, max_pending_questions: usize) -> Result<Self> {
         let backup = sibling_with_suffix(path, ".bak");
         let source = if path.exists() {
             path
@@ -169,14 +196,14 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[derive(Debug, Clone)]
-struct PcmRecording {
+pub(crate) struct PcmRecording {
     path: PathBuf,
     created_at: u64,
     active: bool,
 }
 
 impl PcmRecording {
-    fn active(path: PathBuf, created_at: u64) -> Self {
+    pub(crate) fn active(path: PathBuf, created_at: u64) -> Self {
         Self {
             path,
             created_at,
@@ -184,7 +211,7 @@ impl PcmRecording {
         }
     }
 
-    fn completed(path: PathBuf, created_at: u64) -> Self {
+    pub(crate) fn completed(path: PathBuf, created_at: u64) -> Self {
         Self {
             path,
             created_at,
@@ -194,12 +221,12 @@ impl PcmRecording {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct PcmRetentionReport {
-    deleted: Vec<PathBuf>,
-    retained_completed_bytes: u64,
+pub(crate) struct PcmRetentionReport {
+    pub(crate) deleted: Vec<PathBuf>,
+    pub(crate) retained_completed_bytes: u64,
 }
 
-fn enforce_pcm_retention(
+pub(crate) fn enforce_pcm_retention(
     recordings: Vec<PcmRecording>,
     max_completed_bytes: u64,
 ) -> Result<PcmRetentionReport> {

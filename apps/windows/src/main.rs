@@ -26,6 +26,7 @@ mod event_sync_http;
 mod execution_host;
 mod file_http;
 mod http_frontdoor;
+mod live_call_http;
 mod live_call_runtime;
 mod mcp_session_sidecar;
 mod pairing_http;
@@ -531,6 +532,9 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_discovery(discovery_route)
         .with_cloudflare(cloudflare_route)
         .with_push(push_route)
+        .with_live_call(Some(live_call_http::LiveCallRouteConfig::new(
+            route_data_dir.clone(),
+        )))
         .with_product(Some(product_http::ProductRouteConfig::new(
             route_data_dir.clone(),
         )))
@@ -611,6 +615,9 @@ fn run_rust_only_http(cli: &Cli, data_dir: Option<PathBuf>) -> Result<()> {
         .with_push(Some(push_http::PushRouteConfig::new(
             data_dir.clone(),
             root.clone(),
+        )))
+        .with_live_call(Some(live_call_http::LiveCallRouteConfig::new(
+            data_dir.clone(),
         )))
         .with_product(Some(product_http::ProductRouteConfig::new(
             data_dir.clone(),

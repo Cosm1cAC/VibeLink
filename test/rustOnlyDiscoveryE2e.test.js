@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import WebSocket from "ws";
 
 import { rustBinaryIsCurrent } from "./rustTestSupport.js";
 
@@ -298,6 +299,52 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     assert.equal(response.headers.get("x-vibelink-control-plane"), "rust", family);
     assert.ok(Array.isArray(JSON.parse(body)[collection]), family);
   }
+
+  const liveCreateResponse = await fetch(`http://127.0.0.1:${port}/api/live-calls`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ title: "Rust audio E2E", source: "android", asrProvider: "mock" })
+  });
+  const liveCreateBody = await liveCreateResponse.text();
+  assert.equal(liveCreateResponse.status, 201, liveCreateBody);
+  assert.equal(liveCreateResponse.headers.get("x-vibelink-control-plane"), "rust");
+  const liveSession = JSON.parse(liveCreateBody).session;
+  const audioMessages = await new Promise((resolve, reject) => {
+    const received = [];
+    const timeout = setTimeout(() => reject(new Error(`Rust Live Call WebSocket timed out: ${JSON.stringify(received)}\n${logs}`)), 15_000);
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/live-calls/${encodeURIComponent(liveSession.id)}/audio`, {
+      headers: { Authorization: "Bearer device-token" }
+    });
+    socket.on("open", () => socket.send(JSON.stringify({ sampleRate: 16000, channels: 1, encoding: "pcm16le", device: "remote" })));
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      received.push(message);
+      if (message.type === "ready") {
+        for (let index = 0; index < 20; index += 1) socket.send(Buffer.alloc(320, index));
+      } else if (message.type === "ack") {
+        socket.send(JSON.stringify({ type: "flush" }));
+      } else if (message.type === "flushed") {
+        socket.send(JSON.stringify({ type: "stop" }));
+      }
+    });
+    socket.on("error", reject);
+    socket.on("close", () => {
+      clearTimeout(timeout);
+      resolve(received);
+    });
+  });
+  assert.ok(audioMessages.some((message) => message.type === "ready"));
+  assert.ok(audioMessages.some((message) => message.type === "ack" && message.seq === 20 && message.bytes === 6400));
+  assert.ok(audioMessages.some((message) => message.type === "stopped"));
+  const liveEventsResponse = await fetch(`http://127.0.0.1:${port}/api/live-calls/${encodeURIComponent(liveSession.id)}/events/catch-up?after=0&limit=100`, { headers });
+  assert.equal(liveEventsResponse.status, 200);
+  const liveEvents = (await liveEventsResponse.json()).items;
+  assert.ok(liveEvents.some((event) => event.type === "live_call.audio_stream.connected"));
+  assert.ok(liveEvents.some((event) => event.type === "live_call.audio_stream.disconnected"));
+  assert.ok(liveEvents.every((event, index) => index === 0 || event.cursor > liveEvents[index - 1].cursor));
+  const pcmFiles = fs.readdirSync(path.join(directory, "live-call", "pcm")).filter((name) => name.endsWith(".pcm"));
+  assert.equal(pcmFiles.length, 1);
+  assert.equal(fs.statSync(path.join(directory, "live-call", "pcm", pcmFiles[0])).size, 6400);
 
   for (const [family, route] of [
     ["doubao", "/api/doubao/status"],

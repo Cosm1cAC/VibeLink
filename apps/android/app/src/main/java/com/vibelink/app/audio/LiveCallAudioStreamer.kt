@@ -113,6 +113,11 @@ class LiveCallAudioStreamer(
                 if (text.contains("\"error\"")) onErrorCallback(text) else onStatusCallback(text.take(120))
             }
 
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+                handleDisconnect(webSocket, "Microphone stream closing: $reason")
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 handleDisconnect(webSocket, "Microphone stream closed: $reason")
             }

@@ -178,6 +178,8 @@ impl WhisperConfig {
         let model_dir = std::env::var_os("VIBELINK_WHISPER_CPP_MODELS")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("tools/whisper-cpp/models"));
+        let bin_dir = absolute_from(&root, &bin_dir);
+        let model_dir = absolute_from(&root, &model_dir);
         let binary_name = std::env::var_os("VIBELINK_WHISPER_CPP_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("whisper-cli.exe"));
@@ -199,7 +201,7 @@ impl WhisperConfig {
             model,
             language: std::env::var("VIBELINK_WHISPER_CPP_LANGUAGE")
                 .unwrap_or_else(|_| "zh".into()),
-            temp_dir: data_dir.join("live-call-asr-tmp"),
+            temp_dir: absolute_from(&root, data_dir).join("live-call-asr-tmp"),
         }
     }
     pub fn available(&self) -> bool {
@@ -218,17 +220,25 @@ pub fn transcribe(config: &WhisperConfig, pcm: &[u8], id: &str) -> Result<String
     let wav = stem.with_extension("wav");
     let prefix = stem.to_string_lossy().to_string();
     fs::write(&wav, wav_bytes(pcm, TARGET_SAMPLE_RATE))?;
+    let working_dir = common_path_ancestor(&config.model, &wav);
+    let model_arg = config
+        .model
+        .strip_prefix(&working_dir)
+        .unwrap_or(&config.model);
+    let wav_arg = wav.strip_prefix(&working_dir).unwrap_or(&wav);
+    let output_arg = stem.strip_prefix(&working_dir).unwrap_or(&stem);
     let mut child = Command::new(&config.binary)
+        .current_dir(&working_dir)
         .args([
             "--model",
-            config.model.to_string_lossy().as_ref(),
+            model_arg.to_string_lossy().as_ref(),
             "--file",
-            wav.to_string_lossy().as_ref(),
+            wav_arg.to_string_lossy().as_ref(),
             "--language",
             &config.language,
             "--output-json",
             "--output-file",
-            &prefix,
+            output_arg.to_string_lossy().as_ref(),
             "--no-timestamps",
             "--no-prints",
         ])
@@ -270,11 +280,33 @@ pub fn transcribe(config: &WhisperConfig, pcm: &[u8], id: &str) -> Result<String
     let _ = fs::remove_file(json_path);
     if !output.status.success() {
         anyhow::bail!(
-            "whisper.cpp failed: {}",
+            "whisper.cpp failed with {}: {}",
+            output.status,
             String::from_utf8_lossy(&output.stderr)
         );
     }
     Ok(transcript.trim().to_string())
+}
+
+fn absolute_from(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn common_path_ancestor(left: &Path, right: &Path) -> PathBuf {
+    let mut ancestor = left
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    while !right.starts_with(&ancestor) {
+        if !ancestor.pop() {
+            return PathBuf::from(".");
+        }
+    }
+    ancestor
 }
 
 #[cfg(test)]

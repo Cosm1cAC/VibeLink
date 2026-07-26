@@ -116,7 +116,6 @@ impl LiveCallRuntime {
             .unwrap_or(&[])
     }
 
-    #[cfg(test)]
     pub(crate) fn acknowledge_question(&mut self, session_id: &str, id: &str) -> Result<bool> {
         let Some(snapshot) = self.sessions.get_mut(session_id) else {
             return Ok(false);

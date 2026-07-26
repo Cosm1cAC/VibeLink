@@ -198,6 +198,17 @@ fn now_iso() -> String {
     now.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+pub(crate) fn native_admin_doctor(data_dir: &Path) -> Result<Value> {
+    let request =
+        crate::status_http::parse_request(b"GET /api/doctor HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .map_err(anyhow::Error::msg)?;
+    build_doctor_report(
+        &request,
+        "native-admin",
+        &DoctorRouteConfig::new(data_dir.to_path_buf()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{route_doctor_request, DoctorRouteConfig};

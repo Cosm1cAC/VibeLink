@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
 
 const DEFAULT_URL = "http://127.0.0.1:8787";
@@ -136,6 +137,39 @@ function syntheticPcm() {
   return frame;
 }
 
+function readPcmFile(filePath) {
+  const input = fs.readFileSync(filePath);
+  if (input.length < 12 || input.toString("ascii", 0, 4) !== "RIFF" || input.toString("ascii", 8, 12) !== "WAVE") {
+    return input;
+  }
+  let offset = 12;
+  let format;
+  let pcm;
+  while (offset + 8 <= input.length) {
+    const chunkType = input.toString("ascii", offset, offset + 4);
+    const chunkBytes = input.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    const end = start + chunkBytes;
+    if (end > input.length) throw new Error("WAV input has a truncated chunk.");
+    if (chunkType === "fmt " && chunkBytes >= 16) {
+      format = {
+        encoding: input.readUInt16LE(start),
+        channels: input.readUInt16LE(start + 2),
+        sampleRate: input.readUInt32LE(start + 4),
+        bitsPerSample: input.readUInt16LE(start + 14)
+      };
+    } else if (chunkType === "data") {
+      pcm = input.subarray(start, end);
+    }
+    offset = end + (chunkBytes % 2);
+  }
+  if (!format || !pcm) throw new Error("WAV input is missing fmt or data chunks.");
+  if (format.encoding !== 1 || format.channels !== 1 || format.sampleRate !== 16000 || format.bitsPerSample !== 16) {
+    throw new Error("WAV input must be PCM16LE, 16 kHz, mono.");
+  }
+  return pcm;
+}
+
 function audioWebSocketUrl(options, sessionId) {
   const url = new URL(options.url);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -168,6 +202,121 @@ function eventTypes(events) {
   return new Set((events || []).map((event) => event.type));
 }
 
+function waitForSocketClose(socket, timeoutMs = 75_000) {
+  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Audio WebSocket close timeout.")), timeoutMs);
+    socket.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function waitForSocketMessage(socket, expectedType, timeoutMs = 75_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Audio WebSocket ${expectedType} timeout.`)),
+      timeoutMs
+    );
+    const onMessage = (value) => {
+      let message;
+      try { message = JSON.parse(value.toString("utf8")); } catch { return; }
+      if (message.type !== expectedType) return;
+      clearTimeout(timer);
+      socket.off("close", onClose);
+      socket.off("message", onMessage);
+      resolve(message);
+    };
+    const onClose = () => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      reject(new Error(`Audio WebSocket closed before ${expectedType}.`));
+    };
+    socket.on("message", onMessage);
+    socket.once("close", onClose);
+  });
+}
+
+async function flushSocket(socket) {
+  const flushed = waitForSocketMessage(socket, "flushed");
+  socket.send(JSON.stringify({ type: "flush" }));
+  await flushed;
+}
+
+async function readSseUntil(options, sessionId, after, targetCursor) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("Live Call SSE replay timeout.")), 15_000);
+  const response = await fetch(
+    `${options.url}/api/live-calls/${encodeURIComponent(sessionId)}/events?after=${after}`,
+    {
+      headers: options.token ? { Authorization: `Bearer ${options.token}` } : {},
+      signal: controller.signal
+    }
+  );
+  if (!response.ok || !response.body) {
+    clearTimeout(timer);
+    throw new Error(`Live Call SSE failed: HTTP ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const events = [];
+  let buffer = "";
+  try {
+    while (events.at(-1)?.cursor !== targetCursor) {
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error("Live Call SSE ended before reaching the target cursor.");
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let boundary = buffer.search(/\r?\n\r?\n/);
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] || "\n\n";
+        buffer = buffer.slice(boundary + separator.length);
+        const data = block
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) {
+          const event = JSON.parse(data);
+          if (Number.isInteger(event.cursor)) events.push(event);
+        }
+        if (events.at(-1)?.cursor === targetCursor) break;
+        boundary = buffer.search(/\r?\n\r?\n/);
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+    await reader.cancel().catch(() => {});
+  }
+  return events;
+}
+
+export async function verifySseReconnect(options, sessionId, expectedEvents) {
+  const cursors = expectedEvents.map((event) => event.cursor);
+  if (!cursors.length || cursors.some((cursor) => !Number.isInteger(cursor))) {
+    throw new Error("Verification failed: Live Call events have invalid cursors.");
+  }
+  if (!cursors.every((cursor, index) => index === 0 || cursor > cursors[index - 1])) {
+    throw new Error("Verification failed: Live Call catch-up cursors are not strictly monotonic.");
+  }
+  const midpoint = Math.max(0, Math.floor(cursors.length / 2) - 1);
+  const first = await readSseUntil(options, sessionId, 0, cursors[midpoint]);
+  const second = midpoint === cursors.length - 1
+    ? []
+    : await readSseUntil(options, sessionId, cursors[midpoint], cursors.at(-1));
+  const replayed = [...first, ...second].map((event) => event.cursor);
+  if (replayed.length !== cursors.length || replayed.some((cursor, index) => cursor !== cursors[index])) {
+    throw new Error("Verification failed: SSE reconnect replay does not match catch-up cursors.");
+  }
+  return replayed.length;
+}
+
 async function createSession(options) {
   const body = {
     title: options.title,
@@ -187,7 +336,7 @@ async function createSession(options) {
 
 async function runStress(options) {
   const session = await createSession(options);
-  const pcm = options.pcmFile ? fs.readFileSync(options.pcmFile) : syntheticPcm();
+  const pcm = options.pcmFile ? readPcmFile(options.pcmFile) : syntheticPcm();
   if (!pcm.length || pcm.length % 2) throw new Error("PCM input must be non-empty PCM16LE data.");
   const startedAt = Date.now();
   const endAt = startedAt + options.seconds * 1000;
@@ -204,7 +353,10 @@ async function runStress(options) {
 
   while (Date.now() < endAt) {
     if (Date.now() >= nextReconnectAt) {
+      await flushSocket(socket);
+      const closed = waitForSocketClose(socket);
       socket.close(1001, "qa-weak-network-reconnect");
+      await closed;
       await sleep(100 + Math.floor(Math.random() * Math.max(1, options.jitterMs)));
       socket = await connectAudio(options, session.id);
       reconnects += 1;
@@ -249,10 +401,12 @@ async function runStress(options) {
     await sleep(20 + Math.floor(Math.random() * (options.jitterMs + 1)));
   }
 
-  socket.send(JSON.stringify({ type: "flush" }));
-  await sleep(500);
+  const closed = waitForSocketClose(socket);
+  await flushSocket(socket);
+  const stopped = waitForSocketMessage(socket, "stopped");
   socket.send(JSON.stringify({ type: "stop" }));
-  await sleep(100);
+  await stopped;
+  await closed;
 
   if (options.stop) {
     await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/stop`, {
@@ -262,6 +416,7 @@ async function runStress(options) {
   }
 
   const events = (await request(options, `/api/live-calls/${encodeURIComponent(session.id)}/events/catch-up?limit=5000`)).items || [];
+  let sseReplayCount = 0;
   if (options.verify) {
     const types = eventTypes(events);
     for (const type of ["live_call.started", "live_call.audio_level", "live_call.asr.provider", "live_call.audio_segment", "live_call.paused", "live_call.resumed"]) {
@@ -270,6 +425,7 @@ async function runStress(options) {
     if (options.pcmFile && !types.has("live_call.transcript.final")) throw new Error("Verification failed: real PCM produced no final transcript.");
     if (options.stop && !types.has("live_call.stopped")) throw new Error("Verification failed: missing live_call.stopped");
     if (tick < 1) throw new Error("Verification failed: no stress ticks were executed.");
+    sseReplayCount = await verifySseReconnect(options, session.id, events);
   }
 
   const finalSession = (await request(options, `/api/live-calls/${encodeURIComponent(session.id)}`)).session;
@@ -283,6 +439,7 @@ async function runStress(options) {
     pcmSource: options.pcmFile || "synthetic",
     session: finalSession,
     eventCount: events.length,
+    sseReplayCount,
     eventTypes: [...eventTypes(events)]
   };
 }
@@ -297,7 +454,9 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error.stack || error.message);
+    process.exitCode = 1;
+  });
+}

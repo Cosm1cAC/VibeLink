@@ -579,6 +579,7 @@ fn create_queued_task(connection: &mut Connection, payload: &Value) -> Result<Va
 pub(crate) fn create_live_call_task(
     data_dir: &Path,
     session_id: &str,
+    question_id: &str,
     question: &str,
     workspace_id: &str,
     agent: &str,
@@ -601,6 +602,7 @@ pub(crate) fn create_live_call_task(
             "reasoningEffort": "low",
             "permissionMode": "default",
             "sessionId": session_id,
+            "questionId": question_id,
             "security": { "networkAccess": false, "sandboxMode": "workspace-write" }
         }),
     )
@@ -616,6 +618,7 @@ fn task_launch_payload(payload: &Value) -> Value {
         "model",
         "mode",
         "sessionId",
+        "questionId",
         "reasoningEffort",
         "permissionMode",
         "security",

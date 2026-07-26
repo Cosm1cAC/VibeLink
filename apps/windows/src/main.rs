@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     env,
     ffi::OsString,
+    fs,
     net::{SocketAddr, TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -46,6 +47,8 @@ mod status_sidecar;
 mod task_http;
 mod tool_events_http;
 mod tool_events_store;
+#[cfg(windows)]
+mod windows_native_ui;
 mod workspace_http;
 mod workspace_tree;
 
@@ -266,34 +269,124 @@ fn run() -> Result<()> {
 }
 
 fn run_user_entry(cli: &Cli) -> Result<()> {
-    println!("Starting VibeLink bridge on {}:{}", cli.host, cli.port);
-    let effective_cli = default_rust_profile(cli);
-    let mut bridge = spawn_bridge_role(&effective_cli)?;
-    let base_url = local_base_url(cli.port);
+    #[cfg(windows)]
+    {
+        run_windows_user_entry(cli)
+    }
+    #[cfg(not(windows))]
+    {
+        println!("Starting VibeLink bridge on {}:{}", cli.host, cli.port);
+        let effective_cli = default_rust_profile(cli);
+        let mut bridge = spawn_bridge_role(&effective_cli)?;
+        let base_url = local_base_url(cli.port);
 
-    if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
-        let _ = bridge.kill();
-        return Err(error);
+        if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
+            let _ = bridge.kill();
+            return Err(error);
+        }
+
+        println!("Bridge is ready: {base_url}");
+        let pairing_base_url = pairing_base_url(cli.port);
+        println!("Android pairing URL base: {pairing_base_url}");
+        print_pairing_qr(&base_url, &pairing_base_url, &cli.device_label)?;
+        println!();
+        println!("Development mode: keep this process open to keep the supervised bridge running.");
+        println!("Next milestone: replace this console surface with a native Windows tray/window.");
+
+        let status = bridge
+            .wait()
+            .context("Bridge role failed to exit cleanly")?;
+        if !status.success() {
+            bail!("Bridge role exited with status {status}");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_user_entry(cli: &Cli) -> Result<()> {
+    let mut active_cli = default_rust_profile(cli);
+    loop {
+        let mut bridge = ManagedBridge::spawn(&active_cli)?;
+        let base_url = local_base_url(cli.port);
+        if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
+            let _ = bridge.shutdown();
+            return Err(error);
+        }
+        let root = project_root()?;
+        let data_dir = resolve_data_dir(
+            &root,
+            env::var_os("VIBELINK_DATA_DIR"),
+            env::var_os("LOCALAPPDATA"),
+            Path::exists,
+        );
+        let action = windows_native_ui::run(windows_native_ui::AdminConfig {
+            base_url,
+            pairing_base_url: pairing_base_url(cli.port),
+            device_label: cli.device_label.clone(),
+            data_dir,
+            compatibility_mode: !active_cli.rust_http_canary,
+        })?;
+        bridge.shutdown()?;
+        if action == windows_native_ui::AdminAction::RestartCompatibility
+            && active_cli.rust_http_canary
+        {
+            active_cli.rust_http_canary = false;
+            continue;
+        }
+        return Ok(());
+    }
+}
+
+#[cfg(windows)]
+struct ManagedBridge {
+    child: Child,
+    job: execution_host::windows::Job,
+    startup_gate: PathBuf,
+}
+
+#[cfg(windows)]
+impl ManagedBridge {
+    fn spawn(cli: &Cli) -> Result<Self> {
+        let startup_gate = env::temp_dir().join(format!(
+            "vibelink-bridge-startup-{}.gate",
+            uuid::Uuid::new_v4()
+        ));
+        let mut command = bridge_role_command(cli)?;
+        command.env("VIBELINK_BRIDGE_STARTUP_GATE", &startup_gate);
+        let child = command.spawn().context("Failed to start bridge role")?;
+        let job = execution_host::windows::Job::create()?;
+        if let Err(error) = job.assign_pid(child.id()) {
+            drop(job);
+            let _ = fs::remove_file(&startup_gate);
+            return Err(error);
+        }
+        fs::write(&startup_gate, b"assigned")
+            .context("Failed to release supervised bridge startup gate")?;
+        Ok(Self {
+            child,
+            job,
+            startup_gate,
+        })
     }
 
-    println!("Bridge is ready: {base_url}");
-    let pairing_base_url = pairing_base_url(cli.port);
-    println!("Android pairing URL base: {pairing_base_url}");
-    print_pairing_qr(&base_url, &pairing_base_url, &cli.device_label)?;
-    println!();
-    println!("Development mode: keep this process open to keep the supervised bridge running.");
-    println!("Next milestone: replace this console surface with a native Windows tray/window.");
-
-    let status = bridge
-        .wait()
-        .context("Bridge role failed to exit cleanly")?;
-    if !status.success() {
-        bail!("Bridge role exited with status {status}");
+    fn shutdown(&mut self) -> Result<()> {
+        self.job.terminate(0)?;
+        let _ = self.child.wait();
+        let _ = fs::remove_file(&self.startup_gate);
+        Ok(())
     }
-    Ok(())
+}
+
+#[cfg(windows)]
+impl Drop for ManagedBridge {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.startup_gate);
+    }
 }
 
 fn run_bridge_role(cli: &Cli) -> Result<()> {
+    wait_for_supervisor_gate()?;
     let root = project_root()?;
     let server = root.join("src").join("server.js");
     if !server.exists() {
@@ -311,6 +404,26 @@ fn run_bridge_role(cli: &Cli) -> Result<()> {
 
     if !status.success() {
         bail!("Node bridge exited with status {status}");
+    }
+    Ok(())
+}
+
+fn wait_for_supervisor_gate() -> Result<()> {
+    let Some(path) = env::var_os("VIBELINK_BRIDGE_STARTUP_GATE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    wait_for_gate(&path, Duration::from_secs(10))?;
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+fn wait_for_gate(path: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !path.is_file() {
+        if Instant::now() >= deadline {
+            bail!("Timed out waiting for bridge supervisor startup gate");
+        }
+        thread::sleep(Duration::from_millis(10));
     }
     Ok(())
 }
@@ -777,7 +890,14 @@ fn run_doctor(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
+    bridge_role_command(cli)?
+        .spawn()
+        .context("Failed to start bridge role")
+}
+
+fn bridge_role_command(cli: &Cli) -> Result<Command> {
     let exe = env::current_exe().context("Cannot resolve current executable path")?;
     let mut command = Command::new(exe);
     command
@@ -839,7 +959,7 @@ fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    command.spawn().context("Failed to start bridge role")
+    Ok(command)
 }
 
 fn print_pairing_qr(api_base_url: &str, pairing_base_url: &str, label: &str) -> Result<()> {
@@ -964,6 +1084,24 @@ fn find_project_root_from(start: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn supervisor_gate_blocks_until_assignment_is_published() {
+        let directory =
+            env::temp_dir().join(format!("vibelink-gate-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let gate = directory.join("bridge.gate");
+        let writer_gate = gate.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            fs::write(writer_gate, b"assigned").unwrap();
+        });
+        let started = Instant::now();
+        wait_for_gate(&gate, Duration::from_secs(1)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        writer.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn packaged_sidecar_envs_use_current_executable_and_preserve_overrides() {

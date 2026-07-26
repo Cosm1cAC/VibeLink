@@ -649,6 +649,12 @@ pub fn authenticate_device(
     Ok(AuthResult::Device(device_id))
 }
 
+pub(crate) fn native_admin_status(data_dir: &Path) -> Result<Value> {
+    let request = parse_request(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .map_err(anyhow::Error::msg)?;
+    build_status_snapshot(&request, &StatusRouteConfig::new(data_dir.to_path_buf()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

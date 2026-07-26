@@ -281,7 +281,9 @@ fn serve_inner(
                 let routes = routes.clone();
                 thread::spawn(move || {
                     if let Err(error) = handle_connection_with_upstream(client, upstream, &routes) {
-                        eprintln!("Rust HTTP front door connection failed: {error}");
+                        if !is_expected_client_disconnect(&error) {
+                            eprintln!("Rust HTTP front door connection failed: {error}");
+                        }
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
@@ -292,6 +294,15 @@ fn serve_inner(
             Err(error) => return Err(error).context("Rust HTTP front door accept failed"),
         }
     }
+}
+
+fn is_expected_client_disconnect(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    )
 }
 
 #[cfg(test)]
@@ -888,7 +899,10 @@ fn write_service_unavailable(client: &mut TcpStream) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_connection, proxy_connection, read_request_body, FrontdoorRoutes};
+    use super::{
+        handle_connection, is_expected_client_disconnect, proxy_connection, read_request_body,
+        FrontdoorRoutes,
+    };
     use crate::audit_http::AuditRouteConfig;
     use crate::device_http::{DeviceMutationRouteConfig, DeviceRouteConfig};
     use crate::doctor_http::DoctorRouteConfig;
@@ -898,10 +912,25 @@ mod tests {
     use crate::workspace_http::{inject_post_file_mutation_failure_once, WorkspaceRouteConfig};
     use rusqlite::params;
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{Error, ErrorKind, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn client_disconnect_errors_are_expected() {
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+        ] {
+            assert!(is_expected_client_disconnect(&Error::from(kind)));
+        }
+
+        assert!(!is_expected_client_disconnect(&Error::from(
+            ErrorKind::Other
+        )));
+    }
 
     #[test]
     fn proxy_preserves_bidirectional_bytes() {

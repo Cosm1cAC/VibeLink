@@ -58,13 +58,16 @@
 - [x] Migrate tool-event read and SSE ownership behind an opt-in Rust flag.
 - [ ] Migrate task, history, and terminal routes.
 - [ ] Migrate provider-process ownership out of Node.
-- [ ] Migrate live-call HTTP and WebSocket/audio routes.
+- [x] Migrate live-call HTTP and WebSocket/audio routes.
+- [x] Project Live Call task deltas/terminal outcomes with durable per-task cursors and drain the matching pending question.
+- [x] Archive a passing 3,600-second Rust-only weak-network Live Call run (2026-07-26: 43,471 ticks, 39 reconnects, 1,016 contiguous events, zero pending/checkpoint leaks).
+- [x] Run physical Android microphone, notification, and disconnect recovery acceptance (PJX110 / Android 16, 2026-07-26).
 
 ## Retirement And Desktop Release
 
 - [ ] Confirm zero Node route ownership and fallback during the observation window.
 - [ ] Remove retired Node route implementations in reversible slices.
 - [ ] Remove bundled Node only after provider/runtime ownership permits it.
-- [ ] Replace the console surface with a native Win32 `windows-rs` tray/window without WebView/HTML.
-- [ ] Measure idle and active native GUI Private Working Set.
+- [x] Replace the console surface with a native Win32 `windows-rs` tray/window without WebView/HTML.
+- [x] Measure idle and active native GUI Private Working Set (2026-07-26: 1.69 MiB idle, 1.80 MiB status/doctor action peak).
 - [ ] Publish a tagged, checksummed, reproducible desktop release with rollback instructions.

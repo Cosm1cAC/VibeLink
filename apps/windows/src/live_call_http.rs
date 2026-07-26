@@ -13,10 +13,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tungstenite::Message;
@@ -50,6 +53,7 @@ pub struct LiveCallRouteConfig {
     runtime: Arc<Mutex<LiveCallRuntime>>,
     checkpoint: PathBuf,
     active_recordings: Arc<Mutex<BTreeSet<PathBuf>>>,
+    _projection_worker: Option<Arc<ProjectionWorker>>,
 }
 
 impl LiveCallRouteConfig {
@@ -61,11 +65,21 @@ impl LiveCallRouteConfig {
         } else {
             LiveCallRuntime::new(MAX_PENDING_QUESTIONS)
         };
+        let runtime = Arc::new(Mutex::new(runtime));
+        #[cfg(not(test))]
+        let projection_worker = Some(ProjectionWorker::start(
+            data_dir.clone(),
+            Arc::clone(&runtime),
+            checkpoint.clone(),
+        ));
+        #[cfg(test)]
+        let projection_worker = None;
         Self {
             data_dir,
-            runtime: Arc::new(Mutex::new(runtime)),
+            runtime,
             checkpoint,
             active_recordings: Arc::new(Mutex::new(BTreeSet::new())),
+            _projection_worker: projection_worker,
         }
     }
 
@@ -98,6 +112,16 @@ impl LiveCallRouteConfig {
             .lock()
             .map_err(|_| anyhow::anyhow!("live call runtime lock poisoned"))?
             .acknowledge_all_questions(session_id);
+        self.persist_runtime()?;
+        Ok(acknowledged)
+    }
+
+    fn acknowledge_question(&self, session_id: &str, question_id: &str) -> Result<bool> {
+        let acknowledged = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("live call runtime lock poisoned"))?
+            .acknowledge_question(session_id, question_id)?;
         self.persist_runtime()?;
         Ok(acknowledged)
     }
@@ -170,6 +194,53 @@ impl LiveCallRouteConfig {
         let report = enforce_pcm_retention(recordings, MAX_RETAINED_PCM_BYTES)?;
         let _ = (report.deleted.len(), report.retained_completed_bytes);
         Ok(())
+    }
+}
+
+struct ProjectionWorker {
+    stop: Arc<AtomicBool>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl ProjectionWorker {
+    #[cfg_attr(test, allow(dead_code))]
+    fn start(
+        data_dir: PathBuf,
+        runtime: Arc<Mutex<LiveCallRuntime>>,
+        checkpoint: PathBuf,
+    ) -> Arc<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let join = thread::Builder::new()
+            .name("live-call-task-projection".to_string())
+            .spawn(move || {
+                let mut connection = None;
+                while !thread_stop.load(Ordering::Acquire) {
+                    if connection.is_none() {
+                        connection = open_database(&data_dir).ok();
+                    }
+                    if let Some(database) = connection.as_mut() {
+                        let _ = project_live_call_tasks_once(database, &runtime, &checkpoint);
+                    }
+                    thread::sleep(Duration::from_millis(150));
+                }
+            })
+            .expect("failed to start Live Call task projection worker");
+        Arc::new(Self {
+            stop,
+            join: Mutex::new(Some(join)),
+        })
+    }
+}
+
+impl Drop for ProjectionWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(mut join) = self.join.lock() {
+            if let Some(handle) = join.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -334,8 +405,20 @@ pub fn stream_live_call_events_request(
         .or_else(|| request.header("last-event-id").map(str::to_string))
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
-    client.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store, no-transform\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\nX-VibeLink-Control-Plane: rust\r\n\r\nretry: 1500\r\n\r\n")?;
-    client.flush()?;
+    if let Err(error) = client.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store, no-transform\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\nX-VibeLink-Control-Plane: rust\r\n\r\nretry: 1500\r\n\r\n") {
+        return if is_client_disconnect(&error) {
+            Ok(Some(()))
+        } else {
+            Err(error.into())
+        };
+    }
+    if let Err(error) = client.flush() {
+        return if is_client_disconnect(&error) {
+            Ok(Some(()))
+        } else {
+            Err(error.into())
+        };
+    }
     let started = Instant::now();
     let mut heartbeat = Instant::now();
     while started.elapsed() < Duration::from_secs(30) {
@@ -343,22 +426,31 @@ pub fn stream_live_call_events_request(
             let cursor = event["cursor"].as_i64().unwrap_or(after);
             let event_type = event["type"].as_str().unwrap_or("live_call.event");
             let data = serde_json::to_string(&event)?;
-            write!(
+            if let Err(error) = write!(
                 client,
                 "id: {cursor}\nevent: {event_type}\ndata: {data}\n\n"
-            )?;
+            ) {
+                return if is_client_disconnect(&error) {
+                    Ok(Some(()))
+                } else {
+                    Err(error.into())
+                };
+            }
             after = cursor;
             heartbeat = Instant::now();
         }
         if heartbeat.elapsed() >= Duration::from_secs(25) {
-            client.write_all(b"event: ping\ndata: {}\n\n")?;
+            if let Err(error) = client.write_all(b"event: ping\ndata: {}\n\n") {
+                return if is_client_disconnect(&error) {
+                    Ok(Some(()))
+                } else {
+                    Err(error.into())
+                };
+            }
             heartbeat = Instant::now();
         }
         if let Err(error) = client.flush() {
-            if matches!(
-                error.kind(),
-                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
-            ) {
+            if is_client_disconnect(&error) {
                 return Ok(Some(()));
             }
             return Err(error.into());
@@ -366,6 +458,15 @@ pub fn stream_live_call_events_request(
         thread::sleep(Duration::from_millis(250));
     }
     Ok(Some(()))
+}
+
+fn is_client_disconnect(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    )
 }
 
 pub fn is_live_call_audio_request(request: &ParsedRequest) -> bool {
@@ -465,10 +566,7 @@ pub fn stream_live_call_audio_request(
                     if let Some(parent) = checkpoint_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    let checkpoint_file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&checkpoint_path)?;
+                    let checkpoint_file = open_asr_checkpoint(&checkpoint_path)?;
                     send_ws_json(
                         &mut websocket,
                         json!({
@@ -511,7 +609,7 @@ pub fn stream_live_call_audio_request(
                                 &format!("{session_id}-flush"),
                             )? {
                                 if let Some((_, file)) = asr_checkpoint.as_mut() {
-                                    file.set_len(0)?;
+                                    reset_asr_checkpoint(file)?;
                                 }
                             }
                         }
@@ -536,9 +634,12 @@ pub fn stream_live_call_audio_request(
                                 &format!("{session_id}-stop"),
                             )? {
                                 if let Some((_, file)) = asr_checkpoint.as_mut() {
-                                    file.set_len(0)?;
+                                    reset_asr_checkpoint(file)?;
                                 }
                             }
+                        }
+                        if let Some((_, file)) = asr_checkpoint.as_mut() {
+                            reset_asr_checkpoint(file)?;
                         }
                         if let Some((_, file)) = recording.as_mut() {
                             file.flush()?;
@@ -617,16 +718,19 @@ pub fn stream_live_call_audio_request(
                             &format!("{session_id}-{frames}-{index}"),
                         )? {
                             if let Some((_, file)) = asr_checkpoint.as_mut() {
-                                file.set_len(0)?;
+                                reset_asr_checkpoint(file)?;
                             }
                         }
                     }
                 }
                 frames = frames.saturating_add(1);
                 bytes = bytes.saturating_add(frame.len() as u64);
-                let sequence =
-                    config.accept_audio(&session_id, frame.len() as u64, frames % 20 == 0)?;
-                if frames % 20 == 0 {
+                let sequence = config.accept_audio(
+                    &session_id,
+                    frame.len() as u64,
+                    frames.is_multiple_of(20),
+                )?;
+                if frames.is_multiple_of(20) {
                     send_ws_json(
                         &mut websocket,
                         json!({ "type": "ack", "seq": sequence, "bytes": bytes }),
@@ -652,7 +756,7 @@ pub fn stream_live_call_audio_request(
             &format!("{session_id}-disconnect"),
         )? {
             if let Some((_, file)) = asr_checkpoint.as_mut() {
-                file.set_len(0)?;
+                reset_asr_checkpoint(file)?;
             }
         }
     }
@@ -727,6 +831,22 @@ fn asr_checkpoint_path(config: &LiveCallRouteConfig, session_id: &str, channel: 
         .join(format!("{session_id}-{channel}.pcm"))
 }
 
+fn open_asr_checkpoint(path: &Path) -> Result<File> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    file.seek(SeekFrom::End(0))?;
+    Ok(file)
+}
+
+fn reset_asr_checkpoint(file: &mut File) -> Result<()> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
 fn list_asr_checkpoints(config: &LiveCallRouteConfig, session_id: &str) -> Result<Vec<Value>> {
     let directory = config.data_dir.join("live-call").join("asr-checkpoints");
     if !directory.is_dir() {
@@ -783,7 +903,7 @@ fn send_ws_json<S: Read + Write>(
     websocket: &mut tungstenite::WebSocket<S>,
     value: Value,
 ) -> Result<()> {
-    websocket.send(Message::Text(value.to_string().into()))?;
+    websocket.send(Message::Text(value.to_string()))?;
     Ok(())
 }
 
@@ -919,7 +1039,15 @@ fn open_database(data_dir: &Path) -> Result<Connection> {
            UNIQUE(session_id, event_id)
          );
          CREATE INDEX IF NOT EXISTS idx_live_call_events_session_cursor
-           ON live_call_events(session_id, cursor);",
+           ON live_call_events(session_id, cursor);
+         CREATE TABLE IF NOT EXISTS live_call_task_projections (
+           task_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, question_id TEXT NOT NULL DEFAULT '',
+           last_task_cursor INTEGER NOT NULL DEFAULT 0,
+           accumulated_text TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0,
+           updated_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_live_call_task_projections_session
+           ON live_call_task_projections(session_id,done);",
     )?;
     Ok(connection)
 }
@@ -1008,13 +1136,31 @@ fn insert_event(
     payload: Value,
 ) -> Result<Value> {
     let event_id = uuid::Uuid::new_v4().to_string();
+    insert_event_with_id(connection, session_id, &event_id, event_type, payload)
+}
+
+fn insert_event_with_id(
+    connection: &Connection,
+    session_id: &str,
+    event_id: &str,
+    event_type: &str,
+    payload: Value,
+) -> Result<Value> {
     let at = now_iso();
     let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
-    connection.execute(
-        "INSERT INTO live_call_events (session_id,event_id,event_type,event_at,text,payload_json,event_json,created_at)
+    let inserted = connection.execute(
+        "INSERT OR IGNORE INTO live_call_events (session_id,event_id,event_type,event_at,text,payload_json,event_json,created_at)
          VALUES (?1,?2,?3,?4,?5,?6,'{}',?4)",
         params![session_id, event_id, event_type, at, text, payload.to_string()],
     )?;
+    if inserted == 0 {
+        let existing: String = connection.query_row(
+            "SELECT event_json FROM live_call_events WHERE session_id=?1 AND event_id=?2",
+            params![session_id, event_id],
+            |row| row.get(0),
+        )?;
+        return serde_json::from_str(&existing).context("invalid persisted Live Call event");
+    }
     let cursor = connection.last_insert_rowid();
     let mut event = json!({
         "id": event_id, "cursor": cursor, "type": event_type, "at": at,
@@ -1032,6 +1178,265 @@ fn insert_event(
         params![at, session_id],
     )?;
     Ok(event)
+}
+
+fn project_live_call_tasks_once(
+    connection: &mut Connection,
+    runtime: &Arc<Mutex<LiveCallRuntime>>,
+    checkpoint: &Path,
+) -> Result<usize> {
+    let task_tables_ready: bool = connection.query_row(
+        "SELECT COUNT(*) = 2 FROM sqlite_master WHERE type='table' AND name IN ('tasks','task_events')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !task_tables_ready {
+        return Ok(0);
+    }
+
+    let transaction = connection.transaction()?;
+    let discovered_tasks = {
+        let mut statement = transaction.prepare(
+            "SELECT tasks.id,tasks.session_id,COALESCE(tasks.meta_json,'{}')
+             FROM tasks JOIN live_calls ON live_calls.id=tasks.session_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (task_id, session_id, meta_json) in discovered_tasks {
+        let question_id = serde_json::from_str::<Value>(&meta_json)
+            .ok()
+            .and_then(|meta| {
+                meta.pointer("/launchPayload/questionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        transaction.execute(
+            "INSERT OR IGNORE INTO live_call_task_projections
+             (task_id,session_id,question_id,last_task_cursor,accumulated_text,done,updated_at)
+             VALUES (?1,?2,?3,0,'',0,?4)",
+            params![task_id, session_id, question_id, now_iso()],
+        )?;
+    }
+    let projections = {
+        let mut statement = transaction.prepare(
+            "SELECT projection.task_id,projection.session_id,projection.question_id,
+                    projection.last_task_cursor,projection.accumulated_text,tasks.status
+             FROM live_call_task_projections projection
+             JOIN tasks ON tasks.id=projection.task_id
+             WHERE projection.done=0 ORDER BY tasks.created_at ASC",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut projected = 0_usize;
+    let mut terminal_questions = Vec::new();
+
+    for (task_id, session_id, question_id, last_cursor, mut accumulated, task_status) in projections
+    {
+        let task_events = {
+            let mut statement = transaction.prepare(
+                "SELECT cursor,event_type,COALESCE(text,''),COALESCE(payload_json,'{}'),event_json
+                 FROM task_events WHERE task_id=?1 AND cursor>?2 ORDER BY cursor ASC",
+            )?;
+            let rows = statement
+                .query_map(params![task_id, last_cursor], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut projected_cursor = last_cursor;
+        for (cursor, event_type, text, payload_json, event_json) in task_events {
+            let payload = serde_json::from_str::<Value>(&payload_json).unwrap_or(Value::Null);
+            let event = serde_json::from_str::<Value>(&event_json).unwrap_or(Value::Null);
+            if let Some(delta) = extract_agent_text(&event_type, &text, &payload, &event) {
+                accumulated.push_str(&delta);
+                accumulated = clean(Some(&accumulated), "", 8000);
+                insert_event_with_id(
+                    &transaction,
+                    &session_id,
+                    &format!("task:{task_id}:{cursor}:delta"),
+                    "live_call.agent.delta",
+                    json!({ "taskId": task_id, "taskCursor": cursor, "text": delta }),
+                )?;
+                projected = projected.saturating_add(1);
+            }
+            projected_cursor = cursor;
+        }
+        transaction.execute(
+            "UPDATE live_call_task_projections
+             SET last_task_cursor=?1,accumulated_text=?2,updated_at=?3 WHERE task_id=?4",
+            params![projected_cursor, accumulated, now_iso(), task_id],
+        )?;
+
+        let Some((terminal_type, succeeded)) = terminal_task_outcome(&task_status) else {
+            continue;
+        };
+        let live_event_type = if succeeded {
+            "live_call.agent.done"
+        } else {
+            "live_call.agent.error"
+        };
+        insert_event_with_id(
+            &transaction,
+            &session_id,
+            &format!("task:{task_id}:{terminal_type}"),
+            live_event_type,
+            json!({
+                "taskId": task_id,
+                "status": terminal_type,
+                "text": accumulated,
+                "error": (!succeeded).then(|| format!("agent task ended with status {terminal_type}"))
+            }),
+        )?;
+        if succeeded {
+            transaction.execute(
+                "UPDATE live_calls SET last_answer=?1 WHERE id=?2",
+                params![accumulated, session_id],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE live_call_task_projections SET done=1,updated_at=?1 WHERE task_id=?2",
+            params![now_iso(), task_id],
+        )?;
+        terminal_questions.push((session_id, question_id));
+        projected = projected.saturating_add(1);
+    }
+
+    if !terminal_questions.is_empty() {
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("live call runtime lock poisoned"))?;
+        for (session_id, question_id) in terminal_questions {
+            if question_id.is_empty() {
+                let unfinished: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM live_call_task_projections
+                     WHERE session_id=?1 AND done=0",
+                    params![session_id],
+                    |row| row.get(0),
+                )?;
+                if unfinished == 0 {
+                    runtime.acknowledge_all_questions(&session_id);
+                }
+            } else {
+                runtime.acknowledge_question(&session_id, &question_id)?;
+            }
+        }
+        runtime.save(checkpoint)?;
+    }
+    transaction.commit()?;
+    Ok(projected)
+}
+
+fn terminal_task_outcome(status: &str) -> Option<(&str, bool)> {
+    match status {
+        "done" | "completed" | "succeeded" => Some((status, true)),
+        "failed" | "cancelled" | "error" | "stopped" => Some((status, false)),
+        _ => None,
+    }
+}
+
+fn extract_agent_text(
+    event_type: &str,
+    text: &str,
+    payload: &Value,
+    event: &Value,
+) -> Option<String> {
+    let event_type = event_type.to_ascii_lowercase();
+    if ["stdout", "stderr", "stdin", "system", "error"]
+        .iter()
+        .any(|kind| event_type == *kind || event_type.starts_with(&format!("{kind}.")))
+    {
+        return None;
+    }
+    let mut fragments = Vec::new();
+    for source in [payload, event] {
+        collect_text(source.pointer("/delta/text"), &mut fragments);
+        collect_content_text(source.pointer("/delta/content"), &mut fragments);
+        if source.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") {
+            collect_text(source.pointer("/item/text"), &mut fragments);
+            collect_content_text(source.pointer("/item/content"), &mut fragments);
+        }
+        let assistant_message = source
+            .pointer("/message/role")
+            .and_then(Value::as_str)
+            .map(|role| role == "assistant")
+            .unwrap_or(true);
+        if assistant_message {
+            collect_text(source.pointer("/message/text"), &mut fragments);
+            collect_content_text(source.pointer("/message/content"), &mut fragments);
+        }
+        collect_text(source.pointer("/content_block/text"), &mut fragments);
+        collect_text(source.pointer("/output_text"), &mut fragments);
+    }
+    if fragments.is_empty()
+        && [
+            "agent",
+            "assistant",
+            "message",
+            "content",
+            "delta",
+            "response",
+            "item",
+        ]
+        .iter()
+        .any(|marker| event_type.contains(marker))
+    {
+        let fallback = payload
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(text);
+        if !fallback.is_empty() {
+            fragments.push(fallback.to_string());
+        }
+    }
+    (!fragments.is_empty()).then(|| fragments.concat())
+}
+
+fn collect_text(value: Option<&Value>, fragments: &mut Vec<String>) {
+    if let Some(text) = value
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        fragments.push(text.to_string());
+    }
+}
+
+fn collect_content_text(value: Option<&Value>, fragments: &mut Vec<String>) {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        collect_text(item.get("text"), fragments);
+    }
 }
 
 fn list_events(
@@ -1180,6 +1585,7 @@ fn record_transcript(
         match crate::task_http::create_live_call_task(
             &config.data_dir,
             session_id,
+            question_id,
             &text,
             current["workspaceId"].as_str().unwrap_or(""),
             input["agent"].as_str().unwrap_or("codex"),
@@ -1187,6 +1593,12 @@ fn record_transcript(
         ) {
             Ok(task) => {
                 let task_id = task["id"].as_str().context("Live Call task id missing")?;
+                connection.execute(
+                    "INSERT OR IGNORE INTO live_call_task_projections
+                     (task_id,session_id,question_id,last_task_cursor,accumulated_text,done,updated_at)
+                     VALUES (?1,?2,?3,0,'',0,?4)",
+                    params![task_id, session_id, question_id, now_iso()],
+                )?;
                 connection.execute(
                     "UPDATE live_calls SET agent_task_id=?1 WHERE id=?2",
                     params![task_id, session_id],
@@ -1211,6 +1623,7 @@ fn record_transcript(
                         "questionCursor": event["cursor"], "error": format!("{error:#}")
                     }),
                 )?;
+                config.acknowledge_question(session_id, question_id)?;
             }
         }
     }
@@ -1397,6 +1810,204 @@ mod tests {
     }
 
     #[test]
+    fn projects_task_output_once_and_drains_pending_questions() {
+        let (directory, config) = fixture();
+        let created = route_live_call_request(
+            &request("POST", "/api/live-calls"),
+            Some(br#"{"title":"Projection"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        let session_id = created.body["session"]["id"].as_str().unwrap().to_string();
+        route_live_call_request(
+            &request("POST", &format!("/api/live-calls/{session_id}/transcript")),
+            Some(br#"{"text":"What is the result?","final":true}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut database = Connection::open(directory.join("mobile-agent.sqlite")).unwrap();
+        let task_id: String = database
+            .query_row(
+                "SELECT agent_task_id FROM live_calls WHERE id=?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let at = now_iso();
+        database
+            .execute(
+                "INSERT INTO task_events
+                 (task_id,event_id,event_type,event_at,text,payload_json,event_json,created_at)
+                 VALUES (?1,'provider-1','response.output_text.delta',?2,'',?3,'{}',?2)",
+                params![
+                    task_id,
+                    at,
+                    json!({ "delta": { "text": "Rust owns it." } }).to_string()
+                ],
+            )
+            .unwrap();
+        database
+            .execute(
+                "UPDATE tasks SET status='done',updated_at=?1 WHERE id=?2",
+                params![now_iso(), task_id],
+            )
+            .unwrap();
+
+        assert_eq!(
+            project_live_call_tasks_once(&mut database, &config.runtime, &config.checkpoint)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            project_live_call_tasks_once(&mut database, &config.runtime, &config.checkpoint)
+                .unwrap(),
+            0
+        );
+        let projected = list_events(&database, &session_id, 0, 20).unwrap();
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|event| event["type"] == "live_call.agent.delta")
+                .count(),
+            1
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|event| event["type"] == "live_call.agent.done")
+                .count(),
+            1
+        );
+        let session = session_by_id(&database, &session_id).unwrap().unwrap();
+        assert_eq!(session["lastAnswer"], "Rust owns it.");
+        assert_eq!(config.pending_question_count(&session_id), 0);
+        drop(database);
+
+        let restarted = LiveCallRouteConfig::new(directory.clone());
+        assert_eq!(restarted.pending_question_count(&session_id), 0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_task_projects_error_and_drains_pending_questions() {
+        let (directory, config) = fixture();
+        let created = route_live_call_request(
+            &request("POST", "/api/live-calls"),
+            Some(br#"{"title":"Failure projection"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        let session_id = created.body["session"]["id"].as_str().unwrap().to_string();
+        route_live_call_request(
+            &request("POST", &format!("/api/live-calls/{session_id}/transcript")),
+            Some(br#"{"text":"Can this fail?","final":true}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        let mut database = Connection::open(directory.join("mobile-agent.sqlite")).unwrap();
+        let task_id: String = database
+            .query_row(
+                "SELECT agent_task_id FROM live_calls WHERE id=?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        database
+            .execute(
+                "UPDATE tasks SET status='failed',updated_at=?1 WHERE id=?2",
+                params![now_iso(), task_id],
+            )
+            .unwrap();
+
+        assert_eq!(
+            project_live_call_tasks_once(&mut database, &config.runtime, &config.checkpoint)
+                .unwrap(),
+            1
+        );
+        let errors = list_events(&database, &session_id, 0, 20)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event["type"] == "live_call.agent.error")
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["status"], "failed");
+        assert_eq!(config.pending_question_count(&session_id), 0);
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_questions_are_acknowledged_by_task_identity() {
+        let (directory, config) = fixture();
+        let created = route_live_call_request(
+            &request("POST", "/api/live-calls"),
+            Some(br#"{"title":"Concurrent questions"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        let session_id = created.body["session"]["id"].as_str().unwrap().to_string();
+        for question in ["What changed?", "Why now?"] {
+            route_live_call_request(
+                &request("POST", &format!("/api/live-calls/{session_id}/transcript")),
+                Some(
+                    json!({ "text": question, "final": true })
+                        .to_string()
+                        .as_bytes(),
+                ),
+                &config,
+            )
+            .unwrap()
+            .unwrap();
+        }
+        assert_eq!(config.pending_question_count(&session_id), 2);
+        let mut database = Connection::open(directory.join("mobile-agent.sqlite")).unwrap();
+        let task_ids = {
+            let mut statement = database
+                .prepare("SELECT id FROM tasks WHERE session_id=?1 ORDER BY created_at,id")
+                .unwrap();
+            let ids = statement
+                .query_map(params![session_id], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            ids
+        };
+        assert_eq!(task_ids.len(), 2);
+
+        database
+            .execute(
+                "UPDATE tasks SET status='done',updated_at=?1 WHERE id=?2",
+                params![now_iso(), task_ids[0]],
+            )
+            .unwrap();
+        project_live_call_tasks_once(&mut database, &config.runtime, &config.checkpoint).unwrap();
+        assert_eq!(config.pending_question_count(&session_id), 1);
+
+        database
+            .execute(
+                "UPDATE tasks SET status='done',updated_at=?1 WHERE id=?2",
+                params![now_iso(), task_ids[1]],
+            )
+            .unwrap();
+        project_live_call_tasks_once(&mut database, &config.runtime, &config.checkpoint).unwrap();
+        assert_eq!(config.pending_question_count(&session_id), 0);
+        let done_count = list_events(&database, &session_id, 0, 30)
+            .unwrap()
+            .iter()
+            .filter(|event| event["type"] == "live_call.agent.done")
+            .count();
+        assert_eq!(done_count, 2);
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn pause_resume_and_stop_are_idempotent_and_cursor_monotonic() {
         let (directory, config) = fixture();
         let created = route_live_call_request(
@@ -1460,6 +2071,23 @@ mod tests {
         .unwrap();
         assert_eq!(checkpoints.body["items"][0]["channel"], "remote");
         assert_eq!(checkpoints.body["items"][0]["bytes"], 4);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn asr_checkpoint_can_be_truncated_after_append_on_windows() {
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-asr-checkpoint-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("checkpoint.pcm");
+        let mut file = open_asr_checkpoint(&path).unwrap();
+        file.write_all(&[1, 2, 3, 4]).unwrap();
+        file.flush().unwrap();
+        reset_asr_checkpoint(&mut file).unwrap();
+        file.write_all(&[5, 6]).unwrap();
+        file.flush().unwrap();
+        drop(file);
+        assert_eq!(fs::read(&path).unwrap(), [5, 6]);
         fs::remove_dir_all(directory).unwrap();
     }
 }

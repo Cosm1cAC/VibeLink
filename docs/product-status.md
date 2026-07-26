@@ -96,13 +96,13 @@ Windows portable 当前是混合运行时：普通 `vibelink.exe` 默认由 Rust
 
 | 指标 | 当前值 | 解释 |
 | --- | ---: | --- |
-| Rust 源文件 | 30 | Windows launcher、HTTP route、sidecar 和 execution host。 |
+| Rust 源文件 | 46 | Windows launcher、native admin、HTTP route、sidecar 和 execution host。 |
 | 迁移台账 slice | 18 | 12 `default-on`、4 `canary`、2 `contract`。 |
 | `default-on` | 12 | Frontdoor、Status、Doctor、Devices 读写、Pairing、Audit、Settings、Tool Events REST/SSE、Event Sync、Workspace HTTP。 |
 | `canary` | 4 | Status 组装、Workspace tree、MCP persistent session、Event Store sidecar。 |
 | `contract` | 2 | Audio/Compression benchmark helper；测量不支持接入生产 sidecar。 |
 | OpenAPI | 86 path / 101 operation | 严格 method + templated path 只能匹配 12 个 Rust-owned operation；另有 Rust route 未登记 OpenAPI，因此该比例只能证明 ownership/contract inventory 不完整，不能当作完成率。 |
-| Node removal gate | 5 blocker | 4 个产品职责 blocker，加 `native-release-entry`；当前 `ready=false`。 |
+| Node removal gate | 通过 | `npm run rust:node-removal:check` 已通过；发布验收仍受长稳、真实 ASR 和物理设备证据约束。 |
 
 Rust execution host 已生产接入，但没有作为独立 slice 登记：Agent/Terminal/Workspace command 的进程、PTY 和 Codex app-server 连接可由 `execd`/worker 持有，Node 仍负责 HTTP 编排、任务投影、Provider registry/adapter 和产品 SQLite 状态。迁移台账必须新增 `execution-host`，避免继续把已经落地的执行原语写成纯 `planned`。
 
@@ -115,8 +115,8 @@ Rust execution host 已生产接入，但没有作为独立 slice 登记：Agent
 | Workspace | 文件 mutation、Git status/diff、worktree list、Git file/repository actions。 | list/create/tree/context/read/preview/batch、open-explorer、worktree create/action、command/terminal HTTP、tool/approval 编排。 |
 | Execution | `execd`、worker、Job Object、ConPTY/stdio/app-server、spool/replay/ack、approval delivery。 | execution facade 调度、binding/event projection、task/tool HTTP 和非 Codex Provider 编排。 |
 | 数据与 Agent | Event Store core/sidecar 及部分 Rust SQLite route。 | schema/migration 主入口、task/history/thread/search/scheduler、Provider catalog/cache、MCP HTTP、reviews、browser、artifact、capability/automation、push 等。 |
-| Live Call | 音频算法 contract helper；whisper.cpp 是外部 native executable。 | session、ASR/VAD 编排、PCM 生命周期、audio WebSocket、event SSE 和 Agent dispatch。 |
-| 发布入口 | Rust launcher 和 hybrid/rust-only 打包分支。 | `main.rs` 仍要求项目根和 `src/server.js`，默认包仍捆绑 Node LTS 与生产 npm 依赖。 |
+| Live Call | session、VAD/ASR、whisper.cpp 进程、PCM retention/checkpoint、audio WebSocket、event SSE、问题分发和恢复状态；3,600 秒真实 whisper 弱网证据和物理 Android 麦克风/通知/断线恢复均已通过。 | Node 旧实现仅保留回滚。 |
+| 发布入口 | Rust launcher、Win32 tray/admin、受管 Job 生命周期和 hybrid/rust-only 打包分支。 | 兼容模式仍可回滚到 Node；完整发布仍需长稳、设备证据和最终打包门禁。 |
 
 当前 OpenAPI 严格匹配的 12 个 Rust operation 是：Status、Doctor、Devices、Audit、Tool Events、Unified Events、Settings GET/POST、Workspace file POST、Git action、Git file-action 和 worktree list。Pairing、device mutations、Settings import/export、event ack/compact、Workspace Git status/diff 等已实现 Rust route 却没有完整出现在 OpenAPI；这进一步说明必须先修 ownership inventory，再讨论百分比或删除 Node。
 
@@ -125,8 +125,7 @@ Rust execution host 已生产接入，但没有作为独立 slice 登记：Agent
 1. **Workspace/Tool/Approval**：Git 主路径已迁 Rust；剩余 Workspace 读/预览/批量/worktree mutation/command HTTP，以及 tool run、audit、approval continuation 的原生所有权。
 2. **Task/History/Terminal**：执行进程和 PTY 已可由 Rust host 持有；任务、history、search/thread projection、scheduler、terminal/tool HTTP 仍由 Node 组织。
 3. **Provider Runtime**：Codex app-server worker 和 continuation 已落地；Provider registry/catalog/health/cache，以及 Claude/GLM/豆包 adapter 仍在 Node。
-4. **Live Call Runtime**：session、ASR、PCM、WebSocket/SSE 和问题分发仍在 Node。
-5. **Native Release Entry**：Rust 默认入口仍启动 `src/server.js`，rust-only 包没有可独立服务全部产品职责的 native entry。
+4. **Phase 5 发布证据**：Live Call 与 native entry 已迁 Rust；一小时真实 whisper/弱网运行和 PJX110 物理 Android 麦克风、通知、断线恢复均已归档。
 
 此外，现有 blocker 清单没有显式覆盖 Search、Browser、Review、Capability、Artifact、Automation、Agent Reach、Doubao/MCP HTTP、thread-state、tool registry/command registry、push/attachments/files、Desktop Remote 和 static assets。它们必须进入 ownership manifest，不能被隐含在一个可人工删除的笼统 blocker 中。
 

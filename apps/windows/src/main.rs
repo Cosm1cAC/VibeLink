@@ -1070,13 +1070,16 @@ fn project_root() -> Result<PathBuf> {
         return Ok(root);
     }
 
-    bail!("Cannot find VibeLink project root. Set VIBELINK_ROOT to the directory containing src/server.js.")
+    bail!("Cannot find VibeLink product root. Set VIBELINK_ROOT to a source checkout or packaged VibeLink directory.")
 }
 
 fn find_project_root_from(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
-        .find(|candidate| candidate.join("src").join("server.js").exists())
+        .find(|candidate| {
+            candidate.join("src").join("server.js").exists()
+                || candidate.join("public").join("index.html").exists()
+        })
         .map(Path::to_path_buf)
 }
 

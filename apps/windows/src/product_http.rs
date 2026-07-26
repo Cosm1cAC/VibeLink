@@ -17,7 +17,6 @@ pub const PRODUCT_RUNTIME_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/mcp/status"),
     ("POST", "/api/mcp/probe"),
     ("POST", "/api/mcp/call"),
-    ("GET", "/api/live-calls/asr-providers"),
     ("GET", "/api/live-calls/audio-metrics"),
     ("GET", "/api/live-calls/asr-metrics"),
     ("GET", "/api/live-calls/audio-files"),
@@ -115,9 +114,6 @@ fn route_authenticated_product_request(request: &ParsedRequest) -> HttpRouteResp
                 "rustSidecar": { "enabled": true, "starts": 0, "failures": 0, "fallbacks": 0 }
             }),
         ),
-        ("GET", "/api/live-calls/asr-providers") => {
-            HttpRouteResponse::json(200, json!({ "items": [] }))
-        }
         ("GET", "/api/live-calls/audio-metrics") => {
             HttpRouteResponse::json(200, json!({ "metrics": {} }))
         }
@@ -260,8 +256,7 @@ fn is_product_route(request: &ParsedRequest) -> bool {
         || path.starts_with("/api/mcp/")
         || matches!(
             path,
-            "/api/live-calls/asr-providers"
-                | "/api/live-calls/audio-metrics"
+            "/api/live-calls/audio-metrics"
                 | "/api/live-calls/asr-metrics"
                 | "/api/live-calls/audio-files"
         )

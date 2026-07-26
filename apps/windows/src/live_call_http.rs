@@ -1,3 +1,6 @@
+use crate::live_call_asr::{
+    normalize_pcm16le, transcribe, VadSegmenter, WhisperConfig, TARGET_SAMPLE_RATE,
+};
 use crate::live_call_runtime::{
     enforce_pcm_retention, AudioAcceptance, LiveCallRuntime, PcmRecording,
 };
@@ -22,6 +25,7 @@ use tungstenite::Message;
 pub const LIVE_CALL_RUNTIME_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/live-calls"),
     ("POST", "/api/live-calls"),
+    ("GET", "/api/live-calls/asr-providers"),
     ("GET", "/api/live-calls/:id"),
     ("POST", "/api/live-calls/:id/stop"),
     ("POST", "/api/live-calls/:id/pause"),
@@ -38,6 +42,7 @@ pub const LIVE_CALL_RUNTIME_ROUTES: &[(&str, &str)] = &[
 const MAX_PENDING_QUESTIONS: usize = 128;
 const MAX_AUDIO_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_RETAINED_PCM_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ASR_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct LiveCallRouteConfig {
@@ -205,6 +210,20 @@ pub fn route_live_call_request(
     }
     let connection = open_database(&config.data_dir)?;
     let path = request.path();
+    if path == "/api/live-calls/asr-providers" && request.method == "GET" {
+        let whisper = WhisperConfig::from_environment(&config.data_dir);
+        return Ok(Some(HttpRouteResponse::json(
+            200,
+            json!({
+                "items": [{
+                    "id": "whisper-cpp", "label": "Whisper.cpp (local ASR)",
+                    "production": true, "available": whisper.available(),
+                    "active": true, "binaryPath": whisper.binary, "modelPath": whisper.model,
+                    "language": whisper.language, "owner": "rust"
+                }]
+            }),
+        )));
+    }
     if path == "/api/live-calls" {
         return match request.method.as_str() {
             "GET" => Ok(Some(HttpRouteResponse::json(
@@ -265,9 +284,16 @@ pub fn route_live_call_request(
                 json!({ "items": list_events(&connection, session_id, after, limit)? }),
             )
         }
-        ("GET", "asr-checkpoints", None) => HttpRouteResponse::json(200, json!({ "items": [] })),
+        ("GET", "asr-checkpoints", None) => HttpRouteResponse::json(
+            200,
+            json!({ "items": list_asr_checkpoints(config, session_id)? }),
+        ),
         ("POST", "asr-recover", None) => {
-            HttpRouteResponse::json(200, json!({ "ok": true, "recovered": 0, "items": [] }))
+            let recovered = recover_asr_checkpoints(&connection, config, session_id)?;
+            HttpRouteResponse::json(
+                200,
+                json!({ "ok": true, "recovered": recovered.len(), "items": recovered }),
+            )
         }
         _ => return Ok(None),
     };
@@ -389,11 +415,21 @@ pub fn stream_live_call_audio_request(
     let mut frames = 0_u64;
     let mut bytes = 0_u64;
     let mut recording: Option<(ActiveRecordingGuard, File)> = None;
+    let mut asr_checkpoint: Option<(PathBuf, File)> = None;
+    let mut checkpoint_full = false;
+    let mut vad: Option<VadSegmenter> = None;
+    let whisper = WhisperConfig::from_environment(&config.data_dir);
     insert_event(
         &connection,
         &session_id,
         "live_call.audio_stream.connected",
         json!({ "source": "device" }),
+    )?;
+    insert_event(
+        &connection,
+        &session_id,
+        "live_call.asr.provider",
+        json!({ "id": "whisper-cpp", "available": whisper.available(), "language": whisper.language }),
     )?;
 
     loop {
@@ -425,6 +461,14 @@ pub fn stream_live_call_audio_request(
                         uuid::Uuid::new_v4()
                     ));
                     let (guard, file) = config.begin_recording(path)?;
+                    let checkpoint_path = asr_checkpoint_path(config, &session_id, &next.device);
+                    if let Some(parent) = checkpoint_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let checkpoint_file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&checkpoint_path)?;
                     send_ws_json(
                         &mut websocket,
                         json!({
@@ -433,6 +477,8 @@ pub fn stream_live_call_audio_request(
                         }),
                     )?;
                     recording = Some((guard, file));
+                    asr_checkpoint = Some((checkpoint_path, checkpoint_file));
+                    vad = Some(VadSegmenter::new(TARGET_SAMPLE_RATE));
                     header = Some(next);
                     continue;
                 }
@@ -448,6 +494,27 @@ pub fn stream_live_call_audio_request(
                         )?;
                     }
                     "flush" => {
+                        if let Some((_, file)) = asr_checkpoint.as_mut() {
+                            file.flush()?;
+                        }
+                        if let Some(segment) = vad.as_mut().and_then(VadSegmenter::flush) {
+                            if record_asr_segment(
+                                &connection,
+                                config,
+                                &session_id,
+                                header
+                                    .as_ref()
+                                    .map(|item| item.device.as_str())
+                                    .unwrap_or("remote"),
+                                &whisper,
+                                &segment,
+                                &format!("{session_id}-flush"),
+                            )? {
+                                if let Some((_, file)) = asr_checkpoint.as_mut() {
+                                    file.set_len(0)?;
+                                }
+                            }
+                        }
                         if let Some((_, file)) = recording.as_mut() {
                             file.flush()?;
                         }
@@ -455,6 +522,24 @@ pub fn stream_live_call_audio_request(
                         send_ws_json(&mut websocket, json!({ "type": "flushed" }))?;
                     }
                     "stop" => {
+                        if let Some(segment) = vad.as_mut().and_then(VadSegmenter::flush) {
+                            if record_asr_segment(
+                                &connection,
+                                config,
+                                &session_id,
+                                header
+                                    .as_ref()
+                                    .map(|item| item.device.as_str())
+                                    .unwrap_or("remote"),
+                                &whisper,
+                                &segment,
+                                &format!("{session_id}-stop"),
+                            )? {
+                                if let Some((_, file)) = asr_checkpoint.as_mut() {
+                                    file.set_len(0)?;
+                                }
+                            }
+                        }
                         if let Some((_, file)) = recording.as_mut() {
                             file.flush()?;
                         }
@@ -491,6 +576,52 @@ pub fn stream_live_call_audio_request(
                     .context("PCM recording missing")?
                     .1
                     .write_all(&frame)?;
+                let normalized = normalize_pcm16le(
+                    &frame,
+                    header.as_ref().context("audio header missing")?.sample_rate as u32,
+                    header.as_ref().context("audio header missing")?.channels as u16,
+                )?;
+                if let Some((_, file)) = asr_checkpoint.as_mut() {
+                    if file
+                        .metadata()?
+                        .len()
+                        .saturating_add(normalized.len() as u64)
+                        <= MAX_ASR_CHECKPOINT_BYTES
+                    {
+                        file.write_all(&normalized)?;
+                    } else if !checkpoint_full {
+                        checkpoint_full = true;
+                        insert_event(
+                            &connection,
+                            &session_id,
+                            "live_call.asr.error",
+                            json!({
+                                "channel": header.as_ref().map(|item| item.device.as_str()).unwrap_or("remote"),
+                                "error": "ASR checkpoint reached 64 MiB limit", "recoverable": false
+                            }),
+                        )?;
+                    }
+                }
+                if let Some(vad) = vad.as_mut() {
+                    for (index, segment) in vad.push(&normalized).into_iter().enumerate() {
+                        if record_asr_segment(
+                            &connection,
+                            config,
+                            &session_id,
+                            header
+                                .as_ref()
+                                .map(|item| item.device.as_str())
+                                .unwrap_or("remote"),
+                            &whisper,
+                            &segment,
+                            &format!("{session_id}-{frames}-{index}"),
+                        )? {
+                            if let Some((_, file)) = asr_checkpoint.as_mut() {
+                                file.set_len(0)?;
+                            }
+                        }
+                    }
+                }
                 frames = frames.saturating_add(1);
                 bytes = bytes.saturating_add(frame.len() as u64);
                 let sequence =
@@ -507,9 +638,30 @@ pub fn stream_live_call_audio_request(
             _ => {}
         }
     }
+    if let Some(segment) = vad.as_mut().and_then(VadSegmenter::flush) {
+        if record_asr_segment(
+            &connection,
+            config,
+            &session_id,
+            header
+                .as_ref()
+                .map(|item| item.device.as_str())
+                .unwrap_or("remote"),
+            &whisper,
+            &segment,
+            &format!("{session_id}-disconnect"),
+        )? {
+            if let Some((_, file)) = asr_checkpoint.as_mut() {
+                file.set_len(0)?;
+            }
+        }
+    }
     if let Some((guard, mut file)) = recording.take() {
         file.flush()?;
         drop(guard);
+    }
+    if let Some((_, mut file)) = asr_checkpoint.take() {
+        file.flush()?;
     }
     config.persist_runtime()?;
     config.enforce_retention()?;
@@ -520,6 +672,111 @@ pub fn stream_live_call_audio_request(
         json!({ "bytes": bytes, "frames": frames }),
     )?;
     Ok(())
+}
+
+fn record_asr_segment(
+    connection: &Connection,
+    config: &LiveCallRouteConfig,
+    session_id: &str,
+    channel: &str,
+    whisper: &WhisperConfig,
+    segment: &[u8],
+    segment_id: &str,
+) -> Result<bool> {
+    insert_event(
+        connection,
+        session_id,
+        "live_call.audio_segment",
+        json!({
+            "channel": channel, "bytes": segment.len(), "sampleRate": TARGET_SAMPLE_RATE
+        }),
+    )?;
+    match transcribe(whisper, segment, segment_id) {
+        Ok(text) => {
+            if !text.is_empty() {
+                record_transcript(
+                    connection,
+                    config,
+                    session_id,
+                    json!({
+                        "text": text, "final": true, "speaker": channel, "channel": channel
+                    }),
+                )?;
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            insert_event(
+                connection,
+                session_id,
+                "live_call.asr.error",
+                json!({
+                    "channel": channel, "error": format!("{error:#}"), "recoverable": true
+                }),
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+fn asr_checkpoint_path(config: &LiveCallRouteConfig, session_id: &str, channel: &str) -> PathBuf {
+    config
+        .data_dir
+        .join("live-call")
+        .join("asr-checkpoints")
+        .join(format!("{session_id}-{channel}.pcm"))
+}
+
+fn list_asr_checkpoints(config: &LiveCallRouteConfig, session_id: &str) -> Result<Vec<Value>> {
+    let directory = config.data_dir.join("live-call").join("asr-checkpoints");
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    let prefix = format!("{session_id}-");
+    let mut items = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".pcm") {
+            continue;
+        }
+        let bytes = entry.metadata()?.len();
+        if bytes == 0 {
+            continue;
+        }
+        items.push(json!({ "channel": name.trim_start_matches(&prefix).trim_end_matches(".pcm"), "bytes": bytes, "sampleRate": TARGET_SAMPLE_RATE, "encoding": "pcm16le" }));
+    }
+    Ok(items)
+}
+
+fn recover_asr_checkpoints(
+    connection: &Connection,
+    config: &LiveCallRouteConfig,
+    session_id: &str,
+) -> Result<Vec<Value>> {
+    let whisper = WhisperConfig::from_environment(&config.data_dir);
+    let mut recovered = Vec::new();
+    for item in list_asr_checkpoints(config, session_id)? {
+        let channel = item["channel"].as_str().unwrap_or("remote");
+        let path = asr_checkpoint_path(config, session_id, channel);
+        let pcm = fs::read(&path)?;
+        let text = transcribe(&whisper, &pcm, &format!("{session_id}-recovery-{channel}"))?;
+        if text.is_empty() {
+            continue;
+        }
+        record_transcript(
+            connection,
+            config,
+            session_id,
+            json!({ "text": text, "final": true, "speaker": channel, "channel": channel, "recovered": true }),
+        )?;
+        fs::remove_file(&path)?;
+        recovered.push(json!({ "channel": channel, "bytes": pcm.len(), "text": text }));
+    }
+    Ok(recovered)
 }
 
 fn send_ws_json<S: Read + Write>(
@@ -602,7 +859,7 @@ impl AudioHeader {
 }
 
 fn is_live_call_core_path(path: &str) -> bool {
-    if path == "/api/live-calls" {
+    if matches!(path, "/api/live-calls" | "/api/live-calls/asr-providers") {
         return true;
     }
     let Some(parts) = live_call_parts(path) else {
@@ -1165,6 +1422,44 @@ mod tests {
         assert!(events
             .windows(2)
             .all(|pair| pair[0]["cursor"].as_i64() < pair[1]["cursor"].as_i64()));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn exposes_provider_readiness_and_restart_safe_asr_checkpoints() {
+        let (directory, config) = fixture();
+        let providers = route_live_call_request(
+            &request("GET", "/api/live-calls/asr-providers"),
+            None,
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(providers.body["items"][0]["id"], "whisper-cpp");
+        assert!(providers.body["items"][0]["available"].is_boolean());
+
+        let created = route_live_call_request(
+            &request("POST", "/api/live-calls"),
+            Some(br#"{"title":"Recovery"}"#),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        let id = created.body["session"]["id"].as_str().unwrap();
+        let path = asr_checkpoint_path(&config, id, "remote");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
+
+        let restarted = LiveCallRouteConfig::new(directory.clone());
+        let checkpoints = route_live_call_request(
+            &request("GET", &format!("/api/live-calls/{id}/asr-checkpoints")),
+            None,
+            &restarted,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(checkpoints.body["items"][0]["channel"], "remote");
+        assert_eq!(checkpoints.body["items"][0]["bytes"], 4);
         fs::remove_dir_all(directory).unwrap();
     }
 }

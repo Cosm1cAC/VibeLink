@@ -26,6 +26,7 @@ mod event_sync_http;
 mod execution_host;
 mod file_http;
 mod http_frontdoor;
+mod live_call_asr;
 mod live_call_http;
 mod live_call_runtime;
 mod mcp_session_sidecar;

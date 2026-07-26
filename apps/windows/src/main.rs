@@ -307,12 +307,7 @@ fn run_user_entry(cli: &Cli) -> Result<()> {
 fn run_windows_user_entry(cli: &Cli) -> Result<()> {
     let mut active_cli = default_rust_profile(cli);
     loop {
-        let mut bridge = ManagedBridge::spawn(&active_cli)?;
         let base_url = local_base_url(cli.port);
-        if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
-            let _ = bridge.shutdown();
-            return Err(error);
-        }
         let root = project_root()?;
         let data_dir = resolve_data_dir(
             &root,
@@ -321,20 +316,40 @@ fn run_windows_user_entry(cli: &Cli) -> Result<()> {
             Path::exists,
         );
         let action = windows_native_ui::run(windows_native_ui::AdminConfig {
+            base_url: base_url.clone(),
+            pairing_base_url: pairing_base_url(cli.port),
+            device_label: cli.device_label.clone(),
+            data_dir: data_dir.clone(),
+            compatibility_mode: !active_cli.rust_http_canary,
+            server_started: false,
+        })?;
+        if action != windows_native_ui::AdminAction::StartServer {
+            return Ok(());
+        }
+
+        let mut bridge = ManagedBridge::spawn(&active_cli)?;
+        if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
+            let _ = bridge.shutdown();
+            return Err(error);
+        }
+        let action = windows_native_ui::run(windows_native_ui::AdminConfig {
             base_url,
             pairing_base_url: pairing_base_url(cli.port),
             device_label: cli.device_label.clone(),
             data_dir,
             compatibility_mode: !active_cli.rust_http_canary,
+            server_started: true,
         })?;
         bridge.shutdown()?;
-        if action == windows_native_ui::AdminAction::RestartCompatibility
-            && active_cli.rust_http_canary
-        {
-            active_cli.rust_http_canary = false;
-            continue;
+        match action {
+            windows_native_ui::AdminAction::RestartCompatibility if active_cli.rust_http_canary => {
+                active_cli.rust_http_canary = false;
+                continue;
+            }
+            windows_native_ui::AdminAction::StartServer => continue,
+            windows_native_ui::AdminAction::Exit
+            | windows_native_ui::AdminAction::RestartCompatibility => return Ok(()),
         }
-        return Ok(());
     }
 }
 

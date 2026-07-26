@@ -33,13 +33,16 @@ const ID_SETTINGS: usize = 104;
 const ID_ROLLBACK: usize = 105;
 const ID_EXIT: usize = 106;
 const ID_UPDATE: usize = 107;
+const ID_START: usize = 108;
 const SMOKE_EXIT_TIMER: usize = 9001;
 const SMOKE_VALIDATE_TIMER: usize = 9002;
 const SMOKE_ACTION_TIMER: usize = 9003;
+const SMOKE_START_TIMER: usize = 9004;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdminAction {
     Exit,
+    StartServer,
     RestartCompatibility,
 }
 
@@ -49,6 +52,7 @@ pub struct AdminConfig {
     pub device_label: String,
     pub data_dir: PathBuf,
     pub compatibility_mode: bool,
+    pub server_started: bool,
 }
 
 struct AdminState {
@@ -143,10 +147,14 @@ pub fn run(config: AdminConfig) -> Result<AdminAction> {
         if let Some(milliseconds) = smoke_exit_milliseconds() {
             SetTimer(hwnd, SMOKE_EXIT_TIMER, milliseconds, None);
         }
-        if smoke_validate_admin_endpoints() {
+        if smoke_start_server() && !state.config.server_started {
+            SetTimer(hwnd, SMOKE_START_TIMER, 750, None);
+        }
+        if state.config.server_started && smoke_validate_admin_endpoints() {
             SetTimer(hwnd, SMOKE_VALIDATE_TIMER, 750, None);
         }
-        if !state.config.compatibility_mode
+        if state.config.server_started
+            && !state.config.compatibility_mode
             && (smoke_pair_android() || smoke_restart_compatibility())
         {
             SetTimer(hwnd, SMOKE_ACTION_TIMER, 1200, None);
@@ -192,7 +200,12 @@ unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
     state.status_label = create_label(
         hwnd,
         &format!(
-            "Ready at {} | {}",
+            "{} at {} | {}",
+            if state.config.server_started {
+                "Ready"
+            } else {
+                "Stopped"
+            },
             state.config.base_url,
             if state.config.compatibility_mode {
                 "Compatibility runtime"
@@ -208,6 +221,23 @@ unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
     )?;
     create_label(hwnd, "Android pairing", 28, 138, 120, 22, font)?;
     state.pairing_value = create_label(hwnd, "No active pairing session", 28, 164, 624, 44, font)?;
+    create_button(
+        hwnd,
+        if state.config.server_started {
+            "Server running"
+        } else {
+            "Start server"
+        },
+        ID_START,
+        472,
+        222,
+        136,
+        34,
+        font,
+    )?;
+    if state.config.server_started {
+        EnableWindow(GetDlgItem(hwnd, ID_START as i32), 0);
+    }
     create_button(hwnd, "Pair Android", ID_PAIR, 28, 222, 136, 34, font)?;
     create_button(hwnd, "Refresh status", ID_REFRESH, 176, 222, 136, 34, font)?;
     create_button(hwnd, "Run diagnostics", ID_DOCTOR, 324, 222, 136, 34, font)?;
@@ -235,10 +265,16 @@ unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
     if state.config.compatibility_mode {
         EnableWindow(GetDlgItem(hwnd, ID_ROLLBACK as i32), 0);
     }
+    if !state.config.server_started {
+        EnableWindow(GetDlgItem(hwnd, ID_PAIR as i32), 0);
+        EnableWindow(GetDlgItem(hwnd, ID_REFRESH as i32), 0);
+        EnableWindow(GetDlgItem(hwnd, ID_DOCTOR as i32), 0);
+        EnableWindow(GetDlgItem(hwnd, ID_ROLLBACK as i32), 0);
+    }
     create_button(hwnd, "Exit VibeLink", ID_EXIT, 472, 334, 136, 34, font)?;
     create_label(
         hwnd,
-        "Closing this window keeps VibeLink in the notification area.",
+        "Closing this window exits VibeLink and stops the managed server.",
         28,
         394,
         624,
@@ -355,6 +391,14 @@ unsafe extern "system" fn window_proc(
             DestroyWindow(hwnd);
             0
         }
+        WM_TIMER if wparam == SMOKE_START_TIMER && !state.is_null() => {
+            KillTimer(hwnd, SMOKE_START_TIMER);
+            if !(*state).config.server_started {
+                (*state).action = AdminAction::StartServer;
+                DestroyWindow(hwnd);
+            }
+            0
+        }
         WM_TIMER if wparam == SMOKE_VALIDATE_TIMER && !state.is_null() => {
             KillTimer(hwnd, SMOKE_VALIDATE_TIMER);
             let validation = crate::status_http::native_admin_status(&(*state).config.data_dir)
@@ -384,7 +428,10 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_CLOSE => {
-            ShowWindow(hwnd, SW_HIDE);
+            if !state.is_null() {
+                (*state).action = AdminAction::Exit;
+            }
+            DestroyWindow(hwnd);
             0
         }
         WM_TRAY if lparam as u32 == WM_LBUTTONUP || lparam as u32 == WM_RBUTTONUP => {
@@ -396,6 +443,7 @@ unsafe extern "system" fn window_proc(
             KillTimer(hwnd, SMOKE_EXIT_TIMER);
             KillTimer(hwnd, SMOKE_VALIDATE_TIMER);
             KillTimer(hwnd, SMOKE_ACTION_TIMER);
+            KillTimer(hwnd, SMOKE_START_TIMER);
             if !state.is_null() {
                 Shell_NotifyIconW(NIM_DELETE, &(*state).tray);
                 DeleteObject((*state).regular_font);
@@ -410,6 +458,12 @@ unsafe extern "system" fn window_proc(
 
 unsafe fn handle_command(hwnd: HWND, state: &mut AdminState, id: usize) {
     match id {
+        ID_START => {
+            if !state.config.server_started {
+                state.action = AdminAction::StartServer;
+                DestroyWindow(hwnd);
+            }
+        }
         ID_PAIR => {
             match super::create_pairing_session(&state.config.base_url, &state.config.device_label)
             {
@@ -609,6 +663,10 @@ fn smoke_restart_compatibility() -> bool {
     smoke_flag("VIBELINK_NATIVE_UI_SMOKE_ROLLBACK")
 }
 
+fn smoke_start_server() -> bool {
+    smoke_flag("VIBELINK_NATIVE_UI_SMOKE_START")
+}
+
 fn smoke_flag(name: &str) -> bool {
     std::env::var(name).ok().as_deref() == Some("1")
 }
@@ -645,5 +703,11 @@ mod tests {
         );
         assert!(latest_release_tag(&serde_json::json!({ "tag_name": "" })).is_err());
         assert!(latest_release_tag(&serde_json::json!({ "tag_name": "x".repeat(65) })).is_err());
+    }
+
+    #[test]
+    fn start_server_action_is_distinct_from_exit_and_rollback() {
+        assert_ne!(AdminAction::StartServer, AdminAction::Exit);
+        assert_ne!(AdminAction::StartServer, AdminAction::RestartCompatibility);
     }
 }

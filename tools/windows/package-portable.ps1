@@ -85,8 +85,22 @@ function Test-RustOnlyStartupCanary([string]$StagePath) {
   $port = Get-FreeLoopbackPort
   $dataDir = Join-Path $tempRoot "rust-only-smoke-data"
   Reset-Directory -Path $dataDir -AllowedRoot $tempRoot
+  $smokeToken = "vibelink-rust-only-package-smoke-device"
+  Invoke-Checked "node.exe" @(
+    (Join-Path $root "tools\rust-only-package-smoke.mjs"),
+    "--prepare-data",
+    $dataDir,
+    "--port",
+    "$port",
+    "--token",
+    $smokeToken
+  )
   $previousDataDir = $env:VIBELINK_DATA_DIR
+  $previousSmokeStart = $env:VIBELINK_NATIVE_UI_SMOKE_START
+  $previousSmokeExit = $env:VIBELINK_NATIVE_UI_SMOKE_EXIT_MS
   $env:VIBELINK_DATA_DIR = $dataDir
+  $env:VIBELINK_NATIVE_UI_SMOKE_START = "1"
+  $env:VIBELINK_NATIVE_UI_SMOKE_EXIT_MS = "60000"
   $process = $null
   try {
     $process = Start-Process -FilePath $exe -ArgumentList @("--host", "127.0.0.1", "--port", "$port") -WorkingDirectory $StagePath -PassThru -WindowStyle Hidden
@@ -95,8 +109,8 @@ function Test-RustOnlyStartupCanary([string]$StagePath) {
     while ([DateTime]::UtcNow -lt $deadline) {
       if ($process.HasExited) { throw "Rust-only startup canary exited early with code $($process.ExitCode)" }
       try {
-        $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$port/api/status"
-        if ($response.StatusCode -eq 200) {
+        $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Headers @{ Authorization = "Bearer $smokeToken" } -Uri "http://127.0.0.1:$port/api/status"
+        if ($response.StatusCode -eq 200 -and $response.Headers["x-vibelink-control-plane"] -eq "rust") {
           $ready = $true
           break
         }
@@ -106,17 +120,23 @@ function Test-RustOnlyStartupCanary([string]$StagePath) {
     }
     if (-not $ready) { throw "Rust-only startup canary did not serve /api/status." }
     $descendants = @(Get-DescendantProcessIds -ParentPid $process.Id)
-    foreach ($pid in $descendants) {
-      $child = Get-CimInstance Win32_Process -Filter "ProcessId = $pid" -ErrorAction SilentlyContinue
+    foreach ($descendantPid in $descendants) {
+      $child = Get-CimInstance Win32_Process -Filter "ProcessId = $descendantPid" -ErrorAction SilentlyContinue
       if ($child -and [IO.Path]::GetFileName($child.ExecutablePath) -ieq "node.exe") {
         throw "Rust-only startup canary spawned Node: $($child.ExecutablePath)"
       }
     }
   } finally {
     if ($process -and -not $process.HasExited) {
-      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+      try {
+        Start-Process -FilePath "taskkill.exe" -ArgumentList @("/PID", "$($process.Id)", "/T", "/F") -Wait -WindowStyle Hidden
+      } catch {
+        # The smoke-managed default entry may exit between HasExited and taskkill.
+      }
     }
     if ($previousDataDir) { $env:VIBELINK_DATA_DIR = $previousDataDir } else { Remove-Item Env:\VIBELINK_DATA_DIR -ErrorAction SilentlyContinue }
+    if ($previousSmokeStart) { $env:VIBELINK_NATIVE_UI_SMOKE_START = $previousSmokeStart } else { Remove-Item Env:\VIBELINK_NATIVE_UI_SMOKE_START -ErrorAction SilentlyContinue }
+    if ($previousSmokeExit) { $env:VIBELINK_NATIVE_UI_SMOKE_EXIT_MS = $previousSmokeExit } else { Remove-Item Env:\VIBELINK_NATIVE_UI_SMOKE_EXIT_MS -ErrorAction SilentlyContinue }
   }
 }
 
@@ -325,6 +345,12 @@ $archive = Join-Path $outputRoot $archiveName
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 Compress-Archive -LiteralPath $stageRoot -DestinationPath $archive -CompressionLevel Optimal
 if ($RuntimeFlavor -eq "rust-only") {
+  $canaryExtract = Join-Path $tempRoot "rust-only-final-zip-canary"
+  Reset-Directory -Path $canaryExtract -AllowedRoot $tempRoot
+  Expand-Archive -LiteralPath $archive -DestinationPath $canaryExtract -Force
+  $canaryStage = Join-Path $canaryExtract "VibeLink"
+  Test-RustOnlyPackageContents -StagePath $canaryStage
+  Test-RustOnlyStartupCanary -StagePath $canaryStage
   Invoke-Checked "node.exe" @((Join-Path $root "tools\rust-only-package-smoke.mjs"), "--archive", $archive)
 }
 $hash = Get-Sha256 $archive

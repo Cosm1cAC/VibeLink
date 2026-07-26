@@ -309,6 +309,7 @@ fn run_windows_user_entry(cli: &Cli) -> Result<()> {
     loop {
         let base_url = local_base_url(cli.port);
         let root = project_root()?;
+        let server_role = user_entry_server_role(&root);
         let data_dir = resolve_data_dir(
             &root,
             env::var_os("VIBELINK_DATA_DIR"),
@@ -320,14 +321,15 @@ fn run_windows_user_entry(cli: &Cli) -> Result<()> {
             pairing_base_url: pairing_base_url(cli.port),
             device_label: cli.device_label.clone(),
             data_dir: data_dir.clone(),
-            compatibility_mode: !active_cli.rust_http_canary,
+            compatibility_mode: server_role == UserEntryServerRole::Bridge
+                && !active_cli.rust_http_canary,
             server_started: false,
         })?;
         if action != windows_native_ui::AdminAction::StartServer {
             return Ok(());
         }
 
-        let mut bridge = ManagedBridge::spawn(&active_cli)?;
+        let mut bridge = ManagedBridge::spawn(&active_cli, server_role, &data_dir)?;
         if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
             let _ = bridge.shutdown();
             return Err(error);
@@ -337,7 +339,8 @@ fn run_windows_user_entry(cli: &Cli) -> Result<()> {
             pairing_base_url: pairing_base_url(cli.port),
             device_label: cli.device_label.clone(),
             data_dir,
-            compatibility_mode: !active_cli.rust_http_canary,
+            compatibility_mode: server_role == UserEntryServerRole::Bridge
+                && !active_cli.rust_http_canary,
             server_started: true,
         })?;
         bridge.shutdown()?;
@@ -360,14 +363,44 @@ struct ManagedBridge {
     startup_gate: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserEntryServerRole {
+    Bridge,
+    RustOnly,
+}
+
+fn user_entry_server_role(root: &Path) -> UserEntryServerRole {
+    let manifest = root.join("release-manifest.json");
+    let rust_only_flavor = fs::read_to_string(&manifest)
+        .ok()
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .and_then(|value| {
+            value
+                .get("runtimeFlavor")
+                .and_then(|flavor| flavor.as_str())
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("rust-only");
+    let packaged_without_node =
+        manifest.exists() && !root.join("runtime").join("node.exe").exists();
+    let bridge_server_missing = !root.join("src").join("server.js").exists();
+
+    if rust_only_flavor || packaged_without_node || bridge_server_missing {
+        UserEntryServerRole::RustOnly
+    } else {
+        UserEntryServerRole::Bridge
+    }
+}
+
 #[cfg(windows)]
 impl ManagedBridge {
-    fn spawn(cli: &Cli) -> Result<Self> {
+    fn spawn(cli: &Cli, role: UserEntryServerRole, data_dir: &Path) -> Result<Self> {
         let startup_gate = env::temp_dir().join(format!(
             "vibelink-bridge-startup-{}.gate",
             uuid::Uuid::new_v4()
         ));
-        let mut command = bridge_role_command(cli)?;
+        let mut command = server_role_command(cli, role, Some(data_dir))?;
         command.env("VIBELINK_BRIDGE_STARTUP_GATE", &startup_gate);
         let child = command.spawn().context("Failed to start bridge role")?;
         let job = execution_host::windows::Job::create()?;
@@ -907,12 +940,16 @@ fn run_doctor(cli: &Cli) -> Result<()> {
 
 #[cfg(not(windows))]
 fn spawn_bridge_role(cli: &Cli) -> Result<Child> {
-    bridge_role_command(cli)?
+    server_role_command(cli, UserEntryServerRole::Bridge, None)?
         .spawn()
         .context("Failed to start bridge role")
 }
 
-fn bridge_role_command(cli: &Cli) -> Result<Command> {
+fn server_role_command(
+    cli: &Cli,
+    role: UserEntryServerRole,
+    data_dir: Option<&Path>,
+) -> Result<Command> {
     let exe = env::current_exe().context("Cannot resolve current executable path")?;
     let mut command = Command::new(exe);
     command
@@ -965,8 +1002,18 @@ fn bridge_role_command(cli: &Cli) -> Result<Command> {
     if cli.rust_workspace_http {
         command.arg("--rust-workspace-http");
     }
+    match role {
+        UserEntryServerRole::Bridge => {
+            command.arg("bridge");
+        }
+        UserEntryServerRole::RustOnly => {
+            command.arg("rust-only");
+            if let Some(data_dir) = data_dir {
+                command.arg("--data-dir").arg(data_dir);
+            }
+        }
+    }
     command
-        .arg("bridge")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1225,6 +1272,87 @@ mod tests {
         assert!(effective.rust_provider_http);
         assert!(effective.rust_tool_events_sse);
         assert!(effective.rust_event_sync_http);
+    }
+
+    #[test]
+    fn user_entry_server_role_follows_package_flavor_and_node_assets() {
+        let directory =
+            env::temp_dir().join(format!("vibelink-entry-role-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+
+        let src = directory.join("src");
+        let runtime = directory.join("runtime");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(src.join("server.js"), b"console.log('bridge');").unwrap();
+
+        assert_eq!(
+            user_entry_server_role(&directory),
+            UserEntryServerRole::Bridge
+        );
+
+        fs::write(
+            directory.join("release-manifest.json"),
+            br#"{"runtimeFlavor":"hybrid"}"#,
+        )
+        .unwrap();
+        fs::write(runtime.join("node.exe"), b"node").unwrap();
+        assert_eq!(
+            user_entry_server_role(&directory),
+            UserEntryServerRole::Bridge
+        );
+
+        fs::remove_file(runtime.join("node.exe")).unwrap();
+        assert_eq!(
+            user_entry_server_role(&directory),
+            UserEntryServerRole::RustOnly
+        );
+
+        fs::write(runtime.join("node.exe"), b"node").unwrap();
+        fs::write(
+            directory.join("release-manifest.json"),
+            br#"{"runtimeFlavor":"rust-only"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            user_entry_server_role(&directory),
+            UserEntryServerRole::RustOnly
+        );
+
+        fs::remove_file(directory.join("release-manifest.json")).unwrap();
+        fs::remove_file(src.join("server.js")).unwrap();
+        assert_eq!(
+            user_entry_server_role(&directory),
+            UserEntryServerRole::RustOnly
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn supervised_user_entry_commands_preserve_rust_only_and_bridge_modes() {
+        let cli =
+            Cli::try_parse_from(["vibelink", "--host", "127.0.0.1", "--port", "15177"]).unwrap();
+
+        let data_dir = Path::new("C:/ProgramData/VibeLink");
+        let rust_only_args =
+            server_role_command(&cli, UserEntryServerRole::RustOnly, Some(data_dir))
+                .unwrap()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+        assert!(rust_only_args.contains(&"rust-only".to_string()));
+        assert!(rust_only_args.contains(&"--data-dir".to_string()));
+        assert!(rust_only_args.contains(&"C:/ProgramData/VibeLink".to_string()));
+        assert!(!rust_only_args.contains(&"bridge".to_string()));
+
+        let bridge_args = server_role_command(&cli, UserEntryServerRole::Bridge, Some(data_dir))
+            .unwrap()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(bridge_args.contains(&"bridge".to_string()));
+        assert!(!bridge_args.contains(&"rust-only".to_string()));
     }
 
     #[test]

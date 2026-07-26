@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use std::ffi::c_void;
 use std::io::Read;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use windows_sys::Win32::Foundation::{GlobalFree, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DeleteObject, UpdateWindow, HBRUSH, HFONT,
@@ -67,6 +69,10 @@ struct AdminState {
 }
 
 pub fn run(config: AdminConfig) -> Result<AdminAction> {
+    if let Some(action) = headless_smoke_action(&config) {
+        return Ok(action);
+    }
+
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let instance = GetModuleHandleW(std::ptr::null());
@@ -667,6 +673,19 @@ fn smoke_start_server() -> bool {
     smoke_flag("VIBELINK_NATIVE_UI_SMOKE_START")
 }
 
+fn headless_smoke_action(config: &AdminConfig) -> Option<AdminAction> {
+    if smoke_start_server() && !config.server_started {
+        return Some(AdminAction::StartServer);
+    }
+    if smoke_start_server() && config.server_started {
+        if let Some(milliseconds) = smoke_exit_milliseconds() {
+            thread::sleep(Duration::from_millis(milliseconds as u64));
+            return Some(AdminAction::Exit);
+        }
+    }
+    None
+}
+
 fn smoke_flag(name: &str) -> bool {
     std::env::var(name).ok().as_deref() == Some("1")
 }
@@ -709,5 +728,21 @@ mod tests {
     fn start_server_action_is_distinct_from_exit_and_rollback() {
         assert_ne!(AdminAction::StartServer, AdminAction::Exit);
         assert_ne!(AdminAction::StartServer, AdminAction::RestartCompatibility);
+    }
+
+    #[test]
+    fn headless_smoke_starts_server_without_a_window() {
+        std::env::set_var("VIBELINK_NATIVE_UI_SMOKE_START", "1");
+        std::env::remove_var("VIBELINK_NATIVE_UI_SMOKE_EXIT_MS");
+        let action = headless_smoke_action(&AdminConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            pairing_base_url: "http://127.0.0.1:1".to_string(),
+            device_label: "test".to_string(),
+            data_dir: PathBuf::from("C:/tmp/vibelink-test"),
+            compatibility_mode: false,
+            server_started: false,
+        });
+        std::env::remove_var("VIBELINK_NATIVE_UI_SMOKE_START");
+        assert_eq!(action, Some(AdminAction::StartServer));
     }
 }

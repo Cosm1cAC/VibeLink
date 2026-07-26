@@ -447,6 +447,11 @@ test("portable packaging gates rust-only output before omitting Node assets", ()
   assert.match(source, /check-node-removal-readiness\.mjs/);
   assert.match(source, /Test-RustOnlyPackageContents/);
   assert.match(source, /Test-RustOnlyStartupCanary/);
+  assert.match(source, /Expand-Archive[\s\S]*\$archive[\s\S]*rust-only-final-zip-canary/);
+  assert.match(source, /VIBELINK_NATIVE_UI_SMOKE_START\s*=\s*"1"/);
+  assert.match(source, /--prepare-data/);
+  assert.match(source, /Authorization\s*=\s*"Bearer \$smokeToken"/);
+  assert.match(source, /Invoke-WebRequest[\s\S]*\/api\/status/);
   assert.match(source, /if \(\$RuntimeFlavor -eq "hybrid"\)[\s\S]*runtime\\node\.exe/);
   assert.match(source, /windows-x64-rust-only\.zip/);
 });

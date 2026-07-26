@@ -1,13 +1,25 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import crypto from "node:crypto";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 
 const MAX_DIAGNOSTIC_CHARS = 4_000;
-export const RUST_ONLY_READINESS_PATH = "/api/openapi.json";
+export const RUST_ONLY_READINESS_PATH = "/api/status";
+export const RUST_ONLY_SMOKE_DEVICE_TOKEN = "vibelink-rust-only-package-smoke-device";
+
+export function rustOnlyDefaultEntryArgs(port) {
+  return [
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port)
+  ];
+}
 
 export function rustOnlyServerArgs(port, dataDir) {
   return [
@@ -19,6 +31,48 @@ export function rustOnlyServerArgs(port, dataDir) {
     "--data-dir",
     dataDir
   ];
+}
+
+export function prepareRustOnlySmokeData(dataDir, port, token = RUST_ONLY_SMOKE_DEVICE_TOKEN) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, "settings.json"), JSON.stringify({
+    pairingToken: "vibelink-rust-only-package-smoke-pairing",
+    host: "127.0.0.1",
+    port,
+    hostAllowlist: ["127.0.0.1"]
+  }));
+  const database = new DatabaseSync(path.join(dataDir, "mobile-agent.sqlite"));
+  try {
+    database.exec(`
+      CREATE TABLE devices (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        token_hash TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT,
+        revoked_at TEXT,
+        expires_at TEXT,
+        rotated_at TEXT,
+        meta_json TEXT
+      );
+    `);
+    database.prepare(`
+      INSERT INTO devices (
+        id, label, token_hash, created_at, last_seen_at,
+        revoked_at, expires_at, rotated_at, meta_json
+      ) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?)
+    `).run(
+      "package-smoke-device",
+      "Rust-only package smoke",
+      crypto.createHash("sha256").update(token).digest("hex"),
+      new Date().toISOString(),
+      new Date().toISOString(),
+      "2099-01-01T00:00:00.000Z",
+      "{}"
+    );
+  } finally {
+    database.close();
+  }
 }
 
 function argValue(name) {
@@ -80,14 +134,17 @@ function startupDiagnostics(stdout, stderr) {
   return sections.length ? `\n${sections.join("\n")}` : "";
 }
 
-async function waitForServer(port, child, output) {
+async function waitForServer(port, child, output, token) {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       fail(`Rust-only package exited during startup with code ${child.exitCode}.${startupDiagnostics(output.stdout, output.stderr)}`);
     }
     try {
-      const response = await fetch(`http://127.0.0.1:${port}${RUST_ONLY_READINESS_PATH}`, { signal: AbortSignal.timeout(2_000) });
+      const response = await fetch(`http://127.0.0.1:${port}${RUST_ONLY_READINESS_PATH}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(2_000)
+      });
       if (response.ok && response.headers.get("x-vibelink-control-plane") === "rust") return;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -136,11 +193,18 @@ export async function runRustOnlyPackageSmoke(archive) {
     if (!fs.existsSync(exe)) fail("Rust-only package does not contain VibeLink/vibelink.exe.");
 
     const dataDir = path.join(tempRoot, "data");
-    fs.mkdirSync(dataDir, { recursive: true });
     const port = await freePort();
+    const token = RUST_ONLY_SMOKE_DEVICE_TOKEN;
+    prepareRustOnlySmokeData(dataDir, port, token);
     const output = { stdout: "", stderr: "" };
-    const child = spawn(exe, rustOnlyServerArgs(port, dataDir), {
+    const child = spawn(exe, rustOnlyDefaultEntryArgs(port), {
       cwd: packageRoot,
+      env: {
+        ...process.env,
+        VIBELINK_DATA_DIR: dataDir,
+        VIBELINK_NATIVE_UI_SMOKE_START: "1",
+        VIBELINK_NATIVE_UI_SMOKE_EXIT_MS: "60000"
+      },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -149,7 +213,7 @@ export async function runRustOnlyPackageSmoke(archive) {
     child.stdout.on("data", (chunk) => { output.stdout = diagnosticTail(output.stdout + chunk); });
     child.stderr.on("data", (chunk) => { output.stderr = diagnosticTail(output.stderr + chunk); });
     try {
-      await waitForServer(port, child, output);
+      await waitForServer(port, child, output, token);
       const nodeChildrenValue = descendantNodeProcesses(child.pid);
       const nodeChildren = Array.isArray(nodeChildrenValue)
         ? nodeChildrenValue
@@ -166,5 +230,14 @@ export async function runRustOnlyPackageSmoke(archive) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runRustOnlyPackageSmoke(argValue("--archive"));
+  const prepareDataDir = argValue("--prepare-data");
+  if (prepareDataDir) {
+    prepareRustOnlySmokeData(
+      prepareDataDir,
+      Number(argValue("--port")),
+      argValue("--token") || RUST_ONLY_SMOKE_DEVICE_TOKEN
+    );
+  } else {
+    await runRustOnlyPackageSmoke(argValue("--archive"));
+  }
 }

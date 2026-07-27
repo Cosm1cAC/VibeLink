@@ -2,7 +2,7 @@
 
 最后更新：2026-07-27
 
-审计基线：`main` 本地工作树（提交基线 `bfd2c0b`）。本文只描述当前状态与可复现验证结果；已关闭问题不作为产品状态的一部分。
+审计基线：`main` 本地工作树（提交基线 `e22778d`）。本文只描述当前状态与可复现验证结果；已关闭问题不作为产品状态的一部分。
 
 ## 结论
 
@@ -27,6 +27,8 @@ Windows Rust 化迁移已完成。Windows Bridge、HTTP/SSE/WebSocket 产品路�
 - **Live Call Assistant**：负责音频采集、VAD/ASR、问题检测、事件同步和向 Agent 分发问题。
 
 Windows 端提供 Rust HTTP 前门、执行宿主、任务调度、持久事件/审批、Live Call runtime、静态资源服务和 Win32 管理界面。Web 与 Android 连接同一套 Rust API。
+
+Win32 管理器在受管理服务就绪后一次性显示运行状态，并提供“创建配对二维码”入口。Android 配对深链接和矢量 SVG 二维码由 Rust Pairing 路由生成；管理器负责展示、复制和调用系统查看器，不在 GUI 进程中构造配对载荷。
 
 ## 所有权快照
 

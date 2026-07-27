@@ -2,22 +2,23 @@
 
 最后更新：2026-07-27
 
-审计基线：`e4b307b`（`main` / `origin/main`，不含本次文档提交）。
+审计基线：`6f685b1`（`main` / `origin/main`，不含本次文档提交）。
 
 本文记录当前可运行产品、Windows Rust 化的完成度、发布阻塞和本轮实测结果。迁移状态以 `docs/rust-migration-status.json`、`docs/route-ownership.json`、Rust-only 打包产物和实际启动行为为准；旧 TODO、已删除阶段计划和仅存在于 fixture 的实现不作为产品状态证据。
 
 ## 结论
 
-Windows Bridge 的服务端职责迁移已经完成，但 Rust-only 发行入口尚未完全收口。
+Windows Bridge 的服务端职责、无 Node 打包和 Rust-only 默认用户入口均已完成迁移。
 
 - 36 个公开 route family 全部标记为 Rust-owned；13 个后台产品职责也全部由 Rust 拥有。
 - `nodeRuntime.packaging` 已是 `removable`，迁移检查和 Node removal gate 均通过。
-- 显式 `vibelink.exe rust-only` 可从不含 Node runtime 的 ZIP 启动，提供 `/api/status`，且进程树没有 `node.exe`。
-- Rust-only ZIP 的普通 `vibelink.exe` 默认入口仍会启动 `bridge` 子进程；由于包内没有 `src/server.js`，本轮探针等待 30 秒后超时并以退出码 `1` 结束。
+- Rust-only ZIP 的普通 `vibelink.exe` 会根据 `release-manifest.json` 和包内 Node 资产自动选择 Rust-only server role，不再进入 hybrid `bridge`。
+- 最终 ZIP 解压后的普通入口已经通过原生 UI 自动启动、设备 token 鉴权、Rust `/api/status` 和无 `node.exe` 进程树 canary。
+- 显式 `vibelink.exe rust-only` 仍保留用于直接 canary；hybrid 包继续保留 `bridge` 兼容回滚，两条路径由独立测试覆盖。
 
-因此当前状态应表述为：**Rust 产品后端和可脱 Node 打包能力已完成；默认用户入口切换仍有 1 个 P1 发布阻塞。** 在默认入口 canary 通过前，不应宣称 Rust-only Windows 发行版已经完全可交付。
+因此当前状态应表述为：**Windows Rust 化迁移已完成，Node runtime removal 与 Rust-only 默认发行入口验收均已通过。**
 
-本轮没有确认未关闭的 P0。
+本轮没有确认未关闭的 Rust 迁移 P0 或 P1；剩余 canary、长稳和真实设备工作属于发布质量证据，不再是 Node removal blocker。
 
 ## Rust 化口径
 
@@ -68,38 +69,36 @@ Windows 端现在具备 Rust HTTP 前门、原生产品路由、Rust execution h
 | `npm run rust:node-removal:check` | 通过；Node runtime removal gate 放行。 |
 | `npm run rust-http:contract` | 通过；Node 兼容层 4/4、Rust frontdoor 12/12。 |
 | `npm run status:contract` | 通过，17/17。 |
-| `npm run rust:test` | 通过；184 passed、1 ignored、0 failed。 |
-| `node --test test/rustOnlyPackageSmoke.test.js test/rustOnlyDiscoveryE2e.test.js` | 通过，2/2；Web/Android discovery 无 Node backend 路径通过。 |
+| `npm run rust:test` | 通过；187 passed、1 ignored、0 failed。 |
+| `node --test test/rustOnlyPackageSmoke.test.js test/rustMigrationDefaultOn.test.js` | 通过，33/33；默认入口、鉴权 smoke 数据、ownership 和最终 ZIP canary 接线均通过。 |
 | `npm run build` | Web production build 通过。 |
 | `npm run android:test` | Android JVM tests 与 `assembleDebug` 通过。 |
-| `npm run package:windows:rust-only` | 通过；生成 Rust-only ZIP，并由显式 `rust-only` 子命令完成启动 smoke。 |
-| Rust-only ZIP 内容复核 | 128 个 entry；禁止项 0；包含 `VibeLink/vibelink.exe` 与 `VibeLink/public/index.html`。 |
-| Rust-only 默认入口探针 | 失败；普通 `vibelink.exe` 自动启动服务后 30 秒超时，退出码 `1`。 |
+| `npm run package:windows:rust-only` | 通过；stage 和最终 ZIP 均由普通 `vibelink.exe` 完成默认入口 canary，随后再跑独立 ZIP smoke。 |
+| Rust-only ZIP 内容复核 | 128 个 entry；禁止项 0；`runtimeFlavor=rust-only`，manifest commit 为 `6f685b1`。 |
+| Rust-only 默认入口探针 | 通过；原生 UI 自动启动服务，鉴权 `/api/status` 返回 Rust owner header，进程树无 Node。 |
 
-本轮产物：`artifacts/windows/VibeLink-0.1.0-windows-x64-rust-only.zip`，大小 164,975,931 bytes，SHA-256 `8a317454e3756aab23258be007e4b8f46a45c35c89ce37a29386de7a10ea0a72`。
+本轮产物：`artifacts/windows/VibeLink-0.1.0-windows-x64-rust-only.zip`，大小 164,960,620 bytes，SHA-256 `34b58ccac8983e880aafd82b05146c3d97bd408bb7ddc4effe3932d9cd07b815`。
 
-## 当前阻塞
+## 已关闭阻塞
 
-### P1：Rust-only 默认用户入口仍走 hybrid bridge
+### Rust-only 默认用户入口 P1
 
 **证据**
 
-- Windows 普通入口进入 `run_windows_user_entry()`，随后由 `ManagedBridge::spawn()` 构造 bridge 子进程。
-- `bridge_role_command()` 固定追加 `bridge` 子命令；`run_bridge_role()` 仍要求 `src/server.js` 存在。
-- Rust-only ZIP 正确排除了 `src/`，因此默认入口无法启动服务。
-- 当前 `tools/rust-only-package-smoke.mjs` 显式传入 `rust-only` 子命令，所以 package smoke 没有覆盖普通用户入口。
-- `tools/windows/package-portable.ps1` 定义了 `Test-RustOnlyStartupCanary()`，但没有调用；该函数本身也没有设置原生 UI 的自动启动 smoke 开关。
+- `user_entry_server_role()` 读取 `release-manifest.json`，并以 runtime flavor、`runtime/node.exe` 和 `src/server.js` 三组证据选择 `RustOnly` 或 `Bridge`。
+- `ManagedBridge::spawn()` 按 role 构造监督子进程；Rust-only role 传入 `rust-only --data-dir ...`，hybrid role 才传入 `bridge`。
+- `tools/rust-only-package-smoke.mjs` 改为运行普通入口参数，并准备最小 settings、设备记录和 token，用鉴权 `/api/status` 验证 Rust owner。
+- `tools/windows/package-portable.ps1` 会从最终 ZIP 重新解压并调用 `Test-RustOnlyStartupCanary()`；该 canary 设置原生 UI 自动启动开关，并检查整个子进程树没有 `node.exe`。
 
 **影响**
 
-后端迁移和 Rust-only 服务能力是真实的，但用户直接运行 Rust-only 包的主程序仍可能得到无法启动的产品。当前 gate 对“可显式启动 Rust-only server”给出了正确结论，却不足以证明“默认发行入口可用”。
+用户直接运行 Rust-only 包的普通 `vibelink.exe` 现在会启动 Rust-only server；hybrid 包仍按原路径提供 Node 兼容回滚。
 
-**关闭条件**
+**关闭证据**
 
-1. Rust-only 包的普通入口根据 package flavor 或 Node 资产缺失自动进入 Rust-only server，而不是 `bridge`。
-2. 打包流程从最终 ZIP 解压后运行普通 `vibelink.exe`，通过原生 UI smoke 自动启动服务并验证 `/api/status`。
-3. 默认入口进程树不包含 `node.exe`，且显式 `rust-only`、hybrid 兼容回滚两条路径分别保留回归测试。
-4. `npm run package:windows:rust-only` 在上述默认入口验证失败时 fail-closed。
+1. Rust role selection 与监督子进程参数的 Rust 单测通过。
+2. 默认入口、smoke 数据和 package gate 的 Node 聚焦测试 33/33 通过。
+3. `npm run package:windows:rust-only` 从最终 ZIP 运行普通入口成功，且在默认入口、Rust status owner 或无 Node 条件不满足时 fail-closed。
 
 ## 发布判断
 
@@ -107,16 +106,16 @@ Windows 端现在具备 Rust HTTP 前门、原生产品路由、Rust execution h
 | --- | --- |
 | Hybrid Windows 包 | 可继续作为兼容/回滚包；默认 Rust frontdoor，Node 仅承载兼容 fallback。 |
 | 显式 Rust-only server | 已通过迁移门禁、合同、全量 Cargo 测试和真实 ZIP smoke。 |
-| Rust-only Windows 用户发行版 | 暂不发布；等待默认入口 P1 关闭。 |
+| Rust-only Windows 用户发行版 | Node removal 与默认入口验收通过，可进入常规发布流程。 |
 | Web 静态产物 | 构建通过，由 Rust static HTTP 服务承载。 |
 | Android 客户端 | JVM tests 与 debug build 通过；真实设备发布证据仍按 release workflow 单独归档。 |
 
 ## 后续重点
 
-1. 关闭 Rust-only 默认入口 P1，并把默认入口 ZIP canary 接入打包门禁。
-2. 保持 ownership/OpenAPI/runtime registry 双向差集为 0，新 route 或后台职责未登记 owner 时 CI 必须失败。
-3. 继续收集 `canary` slice、真实 Provider 任务、Live Call 长时弱网和 Android 物理设备证据；这些是发布质量证据，不再是 Node removal blocker。
-4. 在 Rust-only 默认发行稳定后再评估删除 hybrid Node 兼容代码；删除源码不是证明迁移完成的前置条件。
+1. 保持 ownership/OpenAPI/runtime registry 双向差集为 0，新 route 或后台职责未登记 owner 时 CI 必须失败。
+2. 继续收集 `canary` slice、真实 Provider 任务、Live Call 长时弱网和 Android 物理设备证据；这些是发布质量证据，不再是 Node removal blocker。
+3. 首批 Rust-only 发布继续保留上一版 hybrid ZIP 作为进程级回滚，并验证升级/回滚演练。
+4. 在 Rust-only 默认发行稳定后再评估删除 hybrid Node 兼容源码；删除源码不是证明迁移完成的前置条件。
 
 ## 状态源
 
@@ -124,4 +123,4 @@ Windows 端现在具备 Rust HTTP 前门、原生产品路由、Rust execution h
 - `docs/rust-migration-status.json`：迁移 slice 与 Node packaging 状态。
 - `tools/check-node-removal-readiness.mjs`：Node removal fail-closed gate。
 - `tools/windows/package-portable.ps1`：hybrid/Rust-only 打包规则。
-- `tools/rust-only-package-smoke.mjs`：最终 ZIP 的显式 Rust-only 启动 smoke。
+- `tools/rust-only-package-smoke.mjs`：最终 ZIP 的普通默认入口 Rust-only 启动 smoke。

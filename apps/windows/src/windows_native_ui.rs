@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use std::ffi::c_void;
+use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{GlobalFree, HWND, LPARAM, LRESULT, WPARAM};
@@ -36,16 +37,13 @@ const ID_SETTINGS: usize = 104;
 const ID_ROLLBACK: usize = 105;
 const ID_EXIT: usize = 106;
 const ID_UPDATE: usize = 107;
-const ID_START: usize = 108;
 const SMOKE_EXIT_TIMER: usize = 9001;
 const SMOKE_VALIDATE_TIMER: usize = 9002;
 const SMOKE_ACTION_TIMER: usize = 9003;
-const SMOKE_START_TIMER: usize = 9004;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdminAction {
     Exit,
-    StartServer,
     RestartCompatibility,
 }
 
@@ -155,9 +153,6 @@ pub fn run(config: AdminConfig) -> Result<AdminAction> {
         if let Some(milliseconds) = smoke_exit_milliseconds() {
             SetTimer(hwnd, SMOKE_EXIT_TIMER, milliseconds, None);
         }
-        if smoke_start_server() && !state.config.server_started {
-            SetTimer(hwnd, SMOKE_START_TIMER, 750, None);
-        }
         if state.config.server_started && smoke_validate_admin_endpoints() {
             SetTimer(hwnd, SMOKE_VALIDATE_TIMER, 750, None);
         }
@@ -229,26 +224,9 @@ unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
     )?;
     create_label(hwnd, "Android 配对", 28, 138, 120, 22, font)?;
     state.pairing_value = create_label(hwnd, "尚无活动配对会话", 28, 164, 624, 44, font)?;
-    create_button(
-        hwnd,
-        if state.config.server_started {
-            "服务已启动"
-        } else {
-            "启动服务"
-        },
-        ID_START,
-        472,
-        222,
-        136,
-        34,
-        font,
-    )?;
-    if state.config.server_started {
-        EnableWindow(GetDlgItem(hwnd, ID_START as i32), 0);
-    }
-    create_button(hwnd, "配对 Android", ID_PAIR, 28, 222, 136, 34, font)?;
-    create_button(hwnd, "刷新状态", ID_REFRESH, 176, 222, 136, 34, font)?;
-    create_button(hwnd, "运行诊断", ID_DOCTOR, 324, 222, 136, 34, font)?;
+    create_button(hwnd, "创建配对二维码", ID_PAIR, 28, 222, 196, 34, font)?;
+    create_button(hwnd, "刷新状态", ID_REFRESH, 236, 222, 136, 34, font)?;
+    create_button(hwnd, "运行诊断", ID_DOCTOR, 384, 222, 136, 34, font)?;
     create_button(hwnd, "打开设置目录", ID_SETTINGS, 28, 274, 136, 34, font)?;
     create_button(hwnd, "检查更新", ID_UPDATE, 176, 274, 148, 34, font)?;
     create_button(hwnd, "以兼容模式重启", ID_ROLLBACK, 28, 334, 244, 34, font)?;
@@ -384,14 +362,6 @@ unsafe extern "system" fn window_proc(
             DestroyWindow(hwnd);
             0
         }
-        WM_TIMER if wparam == SMOKE_START_TIMER && !state.is_null() => {
-            KillTimer(hwnd, SMOKE_START_TIMER);
-            if !(*state).config.server_started {
-                (*state).action = AdminAction::StartServer;
-                DestroyWindow(hwnd);
-            }
-            0
-        }
         WM_TIMER if wparam == SMOKE_VALIDATE_TIMER && !state.is_null() => {
             KillTimer(hwnd, SMOKE_VALIDATE_TIMER);
             let validation = crate::status_http::native_admin_status(&(*state).config.data_dir)
@@ -407,6 +377,7 @@ unsafe extern "system" fn window_proc(
             if smoke_pair_android() {
                 if let Err(error) = super::create_pairing_session(
                     &(*state).config.base_url,
+                    &(*state).config.pairing_base_url,
                     &(*state).config.device_label,
                 ) {
                     (*state).smoke_error = Some(format!("pairing: {error:#}"));
@@ -436,7 +407,6 @@ unsafe extern "system" fn window_proc(
             KillTimer(hwnd, SMOKE_EXIT_TIMER);
             KillTimer(hwnd, SMOKE_VALIDATE_TIMER);
             KillTimer(hwnd, SMOKE_ACTION_TIMER);
-            KillTimer(hwnd, SMOKE_START_TIMER);
             if !state.is_null() {
                 Shell_NotifyIconW(NIM_DELETE, &(*state).tray);
                 DeleteObject((*state).regular_font);
@@ -451,20 +421,26 @@ unsafe extern "system" fn window_proc(
 
 unsafe fn handle_command(hwnd: HWND, state: &mut AdminState, id: usize) {
     match id {
-        ID_START => {
-            if !state.config.server_started {
-                state.action = AdminAction::StartServer;
-                DestroyWindow(hwnd);
-            }
-        }
         ID_PAIR => {
-            match super::create_pairing_session(&state.config.base_url, &state.config.device_label)
-            {
-                Ok(session) => {
-                    let uri = super::android_pairing_uri(&state.config.pairing_base_url, &session);
-                    set_text(state.pairing_value, &uri);
-                    if copy_text(hwnd, &uri).is_err() {
+            match super::create_pairing_session(
+                &state.config.base_url,
+                &state.config.pairing_base_url,
+                &state.config.device_label,
+            ) {
+                Ok(pairing) => {
+                    set_text(state.pairing_value, &pairing.android_pairing_url);
+                    if copy_text(hwnd, &pairing.android_pairing_url).is_err() {
                         message(hwnd, "已创建配对会话，但无法复制链接。", "VibeLink");
+                    }
+                    match save_pairing_qr(&state.config.data_dir, &pairing.android_qr_svg)
+                        .and_then(|path| open_path(hwnd, &path))
+                    {
+                        Ok(()) => {}
+                        Err(error) => message(
+                            hwnd,
+                            &format!("二维码已创建，但无法打开。\n\n{error:#}"),
+                            "VibeLink 配对",
+                        ),
                     }
                 }
                 Err(error) => message(
@@ -543,6 +519,33 @@ unsafe fn handle_command(hwnd: HWND, state: &mut AdminState, id: usize) {
         }
         _ => {}
     }
+}
+
+fn save_pairing_qr(data_dir: &Path, svg: &str) -> Result<PathBuf> {
+    if svg.len() > 512 * 1024 || !svg.starts_with("<?xml") || !svg.contains("<svg") {
+        anyhow::bail!("服务端返回的二维码 SVG 无效");
+    }
+    fs::create_dir_all(data_dir).context("无法创建 VibeLink 数据目录")?;
+    let path = data_dir.join("android-pairing-qr.svg");
+    fs::write(&path, svg).context("无法保存二维码 SVG")?;
+    Ok(path)
+}
+
+unsafe fn open_path(hwnd: HWND, path: &Path) -> Result<()> {
+    let operation = wide("open");
+    let path = wide(&path.to_string_lossy());
+    let result = ShellExecuteW(
+        hwnd,
+        operation.as_ptr(),
+        path.as_ptr(),
+        std::ptr::null(),
+        std::ptr::null(),
+        SW_SHOWNORMAL,
+    );
+    if result as isize <= 32 {
+        anyhow::bail!("系统没有可用的 SVG 查看器");
+    }
+    Ok(())
 }
 
 unsafe fn check_for_updates(hwnd: HWND) {
@@ -650,9 +653,6 @@ fn smoke_start_server() -> bool {
 }
 
 fn headless_smoke_action(config: &AdminConfig) -> Option<AdminAction> {
-    if smoke_start_server() && !config.server_started {
-        return Some(AdminAction::StartServer);
-    }
     if smoke_start_server() && config.server_started {
         if let Some(milliseconds) = smoke_exit_milliseconds() {
             thread::sleep(Duration::from_millis(milliseconds as u64));
@@ -701,13 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn start_server_action_is_distinct_from_exit_and_rollback() {
-        assert_ne!(AdminAction::StartServer, AdminAction::Exit);
-        assert_ne!(AdminAction::StartServer, AdminAction::RestartCompatibility);
-    }
-
-    #[test]
-    fn headless_smoke_starts_server_without_a_window() {
+    fn headless_smoke_does_not_request_a_window_restart() {
         std::env::set_var("VIBELINK_NATIVE_UI_SMOKE_START", "1");
         std::env::remove_var("VIBELINK_NATIVE_UI_SMOKE_EXIT_MS");
         let action = headless_smoke_action(&AdminConfig {
@@ -719,7 +713,7 @@ mod tests {
             server_started: false,
         });
         std::env::remove_var("VIBELINK_NATIVE_UI_SMOKE_START");
-        assert_eq!(action, Some(AdminAction::StartServer));
+        assert_eq!(action, None);
     }
 
     #[test]

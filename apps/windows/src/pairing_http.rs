@@ -74,6 +74,8 @@ struct PairingBody {
     #[serde(default)]
     trust_local_launcher: bool,
     #[serde(default)]
+    pairing_base_url: String,
+    #[serde(default)]
     code: String,
 }
 
@@ -566,11 +568,14 @@ fn create_pairing_session(
     let local_launcher_trusted = body.trust_local_launcher && is_loopback_ip(request_ip);
     let host = crate::status_http::clean_host(request.host());
     let pairing_url = pairing_url(request, &id, &code);
-    let qr_code = QrCode::new(pairing_url.as_bytes()).context("Cannot encode pairing QR")?;
-    let qr_svg = qr_code
-        .render::<svg::Color>()
-        .min_dimensions(220, 220)
-        .build();
+    let qr_svg = render_qr_svg(&pairing_url)?;
+    let android_pairing_url = local_launcher_trusted
+        .then(|| android_pairing_url(&body.pairing_base_url, &id, &code))
+        .flatten();
+    let android_qr_svg = android_pairing_url
+        .as_deref()
+        .map(render_qr_svg)
+        .transpose()?;
     let code_hash = crate::status_http::hash_token(&format!("{id}:{}", code.trim()));
     let mut connection = open_database(data_dir, false)?;
     let transaction = connection
@@ -635,8 +640,44 @@ fn create_pairing_session(
             "ok": true,
             "session": session,
             "pairingUrl": pairing_url,
-            "qrSvg": qr_svg
+            "qrSvg": qr_svg,
+            "androidPairingUrl": android_pairing_url,
+            "androidQrSvg": android_qr_svg
         }),
+    ))
+}
+
+fn render_qr_svg(payload: &str) -> Result<String> {
+    let qr_code = QrCode::new(payload.as_bytes()).context("Cannot encode pairing QR")?;
+    Ok(qr_code
+        .render::<svg::Color>()
+        .min_dimensions(220, 220)
+        .build())
+}
+
+fn android_pairing_url(base_url: &str, session_id: &str, code: &str) -> Option<String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    if base_url.is_empty() || base_url.len() > 512 {
+        return None;
+    }
+    let authority = base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))?;
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        || authority
+            .chars()
+            .any(|character| matches!(character, '/' | '?' | '#' | '\\' | '@'))
+    {
+        return None;
+    }
+    Some(format!(
+        "vibelink://pair?server={}&session={}&code={}",
+        urlencoding::encode(base_url),
+        urlencoding::encode(session_id),
+        urlencoding::encode(code)
     ))
 }
 
@@ -1691,6 +1732,40 @@ mod tests {
             .unwrap();
         assert_eq!(audit_count, 3);
         drop(database);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn trusted_local_launcher_receives_server_generated_android_qr() {
+        let data_dir = ready_data_dir();
+        let config = PairingRouteConfig::new(data_dir.clone());
+        let create = request("POST", "/api/pairing-sessions", "");
+        let created = route_pairing_request_with_body(
+            &create,
+            "127.0.0.1",
+            Some(
+                br#"{"deviceLabel":"Windows admin","trustLocalLauncher":true,"pairingBaseUrl":"http://192.168.1.10:5177"}"#,
+            ),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+
+        let session_id = created.body["session"]["id"].as_str().unwrap();
+        let code = created.body["session"]["code"].as_str().unwrap();
+        assert_eq!(created.status, 201);
+        assert_eq!(created.body["session"]["status"], "approved");
+        assert_eq!(
+            created.body["androidPairingUrl"],
+            format!(
+                "vibelink://pair?server=http%3A%2F%2F192.168.1.10%3A5177&session={session_id}&code={code}"
+            )
+        );
+        assert!(created.body["androidQrSvg"]
+            .as_str()
+            .unwrap()
+            .starts_with("<?xml"));
+
         fs::remove_dir_all(data_dir).unwrap();
     }
 }

@@ -198,18 +198,29 @@ struct CreatePairingRequest<'a> {
     device_label: &'a str,
     #[serde(rename = "trustLocalLauncher")]
     trust_local_launcher: bool,
+    #[serde(rename = "pairingBaseUrl")]
+    pairing_base_url: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreatePairingResponse {
     ok: bool,
     session: Option<PairingSession>,
+    #[serde(rename = "androidPairingUrl")]
+    android_pairing_url: Option<String>,
+    #[serde(rename = "androidQrSvg")]
+    android_qr_svg: Option<String>,
+}
+
+struct CreatedPairing {
+    session: PairingSession,
+    android_pairing_url: String,
+    android_qr_svg: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct PairingSession {
     id: String,
-    code: String,
     status: String,
     #[serde(rename = "expiresAt")]
     expires_at: String,
@@ -316,19 +327,6 @@ fn run_windows_user_entry(cli: &Cli) -> Result<()> {
             env::var_os("LOCALAPPDATA"),
             Path::exists,
         );
-        let action = windows_native_ui::run(windows_native_ui::AdminConfig {
-            base_url: base_url.clone(),
-            pairing_base_url: pairing_base_url(cli.port),
-            device_label: cli.device_label.clone(),
-            data_dir: data_dir.clone(),
-            compatibility_mode: server_role == UserEntryServerRole::Bridge
-                && !active_cli.rust_http_canary,
-            server_started: false,
-        })?;
-        if action != windows_native_ui::AdminAction::StartServer {
-            return Ok(());
-        }
-
         let mut bridge = ManagedBridge::spawn(&active_cli, server_role, &data_dir)?;
         if let Err(error) = wait_for_bridge(&base_url, Duration::from_secs(30)) {
             let _ = bridge.shutdown();
@@ -349,7 +347,6 @@ fn run_windows_user_entry(cli: &Cli) -> Result<()> {
                 active_cli.rust_http_canary = false;
                 continue;
             }
-            windows_native_ui::AdminAction::StartServer => continue,
             windows_native_ui::AdminAction::Exit
             | windows_native_ui::AdminAction::RestartCompatibility => return Ok(()),
         }
@@ -1025,8 +1022,9 @@ fn server_role_command(
 }
 
 fn print_pairing_qr(api_base_url: &str, pairing_base_url: &str, label: &str) -> Result<()> {
-    let session = create_pairing_session(api_base_url, label)?;
-    let payload = android_pairing_uri(pairing_base_url, &session);
+    let pairing = create_pairing_session(api_base_url, pairing_base_url, label)?;
+    let session = pairing.session;
+    let payload = pairing.android_pairing_url;
     let code = QrCode::new(payload.as_bytes()).context("Failed to encode QR payload")?;
     let image = code.render::<unicode::Dense1x2>().quiet_zone(true).build();
 
@@ -1040,11 +1038,16 @@ fn print_pairing_qr(api_base_url: &str, pairing_base_url: &str, label: &str) -> 
     Ok(())
 }
 
-fn create_pairing_session(base_url: &str, label: &str) -> Result<PairingSession> {
+fn create_pairing_session(
+    base_url: &str,
+    pairing_base_url: &str,
+    label: &str,
+) -> Result<CreatedPairing> {
     let endpoint = format!("{}/api/pairing-sessions", base_url.trim_end_matches('/'));
     let body = CreatePairingRequest {
         device_label: label,
         trust_local_launcher: true,
+        pairing_base_url,
     };
     let response: CreatePairingResponse = ureq::post(&endpoint)
         .set("Content-Type", "application/json")
@@ -1057,18 +1060,20 @@ fn create_pairing_session(base_url: &str, label: &str) -> Result<PairingSession>
         bail!("Bridge rejected pairing session creation");
     }
 
-    response
+    let session = response
         .session
-        .context("Bridge response did not include a pairing session")
-}
-
-fn android_pairing_uri(base_url: &str, session: &PairingSession) -> String {
-    format!(
-        "vibelink://pair?server={}&session={}&code={}",
-        urlencoding::encode(base_url.trim_end_matches('/')),
-        urlencoding::encode(&session.id),
-        urlencoding::encode(&session.code)
-    )
+        .context("Bridge response did not include a pairing session")?;
+    let android_pairing_url = response
+        .android_pairing_url
+        .context("Bridge response did not include an Android pairing URL")?;
+    let android_qr_svg = response
+        .android_qr_svg
+        .context("Bridge response did not include an Android pairing QR")?;
+    Ok(CreatedPairing {
+        session,
+        android_pairing_url,
+        android_qr_svg,
+    })
 }
 
 fn wait_for_bridge(base_url: &str, timeout: Duration) -> Result<()> {
@@ -1631,23 +1636,6 @@ mod tests {
                 false
             }),
             root.join(".agent-mobile-terminal")
-        );
-    }
-
-    #[test]
-    fn android_pairing_uri_uses_deep_link_and_escapes_server() {
-        let session = PairingSession {
-            id: "session 1".to_string(),
-            code: "ABC123".to_string(),
-            status: "pending".to_string(),
-            expires_at: "2026-07-07T00:00:00.000Z".to_string(),
-        };
-
-        let uri = android_pairing_uri("http://192.168.1.10:8787/", &session);
-
-        assert_eq!(
-            uri,
-            "vibelink://pair?server=http%3A%2F%2F192.168.1.10%3A8787&session=session%201&code=ABC123"
         );
     }
 }

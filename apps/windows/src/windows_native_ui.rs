@@ -27,6 +27,7 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WINDOW_CLASS: &str = "VibeLinkNativeAdmin";
+const APP_ICON_RESOURCE: usize = 1;
 const WM_TRAY: u32 = WM_USER + 42;
 const ID_PAIR: usize = 101;
 const ID_REFRESH: usize = 102;
@@ -90,6 +91,7 @@ pub fn run(config: AdminConfig) -> Result<AdminAction> {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
             hCursor: cursor,
+            hIcon: LoadIconW(instance, APP_ICON_RESOURCE as *const u16),
             hbrBackground: background as HBRUSH,
             lpszClassName: class.as_ptr(),
             ..std::mem::zeroed()
@@ -120,7 +122,7 @@ pub fn run(config: AdminConfig) -> Result<AdminAction> {
             heading_font,
             smoke_error: None,
         });
-        let title = wide("VibeLink Administration");
+        let title = wide("VibeLink 管理中心");
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
@@ -201,22 +203,22 @@ pub fn run(config: AdminConfig) -> Result<AdminAction> {
 unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
     let font = state.regular_font;
     create_label(hwnd, "VibeLink", 28, 22, 620, 34, state.heading_font)?;
-    create_label(hwnd, "Native bridge administration", 28, 56, 620, 22, font)?;
-    create_label(hwnd, "Bridge", 28, 98, 100, 22, font)?;
+    create_label(hwnd, "原生服务管理", 28, 56, 620, 22, font)?;
+    create_label(hwnd, "服务状态", 28, 98, 100, 22, font)?;
     state.status_label = create_label(
         hwnd,
         &format!(
-            "{} at {} | {}",
+            "{} · {} · {}",
             if state.config.server_started {
-                "Ready"
+                "正在运行"
             } else {
-                "Stopped"
+                "未启动"
             },
             state.config.base_url,
             if state.config.compatibility_mode {
-                "Compatibility runtime"
+                "兼容运行时"
             } else {
-                "Rust runtime"
+                "Rust 运行时"
             }
         ),
         132,
@@ -225,14 +227,14 @@ unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
         22,
         font,
     )?;
-    create_label(hwnd, "Android pairing", 28, 138, 120, 22, font)?;
-    state.pairing_value = create_label(hwnd, "No active pairing session", 28, 164, 624, 44, font)?;
+    create_label(hwnd, "Android 配对", 28, 138, 120, 22, font)?;
+    state.pairing_value = create_label(hwnd, "尚无活动配对会话", 28, 164, 624, 44, font)?;
     create_button(
         hwnd,
         if state.config.server_started {
-            "Server running"
+            "服务已启动"
         } else {
-            "Start server"
+            "启动服务"
         },
         ID_START,
         472,
@@ -244,30 +246,12 @@ unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
     if state.config.server_started {
         EnableWindow(GetDlgItem(hwnd, ID_START as i32), 0);
     }
-    create_button(hwnd, "Pair Android", ID_PAIR, 28, 222, 136, 34, font)?;
-    create_button(hwnd, "Refresh status", ID_REFRESH, 176, 222, 136, 34, font)?;
-    create_button(hwnd, "Run diagnostics", ID_DOCTOR, 324, 222, 136, 34, font)?;
-    create_button(hwnd, "Settings folder", ID_SETTINGS, 28, 274, 136, 34, font)?;
-    create_button(
-        hwnd,
-        "Check for updates",
-        ID_UPDATE,
-        176,
-        274,
-        148,
-        34,
-        font,
-    )?;
-    create_button(
-        hwnd,
-        "Restart in compatibility mode",
-        ID_ROLLBACK,
-        28,
-        334,
-        244,
-        34,
-        font,
-    )?;
+    create_button(hwnd, "配对 Android", ID_PAIR, 28, 222, 136, 34, font)?;
+    create_button(hwnd, "刷新状态", ID_REFRESH, 176, 222, 136, 34, font)?;
+    create_button(hwnd, "运行诊断", ID_DOCTOR, 324, 222, 136, 34, font)?;
+    create_button(hwnd, "打开设置目录", ID_SETTINGS, 28, 274, 136, 34, font)?;
+    create_button(hwnd, "检查更新", ID_UPDATE, 176, 274, 148, 34, font)?;
+    create_button(hwnd, "以兼容模式重启", ID_ROLLBACK, 28, 334, 244, 34, font)?;
     if state.config.compatibility_mode {
         EnableWindow(GetDlgItem(hwnd, ID_ROLLBACK as i32), 0);
     }
@@ -277,10 +261,10 @@ unsafe fn create_controls(hwnd: HWND, state: &mut AdminState) -> Result<()> {
         EnableWindow(GetDlgItem(hwnd, ID_DOCTOR as i32), 0);
         EnableWindow(GetDlgItem(hwnd, ID_ROLLBACK as i32), 0);
     }
-    create_button(hwnd, "Exit VibeLink", ID_EXIT, 472, 334, 136, 34, font)?;
+    create_button(hwnd, "退出 VibeLink", ID_EXIT, 472, 334, 136, 34, font)?;
     create_label(
         hwnd,
-        "Closing this window exits VibeLink and stops the managed server.",
+        "关闭此窗口会退出 VibeLink 并停止受管理服务。",
         28,
         394,
         624,
@@ -365,8 +349,11 @@ unsafe fn add_tray_icon(hwnd: HWND, state: &mut AdminState) -> Result<()> {
     state.tray.uID = 1;
     state.tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     state.tray.uCallbackMessage = WM_TRAY;
-    state.tray.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
-    let tip = wide("VibeLink | Bridge ready");
+    state.tray.hIcon = LoadIconW(
+        GetModuleHandleW(std::ptr::null()),
+        APP_ICON_RESOURCE as *const u16,
+    );
+    let tip = wide("VibeLink | 服务就绪");
     for (target, source) in state.tray.szTip.iter_mut().zip(tip.iter()) {
         *target = *source;
     }
@@ -477,17 +464,13 @@ unsafe fn handle_command(hwnd: HWND, state: &mut AdminState, id: usize) {
                     let uri = super::android_pairing_uri(&state.config.pairing_base_url, &session);
                     set_text(state.pairing_value, &uri);
                     if copy_text(hwnd, &uri).is_err() {
-                        message(
-                            hwnd,
-                            "Pairing session created, but the link could not be copied.",
-                            "VibeLink",
-                        );
+                        message(hwnd, "已创建配对会话，但无法复制链接。", "VibeLink");
                     }
                 }
                 Err(error) => message(
                     hwnd,
-                    &format!("Could not create pairing session.\n\n{error:#}"),
-                    "VibeLink pairing",
+                    &format!("无法创建配对会话。\n\n{error:#}"),
+                    "VibeLink 配对",
                 ),
             }
         }
@@ -496,17 +479,17 @@ unsafe fn handle_command(hwnd: HWND, state: &mut AdminState, id: usize) {
             set_text(
                 state.status_label,
                 &format!(
-                    "{} at {} | {}",
+                    "{} · {} · {}",
                     if status.is_ok() {
-                        "Ready"
+                        "正在运行"
                     } else {
-                        "Unavailable"
+                        "不可用"
                     },
                     state.config.base_url,
                     if state.config.compatibility_mode {
-                        "Compatibility runtime"
+                        "兼容运行时"
                     } else {
-                        "Rust runtime"
+                        "Rust 运行时"
                     }
                 ),
             );
@@ -524,17 +507,17 @@ unsafe fn handle_command(hwnd: HWND, state: &mut AdminState, id: usize) {
                 message(
                     hwnd,
                     &format!(
-                        "{} checks completed. {} require attention.",
+                        "{} 项检查已完成，其中 {} 项需要处理。",
                         checks.len(),
                         failed
                     ),
-                    "VibeLink diagnostics",
+                    "VibeLink 诊断",
                 );
             }
             Err(error) => message(
                 hwnd,
-                &format!("Diagnostics request failed.\n\n{error:#}"),
-                "VibeLink diagnostics",
+                &format!("诊断请求失败。\n\n{error:#}"),
+                "VibeLink 诊断",
             ),
         },
         ID_SETTINGS => {
@@ -575,23 +558,16 @@ unsafe fn check_for_updates(hwnd: HWND) {
         Ok(release) => match latest_release_tag(&release) {
             Ok(latest) => message(
                 hwnd,
-                &format!(
-                    "Installed: {}\nLatest release: {latest}",
-                    env!("CARGO_PKG_VERSION")
-                ),
-                "VibeLink updates",
+                &format!("已安装：{}\n最新版本：{latest}", env!("CARGO_PKG_VERSION")),
+                "VibeLink 更新",
             ),
             Err(error) => message(
                 hwnd,
-                &format!("Release response was invalid.\n\n{error:#}"),
-                "VibeLink updates",
+                &format!("发布信息无效。\n\n{error:#}"),
+                "VibeLink 更新",
             ),
         },
-        Err(error) => message(
-            hwnd,
-            &format!("Could not check releases.\n\n{error}"),
-            "VibeLink updates",
-        ),
+        Err(error) => message(hwnd, &format!("无法检查更新。\n\n{error}"), "VibeLink 更新"),
     }
 }
 
@@ -744,5 +720,17 @@ mod tests {
         });
         std::env::remove_var("VIBELINK_NATIVE_UI_SMOKE_START");
         assert_eq!(action, Some(AdminAction::StartServer));
+    }
+
+    #[test]
+    fn compiled_vibelink_icon_resource_is_available() {
+        unsafe {
+            let instance = GetModuleHandleW(std::ptr::null());
+            assert_ne!(
+                LoadIconW(instance, APP_ICON_RESOURCE as *const u16),
+                std::ptr::null_mut(),
+                "the application icon resource should be compiled into the executable"
+            );
+        }
     }
 }

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createSqliteEventStore } from "../../src/eventStore.js";
 import { EVENT_STORE_CONTRACT_METHODS, EVENT_STORE_SIDECAR_PROTOCOL_VERSION } from "../../src/eventStoreContract.js";
@@ -87,9 +87,7 @@ function createTempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "vibelink-event-store-canary-"));
 }
 
-function openCanaryDb(dbPath) {
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new DatabaseSync(dbPath, { timeout: 5000 });
+export function initializeCanarySchema(db) {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
@@ -177,7 +175,41 @@ function openCanaryDb(dbPath) {
     );
     CREATE INDEX idx_live_call_events_session_cursor ON live_call_events(session_id, cursor);
     CREATE INDEX idx_live_call_events_session_at ON live_call_events(session_id, event_at);
+
+    CREATE TABLE event_acks (
+      device_id TEXT NOT NULL,
+      stream_id TEXT NOT NULL,
+      cursor INTEGER NOT NULL DEFAULT 0,
+      event_id TEXT,
+      acked_at TEXT NOT NULL,
+      metadata_json TEXT,
+      PRIMARY KEY (device_id, stream_id)
+    );
+    CREATE INDEX idx_event_acks_stream ON event_acks(stream_id, cursor);
+
+    CREATE TABLE retention_policies (
+      stream_id TEXT PRIMARY KEY,
+      retention_days INTEGER NOT NULL DEFAULT 30,
+      keep_latest INTEGER NOT NULL DEFAULT 5000,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE compaction_markers (
+      marker_id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      from_cursor INTEGER NOT NULL,
+      to_cursor INTEGER NOT NULL,
+      compacted_at TEXT NOT NULL,
+      metadata_json TEXT
+    );
+    CREATE INDEX idx_compaction_markers_stream ON compaction_markers(stream_id, to_cursor);
   `);
+}
+
+function openCanaryDb(dbPath) {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath, { timeout: 5000 });
+  initializeCanarySchema(db);
   return db;
 }
 
@@ -438,7 +470,9 @@ async function main() {
   process.exitCode = evaluation.passed ? 0 : 1;
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message || String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error.stack || error.message || String(error));
+    process.exitCode = 1;
+  });
+}

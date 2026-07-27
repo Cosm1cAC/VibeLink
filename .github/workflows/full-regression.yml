@@ -54,8 +54,8 @@ jobs:
           java-version: "17"
       - run: cd apps/android && ./gradlew testDebugUnitTest assembleDebug
 
-  rust-only-negative:
-    name: Rust-only package negative gate
+  rust-only-package:
+    name: Rust-only package gate
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -69,11 +69,11 @@ jobs:
         with:
           workspaces: apps/windows
       - run: npm ci
-      - name: Verify rust-only package is rejected
+      - name: Verify rust-only package succeeds
+        run: npm run package:windows:rust-only
+      - name: Verify rust-only package outputs
         shell: pwsh
         run: |
-          npm run package:windows:rust-only
-          if ($LASTEXITCODE -eq 0) {
-            throw "Rust-only packaging unexpectedly succeeded before Node removal blockers were cleared."
-          }
-          Write-Host "Rust-only packaging rejected as expected."
+          $zip = Get-Item artifacts/windows/VibeLink-*-windows-x64-rust-only.zip
+          $checksum = Get-Item "$($zip.FullName).sha256"
+          if ($zip.Length -le 0 -or $checksum.Length -le 0) { throw "Rust-only package output is empty." }

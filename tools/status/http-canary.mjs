@@ -223,12 +223,12 @@ function stopServer(server) {
 }
 
 async function removeTempRoot(tempRoot) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     try {
       fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       return;
     } catch (error) {
-      if (!["EBUSY", "EPERM", "ENOTEMPTY"].includes(error?.code) || attempt === 19) throw error;
+      if (!["EBUSY", "EPERM", "ENOTEMPTY"].includes(error?.code) || attempt === 79) throw error;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }

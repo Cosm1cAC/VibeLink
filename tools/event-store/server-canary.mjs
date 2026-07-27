@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..", "..");
@@ -204,7 +204,35 @@ function metric(stats, method) {
   };
 }
 
-function evaluate(stats, { maxAppendAvgMs }) {
+export function metricDelta(baseline, stats, method) {
+  const before = metric(baseline, method);
+  const after = metric(stats, method);
+  const count = Math.max(0, Number(after.count || 0) - Number(before.count || 0));
+  const totalDurationMs = Math.max(
+    0,
+    Number(after.count || 0) * Number(after.avgDurationMs || 0) -
+      Number(before.count || 0) * Number(before.avgDurationMs || 0)
+  );
+  const modes = new Set([
+    ...Object.keys(before.modeCounts || {}),
+    ...Object.keys(after.modeCounts || {})
+  ]);
+  const modeCounts = Object.fromEntries(
+    [...modes].map((mode) => [
+      mode,
+      Math.max(0, Number(after.modeCounts?.[mode] || 0) - Number(before.modeCounts?.[mode] || 0))
+    ])
+  );
+  return {
+    count,
+    failures: Math.max(0, Number(after.failures || 0) - Number(before.failures || 0)),
+    fallbacks: Math.max(0, Number(after.fallbacks || 0) - Number(before.fallbacks || 0)),
+    avgDurationMs: count > 0 ? Math.round((totalDurationMs / count) * 10) / 10 : 0,
+    modeCounts
+  };
+}
+
+export function evaluate(stats, baseline, { maxAppendAvgMs }) {
   const eventStore = stats.eventStore || {};
   const rust = eventStore.rustSidecar || {};
   const checks = [];
@@ -230,7 +258,7 @@ function evaluate(stats, { maxAppendAvgMs }) {
   });
 
   for (const method of ["insertToolEvents", "insertLiveCallEvents"]) {
-    const item = metric(stats, method);
+    const item = metricDelta(baseline, stats, method);
     checks.push({
       name: `${method} rust routing`,
       pass: Number(item.modeCounts?.["rust-sidecar"] || 0) > 0,
@@ -250,8 +278,8 @@ function evaluate(stats, { maxAppendAvgMs }) {
 
   checks.push({
     name: "sync stalls",
-    pass: Number(eventStore.metrics?.stalls?.count || 0) === 0,
-    detail: `${eventStore.metrics?.stalls?.count || 0} sync stalls`
+    pass: Number(eventStore.metrics?.stalls?.count || 0) - Number(baseline?.eventStore?.metrics?.stalls?.count || 0) === 0,
+    detail: `${Math.max(0, Number(eventStore.metrics?.stalls?.count || 0) - Number(baseline?.eventStore?.metrics?.stalls?.count || 0))} sync stalls`
   });
   checks.push({
     name: "pending drain",
@@ -279,7 +307,7 @@ function printSummary(result) {
   console.log(`- mode: ${result.stats.storeMode}`);
   console.log("\nRuntime append metrics:");
   for (const method of ["insertToolEvents", "insertLiveCallEvents"]) {
-    const item = metric(result.stats, method);
+    const item = metricDelta(result.baselineStats, result.stats, method);
     console.log(`- ${method}: count ${item.count || 0}, avg ${item.avgDurationMs || 0}ms, modes ${JSON.stringify(item.modeCounts || {})}`);
   }
   console.log("\nChecks:");
@@ -287,6 +315,26 @@ function printSummary(result) {
     console.log(`- ${check.pass ? "PASS" : "FAIL"} ${check.name}: ${check.detail}`);
   }
   console.log(`\nResult: ${result.evaluation.passed ? "PASS" : "FAIL"}`);
+}
+
+async function startTerminalSession(baseUrl, token, workspaceId) {
+  const terminal = await requestJson(baseUrl, `/api/workspaces/${encodeURIComponent(workspaceId)}/terminal-session`, {
+    method: "POST",
+    token,
+    body: { mode: "spawn", cols: 100, rows: 30 }
+  });
+  if (!terminal.ok || !terminal.toolRunId) {
+    throw new Error(`terminal session failed: ${JSON.stringify(terminal)}`);
+  }
+  return terminal.toolRunId;
+}
+
+async function stopTerminalSession(baseUrl, token, toolRunId, reason) {
+  await requestJson(baseUrl, `/api/tool-runs/${encodeURIComponent(toolRunId)}/stop`, {
+    method: "POST",
+    token,
+    body: { reason }
+  });
 }
 
 async function main() {
@@ -312,6 +360,21 @@ async function main() {
     if (!workspace?.id) throw new Error("server canary could not find a workspace");
 
     await requestJson(baseUrl, "/api/tool-events/stats", { token });
+    const warmupToolRunId = await startTerminalSession(baseUrl, token, workspace.id);
+    await waitForStats(
+      baseUrl,
+      token,
+      (item) => Number(metric(item, "insertToolEvents").modeCounts?.["rust-sidecar"] || 0) > 0 &&
+        Number(item.eventStore?.rustSidecar?.client?.pending || 0) === 0,
+      30000
+    );
+    await stopTerminalSession(baseUrl, token, warmupToolRunId, "Event-store server canary warm-up completed.");
+    const baselineStats = await waitForStats(
+      baseUrl,
+      token,
+      (item) => Number(item.eventStore?.rustSidecar?.client?.pending || 0) === 0,
+      30000
+    );
 
     const commandScript = `for ($i = 0; $i -lt ${commandLines}; $i++) { Write-Output \"event-store-server-canary $i\" }`;
     const commandResult = await requestJson(baseUrl, `/api/workspaces/${encodeURIComponent(workspace.id)}/command`, {
@@ -323,6 +386,8 @@ async function main() {
       }
     });
     if (!commandResult.ok) throw new Error(`workspace command failed: ${commandResult.stderr || commandResult.stdout || "unknown"}`);
+
+    const terminalToolRunId = await startTerminalSession(baseUrl, token, workspace.id);
 
     const live = await requestJson(baseUrl, "/api/live-calls", {
       method: "POST",
@@ -360,19 +425,21 @@ async function main() {
       }
     }
 
+    await stopTerminalSession(baseUrl, token, terminalToolRunId, "Event-store server canary completed.");
+
     const stats = await waitForStats(
       baseUrl,
       token,
       (item) => {
-        const tool = metric(item, "insertToolEvents");
-        const liveStats = metric(item, "insertLiveCallEvents");
+        const tool = metricDelta(baselineStats, item, "insertToolEvents");
+        const liveStats = metricDelta(baselineStats, item, "insertLiveCallEvents");
         return Number(tool.modeCounts?.["rust-sidecar"] || 0) > 0 &&
           Number(liveStats.modeCounts?.["rust-sidecar"] || 0) > 0 &&
           Number(item.eventStore?.rustSidecar?.client?.pending || 0) === 0;
       },
       30000
     );
-    const evaluation = evaluate(stats, { maxAppendAvgMs });
+    const evaluation = evaluate(stats, baselineStats, { maxAppendAvgMs });
     const result = {
       generatedAt: nowIso(),
       baseUrl,
@@ -386,6 +453,8 @@ async function main() {
         stdoutBytes: Buffer.byteLength(commandResult.stdout || "", "utf8"),
         stderrBytes: Buffer.byteLength(commandResult.stderr || "", "utf8")
       },
+      terminalToolRunId,
+      baselineStats,
       stats,
       evaluation
     };
@@ -411,7 +480,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message || String(error));
-  process.exitCode = 1;
-});
+if (pathToFileURL(process.argv[1] || "").href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error.stack || error.message || String(error));
+    process.exitCode = 1;
+  });
+}

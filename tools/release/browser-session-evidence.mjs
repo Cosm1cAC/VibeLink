@@ -53,15 +53,21 @@ try {
   assert.ok((await api("/api/browser-sessions")).items.some((item) => item.id === sessionId), "session did not survive a new HTTP request");
 
   const browser = await chromium.launch({ headless: true });
-  for (const [name, viewport] of [["desktop", { width: 1440, height: 960 }], ["phone", { width: 390, height: 844 }]]) {
-    const page = await browser.newPage({ viewport });
+  const browserCases = [
+    { name: "desktop", viewport: { width: 1440, height: 960 }, locale: "en-US", capabilityLabel: "Capability center" },
+    { name: "phone", viewport: { width: 390, height: 844 }, locale: "zh-CN", capabilityLabel: "能力中心" }
+  ];
+  for (const { name, viewport, locale, capabilityLabel } of browserCases) {
+    const page = await browser.newPage({ viewport, locale });
     const errors = [];
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-    await page.goto(baseUrl);
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await page.evaluate((value) => localStorage.setItem("mat.token", value), token);
-    await page.reload({ waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "Settings" }).click();
-    await page.getByLabel("Capability center").waitFor();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    const settingsButton = page.getByRole("button", { name: "Settings" });
+    await settingsButton.waitFor();
+    await settingsButton.click();
+    await page.getByLabel(capabilityLabel).waitFor();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false, `${name} layout overflows`);
     assert.deepEqual(errors, [], `${name} console errors: ${errors.join("; ")}`);
     await page.screenshot({ path: path.join(outputDir, `web-${name}.png`), fullPage: true });
@@ -71,7 +77,7 @@ try {
 
   await api(`/api/browser-sessions/${sessionId}`, { method: "DELETE" });
   await api(`/api/browser-sessions/${sessionId}`, {}, 404);
-  fs.writeFileSync(path.join(outputDir, "report.json"), JSON.stringify({ ok: true, bridge: baseUrl, traceEvents: trace.length, tracePages: pages, redactionVerified: true, reconnectVerified: true, cleanupVerified: true, viewports: ["desktop", "phone"], generatedAt: new Date().toISOString() }, null, 2));
+  fs.writeFileSync(path.join(outputDir, "report.json"), JSON.stringify({ ok: true, bridge: baseUrl, traceEvents: trace.length, tracePages: pages, redactionVerified: true, reconnectVerified: true, cleanupVerified: true, viewports: browserCases.map(({ name, locale }) => ({ name, locale })), generatedAt: new Date().toISOString() }, null, 2));
 } finally {
   if (sessionId) await fetch(`${baseUrl}/api/browser-sessions/${sessionId}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
   await new Promise((resolve) => fixture.close(resolve));

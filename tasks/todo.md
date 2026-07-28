@@ -1,73 +1,28 @@
-# VibeLink Rust Control-Plane Migration
+# VibeLink 当前待办
 
-## Public Status Milestone
+最后更新：2026-07-28
 
-- [x] Audit the current Status sidecar, route canary, public process, Tunnel, and package state.
-- [x] Write the staged migration, verification, and rollback plan.
-- [x] Add a failing test for public Status runtime evidence.
-- [x] Implement the public authenticated Status canary.
-- [x] Add degraded-runtime and latency-threshold coverage.
-- [x] Run Status Node/Rust contract and server-route verification.
-- [x] Hide pairing tokens from startup logs after device pairing.
-- [x] Build a portable package from the current commit and verify its manifest/checksum.
-- [x] Preflight the named Tunnel and preserve the current rollback commands.
-- [x] Restart the public bridge with `VIBELINK_RUST_STATUS=1` under the Rust launcher.
-- [x] Run and archive the authenticated public canary.
-- [x] Review, stage, commit, and push the verified milestone.
+## P1 测试基础设施
 
-## Existing Data-Plane Promotions
+- [ ] TBUG-001：修复 Rust HTTP 合同并发超时，完成 20 轮并发回归。
+- [ ] TBUG-002：修复 Cargo/linker 可用性误判，恢复 6 个真实 workspace Rust 测试。
+- [ ] TBUG-003：统一 canary binary provenance，拒绝陈旧 release 和 debug 性能误判。
 
-- [x] Collect representative Workspace interactive-session evidence.
-- [x] Collect controlled real-server and soak MCP evidence.
-- [ ] Collect representative MCP natural-session evidence.
-- [x] Collect Event Store real-session runtime statistics.
-- [x] Evaluate every slice against parity, latency, and zero-fallback gates without premature promotion.
-- [x] Add, package, deploy, and verify the explicit `--rust-canary` launcher profile.
+## P2 质量门禁
 
-## Rust HTTP Ownership
+- [ ] QG-001：把 execution-host ignored 集成测试接入 focused CI。
+- [ ] QG-002：清理 Android 弃用 API 与 unchecked cast 告警。
 
-- [x] Add an opt-in Rust external front door with a loopback-only Node backend.
-- [x] Verify transparent HTTP, SSE, WebSocket, authentication, and shutdown parity.
-- [x] Migrate direct `/api/status` HTTP ownership behind a rollback flag.
-- [x] Migrate direct `/api/doctor` HTTP ownership behind a rollback flag.
-- [x] Migrate read-only `GET /api/devices` ownership behind an independent Rust flag.
-- [x] Migrate pairing and audited device mutation routes.
-- [x] Migrate settings and audit routes.
-- [ ] Migrate workspace and tool routes.
-- [ ] Migrate task and live-call routes.
+## 发布证据
 
-## Independent Rust Server Execution
+- [ ] QG-003：归档真实 Provider、自然 MCP/豁免、终端恢复、弱网 Live Call 和 Android 设备证据。
+- [ ] QG-004：发布与最终 commit 对齐的 tag、manifest、Rust-only/hybrid ZIP、SHA-256 与回滚说明。
+- [ ] QG-005：在稳定发布后按可逆 slice 退役 hybrid Node 兼容源码。
 
-- [x] Record the end-state architecture and migration order.
-- [x] Add Rust pairing/device mutation ownership with Node fallback.
-- [x] Add Rust settings and audit ownership with Node fallback.
-- [ ] Add Rust workspace/tool ownership with command and approval parity.
-- [ ] Add Rust task/live-call ownership with provider boundary parity.
-- [ ] Make Rust the default bridge server and keep Node as explicit rollback.
-- [ ] Remove Node runtime from the portable package after observation and recovery evidence.
-- [x] Migrate audited device mutation routes with transaction-bound fallback semantics.
-- [x] Migrate pairing status/list/approve/deny routes.
-- [x] Migrate pairing create/claim routes with bounded JSON bodies and one-time token safety.
-- [x] Migrate settings read, validation, dry-run, and mutation routes.
-- [x] Migrate audit-log read, bounded pagination, and field-projection routes.
-- [x] Isolate Rust workspace-tree, event-store, MCP session, and sidecar protocol modules.
-- [ ] Migrate workspace read/tree and registry routes.
-- [x] Migrate authenticated workspace file write/delete/rename with allowed-root enforcement.
-- [ ] Migrate approvals, commands, Git actions, and tool-run routes.
-- [ ] Migrate tool-event and unified-event SSE streams.
-- [x] Migrate tool-event read and SSE ownership behind an opt-in Rust flag.
-- [ ] Migrate task, history, and terminal routes.
-- [ ] Migrate provider-process ownership out of Node.
-- [x] Migrate live-call HTTP and WebSocket/audio routes.
-- [x] Project Live Call task deltas/terminal outcomes with durable per-task cursors and drain the matching pending question.
-- [x] Archive a passing 3,600-second Rust-only weak-network Live Call run (2026-07-26: 43,471 ticks, 39 reconnects, 1,016 contiguous events, zero pending/checkpoint leaks).
-- [x] Run physical Android microphone, notification, and disconnect recovery acceptance (PJX110 / Android 16, 2026-07-26).
+## 待产品决策
 
-## Retirement And Desktop Release
+- [ ] FG-001：原生 iOS 还是移动 Web/PWA。
+- [ ] FG-002：Codex Desktop Remote 目标是可靠遥控还是完整状态镜像。
+- [ ] FG-003：Workspace 是否内置远端协议与离线同步。
 
-- [ ] Confirm zero Node route ownership and fallback during the observation window.
-- [ ] Remove retired Node route implementations in reversible slices.
-- [ ] Remove bundled Node only after provider/runtime ownership permits it.
-- [x] Replace the console surface with a native Win32 `windows-rs` tray/window without WebView/HTML.
-- [x] Measure idle and active native GUI Private Working Set (2026-07-26: 1.69 MiB idle, 1.80 MiB status/doctor action peak).
-- [ ] Publish a tagged, checksummed, reproducible desktop release with rollback instructions.
+详细证据、修复方案、验收和并行策略见 `docs/bug-and-feature-gaps.md`。

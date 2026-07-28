@@ -1,23 +1,23 @@
 # VibeLink Rust 迁移报告
 
-最后更新：2026-07-23
+最后更新：2026-07-28
 
-本文是 Rust 迁移唯一的人工维护报告。机器可读状态保存在 `docs/rust-migration-status.json`，架构决策记录在 `docs/decisions/ADR-0001` 至 `ADR-0008`。
+本文是 Rust 迁移唯一的人工维护报告。机器可读状态保存在 `docs/rust-migration-status.json`，架构决策记录在 `docs/decisions/ADR-0001` 至 `ADR-0010`。
 
 ## 迁移原则
 
-- Rust canary 已可负责外部 TCP/HTTP 监听；Node 退到 loopback backend，继续负责尚未迁移的 HTTP API、认证、配对、审批、Provider 编排、REST/SSE 和产品状态机。
-- 迁移阶段继续用测量决定 sidecar 是否值得接入；最终桌面包要求所有产品必需的 HTTP/SSE/WebSocket、Provider、事件和实时通话职责都由 Rust 所有，不能以性能收益不足为由永久保留捆绑 Node。
-- 所有生产 Rust 路径必须保留 Node 或 Worker 回退；缺少二进制、健康检查失败、超时、无效 JSON 和进程退出都不能破坏用户任务。
+- Rust-only 默认发行已经负责外部 TCP/HTTP 监听、全部产品 API、Provider/任务执行、持久状态和实时通话职责；hybrid Node bridge 只作为兼容回滚产物保留。
+- 继续用测量决定独立 sidecar 是否值得保持 `canary` 或 `contract`；slice 状态表达观测策略，不再等同于产品职责所有权。
+- Rust-only 路径必须拥有完整恢复语义；hybrid 兼容模式中的 Node/Worker 回退继续用于回归对照，但不是默认发行的运行依赖。
 - 状态按 `planned -> contract -> opt-in -> canary -> default-on` 推进。没有真实收益或代表性运行证据时不得升级。
 - Android/Web 继续使用现有 HTTP/SSE 契约，不感知底层执行语言。
-- 不新增 Web 管理后台；未来桌面管理壳使用原生 Win32 `windows-rs`，不嵌 WebView。
+- 不新增 Web 管理后台；桌面管理壳已经使用原生 Win32 `windows-rs`，不嵌 WebView。
 
 ## 当前状态
 
 | Slice | 状态 | 生产路由 | 下一步 |
 | --- | --- | --- | --- |
-| Rust HTTP 前门 | `default-on` | Rust 外部监听，Node loopback backend | 保留显式 `bridge` 回滚直到 Node blocker 清零 |
+| Rust HTTP 前门 | `default-on` | Rust-only 默认入口；hybrid 包可选 Node loopback backend | 保留 hybrid `bridge` 兼容回滚并定期演练 |
 | 状态响应契约组装 | `canary` | 公网 bridge 显式开启，Node 快照回退 | 继续作为 Status 动态快照强类型契约层 |
 | Status 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/settings projection/设备列表/响应；Web/Android rust-only E2E | 扩展 Provider 与任务动态快照 |
 | Doctor 原生 HTTP 路由 | `default-on` | Rust Host/鉴权/checks/toolRunId/响应；Web/Android rust-only E2E | 扩展平台探测与 tool run 投影 |
@@ -29,13 +29,13 @@
 | Tool Events 非流式原生 HTTP 路由 | `default-on` | Rust replay/filter/fields | 保持默认开启 |
 | Tool Events SSE 原生 HTTP 路由 | `default-on` | Rust catch-up/SSE/Last-Event-ID | 监测重连与慢消费者 |
 | Workspace 目录扫描器 | `canary` | `auto`/显式开启，持久 sidecar | 有限交互会话后评估 default-on |
-| Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust list/create/tree/context/read/preview/batch、Git actions 与 worktree lifecycle；Web/Android rust-only E2E | 继续迁移 command/terminal/approval |
+| Workspace 文件与 Git 原生 HTTP 路由 | `default-on` | Rust list/create/tree/context/read/preview/batch、Git/worktree/command/terminal/approval；Web/Android rust-only E2E | 扩大真实终端恢复与审批投递观测 |
 | Task 持久投影原生 HTTP 路由 | `default-on` | Rust task collection、mutation、scheduler、execution binding、事件 SSE、history/search/FTS watcher | 继续观察真实 provider 运行与 task input/stop 边界 |
 | Provider Registry 缓存投影原生 HTTP 路由 | `default-on` | Rust SQLite cache projection 已通过 Web/Android rust-only E2E；支持 CLI/Doubao bridge health probe、Zhipu/Claude model API catalog refresh | 保持真实 Provider health 与 fidelity 观测 |
 | Tool 与 Command Registry 原生 HTTP 路由 | `default-on` | Rust 内置 catalog、SQLite MCP tool cache 与本地 skill 扫描；Web/Android 无 Node E2E | 保持默认开启 |
-| Static Assets 与 OpenAPI 原生服务 | `default-on` | `/api/openapi.json` 已通过 Web/Android rust-only E2E；Rust 服务白名单 public assets | 连接 package smoke，并补齐 Web/Android 无 Node 首屏证据 |
+| Static Assets 与 OpenAPI 原生服务 | `default-on` | `/api/openapi.json`、packaged public root 与 Web/Android rust-only E2E 已通过 | 保持构建哈希、白名单与最终包 smoke 一致 |
 | 统一事件同步原生 HTTP 路由 | `default-on` | Rust unified replay、设备 ack、retention/compaction 与 marker | 保持客户端 ack 与多设备冲突观测 |
-| Durable Execution Host | `default-on` | Rust execd/worker 持有 ConPTY、stdio、app-server backend、task scheduler 与 host event spool | 继续迁移剩余 Live Call/ASR 生命周期 |
+| Durable Execution Host | `default-on` | Rust execd/worker 持有 ConPTY、stdio、app-server backend、task scheduler、host event spool 与 approval outbox | 扩大真实 Provider/终端恢复观测并消除 ignored 集成测试 |
 | MCP 持久 stdio 会话 | `canary` | `auto`/显式开启，持久 sidecar | 观察有限自然生产会话 |
 | 事件存储 append/replay sidecar | `canary` | `auto`/显式开启，可回退 Worker/同步 SQLite | 有限真人运行会话并采集统计 |
 | 实时音频低延迟管线 | `contract` | 无 | 仅在新证据表明 Node 成为瓶颈时重评 |
@@ -43,7 +43,7 @@
 
 2026-07-20 起，普通 `vibelink.exe` 用户入口实际启用的 Rust HTTP route family 全部登记为 `default-on`；显式 `vibelink.exe bridge` 仍提供进程级 Node 回滚。Audio 和 Compression 不是“尚未接线”，而是测量结果明确不支持增加生产 sidecar 边界。
 
-`default-on` 只表示外部路由所有权默认归 Rust，不等于 Node runtime 已可删除。Node-free 打包由机器门禁控制，当前 blocker 已缩小到 Workspace command/approval continuation、Live Call/ASR/录音生命周期，以及不依赖 `src/server.js` 的 native release entry。`package-portable.ps1 -RuntimeFlavor rust-only` 会在下载或构建前运行该门禁并拒绝不完整产品包。
+2026-07-27 起，36 个公开 route family 和 13 个后台职责全部为 Rust-owned，`nodeRuntime.packaging` 为 `removable`，四组 Node removal blocker 的 `remainingRoutes` 均为空。`package-portable.ps1 -RuntimeFlavor rust-only` 会先运行 fail-closed 门禁，并在最终 ZIP 上验证默认 Rust-only 入口、鉴权 owner、无 Node 进程树和禁止项缺失。
 
 ## Rust HTTP 前门
 
@@ -153,9 +153,9 @@ Rust 对 ack 与 compact 分别执行每分钟 240/20 次的设备级限流并�
 
 `--rust-workspace-http` 接管认证 `POST /api/workspaces/:id/file` 的 write、delete 和 rename。Rust 从 SQLite 读取 workspace root，执行 canonical allowed-root 校验、1MiB JSON/text 上限、父目录创建与文件操作，并写入 `workspace.file` audit 记录；路径穿越、绝对路径、非文件目标和冲突目标均拒绝。请求解析、数据库未就绪或 Rust 操作失败时，前门保留原始请求并回退 Node。
 
-同一默认开启的 route family 现已接管 `GET /api/workspaces/:id/git/status`、`/git/diff`、`/worktrees` 与 `POST /git/file-action`、`/git/action`。Rust 使用参数化 workspace 查询和 canonical 工作目录执行固定 Git 参数，保持 branch/files/changedCount/stdout/stderr/exitCode/workspace/cwd 合同、10 MiB 输出上限，以及 Node 的 workspace 最近使用时间更新语义。Diff 路由还保持未初始化仓库的 HEAD fallback、最多 6 个未跟踪文本预览、512 KiB 单文件预览上限和文件级增删行统计；worktree list 保持 main/detached/bare/locked/prunable 元数据与已注册 workspace 关联。Git file-action 支持 stage/accept、restore/reject、unstage、冲突侧选择、mark-resolved 和单文件 stage/unstage hunk；仓库级 action 支持 stage/unstage all、branch create/switch、stash push/pop、commit、push、ff-only pull 和 `gh pr create`，并保持 dry-run。两类写操作均持久化 tool.created/started/completed/error、tool run 终态和成功/失败审计；失败响应在 Rust 内终止，不会把已开始的 mutation 重放给 Node。Worktree action、command 与 approval continuation 仍由 Node 持有。
+同一默认开启的 route family 现已接管 `GET /api/workspaces/:id/git/status`、`/git/diff`、`/worktrees` 与 `POST /git/file-action`、`/git/action`。Rust 使用参数化 workspace 查询和 canonical 工作目录执行固定 Git 参数，保持 branch/files/changedCount/stdout/stderr/exitCode/workspace/cwd 合同、10 MiB 输出上限，以及既有 workspace 最近使用时间更新语义。Diff 路由还保持未初始化仓库的 HEAD fallback、最多 6 个未跟踪文本预览、512 KiB 单文件预览上限和文件级增删行统计；worktree list 保持 main/detached/bare/locked/prunable 元数据与已注册 workspace 关联。Git file-action 支持 stage/accept、restore/reject、unstage、冲突侧选择、mark-resolved 和单文件 stage/unstage hunk；仓库级 action 支持 stage/unstage all、branch create/switch、stash push/pop、commit、push、ff-only pull 和 `gh pr create`，并保持 dry-run。Worktree action、command、terminal session 与 approval continuation 也已由 Rust/execd 持有。写操作均持久化 tool.created/started/completed/error、tool run 终态和成功/失败审计；失败响应在 Rust 内终止，不会重复执行 mutation。
 
-当前本地 126 项 Rust 测试覆盖 Workspace list/create/tree/context/read/preview/batch、文件写入、重命名、删除、Git status/diff/file-action/action、worktree list/create/action、首次提交前 diff、单文件 hunk 边界、失败 tool-run/audit、未跟踪文件拒绝、dry-run、branch/stash 往返、worktree 元数据、路径穿越拒绝和现有控制面回归。该切片已纳入默认 `vibelink.exe` Rust 前门 profile；其余 command/terminal/approval continuation 仍由 Node 负责，直到后续 workspace/tool slices 完成。
+2026-07-28 的 187 项 Rust 测试（187 passed、1 ignored）和 workspace 本仓库/server canary 覆盖 Workspace list/create/tree/context/read/preview/batch、文件写入、重命名、删除、Git status/diff/file-action/action、worktree lifecycle、command、terminal/approval 持久状态、路径穿越拒绝和现有控制面回归。该 route family 已纳入默认 Rust-only server；后续工作是扩大长会话恢复证据，而不是继续迁移所有权。
 
 实现：`src/workspaces.js`、`src/workspaceTreeSidecarClient.js`、`apps/windows/src/workspace_tree.rs`、`vibelink workspace-tree-sidecar`，一次性回退命令为 `vibelink workspace-tree`。
 
@@ -290,23 +290,22 @@ npm run compression:benchmark -- --require-real
 
 ## 剩余计划
 
-无需人工参与的代表性 canary、故障测试、回退测试和 CI gate 已基本齐备。剩余工作不是继续增加 sidecar，而是：
+Rust 产品所有权迁移已经完成。后续工作按 `docs/bug-and-feature-gaps.md` 管理，不再用旧迁移任务描述：
 
-1. Rust route family：普通用户入口已全部 `default-on`，继续监测回退和错误指标。
-2. Workspace：扩大自然交互观察窗口。
-3. MCP：完成自然生产会话观察；受控真实/soak 证据已通过。
-4. Event Store：扩大自然运行窗口并持续采集前后 runtime stats。
-5. Node runtime：按 Workspace Git/command/approval、task/history/terminal、Provider、Live Call 四个 blocker 迁移；门禁清零前禁止 rust-only 发布包。
-6. Audio/Compression：性能实验保持 `contract`；产品必需的实时通话与音频所有权仍按全量 Node 退役计划迁移。
+1. 修复并发 Rust HTTP 契约超时和 Cargo 可用性误判，恢复所有预期集成测试的可信执行。
+2. 扩大 Workspace、MCP、Event Store、真实 Provider 和终端恢复的自然运行观察窗口；外部账号、工具或设备不可用只记为证据前置条件。
+3. 在 Rust-only 发行稳定后分批删除 hybrid Node 兼容源码，每批保持契约、数据迁移和回滚证据。
+4. 发布与当前 commit 对齐的 tagged、checksummed、可复现 Windows release，并保留上一版 hybrid rollback artifact。
+5. Audio/Compression 性能实验保持 `contract`，除非生产遥测跨过已定义的重评阈值。
 
 ## 全量控制面迁移与桌面发布
 
 “全量 Rust 重写”采用 strangler 路线，不做一次性替换：
 
-1. **桌面运行边界**：Rust launcher 已负责进程监督、包内 Node 解析、sidecar 命令注入、配对 QR、doctor 和命名 Cloudflare Tunnel 安全预检/监督。
-2. **可分发包**：`npm run package:windows` 生成 Windows x64 portable ZIP，固定 Node LTS 与 cloudflared 版本，仅安装服务端生产依赖，并输出 SHA256。
+1. **桌面运行边界**：Rust launcher 已负责进程监督、Rust-only server role、sidecar 命令注入、配对 QR、doctor 和命名 Cloudflare Tunnel 安全预检/监督。
+2. **可分发包**：`npm run package:windows:rust-only` 生成默认 Windows x64 portable ZIP，并输出 manifest 与 SHA256；hybrid 包单独保留为兼容回滚产物。
 3. **公网入口**：`vibelink tunnel --check-only` 必须验证固定 hostname、loopback upstream、Host allowlist、端口一致、legacy login 禁用和 404 fallback；通过后才允许运行 connector。
-4. **HTTP 路由迁移**：当前 Rust route family 已随普通用户入口 `default-on`；剩余工作是迁移 Node 内部执行职责，而不是继续堆叠外部路由开关。
-5. **删除 Node**：`rust:node-removal:check` 是 portable `rust-only` 包的强制门禁。只有四个产品职责 blocker 清零、契约/故障/回滚测试齐全后，打包器才跳过 Node runtime、服务端源码和 npm 生产依赖。
+4. **HTTP 与执行所有权**：全部公开 route family 和后台职责已经 Rust-owned；后续只扩展观测和修复，不再使用迁移开关代表产品完成度。
+5. **Node removal**：`rust:node-removal:check` 是 portable `rust-only` 包的强制门禁。四个产品职责 blocker 已清零，打包器会跳过 Node runtime、服务端源码和 npm 生产依赖，并对最终 ZIP 再做 fail-closed smoke。
 
-当前桌面包仍是经过验证的 Rust + Node 混合包，不宣称已经完成控制面全量重写。
+当前默认桌面发行形态是经过验证的 Rust-only 包；hybrid 包及 Node 兼容源码只承担回滚、契约对照和渐进删除职责。

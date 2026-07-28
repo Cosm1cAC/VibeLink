@@ -100,15 +100,15 @@ Live Call Assistant
 | 只需要观察和接管当前 Desktop 可见状态 | Codex Desktop Remote |
 
 
-## Rust 化性能架构
+## Rust-only 默认架构
 
-VibeLink 当前运行在 Rust HTTP 前门 + Node loopback backend 的混合架构上，并持续向 Rust 桌面服务迁移。默认 Windows 启动会开启 Rust 前门和当前已迁移的路由；Node 仍负责尚未迁移的产品职责，并作为失败、超时和无效响应时的回退。Workspace、MCP 和 Event Store 已进入 `canary`；Status、Doctor、Devices、设备令牌写操作、完整配对生命周期和 Audit Log 已有 Rust HTTP 路由。只有全部产品职责完成 Rust 所有权并通过观察窗口后才移除捆绑 Node。Audio/Compression 的旧性能 sidecar 因没有测得收益保持 `contract`，但实时通话等产品职责仍在全量迁移范围内。
+Windows 产品迁移已经完成：36 个公开 route family 和 13 个后台产品职责均由 Rust 持有，普通 `vibelink.exe` 会根据包内 `release-manifest.json` 进入 Rust-only server role。默认 Rust-only portable 包不包含 `node.exe`、`src/`、`node_modules/` 或服务端 `package.json`；Web 与 Android 都作为同一套 Rust HTTP/SSE/WebSocket API 的客户端。
 
-Windows portable 包可用 `vibelink.exe --rust-canary`（或 `start-vibelink-canary.cmd`）显式复现当前 Rust canary profile；普通 `vibelink.exe` 也会应用默认 Rust 前门 profile。需要紧急回退时运行 `vibelink.exe bridge`，直接启动 Node bridge。
+hybrid portable 包只作为兼容和进程级回滚产物保留，其中 `vibelink.exe bridge` 可启动旧 Node bridge。源码目录中的 Node 实现也属于开发期契约基线与兼容来源，不代表当前发行包仍依赖 Node。Workspace、MCP 和 Event Store 的 `canary` 状态表示仍在扩大运行观测，不表示产品所有权尚未迁移。
 
-服务端 HTTP 前门使用独立的 `--rust-http-canary` 逐步迁入 Rust；设备写操作另由 `--rust-device-mutations-http` 控制，写事务一旦由 Rust 接管就不会回放到 Node。管理界面规划为原生 Win32 `windows-rs` 托盘/窗口，不新增 Web 管理后台，也不嵌入 WebView。
+桌面管理入口已经是原生 Win32 `windows-rs` 托盘/窗口，不使用 WebView。Audio/Compression 性能实验保持 `contract`，因为实测未证明额外 sidecar 边界有收益；Live Call、ASR 和录音等产品职责已经由 Rust 持有。
 
-完整状态、证据、阈值、回滚和命令统一见 `docs/rust-migration-report.md`；机器清单为 `docs/rust-migration-status.json`。推进前运行：
+完整状态、证据、阈值和回滚见 `docs/rust-migration-report.md`；机器清单为 `docs/rust-migration-status.json`，当前缺陷与功能缺口见 `docs/bug-and-feature-gaps.md`。变更前运行：
 
 ```bash
 npm run rust:migration:check
@@ -156,7 +156,7 @@ Workspace 是 VibeLink 把本机项目目录暴露给网页/手机端的中枢�
 ### 定位
 
 - **只读语义 + Git 写入**。Workspace 负责浏览本机目录、读取文本文件、把选中的文件作为 LLM 上下文附加到 prompt；同时承担 Git 状态、diff 和 stage / commit / push / PR 操作。
-- **绑定在本机 bridge 进程**。所有文件操作都通过 `node:fs` 直接发生在 bridge 所在的操作系统上。能看到的目录就是 bridge 进程所在机器上已挂载的目录。
+- **绑定在本机 bridge 进程**。所有文件操作都由 Rust Workspace 服务直接发生在 bridge 所在的操作系统上；hybrid 开发/回滚模式保留 Node 兼容实现。能看到的目录就是 bridge 进程所在机器上已挂载的目录。
 - **不连接云盘 / 远端协议**。没有 S3、Google Drive、OneDrive、Dropbox、SSHFS、SFTP、NFS 客户端等任何集成。但只要操作系统本身已经把某个 SMB / NFS / WSL / 映射网络驱动器挂载到本地路径（例如 `Z:\`、`\\wsl$\Ubuntu\home`、`\\nas\share`），Workspace 就能像普通目录一样浏览它。
 - **绑定到会话/任务**。Workspace 可以独立浏览，也会被会话或任务的 `cwd` 自动选中；任务运行产生的 tool run / tool event / approval 都共享同一个 `workspace_id`，所以同一个工作的所有产物（命令、文件变更、审批）能聚在一起。
 
@@ -175,7 +175,7 @@ Workspace 在网页端是一个可折叠的面板（默认收起），挂在聊�
 
 ### 后端 API
 
-主要端点（完整列表见 `src/server.js`）：
+主要端点（完整契约见 `docs/openapi.json`，Rust ownership 见 `docs/route-ownership.json`）：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -224,7 +224,8 @@ Codex Desktop 本身目前无法被第三方网页端强制回显完整消息状
 
 ## 技术结构
 
-- `src/`：本机 Node bridge、VibeLink Agent 启动、provider adapter、历史扫描、desktop observer、安全与 workspace API。
+- `apps/windows/`：Rust Windows launcher、HTTP/SSE/WebSocket 产品服务、执行宿主、Live Call runtime 和原生 Win32 管理器。
+- `src/`：hybrid 开发/回滚兼容实现、Node 契约基线及部分构建和测试辅助代码；不进入 Rust-only 发行包。
 - `apps/web/`：React + Vite 网页端。
 - `apps/android/`：Jetpack Compose Android 原生端，复用 bridge API、SSE、Live Call WebSocket 和会话模型。
 - `packages/doubao-cli/`：豆包 Web CLI / extension bridge 原型，作为 VibeLink Agent 的 provider adapter 之一。

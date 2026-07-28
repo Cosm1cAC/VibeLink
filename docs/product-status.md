@@ -1,14 +1,14 @@
 # VibeLink 产品状态
 
-最后更新：2026-07-27
+最后更新：2026-07-28
 
-审计基线：`main` 本地工作树（提交基线 `e22778d`）。本文只描述当前状态与可复现验证结果；已关闭问题不作为产品状态的一部分。
+审计基线：`main` 提交 `e32aa41`。本文只描述当前状态与可复现验证结果；已关闭问题不作为产品状态的一部分。
 
 ## 结论
 
 Windows Rust 化迁移已完成。Windows Bridge、HTTP/SSE/WebSocket 产品路由、SQLite 产品状态、执行宿主、后台生命周期、原生管理入口及 Rust-only 默认发行入口均可在不携带 Node runtime 的包中运行。
 
-本轮全量自动化验证未发现确认的 P0/P1 产品缺陷：所有本地测试、质量门禁、服务端到端 canary、浏览器证据和 Windows 两种发行包均通过；依赖审计为 0 个已知漏洞。
+2026-07-28 的本地全量复测未发现确认的 P0/P1/P2 产品功能缺陷：Node、Rust、Android、真实浏览器和服务端 canary 均通过，依赖审计为 0 个已知漏洞。复测确认了三项测试基础设施缺陷、Android 编译告警债务及若干产品候选缺口，统一记录在 `docs/bug-and-feature-gaps.md`，不与产品运行缺陷混淆。
 
 这不等同于对未接入本机环境的第三方账号、真实弱网和物理 Android 设备作绝对保证。它们属于上线前继续收集的运行证据，不改变当前迁移完成和可发布的判断。
 
@@ -47,21 +47,22 @@ Win32 管理器在受管理服务就绪后一次性显示运行状态，并提�
 
 | 验证项 | 结果 |
 | --- | --- |
-| `npm ci` | 使用 lockfile 复现安装通过。 |
+| `npm ci` | 2026-07-27 使用 lockfile 复现安装通过；本轮未重复安装。 |
 | `npm audit --omit=dev --registry=https://registry.npmjs.org` | 通过，0 个漏洞；`postcss` 已锁定为 8.5.23。 |
 | `npm test` | 全套 Node 测试通过。 |
 | `npm run build` | Vite production build 通过，2,072 个模块转换完成。 |
 | `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` | 均通过。 |
-| `npm run rust:test` | 187 passed、1 ignored、0 failed。 |
-| `npm run android:test` | Android JVM tests 与 `assembleDebug` 通过。 |
+| `npm run rust:test` | 187 passed、1 ignored、0 failed；ignored 项要求显式的新构建 execution-host 二进制。 |
+| `npm run android:test` | Android JVM tests 与 `assembleDebug` 通过；41 tasks，存在弃用 API 与 unchecked cast 编译告警。 |
 | `npm run rust:migration:check` / `npm run rust:node-removal:check` | 均通过。 |
-| Rust/HTTP/status 合同 | `rust-http:contract`、`status:contract`、`test:rust-sidecars`、音频、压缩和 Codex app-server 合同均通过。 |
-| Event Store 三层 canary | 本地、运行时、服务路由均通过；服务路径增量工具事件 72.1ms、Live Call 58.5ms，0 回退、0 失败、0 新增同步停顿。 |
-| Status/Workspace/MCP canary | HTTP、Public Status、Workspace tree、MCP 持久会话与 soak 全部通过；Public Status 10 次采样 p95 927.99ms，0 回退/失败/超时/背压。 |
-| Execution Host | 启动、Bridge 重连、execd 崩溃恢复、spool 重放、持久 ack、30 秒 soak 与故障告警全部通过。 |
+| Rust/HTTP/status 合同 | `rust-http:contract` 隔离运行 12/12 通过；`status:contract` 17/17、Codex app-server 14/14 通过。并发批次中 Rust HTTP 合同可复现 3 个 120 秒超时，已列为测试稳定性缺陷。 |
+| Rust sidecar 集合 | 91 passed、0 failed、7 skipped；其中 6 项被错误的 `link.exe` 前置判断跳过，1 项因可选 `codebase-memory-mcp`/索引项目不可用跳过。 |
+| Event Store 三层 canary | 当前 release 二进制下本地、运行时、服务路由均通过；批量 append 平均 7.2–8.3ms，0 回退、0 失败、0 背压拒绝。 |
+| Workspace/MCP canary | workspace 本仓库真实数据、server route、MCP 持久会话与 HTTP server route 全部通过；0 回退，pending 均排空。 |
+| Execution Host | 当前 release 二进制的启动、Bridge 重连、execd 崩溃恢复、spool 重放、持久 ack、30 秒 soak 与故障告警全部通过。 |
 | 浏览器端到端证据 | 桌面 `en-US` 与手机 `zh-CN` 均通过；23 个 trace event、12 页 trace，redaction、重连和资源清理均已验证。 |
-| `npm run package:windows` | hybrid ZIP 生成并通过打包流程。 |
-| `npm run package:windows:rust-only` | Node removal gate、最终 ZIP smoke、普通入口 Rust-only 启动、鉴权 Rust status owner 与无 Node 进程树验收均通过。 |
+| `npm run package:windows` | 2026-07-27 hybrid ZIP 生成并通过打包流程；本轮未重建。 |
+| `npm run package:windows:rust-only` | 2026-07-27 Node removal gate、最终 ZIP smoke、默认 Rust-only 入口、鉴权 owner 与无 Node 进程树验收均通过；本轮门禁复测通过，未重建 ZIP。 |
 
 ## 发行产物
 
@@ -87,6 +88,7 @@ Rust-only ZIP 复核：128 个 entry，`runtimeFlavor=rust-only`，无 `node.exe
 2. 继续收集真实 Provider 任务、Live Call 长时弱网和 Android 物理设备证据。
 3. Rust-only 首批发布保留上一版 hybrid ZIP，并定期验证升级与回滚演练。
 4. 在 Rust-only 默认发行稳定后再评估删除 hybrid Node 兼容源码；源码删除不是迁移完成的前置条件。
+5. 按 `docs/bug-and-feature-gaps.md` 的依赖关系拆分测试修复、Android 告警清理、运行证据和候选功能设计；不要把外部账号、工具或设备缺失转为 Bug。
 
 ## 状态源
 
@@ -95,3 +97,4 @@ Rust-only ZIP 复核：128 个 entry，`runtimeFlavor=rust-only`，无 `node.exe
 - `tools/check-node-removal-readiness.mjs`：Node removal fail-closed gate。
 - `tools/windows/package-portable.ps1`：hybrid/Rust-only 打包规则。
 - `tools/rust-only-package-smoke.mjs`：最终 ZIP 的普通默认入口 Rust-only 启动 smoke。
+- `docs/bug-and-feature-gaps.md`：当前确认缺陷、质量/证据缺口、候选功能与并行修复策略。

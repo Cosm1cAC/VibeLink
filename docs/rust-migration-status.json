@@ -125,7 +125,7 @@
         "test/supervisorMonitor.test.js",
         "test/statusPublicCanary.test.js"
       ],
-      "nextAction": "默认用户入口已启用 Rust 前门；继续以显式 bridge 子命令保留 Node 直连回滚，直到 Node runtime blocker 清零。"
+      "nextAction": "Rust-only 默认入口与 Node removal gate 已通过；hybrid bridge 仅作为兼容回滚产物保留并定期演练。"
     },
     {
       "id": "status-response-sidecar",
@@ -371,7 +371,7 @@
         "apps/windows/src/http_frontdoor.rs",
         "tools/status/http-canary.mjs"
       ],
-      "nextAction": "保持默认开启并监测断线重连、Last-Event-ID 与慢消费者行为，Node runtime 移除由独立 blocker gate 控制。"
+      "nextAction": "保持默认开启并监测断线重连、Last-Event-ID 与慢消费者行为；Node removal gate 已通过，继续验证 rust-only 包内行为。"
     },
     {
       "id": "event-sync-http-route",
@@ -412,7 +412,7 @@
         "apps/windows/src/workspace_http.rs",
         "apps/windows/src/http_frontdoor.rs"
       ],
-      "nextAction": "Web/Android rust-only E2E 已通过；Workspace list/create/tree/context/read/preview/batch、Git status/diff/actions、worktree list/create/action、command、terminal-session 入口与 approval 持久化已默认开启；继续把 terminal input/resize 与 provider approval delivery 接到 execd 的长期会话恢复。"
+      "nextAction": "Web/Android rust-only E2E 已通过；Workspace、Git/worktree、command、terminal-session 与 approval 已默认开启；继续扩大 terminal input/resize、approval delivery 与长期会话恢复观测。"
     },
     {
       "id": "task-http-route",
@@ -491,7 +491,7 @@
         "apps/windows/src/static_http.rs",
         "apps/windows/src/http_frontdoor.rs"
       ],
-      "nextAction": "OpenAPI 已通过 Web/Android rust-only E2E；继续将 packaged public root 与 rust-only package smoke 连接，并采集不经过 Node 静态服务的首屏证据。"
+      "nextAction": "OpenAPI、packaged public root、rust-only package smoke 与无 Node 首屏证据已通过；保持构建哈希、白名单与最终包验收一致。"
     },
     {
       "id": "execution-host",
@@ -516,7 +516,7 @@
         "test/executionStartupReconciliation.test.js",
         "tools/execution-host/reliability-canary.mjs"
       ],
-      "nextAction": "execd、per-execution worker、task scheduler、ConPTY/stdio/app-server backend、durable binding、event spool、ack drain 和 approval outbox delivery 已接入；继续迁移 Live Call/ASR 生命周期。"
+      "nextAction": "execd、per-execution worker、task scheduler、ConPTY/stdio/app-server backend、durable binding、event spool、ack drain、approval outbox 与 Live Call/ASR 生命周期已接入；继续扩大真实 Provider/终端恢复观测并消除 ignored 集成测试。"
     },
     {
       "id": "mcp-session-sidecar",

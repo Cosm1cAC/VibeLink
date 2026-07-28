@@ -914,8 +914,118 @@ mod tests {
     use std::fs;
     use std::io::{Error, ErrorKind, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    const TEST_IO_TIMEOUT: Duration = Duration::from_secs(10);
+    const NODE_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}";
+
+    struct TestThread {
+        name: &'static str,
+        finished: mpsc::Receiver<()>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl TestThread {
+        fn wait(self) {
+            match self.finished.recv_timeout(TEST_IO_TIMEOUT) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.handle.join().unwrap();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("{} did not finish within {TEST_IO_TIMEOUT:?}", self.name);
+                }
+            }
+        }
+    }
+
+    fn spawn_ready_thread(
+        name: &'static str,
+        operation: impl FnOnce() + Send + 'static,
+    ) -> TestThread {
+        // Avoid timing-dependent accepts and turn stalled helper threads into prompt test failures.
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            operation();
+            let _ = finished_tx.send(());
+        });
+        ready_rx
+            .recv_timeout(TEST_IO_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{name} did not become ready: {error}"));
+        TestThread {
+            name,
+            finished: finished_rx,
+            handle,
+        }
+    }
+
+    fn spawn_accept_thread(
+        name: &'static str,
+        listener: TcpListener,
+        handler: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> TestThread {
+        spawn_ready_thread(name, move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+            stream.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+            handler(stream);
+        })
+    }
+
+    fn spawn_mock_upstream(
+        expected_request: &'static [u8],
+        response: &'static [u8],
+    ) -> (std::net::SocketAddr, TestThread) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = spawn_accept_thread("mock upstream", listener, move |mut stream| {
+            let mut request = vec![0_u8; expected_request.len()];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request, expected_request);
+            stream.write_all(response).unwrap();
+        });
+        (address, server)
+    }
+
+    fn spawn_proxy_frontend(
+        upstream_addr: std::net::SocketAddr,
+        routes: FrontdoorRoutes,
+    ) -> (std::net::SocketAddr, TestThread) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = spawn_accept_thread("front door", listener, move |client| {
+            handle_connection(client, upstream_addr, &routes).unwrap();
+        });
+        (address, proxy)
+    }
+
+    fn round_trip_client(
+        frontend_addr: std::net::SocketAddr,
+        request: &'static [u8],
+        expected_response: &'static [u8],
+    ) {
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.write_all(request).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert_eq!(response, expected_response);
+        client.shutdown(Shutdown::Both).unwrap();
+    }
+
+    fn assert_routes_replay_to_node(routes: FrontdoorRoutes, request: &'static [u8]) {
+        let (upstream_addr, upstream) = spawn_mock_upstream(request, NODE_RESPONSE);
+        let (frontend_addr, proxy) = spawn_proxy_frontend(upstream_addr, routes);
+
+        round_trip_client(frontend_addr, request, NODE_RESPONSE);
+
+        proxy.wait();
+        upstream.wait();
+    }
 
     #[test]
     fn client_disconnect_errors_are_expected() {
@@ -934,72 +1044,63 @@ mod tests {
 
     #[test]
     fn proxy_preserves_bidirectional_bytes() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
-            assert_eq!(
-                request,
-                b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
-            );
-            stream
-                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 20\r\n\r\n{\"error\":\"missing\"}")
-                .unwrap();
-        });
+        const REQUEST: &[u8] = b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n";
+        const RESPONSE: &[u8] =
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 20\r\n\r\n{\"error\":\"missing\"}";
+        const CONCURRENT_CONNECTIONS: usize = 8;
 
-        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let frontend_addr = frontend.local_addr().unwrap();
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
-            client.set_nonblocking(true).unwrap();
-            proxy_connection(client, upstream_addr).unwrap();
-        });
+        let barrier = Arc::new(Barrier::new(CONCURRENT_CONNECTIONS + 1));
+        let mut servers = Vec::with_capacity(CONCURRENT_CONNECTIONS);
+        let mut clients = Vec::with_capacity(CONCURRENT_CONNECTIONS);
+        for _ in 0..CONCURRENT_CONNECTIONS {
+            let (upstream_addr, upstream) = spawn_mock_upstream(REQUEST, RESPONSE);
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let frontend_addr = listener.local_addr().unwrap();
+            let proxy = spawn_accept_thread("front door", listener, move |client| {
+                proxy_connection(client, upstream_addr).unwrap();
+            });
+            let client_barrier = Arc::clone(&barrier);
+            let client = spawn_ready_thread("proxy client", move || {
+                client_barrier.wait();
+                round_trip_client(frontend_addr, REQUEST, RESPONSE);
+            });
+            servers.push((proxy, upstream));
+            clients.push(client);
+        }
 
-        let mut client = TcpStream::connect(frontend_addr).unwrap();
-        client
-            .write_all(b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
-            .unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-
-        assert_eq!(
-            response,
-            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 20\r\n\r\n{\"error\":\"missing\"}"
-        );
-        proxy_thread.join().unwrap();
-        upstream_thread.join().unwrap();
+        barrier.wait();
+        for client in clients {
+            client.wait();
+        }
+        for (proxy, upstream) in servers {
+            proxy.wait();
+            upstream.wait();
+        }
     }
 
     #[test]
     fn proxy_returns_keep_alive_response_before_client_disconnects() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
+        let upstream_thread = spawn_accept_thread("mock upstream", upstream, move |mut stream| {
             let mut request = [0_u8; 1024];
             let size = stream.read(&mut request).unwrap();
             assert!(request[..size].ends_with(b"\r\n\r\n"));
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
                 .unwrap();
-            thread::sleep(std::time::Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(100));
         });
 
         let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let frontend_addr = frontend.local_addr().unwrap();
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
-            client.set_nonblocking(true).unwrap();
+        let proxy_thread = spawn_accept_thread("front door", frontend, move |client| {
             proxy_connection(client, upstream_addr).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
-        client
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .unwrap();
+        client.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
         client
             .write_all(b"GET / HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
             .unwrap();
@@ -1008,20 +1109,21 @@ mod tests {
 
         assert_eq!(&response, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
         client.shutdown(Shutdown::Both).unwrap();
-        proxy_thread.join().unwrap();
-        upstream_thread.join().unwrap();
+        proxy_thread.wait();
+        upstream_thread.wait();
     }
 
     #[test]
     fn reads_fragmented_content_length_body_and_preserves_request_bytes() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let client = thread::spawn(move || {
+        let client = spawn_ready_thread("fragmented request client", move || {
             let mut stream = TcpStream::connect(address).unwrap();
+            stream.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
             stream
                 .write_all(b"POST /api/pairing-sessions HTTP/1.1\r\nHost: bridge.test\r\nContent-Length: 19\r\n\r\n{\"device")
                 .unwrap();
-            thread::sleep(std::time::Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
             stream.write_all(b"Label\":\"A\"}").unwrap();
         });
         let (mut stream, _) = listener.accept().unwrap();
@@ -1032,28 +1134,11 @@ mod tests {
             .unwrap();
         assert_eq!(body, br#"{"deviceLabel":"A"}"#);
         assert!(prefix.ends_with(&body));
-        client.join().unwrap();
+        client.wait();
     }
 
     #[test]
     fn status_route_failure_replays_the_original_request_to_node() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
-            assert_eq!(
-                request,
-                b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
-            );
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
-                .unwrap();
-        });
-
-        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let frontend_addr = frontend.local_addr().unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1065,48 +1150,15 @@ mod tests {
         fs::create_dir_all(&invalid_data_dir).unwrap();
         fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
         let status_route = StatusRouteConfig::new(invalid_data_dir.clone());
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
-            let routes = FrontdoorRoutes::default().with_status(Some(status_route));
-            handle_connection(client, upstream_addr, &routes).unwrap();
-        });
-
-        let mut client = TcpStream::connect(frontend_addr).unwrap();
-        client
-            .write_all(b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
-            .unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-
-        assert_eq!(
-            response,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        assert_routes_replay_to_node(
+            FrontdoorRoutes::default().with_status(Some(status_route)),
+            b"GET /api/status HTTP/1.1\r\nHost: bridge.test\r\n\r\n",
         );
-        proxy_thread.join().unwrap();
-        upstream_thread.join().unwrap();
         fs::remove_dir_all(invalid_data_dir).unwrap();
     }
 
     #[test]
     fn doctor_route_pending_replays_the_original_request_to_node() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
-            assert_eq!(
-                request,
-                b"GET /api/doctor HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
-            );
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
-                .unwrap();
-        });
-
-        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let frontend_addr = frontend.local_addr().unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1117,47 +1169,14 @@ mod tests {
         ));
         assert!(!missing_data_dir.exists());
         let doctor_route = DoctorRouteConfig::new(missing_data_dir);
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
-            let routes = FrontdoorRoutes::default().with_doctor(Some(doctor_route));
-            handle_connection(client, upstream_addr, &routes).unwrap();
-        });
-
-        let mut client = TcpStream::connect(frontend_addr).unwrap();
-        client
-            .write_all(b"GET /api/doctor HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
-            .unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-
-        assert_eq!(
-            response,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        assert_routes_replay_to_node(
+            FrontdoorRoutes::default().with_doctor(Some(doctor_route)),
+            b"GET /api/doctor HTTP/1.1\r\nHost: bridge.test\r\n\r\n",
         );
-        proxy_thread.join().unwrap();
-        upstream_thread.join().unwrap();
     }
 
     #[test]
     fn device_route_failure_replays_the_original_request_to_node() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
-            assert_eq!(
-                request,
-                b"GET /api/devices HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
-            );
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
-                .unwrap();
-        });
-
-        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let frontend_addr = frontend.local_addr().unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1169,48 +1188,15 @@ mod tests {
         fs::create_dir_all(&invalid_data_dir).unwrap();
         fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
         let device_route = DeviceRouteConfig::new(invalid_data_dir.clone());
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
-            let routes = FrontdoorRoutes::default().with_device(Some(device_route));
-            handle_connection(client, upstream_addr, &routes).unwrap();
-        });
-
-        let mut client = TcpStream::connect(frontend_addr).unwrap();
-        client
-            .write_all(b"GET /api/devices HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
-            .unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-
-        assert_eq!(
-            response,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        assert_routes_replay_to_node(
+            FrontdoorRoutes::default().with_device(Some(device_route)),
+            b"GET /api/devices HTTP/1.1\r\nHost: bridge.test\r\n\r\n",
         );
-        proxy_thread.join().unwrap();
-        upstream_thread.join().unwrap();
         fs::remove_dir_all(invalid_data_dir).unwrap();
     }
 
     #[test]
     fn audit_route_failure_replays_the_original_request_to_node() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
-            assert_eq!(
-                request,
-                b"GET /api/audit-log?limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
-            );
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
-                .unwrap();
-        });
-
-        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let frontend_addr = frontend.local_addr().unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1222,48 +1208,15 @@ mod tests {
         fs::create_dir_all(&invalid_data_dir).unwrap();
         fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
         let audit_route = AuditRouteConfig::new(invalid_data_dir.clone());
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
-            let routes = FrontdoorRoutes::default().with_audit(Some(audit_route));
-            handle_connection(client, upstream_addr, &routes).unwrap();
-        });
-
-        let mut client = TcpStream::connect(frontend_addr).unwrap();
-        client
-            .write_all(b"GET /api/audit-log?limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n")
-            .unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-
-        assert_eq!(
-            response,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        assert_routes_replay_to_node(
+            FrontdoorRoutes::default().with_audit(Some(audit_route)),
+            b"GET /api/audit-log?limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n",
         );
-        proxy_thread.join().unwrap();
-        upstream_thread.join().unwrap();
         fs::remove_dir_all(invalid_data_dir).unwrap();
     }
 
     #[test]
     fn tool_events_route_failure_replays_the_original_request_to_node() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
-            assert_eq!(
-                request,
-                b"GET /api/tool-events?after=4&limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n"
-            );
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}")
-                .unwrap();
-        });
-
-        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let frontend_addr = frontend.local_addr().unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1275,28 +1228,10 @@ mod tests {
         fs::create_dir_all(&invalid_data_dir).unwrap();
         fs::write(invalid_data_dir.join("settings.json"), "{invalid-json").unwrap();
         let tool_events_route = ToolEventsRouteConfig::new(invalid_data_dir.clone());
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
-            let routes = FrontdoorRoutes::default().with_tool_events(Some(tool_events_route));
-            handle_connection(client, upstream_addr, &routes).unwrap();
-        });
-
-        let mut client = TcpStream::connect(frontend_addr).unwrap();
-        client
-            .write_all(
-                b"GET /api/tool-events?after=4&limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n",
-            )
-            .unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-
-        assert_eq!(
-            response,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"node\":true}"
+        assert_routes_replay_to_node(
+            FrontdoorRoutes::default().with_tool_events(Some(tool_events_route)),
+            b"GET /api/tool-events?after=4&limit=5 HTTP/1.1\r\nHost: bridge.test\r\n\r\n",
         );
-        proxy_thread.join().unwrap();
-        upstream_thread.join().unwrap();
         fs::remove_dir_all(invalid_data_dir).unwrap();
     }
 
@@ -1349,13 +1284,14 @@ mod tests {
             .unwrap();
         drop(database);
         let mutation_route = DeviceMutationRouteConfig::new(data_dir.clone());
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
+        let proxy_thread = spawn_accept_thread("front door", frontend, move |client| {
             let routes = FrontdoorRoutes::default().with_device_mutation(Some(mutation_route));
             handle_connection(client, upstream_addr, &routes).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
         client
             .write_all(b"POST /api/devices/device-current/revoke HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer active-token\r\nContent-Length: 2\r\n\r\n{}")
             .unwrap();
@@ -1365,7 +1301,7 @@ mod tests {
         let response = String::from_utf8(response).unwrap();
         assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
         assert!(response.contains("X-VibeLink-Control-Plane: rust"));
-        proxy_thread.join().unwrap();
+        proxy_thread.wait();
         assert_eq!(
             upstream.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
@@ -1451,8 +1387,7 @@ mod tests {
 
         let workspace_route = WorkspaceRouteConfig::new(data_dir.clone());
         inject_post_file_mutation_failure_once(&workspace_route);
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
+        let proxy_thread = spawn_accept_thread("front door", frontend, move |client| {
             let routes = FrontdoorRoutes::default().with_workspace(Some(workspace_route));
             handle_connection(client, upstream_addr, &routes).unwrap();
         });
@@ -1464,6 +1399,8 @@ mod tests {
             String::from_utf8_lossy(body)
         );
         let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
         client.write_all(request.as_bytes()).unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut response = Vec::new();
@@ -1472,7 +1409,7 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
         assert!(response.contains("Workspace mutation failed."));
         assert!(response.contains("X-VibeLink-Control-Plane: rust"));
-        proxy_thread.join().unwrap();
+        proxy_thread.wait();
         assert_eq!(
             upstream.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
@@ -1542,13 +1479,14 @@ mod tests {
             .unwrap();
         drop(database);
         let pairing_route = PairingRouteConfig::new(data_dir.clone());
-        let proxy_thread = thread::spawn(move || {
-            let (client, _) = frontend.accept().unwrap();
+        let proxy_thread = spawn_accept_thread("front door", frontend, move |client| {
             let routes = FrontdoorRoutes::default().with_pairing(Some(pairing_route));
             handle_connection(client, upstream_addr, &routes).unwrap();
         });
 
         let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
         client
             .write_all(b"POST /api/pairing-sessions/pairing-pending/approve HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer admin-token\r\nContent-Length: 2\r\n\r\n{}")
             .unwrap();
@@ -1558,7 +1496,7 @@ mod tests {
         let response = String::from_utf8(response).unwrap();
         assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
         assert!(response.contains("X-VibeLink-Control-Plane: rust"));
-        proxy_thread.join().unwrap();
+        proxy_thread.wait();
         assert_eq!(
             upstream.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock

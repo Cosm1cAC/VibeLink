@@ -1,10 +1,20 @@
 # VibeLink 当前待办
 
-最后更新：2026-07-28
+最后更新：2026-07-29
+
+## P1 产品阻塞
+
+- [ ] PBUG-001：为 Rust-only 空数据目录补完整、幂等 bootstrap，并新增首次启动 API + browser smoke。
+- [ ] PBUG-002：缩短 search watcher SQLite 写事务，定义 busy 的可重试错误语义并补启动并发回归。
+
+## P2/P3 产品缺陷
+
+- [ ] PBUG-003：实现 Rust-only legacy `/api/login`，或同步撤销 ownership/OpenAPI/UI 声明。
+- [ ] PBUG-004：修复配对卡片标题/说明的纵向间距，补桌面和移动视觉 smoke。
 
 ## P1 测试基础设施
 
-- [ ] TBUG-001：修复 Rust HTTP 合同并发超时，完成 20 轮并发回归。
+- [ ] TBUG-001：`f785213` 已修复 Rust HTTP 合同并发等待；完成 20 轮并发门禁后关闭。
 - [ ] TBUG-002：修复 Cargo/linker 可用性误判，恢复 6 个真实 workspace Rust 测试。
 - [ ] TBUG-003：统一 canary binary provenance，拒绝陈旧 release 和 debug 性能误判。
 

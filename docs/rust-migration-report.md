@@ -1,6 +1,6 @@
 # VibeLink Rust 迁移报告
 
-最后更新：2026-07-28
+最后更新：2026-07-29
 
 本文是 Rust 迁移唯一的人工维护报告。机器可读状态保存在 `docs/rust-migration-status.json`，架构决策记录在 `docs/decisions/ADR-0001` 至 `ADR-0010`。
 
@@ -44,6 +44,8 @@
 2026-07-20 起，普通 `vibelink.exe` 用户入口实际启用的 Rust HTTP route family 全部登记为 `default-on`；显式 `vibelink.exe bridge` 仍提供进程级 Node 回滚。Audio 和 Compression 不是“尚未接线”，而是测量结果明确不支持增加生产 sidecar 边界。
 
 2026-07-27 起，36 个公开 route family 和 13 个后台职责全部为 Rust-owned，`nodeRuntime.packaging` 为 `removable`，四组 Node removal blocker 的 `remainingRoutes` 均为空。`package-portable.ps1 -RuntimeFlavor rust-only` 会先运行 fail-closed 门禁，并在最终 ZIP 上验证默认 Rust-only 入口、鉴权 owner、无 Node 进程树和禁止项缺失。
+
+2026-07-29 的运行审计补充了迁移所有权之外的发布健康结论：由 `f785213` 源码本地重建的 release binary（非 2026-07-27 ZIP）在空数据目录无法完成 Rust-only 首次配对（PBUG-001），启动 search watcher 的长 SQLite 写事务会暂时阻塞控制面并把 busy 误映射为 404/500（PBUG-002）；开启 legacy token login 时 `/api/login` 仍缺少 Rust handler（PBUG-003）。这些问题不否定 route ownership 或 Node removal gate，但在关闭并通过真实启动/浏览器回归前，Rust-only 用户发行版不能标记为可常规发布。配对卡片的 P3 排版问题记录为 PBUG-004。详见 `docs/bug-and-feature-gaps.md`。
 
 ## Rust HTTP 前门
 
@@ -308,4 +310,4 @@ Rust 产品所有权迁移已经完成。后续工作按 `docs/bug-and-feature-g
 4. **HTTP 与执行所有权**：全部公开 route family 和后台职责已经 Rust-owned；后续只扩展观测和修复，不再使用迁移开关代表产品完成度。
 5. **Node removal**：`rust:node-removal:check` 是 portable `rust-only` 包的强制门禁。四个产品职责 blocker 已清零，打包器会跳过 Node runtime、服务端源码和 npm 生产依赖，并对最终 ZIP 再做 fail-closed smoke。
 
-当前默认桌面发行形态是经过验证的 Rust-only 包；hybrid 包及 Node 兼容源码只承担回滚、契约对照和渐进删除职责。
+当前 ownership 与 Rust-only 包门禁已验证，但运行审计发现 PBUG-001/PBUG-002，默认桌面 Rust-only 包暂不能作为可常规发布的健康发行版；hybrid 包及 Node 兼容源码继续承担回滚、契约对照和渐进删除职责。

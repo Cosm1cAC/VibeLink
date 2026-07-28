@@ -1,8 +1,8 @@
 # VibeLink Bug 与功能缺口清单
 
-最后更新：2026-07-28
+最后更新：2026-07-29
 
-审计基线：`main` 提交 `e32aa41`。本文是后续修复和功能评审的入口；迁移完成度仍以 `docs/route-ownership.json` 与 `docs/rust-migration-status.json` 为准。
+审计基线：`main` 提交 `f785213`。本文是后续修复和功能评审的入口；迁移完成度仍以 `docs/route-ownership.json` 与 `docs/rust-migration-status.json` 为准，运行健康度以本文件和 `docs/product-status.md` 为准。
 
 ## 分类规则
 
@@ -29,19 +29,57 @@
 | Workspace | local、real-repository、server 三种 canary | 全部通过，真实仓库 parity、缓存与 session drain 正常。 |
 | MCP | persistent-session 与 server-route canary | 全部通过，单 server/session 复用，0 fallback，pending 排空。 |
 | Execution Host | 当前 release binary，30 秒 reliability canary | 启动、重连、崩溃恢复、spool、ack、soak、告警全部通过。 |
-| Browser | desktop `en-US`、phone `zh-CN` E2E | 23 trace events、12 pages；redaction/reconnect/cleanup 通过，无 console error/横向溢出。 |
+| Browser | 当前 release Rust-only，桌面 1280×720、移动 390×844 | 实际打开产品；空目录首次配对失败，在标准 schema fixture 下完成配对、审批/领取、主界面、Settings 和移动端导航检查；移动端无横向溢出。 |
 
-结论：本轮没有确认的产品运行 Bug。下面三项是实际复现的测试基础设施 Bug，不能因为不影响最终用户就忽略，也不能写成产品功能故障。
+结论：本轮实际产品运行确认 3 项 P1/P2 缺陷和 1 项 P3 视觉缺陷；另有测试基础设施和证据缺口。缺陷均在隔离数据目录、当前 release 和真实浏览器中复现，不把 PATH、可选 CLI、账号或设备缺失登记为产品 Bug。
+
+## 已确认产品 Bug
+
+### PBUG-001 Rust-only 空数据目录无法完成首次启动
+
+- **级别**：P1 产品阻塞；新用户首次启动无法进入配对流程。
+- **复现**：使用由当前 `f785213` 源码本地重建的 release binary（非 2026-07-27 ZIP）和全新空 `VIBELINK_DATA_DIR` 启动 `rust-only`。`GET /api/status` 和 `POST /api/pairing-sessions` 均返回 `404 {"error":"Not found."}`；Web 的“Create pairing QR”直接弹出 `Not found.`。只创建 `settings.json` 仍因缺少 `devices` 表复现，说明不是单一配置文件缺失。
+- **根因线索**：`status_http::prepare_route_request` 对未初始化 settings/schema 返回 `Pending`，Rust-only 没有 Node upstream 时由 frontdoor 退化为 404；启动时直接注册路由但没有先执行完整、幂等的 schema/bootstrap。
+- **影响**：空目录安装无法创建短期配对会话，Rust-only 首次启动契约被破坏；现有 package smoke 先调用 `prepareRustOnlySmokeData()`，没有覆盖真正空目录。
+- **修复评估**：优先在 Rust-only 监听前调用共享迁移/bootstrap，原子创建 settings、SQLite 表和默认投影；其次为未就绪状态返回明确的初始化响应，禁止把 pending 映射成 404。不要仅在 smoke fixture 中补表。
+- **验收**：空目录启动后首次 `GET /api/status` 为可解释的 setup/ready 响应，创建 pairing session 返回 201，浏览器能展示 QR；重复启动不丢数据，既有数据迁移回归通过。
+- **主要文件/测试**：`apps/windows/src/main.rs`、`apps/windows/src/status_http.rs`、共享 SQLite migration/bootstrap；新增空目录 Rust-only API + browser smoke。
+
+### PBUG-002 Rust search watcher 启动写事务阻塞控制面
+
+- **级别**：P1 产品稳定性；启动后约 15–20 秒内配对、鉴权、Settings 和任务页面间歇性不可用。
+- **复现**：使用同一份由 `f785213` 源码本地重建的 release binary、标准 settings/schema 和默认 workspace 启动 Rust-only。启动 watcher 扫描 workspace/内容索引时，连续配对 POST 前 3–4 次返回 500（`database is locked`），随后约 20 秒才成功；认证 `/api/devices` 前 4 次返回 404，之后才 200。浏览器 Settings 可见 `Not found.`、`Product request failed.` 和“无配对设备”，与服务端 stderr 的 SQLite lock/fallback 记录一致。
+- **根因线索**：`apps/windows/src/task_http.rs` 的 `start_search_watcher` 在启动即执行 `refresh_search_index`/`refresh_content_index`。workspace 路径收集虽在事务外，但锁内仍逐文件执行 `fs::metadata`、`fs::read_to_string` 和大量 FTS 写入；内容索引也在收集历史文件后持有 `BEGIN IMMEDIATE` 批量写入。SQLite busy 错误经过 route fallback 后在无 Node upstream 的 Rust-only 中变成 404，已认领的 mutation 则变成 500。
+- **影响**：这是 Rust-only 默认启动路径的系统性可用性问题，不是测试环境锁残留；停止 Node、checkpoint WAL、只保留 Rust 进程后仍可复现。
+- **修复评估**：将逐文件 metadata/content 读取移出写事务，改为预计算快照后短批次 FTS/投影写入，或交给带退避的后台队列；设置合理 busy timeout。frontdoor 必须把 transient busy 映射为 503/Retry-After 或明确错误，不能伪装成 404；已认领 mutation 不得重复回放。
+- **验收**：在真实/非空 workspace 启动并并发执行预期成功的 pairing、status、devices、settings、task 请求 20 轮，除业务语义导致的资源不存在 404 外无 404/500；若人为注入锁，客户端收到可重试 503，锁解除后自动恢复，日志包含结构化 busy 原因，并记录锁持有时间上限。
+- **主要文件/测试**：`apps/windows/src/task_http.rs`、`apps/windows/src/http_frontdoor.rs`、共享 SQLite 事务 helper；新增启动并发集成测试。
+
+### PBUG-003 已声明的 legacy token login 在 Rust-only 中缺失
+
+- **级别**：P2 兼容功能缺口；默认关闭，但设置页和 OpenAPI 仍把能力作为可用路由声明。
+- **复现**：在 Settings 开启 `allowLegacyPairingTokenLogin`，输入有效 legacy pairing token，Web 调用 `POST /api/login` 返回 `404 Not found.`。`docs/route-ownership.json`、`docs/openapi.json` 和 Node `src/server.js` 均声明/实现该接口，Rust 源码无对应 handler。
+- **修复评估**：短期在 Rust 实现 Node 当前兼容语义和审计：`allowLegacyPairingTokenLogin || (!isPublicHost && activeDevices.length === 0)`。因此本地非公网且无活动设备时，即使开关为 false 也允许首设备登录；开关为 true 时 Node 也允许公网或已有设备场景。`pairDevice` 当前不会轮换/吊销 pairing token，不能在 Rust 修复中擅自声称旧 token 失效。若产品要收紧为“公网/已有设备始终拒绝”或改为一次性 token，必须作为独立安全变更同步修改 Node、OpenAPI、安全文档和合同。当前 ownership 已标 Rust-owned，默认方案是补 Rust handler。
+- **验收**：Node/Rust 合同覆盖“本地无设备 + 开关 false 允许”“本地已有设备 + 开关 false 拒绝”“公网 + 开关 false 拒绝”“开关 true 时按 Node 允许”；成功响应、重复 pairing token 行为、错误/过期 token 状态码和审计与 Node 一致。
+- **主要文件/测试**：`apps/windows/src/*login*`（新 handler）、`apps/windows/src/http_frontdoor.rs`、`docs/openapi.json`；补 Rust-only login contract。
+
+### PBUG-004 配对卡片标题和说明无视觉间距
+
+- **级别**：P3 视觉回归。
+- **复现**：当前 Web build 的桌面浏览器 1280×720 配对页显示 `QR pairingCreate a short-lived...`，标题 `<strong>` 和说明 `<small>` 都是 inline，肉眼连成一行。代码位于 `apps/web/src/main.jsx:3156`，外层 `.pairing-card` 在 `public/styles.css:3945`，但内层 `<div>` 没有排版规则。
+- **修复评估**：为卡片内层建立纵向 grid/flex 并保留 4px 间距，避免依赖默认 inline 流；不改变文案或配对状态逻辑。
+- **验收**：桌面和 390px 移动断点截图中标题、说明分行且不溢出；配对创建/错误/过期状态均保持布局稳定。
+- **主要文件/测试**：`apps/web/src/main.jsx`、`public/styles.css`；补 desktop/mobile visual smoke。
 
 ## 已确认 Bug
 
-### TBUG-001 Rust HTTP 合同并发运行会超时
+### TBUG-001 Rust HTTP 合同并发运行会超时（已修复，待门禁复核）
 
 - **级别**：P1 测试可靠性；产品影响未证实。
-- **证据**：`rust-http:contract` 与其他 Rust/canary 工作并发时，`doctor_route_pending_replays_the_original_request_to_node`、`audit_route_failure_replays_the_original_request_to_node`、`proxy_preserves_bidirectional_bytes` 在 120 秒后超时；同一 commit 隔离重跑 12/12 在 0.13 秒完成。该模式在两次独立审计中出现。
+- **证据**：此前并发运行会让 3 个前门合同测试在 120 秒后超时；提交 `f785213` 已改为确定性的请求 framing、listener ready 信号和有界测试线程等待。当前提交需在 CI/本地并发循环中复核关闭。
 - **风险**：并行 CI 或本地并行验证产生假红，掩盖真实回归并拖慢发布。
-- **建议修复**：先用可控并发回归测试稳定复现；检查测试 listener/thread 生命周期、端口/accept 同步与共享资源，使用显式 ready channel 和有界 join 代替依赖调度时序。若被测模块必须串行，给相关测试加进程内资源锁并记录原因，不把整个 Rust suite 全局串行化。
-- **验收**：相关合同与至少一个 Rust sidecar canary 并发循环 20 次，0 timeout；隔离运行仍 12/12；`cargo test` 默认并发全绿。
+- **已实施修复**：测试使用显式 request framing、listener ready channel 和有界 join，不再依赖 FIN 或调度时序；未把整个 Rust suite 全局串行化。
+- **验收**：相关合同与至少一个 Rust sidecar canary 并发循环 20 次，0 timeout；隔离运行仍 12/12；`cargo test` 默认并发全绿。完成后将本项移入已关闭记录。
 - **主要文件**：`apps/windows/src/http_frontdoor.rs` 及对应测试辅助代码。
 
 ### TBUG-002 Cargo 探测把可用环境误判为不可用
@@ -87,7 +125,7 @@
 
 ### QG-004 当前 commit 尚无对齐的正式 release tag
 
-- **现状**：仓库最新 tag `v0.1.0` 指向 2026-07-12 的 `2608fdc`；2026-07-27 的 Rust-only ZIP/校验和证据对应后续 commit，而当前审计基线为 `e32aa41`。
+- **现状**：仓库最新 tag `v0.1.0` 指向 2026-07-12 的 `2608fdc`；2026-07-27 的 Rust-only ZIP/校验和证据对应后续 commit，而当前审计基线为 `f785213`。
 - **方案**：先完成测试基础设施修复与 release candidate gate，再生成 manifest、SBOM/依赖审计、hybrid rollback ZIP 和 Rust-only ZIP；验证 hash 后创建不可变 tag 和 release notes。
 - **验收**：tag、manifest commit、ZIP 内 commit、SHA-256 和 release notes 五者一致；升级/回滚 smoke 通过。
 - **依赖**：TBUG-001/002/003、QG-001；是否阻断于 QG-003 由 release owner 明确决定。
@@ -128,11 +166,12 @@
 
 | 阶段 | 工作 | 依赖 | 可并行 |
 | --- | --- | --- | --- |
-| 1 | TBUG-001 并发稳定性；TBUG-002 Cargo 探测；TBUG-003 binary provenance | 无 | 三项可分支并行，但 TBUG-002/003 都改测试辅助层，合并前需协调接口。 |
-| 2 | QG-001 execution-host gate；QG-002 Android 告警 | 阶段 1 的 TBUG-003 | Android 可完全并行；QG-001 等 provenance 规则。 |
-| 3 | QG-003 运行证据与 release candidate package | 阶段 1/2 | Provider、MCP、Live Call、Android 设备证据可分四路并行。 |
-| 4 | QG-004 tag/release | 阶段 3 或显式豁免 | 只能由一个 release owner 串行完成。 |
-| 5 | QG-005 Node 兼容源码退役 | 稳定 release/rollback 基线 | 不同 ownership slice 可并行开发，按共享 gate 顺序合并。 |
+| 1 | PBUG-001 空目录 bootstrap；PBUG-002 watcher/SQLite 锁 | 无 | 两项共享 Rust 启动与 SQLite 生命周期，先由同一 owner 设计 bootstrap/事务边界，再可分支实现；不能独立合并后再猜接口。 |
+| 2 | TBUG-001 复核关闭；TBUG-002 Cargo 探测；TBUG-003 binary provenance | PBUG-001/002 不要求代码依赖，但必须先有稳定可启动 fixture | TBUG-001 与 TBUG-002/003 可并行；TBUG-002/003 共享测试辅助层，合并前由 integration owner 收口。 |
+| 3 | PBUG-003 legacy login；PBUG-004 pairing layout；QG-001/QG-002 | PBUG-003 依赖 Rust 控制面稳定；PBUG-004 无后端依赖 | PBUG-003、PBUG-004、Android 告警可并行；QG-001 仍依赖 binary provenance。 |
+| 4 | QG-003 运行证据与 release candidate package | PBUG-001/002 关闭或 release owner 明确豁免 | Provider、MCP、Live Call、Android 设备证据可分四路并行。 |
+| 5 | QG-004 tag/release | 阶段 4 | 只能由一个 release owner 串行完成。 |
+| 6 | QG-005 Node 兼容源码退役 | 稳定 release/rollback 基线 | 不同 ownership slice 可并行开发，按共享 gate 顺序合并。 |
 | 设计轨 | FG-001/002/003 产品 discovery 与 ADR | 不阻塞阶段 1–4 | 三项可并行调研；没有产品决定前不进入实现。 |
 
 ## 并行协作边界
@@ -141,6 +180,8 @@
 - Android 告警清理只改客户端，可独立交付。
 - 运行证据任务只提交脱敏 manifest/文档，不同时修改核心协议。
 - Node 兼容源码删除必须按 ownership slice 小步合并；同一共享 fixture/OpenAPI 变更由单一 integration owner 收口。
+- PBUG-001 与 PBUG-002 共同触及 Rust-only 启动、SQLite schema 和 frontdoor 错误语义；先冻结共享 bootstrap/事务与错误码合同，再将 watcher、route 和测试分支并行。
+- PBUG-003 只改 Rust pairing/login ownership；PBUG-004 只改 Web 样式和截图测试，两者可完全并行。
 - release tag、校验和和发布说明必须在最终 commit 上串行生成，不能由多个并行分支分别发布。
 
 ## 明确排除的环境问题

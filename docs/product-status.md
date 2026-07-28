@@ -1,16 +1,16 @@
 # VibeLink 产品状态
 
-最后更新：2026-07-28
+最后更新：2026-07-29
 
-审计基线：`main` 提交 `e32aa41`。本文只描述当前状态与可复现验证结果；已关闭问题不作为产品状态的一部分。
+审计基线：`main` 提交 `f785213`。本文只描述当前状态与可复现验证结果；已关闭问题不作为产品状态的一部分。
 
 ## 结论
 
 Windows Rust 化迁移已完成。Windows Bridge、HTTP/SSE/WebSocket 产品路由、SQLite 产品状态、执行宿主、后台生命周期、原生管理入口及 Rust-only 默认发行入口均可在不携带 Node runtime 的包中运行。
 
-2026-07-28 的本地全量复测未发现确认的 P0/P1/P2 产品功能缺陷：Node、Rust、Android、真实浏览器和服务端 canary 均通过，依赖审计为 0 个已知漏洞。复测确认了三项测试基础设施缺陷、Android 编译告警债务及若干产品候选缺口，统一记录在 `docs/bug-and-feature-gaps.md`，不与产品运行缺陷混淆。
+2026-07-29 以由当前 `f785213` 源码本地重建的 release binary（非 2026-07-27 ZIP）实际启动 Rust-only 并打开 Web 产品后，确认了两个 P1 产品缺陷：空数据目录无法完成首次配对，以及启动 search watcher 的 SQLite 写锁会在约 15–20 秒内阻塞控制面；另确认 legacy `/api/login` 在 Rust-only 中缺失（P2）和配对卡片排版问题（P3）。完整证据、排除的环境前置条件、修复方案和并行策略见 `docs/bug-and-feature-gaps.md`。
 
-这不等同于对未接入本机环境的第三方账号、真实弱网和物理 Android 设备作绝对保证。它们属于上线前继续收集的运行证据，不改变当前迁移完成和可发布的判断。
+因此 Rust-only Windows 用户发行版当前不能按“可常规发布”判断；至少 PBUG-001 和 PBUG-002 关闭并通过真实启动回归后才能解除发布阻塞。迁移所有权仍完成，但“迁移完成”不等于“运行健康和可发布”。外部账号、真实弱网和物理 Android 设备仍属于独立运行证据，不得与上述产品缺陷混淆。
 
 ## Rust 化范围
 
@@ -55,12 +55,12 @@ Win32 管理器在受管理服务就绪后一次性显示运行状态，并提�
 | `npm run rust:test` | 187 passed、1 ignored、0 failed；ignored 项要求显式的新构建 execution-host 二进制。 |
 | `npm run android:test` | Android JVM tests 与 `assembleDebug` 通过；41 tasks，存在弃用 API 与 unchecked cast 编译告警。 |
 | `npm run rust:migration:check` / `npm run rust:node-removal:check` | 均通过。 |
-| Rust/HTTP/status 合同 | `rust-http:contract` 隔离运行 12/12 通过；`status:contract` 17/17、Codex app-server 14/14 通过。并发批次中 Rust HTTP 合同可复现 3 个 120 秒超时，已列为测试稳定性缺陷。 |
+| Rust/HTTP/status 合同 | `rust-http:contract` 隔离运行 12/12 通过；`status:contract` 17/17、Codex app-server 14/14 通过。`f785213` 已修复此前的测试线程/FIN 并发等待，尚待 20 轮并发门禁复核关闭 TBUG-001。 |
 | Rust sidecar 集合 | 91 passed、0 failed、7 skipped；其中 6 项被错误的 `link.exe` 前置判断跳过，1 项因可选 `codebase-memory-mcp`/索引项目不可用跳过。 |
 | Event Store 三层 canary | 当前 release 二进制下本地、运行时、服务路由均通过；批量 append 平均 7.2–8.3ms，0 回退、0 失败、0 背压拒绝。 |
 | Workspace/MCP canary | workspace 本仓库真实数据、server route、MCP 持久会话与 HTTP server route 全部通过；0 回退，pending 均排空。 |
 | Execution Host | 当前 release 二进制的启动、Bridge 重连、execd 崩溃恢复、spool 重放、持久 ack、30 秒 soak 与故障告警全部通过。 |
-| 浏览器端到端证据 | 桌面 `en-US` 与手机 `zh-CN` 均通过；23 个 trace event、12 页 trace，redaction、重连和资源清理均已验证。 |
+| 浏览器端到端证据 | 本轮实际打开由 `f785213` 本地重建的 Rust-only release binary：桌面 1280×720 在标准 schema fixture 下完成配对、审批/领取、主界面和 Settings；移动 390×844 检查主界面/导航抽屉，无横向溢出。首次空目录 404、启动锁竞争和 Settings 请求失败已复现并登记 PBUG-001/002。 |
 | `npm run package:windows` | 2026-07-27 hybrid ZIP 生成并通过打包流程；本轮未重建。 |
 | `npm run package:windows:rust-only` | 2026-07-27 Node removal gate、最终 ZIP smoke、默认 Rust-only 入口、鉴权 owner 与无 Node 进程树验收均通过；本轮门禁复测通过，未重建 ZIP。 |
 
@@ -78,7 +78,7 @@ Rust-only ZIP 复核：128 个 entry，`runtimeFlavor=rust-only`，无 `node.exe
 | 发行形态 | 当前判断 |
 | --- | --- |
 | Hybrid Windows 包 | 可作为兼容与进程级回滚包继续发布。 |
-| Rust-only Windows 用户发行版 | 已完成 Node removal、默认入口和最终 ZIP 验收，可进入常规发布流程。 |
+| Rust-only Windows 用户发行版 | 发布阻塞：Node removal/默认入口验收完成，但 PBUG-001/PBUG-002 未关闭；PBUG-003/PBUG-004 需按兼容性和视觉质量优先级处理。 |
 | Web 静态产物 | 构建通过，由 Rust static HTTP 服务承载。 |
 | Android 客户端 | JVM tests 与 debug build 通过；物理设备证据按 release workflow 继续归档。 |
 
@@ -86,9 +86,10 @@ Rust-only ZIP 复核：128 个 entry，`runtimeFlavor=rust-only`，无 `node.exe
 
 1. 保持 ownership、OpenAPI 与 runtime registry 双向差集为 0；新 route 或后台职责未登记 owner 时 CI 必须失败。
 2. 继续收集真实 Provider 任务、Live Call 长时弱网和 Android 物理设备证据。
-3. Rust-only 首批发布保留上一版 hybrid ZIP，并定期验证升级与回滚演练。
-4. 在 Rust-only 默认发行稳定后再评估删除 hybrid Node 兼容源码；源码删除不是迁移完成的前置条件。
-5. 按 `docs/bug-and-feature-gaps.md` 的依赖关系拆分测试修复、Android 告警清理、运行证据和候选功能设计；不要把外部账号、工具或设备缺失转为 Bug。
+3. 先按 `docs/bug-and-feature-gaps.md` 关闭 PBUG-001/PBUG-002，再重跑空目录、启动并发和真实浏览器回归。
+4. Rust-only 首批发布保留上一版 hybrid ZIP，并定期验证升级与回滚演练；产品缺陷关闭前不得宣称可常规发布。
+5. 在 Rust-only 默认发行稳定后再评估删除 hybrid Node 兼容源码；源码删除不是迁移完成的前置条件。
+6. 继续区分测试修复、Android 告警、运行证据和候选功能；不要把外部账号、工具或设备缺失转为 Bug。
 
 ## 状态源
 

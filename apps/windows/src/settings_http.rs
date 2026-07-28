@@ -6,8 +6,8 @@ use crate::settings_credentials::{
     public_credential_state, restore_secret_snapshots, write_requested_secrets,
 };
 use crate::status_http::{
-    authenticate_route_request, clean_host, HttpRouteResponse, ParsedRequest, RouteAuthentication,
-    RouteMetrics,
+    authenticate_route_request, clean_host, sqlite_busy_response, HttpRouteResponse, ParsedRequest,
+    RouteAuthentication, RouteMetrics,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -217,7 +217,8 @@ pub fn route_settings_request_with_body(
         Err(error) => {
             config.metrics.record_failure();
             eprintln!("Rust Settings mutation failed without Node replay: {error:#}");
-            HttpRouteResponse::error(500, "Settings operation failed.")
+            sqlite_busy_response("settings", &error)
+                .unwrap_or_else(|| HttpRouteResponse::error(500, "Settings operation failed."))
         }
     };
     config.metrics.record_response();

@@ -1,5 +1,6 @@
 use crate::status_http::{
-    authenticate_route_request, HttpRouteResponse, ParsedRequest, RouteAuthentication, RouteMetrics,
+    authenticate_route_request, sqlite_busy_response, HttpRouteResponse, ParsedRequest,
+    RouteAuthentication, RouteMetrics,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -257,7 +258,8 @@ fn claimed_result(
         Err(error) => {
             config.metrics.record_failure();
             eprintln!("Rust Device mutation failed without Node replay: {error:#}");
-            HttpRouteResponse::error(500, "Device mutation failed.")
+            sqlite_busy_response("device_mutation", &error)
+                .unwrap_or_else(|| HttpRouteResponse::error(500, "Device mutation failed."))
         }
     }
 }

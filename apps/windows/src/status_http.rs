@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime};
 
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HEADERS: usize = 64;
+const SQLITE_BUSY_RETRY_AFTER_SECONDS: u64 = 1;
 
 #[derive(Debug)]
 pub struct ParsedRequest {
@@ -359,6 +360,68 @@ impl HttpRouteResponse {
         writer.write_all(&body)?;
         writer.flush()
     }
+}
+
+pub(crate) fn sqlite_busy_response(
+    route: &str,
+    error: &anyhow::Error,
+) -> Option<HttpRouteResponse> {
+    if !is_sqlite_busy_error(error) {
+        return None;
+    }
+    let detail = format!("{error:#}");
+    eprintln!(
+        "{}",
+        json!({
+            "event": "sqlite_busy",
+            "route": route,
+            "reason": "sqlite_busy",
+            "retryAfterSeconds": SQLITE_BUSY_RETRY_AFTER_SECONDS,
+            "busyTimeoutMs": 5_000,
+            "detail": detail,
+        })
+    );
+    Some(
+        HttpRouteResponse::json(
+            503,
+            json!({
+                "error": "Database is busy. Retry shortly.",
+                "code": "sqlite_busy",
+                "retryable": true,
+                "route": route,
+            }),
+        )
+        .with_headers(vec![(
+            "Retry-After".to_string(),
+            SQLITE_BUSY_RETRY_AFTER_SECONDS.to_string(),
+        )]),
+    )
+}
+
+fn is_sqlite_busy_error(error: &anyhow::Error) -> bool {
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    }) {
+        return true;
+    }
+    let detail = format!("{error:#}").to_ascii_lowercase();
+    [
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+        "database is busy",
+        "sqlite_busy",
+        "sqlite_locked",
+    ]
+    .iter()
+    .any(|marker| detail.contains(marker))
 }
 
 pub fn route_status_request(

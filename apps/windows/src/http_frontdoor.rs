@@ -38,7 +38,8 @@ use crate::settings_http::{
 };
 use crate::static_http::{stream_static_request, StaticRouteConfig};
 use crate::status_http::{
-    parse_request, route_status_request, HttpRouteResponse, StatusRouteConfig, MAX_HEADER_BYTES,
+    parse_request, route_status_request, sqlite_busy_response, HttpRouteResponse,
+    StatusRouteConfig, MAX_HEADER_BYTES,
 };
 use crate::task_http::{
     route_task_request, stream_task_events_request, task_request_requires_body, TaskRouteConfig,
@@ -440,6 +441,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("provider", &error) {
+                        return response.write_to(&mut client);
+                    }
                     provider_route.record_fallback();
                     eprintln!("Rust Provider route falling back to Node: {error:#}");
                 }
@@ -463,6 +467,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("review", &error) {
+                        return response.write_to(&mut client);
+                    }
                     eprintln!("Rust Review route failed after ownership: {error:#}");
                     return HttpRouteResponse::error(500, "Review request failed.")
                         .write_to(&mut client);
@@ -474,6 +481,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("discovery", &error) {
+                        return response.write_to(&mut client);
+                    }
                     eprintln!("Rust Discovery route failed after ownership: {error:#}");
                     return HttpRouteResponse::error(500, "Discovery request failed.")
                         .write_to(&mut client);
@@ -485,6 +495,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("cloudflare", &error) {
+                        return response.write_to(&mut client);
+                    }
                     eprintln!("Rust Cloudflare route failed after ownership: {error:#}");
                     return HttpRouteResponse::error(500, "Cloudflare guide request failed.")
                         .write_to(&mut client);
@@ -507,6 +520,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("push", &error) {
+                        return response.write_to(&mut client);
+                    }
                     if rust_owned_mutation {
                         eprintln!("Rust Push mutation failed after ownership: {error:#}");
                         return HttpRouteResponse::error(500, "Push mutation failed.")
@@ -529,6 +545,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("live_call", &error) {
+                        return response.write_to(&mut client);
+                    }
                     eprintln!("Rust Live Call route failed after ownership: {error:#}");
                     return HttpRouteResponse::error(500, "Live Call request failed.")
                         .write_to(&mut client);
@@ -540,6 +559,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("product", &error) {
+                        return response.write_to(&mut client);
+                    }
                     eprintln!("Rust Product route failed after ownership: {error:#}");
                     return HttpRouteResponse::error(500, "Product request failed.")
                         .write_to(&mut client);
@@ -551,6 +573,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("artifact", &error) {
+                        return response.write_to(&mut client);
+                    }
                     eprintln!("Rust Artifact route falling back to Node: {error:#}");
                 }
             }
@@ -560,6 +585,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("desktop_remote", &error) {
+                        return response.write_to(&mut client);
+                    }
                     eprintln!("Rust Desktop Remote route falling back to Node: {error:#}")
                 }
             }
@@ -576,6 +604,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("status", &error) {
+                        return response.write_to(&mut client);
+                    }
                     status_route.record_fallback();
                     eprintln!("Rust Status route falling back to Node: {error:#}");
                 }
@@ -586,6 +617,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("doctor", &error) {
+                        return response.write_to(&mut client);
+                    }
                     doctor_route.record_fallback();
                     eprintln!("Rust Doctor route falling back to Node: {error:#}");
                 }
@@ -596,6 +630,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("device", &error) {
+                        return response.write_to(&mut client);
+                    }
                     device_route.record_fallback();
                     eprintln!("Rust Device route falling back to Node: {error:#}");
                 }
@@ -606,6 +643,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("device_mutation", &error) {
+                        return response.write_to(&mut client);
+                    }
                     device_mutation_route.record_fallback();
                     eprintln!(
                         "Rust Device mutation route falling back before ownership: {error:#}"
@@ -618,6 +658,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("audit", &error) {
+                        return response.write_to(&mut client);
+                    }
                     audit_route.record_fallback();
                     eprintln!("Rust Audit route falling back to Node: {error:#}");
                 }
@@ -628,6 +671,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("tool_events", &error) {
+                        return response.write_to(&mut client);
+                    }
                     tool_events_route.record_fallback();
                     eprintln!("Rust Tool Events route falling back to Node: {error:#}");
                 }
@@ -651,6 +697,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("settings", &error) {
+                        return response.write_to(&mut client);
+                    }
                     settings_route.record_fallback();
                     eprintln!("Rust Settings route falling back before ownership: {error:#}");
                 }
@@ -674,6 +723,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("pairing", &error) {
+                        return response.write_to(&mut client);
+                    }
                     pairing_route.record_fallback();
                     eprintln!("Rust Pairing route falling back before ownership: {error:#}");
                 }
@@ -693,6 +745,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("event_sync", &error) {
+                        return response.write_to(&mut client);
+                    }
                     event_sync_route.record_fallback();
                     if rust_owned_mutation {
                         eprintln!("Rust Event Sync mutation failed after ownership: {error:#}");
@@ -717,6 +772,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("task", &error) {
+                        return response.write_to(&mut client);
+                    }
                     task_route.record_fallback();
                     if rust_owned_mutation {
                         eprintln!("Rust Task mutation failed after ownership: {error:#}");
@@ -741,6 +799,9 @@ fn handle_connection_with_upstream(
                 Ok(Some(response)) => return response.write_to(&mut client),
                 Ok(None) => {}
                 Err(error) => {
+                    if let Some(response) = sqlite_busy_response("workspace", &error) {
+                        return response.write_to(&mut client);
+                    }
                     workspace_route.record_fallback();
                     if rust_owned_mutation {
                         eprintln!("Rust Workspace mutation failed after ownership: {error:#}");
@@ -908,6 +969,7 @@ mod tests {
     use crate::doctor_http::DoctorRouteConfig;
     use crate::pairing_http::PairingRouteConfig;
     use crate::status_http::StatusRouteConfig;
+    use crate::task_http::TaskRouteConfig;
     use crate::tool_events_http::ToolEventsRouteConfig;
     use crate::workspace_http::{inject_post_file_mutation_failure_once, WorkspaceRouteConfig};
     use rusqlite::params;
@@ -1040,6 +1102,95 @@ mod tests {
         assert!(!is_expected_client_disconnect(&Error::from(
             ErrorKind::Other
         )));
+    }
+
+    #[test]
+    fn sqlite_busy_errors_return_retryable_service_unavailable() {
+        let error = anyhow::anyhow!("database is locked");
+        let response = crate::status_http::sqlite_busy_response("task", &error).unwrap();
+
+        assert_eq!(response.status, 503);
+        assert_eq!(response.header("Retry-After"), Some("1"));
+        assert_eq!(response.body["code"], "sqlite_busy");
+        assert_eq!(response.body["retryable"], true);
+        assert_eq!(response.body["route"], "task");
+        assert!(
+            crate::status_http::sqlite_busy_response("task", &anyhow::anyhow!("invalid JSON"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn sqlite_write_lock_returns_retryable_task_response_without_node_replay() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!(
+            "vibelink-frontdoor-sqlite-busy-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"pairingToken":"PAIR","hostAllowlist":["bridge.test"]}"#,
+        )
+        .unwrap();
+        let database = rusqlite::Connection::open(data_dir.join("mobile-agent.sqlite")).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE devices (
+                    id TEXT PRIMARY KEY, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL, last_seen_at TEXT, revoked_at TEXT,
+                    expires_at TEXT, rotated_at TEXT, meta_json TEXT
+                );",
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO devices (
+                    id,label,token_hash,created_at,last_seen_at,expires_at,meta_json
+                 ) VALUES ('device-1','Phone',?1,'2026-01-01T00:00:00.000Z',
+                           '2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','{}')",
+                [crate::status_http::hash_token("active-token")],
+            )
+            .unwrap();
+        database.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let task_route = TaskRouteConfig::new(data_dir.clone());
+        let proxy_thread = spawn_accept_thread("front door", frontend, move |client| {
+            let routes = FrontdoorRoutes::default().with_task(Some(task_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
+        });
+
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client
+            .write_all(b"GET /api/tasks HTTP/1.1\r\nHost: bridge.test\r\nAuthorization: Bearer active-token\r\n\r\n")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.contains("Retry-After: 1"));
+        assert!(response.contains("\"code\":\"sqlite_busy\""));
+        assert!(response.contains("\"route\":\"task\""));
+
+        database.execute_batch("ROLLBACK").unwrap();
+        proxy_thread.wait();
+        assert_eq!(
+            upstream.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(database);
+        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]

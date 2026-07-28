@@ -2,8 +2,8 @@ use crate::device_http::apply_fields;
 use crate::settings_contract::load_settings;
 use crate::settings_http::project_public_settings;
 use crate::status_http::{
-    authenticate_route_request, prepare_route_request, HttpRouteResponse, ParsedRequest,
-    RouteAuthentication, RouteMetrics, RoutePreparation,
+    authenticate_route_request, prepare_route_request, sqlite_busy_response, HttpRouteResponse,
+    ParsedRequest, RouteAuthentication, RouteMetrics, RoutePreparation,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -972,7 +972,8 @@ fn claimed_result(
         Err(error) => {
             config.metrics.record_failure();
             eprintln!("Rust Pairing decision failed without Node replay: {error:#}");
-            HttpRouteResponse::error(500, "Pairing operation failed.")
+            sqlite_busy_response("pairing", &error)
+                .unwrap_or_else(|| HttpRouteResponse::error(500, "Pairing operation failed."))
         }
     }
 }

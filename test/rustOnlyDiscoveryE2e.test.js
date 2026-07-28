@@ -16,6 +16,7 @@ const sourceRoot = path.join(root, "apps", "windows", "src");
 const binary = path.join(root, "apps", "windows", "target", "debug", process.platform === "win32" ? "vibelink.exe" : "vibelink");
 const nativeFetch = globalThis.fetch;
 const checkpointPath = process.env.VIBELINK_RUST_ONLY_E2E_CHECKPOINT || "";
+const STARTUP_CONCURRENT_REQUESTS = 20;
 
 function checkpoint(stage) {
   if (checkpointPath) fs.writeFileSync(checkpointPath, `${new Date().toISOString()} ${stage}\n`);
@@ -80,6 +81,12 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   fs.writeFileSync(path.join(directory, "home", ".vibelink", "skills", "e2e", "SKILL.md"), "---\nname: e2e\ndescription: E2E skill\n---\nRun E2E.");
   fs.writeFileSync(path.join(directory, "attachments", artifactId), "hello from rust artifact\n");
   fs.writeFileSync(path.join(workspaceDir, "download.txt"), "hello from rust file\n");
+  for (let index = 0; index < 96; index += 1) {
+    fs.writeFileSync(
+      path.join(workspaceDir, `startup-index-${index}.ts`),
+      `export const startupIndex${index} = "rust startup concurrency marker ${index}";\n`
+    );
+  }
   fs.writeFileSync(path.join(directory, "settings.json"), JSON.stringify({
     pairingToken: "PAIR",
     hostAllowlist: ["127.0.0.1"],
@@ -139,6 +146,17 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     if (port === 0) await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(port > 0, `Rust-only discovery server did not become ready.\n${logs}`);
+  const headers = { Authorization: "Bearer device-token" };
+  const startupPaths = ["/api/status", "/api/tasks", "/api/devices", "/api/pairing-sessions"];
+  const startupResponses = await Promise.all(
+    Array.from({ length: STARTUP_CONCURRENT_REQUESTS }, (_, index) =>
+      fetch(`http://127.0.0.1:${port}${startupPaths[index % startupPaths.length]}`, { headers })
+    )
+  );
+  for (const response of startupResponses) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-vibelink-control-plane"), "rust");
+  }
   checkpoint("server-ready");
   const openApiResponse = await fetch(`http://127.0.0.1:${port}/api/openapi.json`);
   assert.equal(openApiResponse.status, 200);
@@ -149,7 +167,6 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   assert.equal(openApi.info.title, "VibeLink HTTP API");
   assert.ok(openApi.paths["/api/status"]);
 
-  const headers = { Authorization: "Bearer device-token" };
   const statusResponse = await fetch(`http://127.0.0.1:${port}/api/status`, { headers });
   assert.equal(statusResponse.status, 200);
   assert.equal(statusResponse.headers.get("x-vibelink-control-plane"), "rust");

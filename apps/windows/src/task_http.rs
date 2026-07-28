@@ -6,7 +6,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -1419,6 +1419,17 @@ const SEARCH_MAX_FILES: usize = 50_000;
 const SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
 const HISTORY_MAX_FILE_BYTES: i64 = 16 * 1024 * 1024;
 const CONTENT_MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+const INDEX_WRITE_BATCH_SIZE: usize = 64;
+const INDEX_WRITE_BATCH_BYTES: usize = 2 * 1024 * 1024;
+const INDEX_WRITE_LOCK_HOLD_LIMIT_MS: u128 = 250;
+
+#[derive(Debug)]
+struct SearchFileSnapshot {
+    relative_path: String,
+    size_bytes: i64,
+    mtime_ms: i64,
+    content: String,
+}
 
 fn refresh_search_index(connection: &Connection) -> Result<Vec<Value>> {
     if !table_exists(connection, "workspaces")? {
@@ -1436,22 +1447,40 @@ fn refresh_search_index(connection: &Connection) -> Result<Vec<Value>> {
         if !root.is_dir() {
             continue;
         }
-        let files = collect_search_files(&root)?;
-        connection.execute_batch("BEGIN IMMEDIATE")?;
-        let refreshed = refresh_workspace_search_rows(connection, &workspace_id, &root, &files);
-        match refreshed {
-            Ok(value) => {
-                connection.execute_batch("COMMIT")?;
-                result.push(value);
-            }
-            Err(error) => {
-                let _ = connection.execute_batch("ROLLBACK");
-                return Err(error);
-            }
-        }
+        let files = collect_search_file_snapshots(&root)?;
+        result.push(refresh_workspace_search_rows(
+            connection,
+            &workspace_id,
+            &files,
+        )?);
     }
     refresh_content_index(connection)?;
     Ok(result)
+}
+
+fn collect_search_file_snapshots(root: &Path) -> Result<Vec<SearchFileSnapshot>> {
+    collect_search_files(root)?
+        .into_iter()
+        .map(|path| {
+            let relative_path = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let metadata = fs::metadata(&path)?;
+            let mtime_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|value| value.as_millis() as i64)
+                .unwrap_or(0);
+            Ok(SearchFileSnapshot {
+                relative_path,
+                size_bytes: metadata.len().min(i64::MAX as u64) as i64,
+                mtime_ms,
+                content: fs::read_to_string(path).unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 fn collect_search_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -1520,86 +1549,189 @@ fn is_search_text_file(path: &Path) -> bool {
 fn refresh_workspace_search_rows(
     connection: &Connection,
     workspace_id: &str,
-    root: &Path,
-    files: &[PathBuf],
+    files: &[SearchFileSnapshot],
 ) -> Result<Value> {
     let existing = {
-        let mut statement = connection
-            .prepare("SELECT rowid,path FROM workspace_search_files WHERE workspace_id = ?1")?;
+        let mut statement = connection.prepare(
+            "SELECT rowid,path,size_bytes,mtime_ms FROM workspace_search_files
+             WHERE workspace_id = ?1",
+        )?;
         let rows = statement
             .query_map(params![workspace_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    let mut seen = HashSet::new();
-    let mut upserted = 0;
-    for path in files {
-        let relative = path
-            .strip_prefix(root)?
-            .to_string_lossy()
-            .replace('\\', "/");
-        seen.insert(relative.clone());
-        let metadata = fs::metadata(path)?;
-        let mtime_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|value| value.as_millis() as i64)
-            .unwrap_or(0);
-        let content = fs::read_to_string(path).unwrap_or_default();
-        let rowid = connection
-            .query_row(
-                "SELECT rowid FROM workspace_search_files WHERE workspace_id=?1 AND path=?2",
-                params![workspace_id, relative],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let rowid = if let Some(rowid) = rowid {
-            connection.execute(
-                "DELETE FROM workspace_search_fts WHERE rowid=?1",
-                params![rowid],
-            )?;
-            connection.execute(
-                "UPDATE workspace_search_files SET size_bytes=?1,mtime_ms=?2,indexable=1,indexed_at=?3 WHERE rowid=?4",
-                params![metadata.len() as i64, mtime_ms, now_iso(), rowid],
-            )?;
-            rowid
-        } else {
-            connection.execute(
-                "INSERT INTO workspace_search_files(workspace_id,path,size_bytes,mtime_ms,indexable,indexed_at)
-                 VALUES (?1,?2,?3,?4,1,?5)",
-                params![workspace_id, relative, metadata.len() as i64, mtime_ms, now_iso()],
-            )?;
-            connection.last_insert_rowid()
-        };
-        connection.execute(
-            "INSERT INTO workspace_search_fts(rowid,path,content,workspace_id) VALUES (?1,?2,?3,?4)",
-            params![rowid, relative, content, workspace_id],
-        )?;
-        upserted += 1;
+    let existing_by_path = existing
+        .iter()
+        .map(|(rowid, path, size_bytes, mtime_ms)| {
+            (path.as_str(), (*rowid, *size_bytes, *mtime_ms))
+        })
+        .collect::<HashMap<_, _>>();
+    let seen = files
+        .iter()
+        .map(|file| file.relative_path.as_str())
+        .collect::<HashSet<_>>();
+    let changed = files
+        .iter()
+        .filter(|file| {
+            existing_by_path
+                .get(file.relative_path.as_str())
+                .is_none_or(|(_, size_bytes, mtime_ms)| {
+                    *size_bytes != file.size_bytes || *mtime_ms != file.mtime_ms
+                })
+        })
+        .collect::<Vec<_>>();
+    let removed = existing
+        .iter()
+        .filter(|(_, path, _, _)| !seen.contains(path.as_str()))
+        .map(|(rowid, _, _, _)| *rowid)
+        .collect::<Vec<_>>();
+
+    let mut batch_start = 0;
+    while batch_start < changed.len() {
+        let batch_end = bounded_index_batch_end(&changed, batch_start, |file| file.content.len());
+        let batch = &changed[batch_start..batch_end];
+        run_index_write_batch(connection, "workspace_search", batch.len(), || {
+            for file in batch {
+                let rowid = if let Some((rowid, _, _)) =
+                    existing_by_path.get(file.relative_path.as_str())
+                {
+                    connection.execute(
+                        "DELETE FROM workspace_search_fts WHERE rowid=?1",
+                        params![rowid],
+                    )?;
+                    connection.execute(
+                        "UPDATE workspace_search_files
+                         SET size_bytes=?1,mtime_ms=?2,indexable=1,indexed_at=?3
+                         WHERE rowid=?4",
+                        params![file.size_bytes, file.mtime_ms, now_iso(), rowid],
+                    )?;
+                    *rowid
+                } else {
+                    connection.execute(
+                        "INSERT INTO workspace_search_files(
+                           workspace_id,path,size_bytes,mtime_ms,indexable,indexed_at
+                         ) VALUES (?1,?2,?3,?4,1,?5)",
+                        params![
+                            workspace_id,
+                            file.relative_path,
+                            file.size_bytes,
+                            file.mtime_ms,
+                            now_iso()
+                        ],
+                    )?;
+                    connection.last_insert_rowid()
+                };
+                connection.execute(
+                    "INSERT INTO workspace_search_fts(rowid,path,content,workspace_id)
+                     VALUES (?1,?2,?3,?4)",
+                    params![rowid, file.relative_path, file.content, workspace_id],
+                )?;
+            }
+            Ok(())
+        })?;
+        batch_start = batch_end;
     }
-    let mut deleted = 0;
-    for (rowid, path) in existing {
-        if seen.contains(&path) {
-            continue;
-        }
-        connection.execute(
-            "DELETE FROM workspace_search_fts WHERE rowid=?1",
-            params![rowid],
-        )?;
-        connection.execute(
-            "DELETE FROM workspace_search_files WHERE rowid=?1",
-            params![rowid],
-        )?;
-        deleted += 1;
+    for batch in removed.chunks(INDEX_WRITE_BATCH_SIZE) {
+        run_index_write_batch(connection, "workspace_search_cleanup", batch.len(), || {
+            for rowid in batch {
+                connection.execute(
+                    "DELETE FROM workspace_search_fts WHERE rowid=?1",
+                    params![rowid],
+                )?;
+                connection.execute(
+                    "DELETE FROM workspace_search_files WHERE rowid=?1",
+                    params![rowid],
+                )?;
+            }
+            Ok(())
+        })?;
     }
     Ok(json!({
         "workspaceId": workspace_id,
-        "upserted": upserted,
-        "deleted": deleted
+        "upserted": changed.len(),
+        "deleted": removed.len()
     }))
+}
+
+fn run_index_write_batch<T>(
+    connection: &Connection,
+    index: &str,
+    rows: usize,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let wait_started = Instant::now();
+    if let Err(error) = connection.execute_batch("BEGIN IMMEDIATE") {
+        eprintln!(
+            "{}",
+            json!({
+                "event": "sqlite_busy",
+                "reason": "write_lock_unavailable",
+                "index": index,
+                "rows": rows,
+                "busyTimeoutMs": 5_000,
+                "batchSizeLimit": INDEX_WRITE_BATCH_SIZE,
+                "batchBytesLimit": INDEX_WRITE_BATCH_BYTES,
+                "lockHoldLimitMs": INDEX_WRITE_LOCK_HOLD_LIMIT_MS,
+                "detail": error.to_string(),
+            })
+        );
+        return Err(error)
+            .with_context(|| format!("{index} write batch could not acquire SQLite lock"));
+    }
+    let wait_ms = wait_started.elapsed().as_millis();
+    let hold_started = Instant::now();
+    let result = operation();
+    let result = match result {
+        Ok(value) => match connection.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                Err(error).with_context(|| format!("{index} write batch could not commit"))
+            }
+        },
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    };
+    let hold_ms = hold_started.elapsed().as_millis();
+    if wait_ms > 0 || hold_ms > INDEX_WRITE_LOCK_HOLD_LIMIT_MS {
+        eprintln!(
+            "{}",
+            json!({
+                "event": "sqlite_index_write_batch",
+                "index": index,
+                "rows": rows,
+                "lockWaitMs": wait_ms,
+                "lockHoldMs": hold_ms,
+                "lockHoldLimitMs": INDEX_WRITE_LOCK_HOLD_LIMIT_MS,
+                "lockHoldLimitExceeded": hold_ms > INDEX_WRITE_LOCK_HOLD_LIMIT_MS,
+            })
+        );
+    }
+    result.with_context(|| format!("{index} write batch failed"))
+}
+
+fn bounded_index_batch_end<T>(items: &[T], start: usize, size: impl Fn(&T) -> usize) -> usize {
+    let mut end = start;
+    let mut bytes = 0_usize;
+    while end < items.len() && end - start < INDEX_WRITE_BATCH_SIZE {
+        let item_bytes = size(&items[end]);
+        if end > start && bytes.saturating_add(item_bytes) > INDEX_WRITE_BATCH_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(item_bytes);
+        end += 1;
+    }
+    end
 }
 
 #[derive(Debug)]
@@ -1611,40 +1743,54 @@ struct HistoryIndexFile {
     updated_at: String,
 }
 
+#[derive(Debug)]
+struct PreparedContentDocument {
+    event_cursor: i64,
+    kind: &'static str,
+    item_id: String,
+    provider: String,
+    title: String,
+    content: String,
+    turn_id: String,
+    updated_at: String,
+}
+
+#[derive(Debug)]
+struct PreparedContentSource {
+    source_key: String,
+    provider: String,
+    session_id: String,
+    session_origin: &'static str,
+    source_kind: &'static str,
+    file_path: String,
+    byte_offset: i64,
+    event_cursor: i64,
+    source_size: i64,
+    source_mtime_ms: i64,
+    documents: Vec<PreparedContentDocument>,
+}
+
 fn refresh_content_index(connection: &Connection) -> Result<Value> {
     let history_files = collect_history_index_files();
-    connection.execute_batch("BEGIN IMMEDIATE")?;
-    let refreshed = (|| {
-        let mut active = HashSet::new();
-        let mut sessions = 0_i64;
-        let mut messages = 0_i64;
-        for file in &history_files {
-            let (source_key, changed) = refresh_history_content_source(connection, file)?;
-            active.insert(source_key);
-            sessions += 1;
-            messages += changed;
-        }
-        remove_missing_content_sources(connection, "agent", &active)?;
-
-        let (task_keys, task_count, task_messages) = refresh_task_content_sources(connection)?;
-        remove_missing_content_sources(connection, "task", &task_keys)?;
-        Ok::<_, anyhow::Error>(json!({
-            "sessions": sessions,
-            "tasks": task_count,
-            "messages": messages + task_messages,
-            "owner": "rust-content-index"
-        }))
-    })();
-    match refreshed {
-        Ok(value) => {
-            connection.execute_batch("COMMIT")?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            Err(error)
-        }
+    let mut active = HashSet::new();
+    let mut sessions = 0_i64;
+    let mut messages = 0_i64;
+    for file in &history_files {
+        let (source_key, changed) = refresh_history_content_source(connection, file)?;
+        active.insert(source_key);
+        sessions += 1;
+        messages += changed;
     }
+    remove_missing_content_sources(connection, "agent", &active)?;
+
+    let (task_keys, task_count, task_messages) = refresh_task_content_sources(connection)?;
+    remove_missing_content_sources(connection, "task", &task_keys)?;
+    Ok(json!({
+        "sessions": sessions,
+        "tasks": task_count,
+        "messages": messages + task_messages,
+        "owner": "rust-content-index"
+    }))
 }
 
 fn collect_history_index_files() -> Vec<HistoryIndexFile> {
@@ -1732,6 +1878,7 @@ fn refresh_history_content_source(
     if let Some(source_key) = unchanged_source {
         return Ok((source_key, 0));
     }
+
     let mut entries = Vec::new();
     let reader = BufReader::new(fs::File::open(&file.path)?);
     for line in reader.lines().take(50_000) {
@@ -1759,7 +1906,6 @@ fn refresh_history_content_source(
                 .to_string()
         });
     let source_key = format!("agent:{}:{id}", file.provider);
-    delete_content_documents(connection, &source_key)?;
     let mut visible = Vec::new();
     for entry in &entries {
         if let Some((role, text, turn_id, timestamp)) = history_search_entry(entry) {
@@ -1786,57 +1932,52 @@ fn refresh_history_content_source(
         .chars()
         .take(4000)
         .collect::<String>();
-    connection.execute(
-        "INSERT INTO content_search_sources (
-           source_key,provider,session_id,session_origin,source_kind,file_path,byte_offset,
-           event_cursor,source_size,source_mtime_ms,indexed_at
-         ) VALUES (?1,?2,?3,'unknown','agent',?4,?5,?6,?5,?7,?8)
-         ON CONFLICT(source_key) DO UPDATE SET provider=excluded.provider,
-           session_id=excluded.session_id,file_path=excluded.file_path,
-           byte_offset=excluded.byte_offset,event_cursor=excluded.event_cursor,
-           source_size=excluded.source_size,source_mtime_ms=excluded.source_mtime_ms,
-           indexed_at=excluded.indexed_at",
-        params![
-            source_key,
-            file.provider,
-            id,
-            source_path,
-            file.size,
-            entries.len() as i64,
-            file.mtime_ms,
-            now_iso()
-        ],
-    )?;
-    insert_content_document(
-        connection,
-        &source_key,
-        0,
-        "history",
-        &id,
-        file.provider,
-        &title,
-        &preview,
-        "",
-        &file.updated_at,
-    )?;
-    for (index, (_, text, turn_id, timestamp)) in visible.iter().enumerate() {
-        insert_content_document(
-            connection,
-            &source_key,
-            index as i64 + 1,
-            "message",
-            &id,
-            file.provider,
-            &title,
-            text,
-            turn_id,
-            if timestamp.is_empty() {
-                &file.updated_at
-            } else {
-                timestamp
-            },
-        )?;
-    }
+    let mut documents = Vec::with_capacity(visible.len() + 1);
+    documents.push(PreparedContentDocument {
+        event_cursor: 0,
+        kind: "history",
+        item_id: id.clone(),
+        provider: file.provider.to_string(),
+        title: title.clone(),
+        content: preview,
+        turn_id: String::new(),
+        updated_at: file.updated_at.clone(),
+    });
+    documents.extend(
+        visible
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (_, text, turn_id, timestamp))| PreparedContentDocument {
+                    event_cursor: index as i64 + 1,
+                    kind: "message",
+                    item_id: id.clone(),
+                    provider: file.provider.to_string(),
+                    title: title.clone(),
+                    content: text.clone(),
+                    turn_id: turn_id.clone(),
+                    updated_at: if timestamp.is_empty() {
+                        file.updated_at.clone()
+                    } else {
+                        timestamp.clone()
+                    },
+                },
+            ),
+    );
+    let prepared = PreparedContentSource {
+        source_key: source_key.clone(),
+        provider: file.provider.to_string(),
+        session_id: id,
+        session_origin: "unknown",
+        source_kind: "agent",
+        file_path: source_path,
+        byte_offset: file.size,
+        event_cursor: entries.len() as i64,
+        source_size: file.size,
+        source_mtime_ms: file.mtime_ms,
+        documents,
+    };
+    apply_prepared_content_source(connection, &prepared)?;
     Ok((source_key, visible.len() as i64))
 }
 
@@ -1979,7 +2120,6 @@ fn refresh_task_content_sources(connection: &Connection) -> Result<(HashSet<Stri
         if unchanged {
             continue;
         }
-        delete_content_documents(connection, &source_key)?;
         let mut event_statement = connection.prepare(
             "SELECT cursor,event_at,COALESCE(text,''),COALESCE(payload_json,'{}')
              FROM task_events WHERE task_id=?1 ORDER BY cursor ASC LIMIT 5000",
@@ -2009,62 +2149,128 @@ fn refresh_task_content_sources(connection: &Connection) -> Result<(HashSet<Stri
                 },
             );
         }
-        connection.execute(
-            "INSERT INTO content_search_sources (
-               source_key,provider,session_id,session_origin,source_kind,file_path,byte_offset,
-               event_cursor,source_size,source_mtime_ms,indexed_at
-             ) VALUES (?1,?2,?3,'vibelink-cli','task','',0,?4,0,0,?5)
-             ON CONFLICT(source_key) DO UPDATE SET session_id=excluded.session_id,
-               event_cursor=excluded.event_cursor,indexed_at=excluded.indexed_at",
-            params![
-                source_key,
-                agent,
-                if session_id.is_empty() {
-                    id
-                } else {
-                    session_id
-                },
-                max_cursor,
-                now_iso()
-            ],
-        )?;
-        insert_content_document(
-            connection,
-            &source_key,
-            0,
-            "task",
-            id,
-            agent,
-            title,
-            &task_content,
-            "",
-            updated_at,
-        )?;
+        let item_id = if session_id.is_empty() {
+            id.clone()
+        } else {
+            session_id.clone()
+        };
+        let mut documents = vec![PreparedContentDocument {
+            event_cursor: 0,
+            kind: "task",
+            item_id: id.clone(),
+            provider: agent.clone(),
+            title: title.clone(),
+            content: task_content,
+            turn_id: String::new(),
+            updated_at: updated_at.clone(),
+        }];
         for (cursor, at, text, payload_json) in &events {
             let content = if text.is_empty() { payload_json } else { text };
             if content.is_empty() {
                 continue;
             }
-            insert_content_document(
-                connection,
-                &source_key,
-                *cursor,
-                "message",
-                if session_id.is_empty() {
-                    id
-                } else {
-                    session_id
-                },
-                agent,
-                title,
-                content,
-                "",
-                at,
-            )?;
+            documents.push(PreparedContentDocument {
+                event_cursor: *cursor,
+                kind: "message",
+                item_id: item_id.clone(),
+                provider: agent.clone(),
+                title: title.clone(),
+                content: content.clone(),
+                turn_id: String::new(),
+                updated_at: at.clone(),
+            });
             message_count += 1;
         }
+        let prepared = PreparedContentSource {
+            source_key,
+            provider: agent.clone(),
+            session_id: item_id,
+            session_origin: "vibelink-cli",
+            source_kind: "task",
+            file_path: String::new(),
+            byte_offset: 0,
+            event_cursor: max_cursor,
+            source_size: 0,
+            source_mtime_ms: 0,
+            documents,
+        };
+        apply_prepared_content_source(connection, &prepared)?;
     }
     Ok((active, tasks.len() as i64, message_count))
+}
+
+fn apply_prepared_content_source(
+    connection: &Connection,
+    source: &PreparedContentSource,
+) -> Result<()> {
+    run_index_write_batch(connection, "content_search_reset", 1, || {
+        delete_content_documents(connection, &source.source_key)?;
+        connection.execute(
+            "DELETE FROM content_search_sources WHERE source_key=?1",
+            params![source.source_key],
+        )?;
+        Ok(())
+    })?;
+
+    let mut batch_start = 0;
+    while batch_start < source.documents.len() {
+        let batch_end = bounded_index_batch_end(&source.documents, batch_start, |document| {
+            document.content.len().min(CONTENT_MAX_DOCUMENT_BYTES)
+        });
+        let documents = &source.documents[batch_start..batch_end];
+        run_index_write_batch(
+            connection,
+            "content_search_documents",
+            documents.len(),
+            || {
+                for document in documents {
+                    insert_content_document(
+                        connection,
+                        &source.source_key,
+                        document.event_cursor,
+                        document.kind,
+                        &document.item_id,
+                        &document.provider,
+                        &document.title,
+                        &document.content,
+                        &document.turn_id,
+                        &document.updated_at,
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+        batch_start = batch_end;
+    }
+
+    run_index_write_batch(connection, "content_search_source", 1, || {
+        connection.execute(
+            "INSERT INTO content_search_sources (
+               source_key,provider,session_id,session_origin,source_kind,file_path,byte_offset,
+               event_cursor,source_size,source_mtime_ms,indexed_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(source_key) DO UPDATE SET provider=excluded.provider,
+               session_id=excluded.session_id,session_origin=excluded.session_origin,
+               source_kind=excluded.source_kind,file_path=excluded.file_path,
+               byte_offset=excluded.byte_offset,event_cursor=excluded.event_cursor,
+               source_size=excluded.source_size,source_mtime_ms=excluded.source_mtime_ms,
+               indexed_at=excluded.indexed_at",
+            params![
+                source.source_key,
+                source.provider,
+                source.session_id,
+                source.session_origin,
+                source.source_kind,
+                source.file_path,
+                source.byte_offset,
+                source.event_cursor,
+                source.source_size,
+                source.source_mtime_ms,
+                now_iso()
+            ],
+        )?;
+        Ok(())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2080,6 +2286,7 @@ fn insert_content_document(
     turn_id: &str,
     updated_at: &str,
 ) -> Result<()> {
+    let content = truncate_content(content, CONTENT_MAX_DOCUMENT_BYTES);
     connection.execute(
         "INSERT INTO content_search_documents (
            source_key,event_cursor,kind,item_id,provider,title,content,turn_id,updated_at
@@ -2091,7 +2298,7 @@ fn insert_content_document(
             item_id,
             provider,
             title,
-            truncate_content(content, CONTENT_MAX_DOCUMENT_BYTES),
+            content,
             turn_id,
             updated_at
         ],
@@ -2150,15 +2357,19 @@ fn remove_missing_content_sources(
         .query_map(params![source_kind], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for source_key in existing {
-        if active.contains(&source_key) {
-            continue;
-        }
-        delete_content_documents(connection, &source_key)?;
-        connection.execute(
-            "DELETE FROM content_search_sources WHERE source_key=?1",
-            params![source_key],
-        )?;
+    let missing = existing
+        .into_iter()
+        .filter(|source_key| !active.contains(source_key))
+        .collect::<Vec<_>>();
+    for source_key in missing {
+        run_index_write_batch(connection, "content_search_cleanup", 1, || {
+            delete_content_documents(connection, &source_key)?;
+            connection.execute(
+                "DELETE FROM content_search_sources WHERE source_key=?1",
+                params![source_key],
+            )?;
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -3021,6 +3232,11 @@ mod tests {
             .unwrap();
         assert_eq!(refreshed.body["ok"], true);
         assert_eq!(refreshed.body["result"][0]["upserted"], 1);
+        let unchanged = route_task_request(&refresh, None, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.body["result"][0]["upserted"], 0);
+        assert_eq!(unchanged.body["result"][0]["deleted"], 0);
         let search = parse_request(
             b"GET /api/search?q=native%20refresh&scope=files&record=0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\n\r\n",
         )

@@ -21,6 +21,7 @@ use crate::live_call_http::{
     is_live_call_audio_request, live_call_request_requires_body, route_live_call_request,
     stream_live_call_audio_request, stream_live_call_events_request, LiveCallRouteConfig,
 };
+use crate::login_http::{login_request_requires_body, route_login_request, LoginRouteConfig};
 use crate::pairing_http::{
     pairing_request_requires_body, route_pairing_request, route_pairing_request_with_body,
     PairingRouteConfig,
@@ -74,6 +75,7 @@ pub struct FrontdoorRoutes {
     tool_events_sse: Option<ToolEventsRouteConfig>,
     settings: Option<SettingsRouteConfig>,
     pairing: Option<PairingRouteConfig>,
+    login: Option<LoginRouteConfig>,
     provider: Option<ProviderRouteConfig>,
     static_route: Option<StaticRouteConfig>,
     task: Option<TaskRouteConfig>,
@@ -133,6 +135,11 @@ impl FrontdoorRoutes {
 
     pub fn with_pairing(mut self, route: Option<PairingRouteConfig>) -> Self {
         self.pairing = route;
+        self
+    }
+
+    pub fn with_login(mut self, route: Option<LoginRouteConfig>) -> Self {
+        self.login = route;
         self
     }
 
@@ -216,6 +223,7 @@ impl FrontdoorRoutes {
             && self.tool_events_sse.is_none()
             && self.settings.is_none()
             && self.pairing.is_none()
+            && self.login.is_none()
             && self.provider.is_none()
             && self.static_route.is_none()
             && self.task.is_none()
@@ -705,6 +713,28 @@ fn handle_connection_with_upstream(
                 }
             }
         }
+        if let Some(login_route) = routes.login.as_ref() {
+            let body = if login_request_requires_body(&request) {
+                match read_request_body(&mut client, &mut prefix, &request)? {
+                    Some(body) => Some(body),
+                    None => return proxy_or_not_found(client, upstream, prefix),
+                }
+            } else {
+                None
+            };
+            match route_login_request(&request, &peer_ip, body.as_deref(), login_route) {
+                Ok(Some(response)) => return response.write_to(&mut client),
+                Ok(None) => {}
+                Err(error) => {
+                    if let Some(response) = sqlite_busy_response("login", &error) {
+                        return response.write_to(&mut client);
+                    }
+                    eprintln!("Rust Login route failed after ownership: {error:#}");
+                    return HttpRouteResponse::error(500, "Login request failed.")
+                        .write_to(&mut client);
+                }
+            }
+        }
         if let Some(pairing_route) = routes.pairing.as_ref() {
             let body = if pairing_request_requires_body(&request) {
                 match read_request_body(&mut client, &mut prefix, &request)? {
@@ -967,6 +997,7 @@ mod tests {
     use crate::audit_http::AuditRouteConfig;
     use crate::device_http::{DeviceMutationRouteConfig, DeviceRouteConfig};
     use crate::doctor_http::DoctorRouteConfig;
+    use crate::login_http::LoginRouteConfig;
     use crate::pairing_http::PairingRouteConfig;
     use crate::status_http::StatusRouteConfig;
     use crate::task_http::TaskRouteConfig;
@@ -1663,6 +1694,70 @@ mod tests {
             .unwrap();
         assert_eq!(status, "pending");
         drop(database);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn login_is_owned_by_rust_frontdoor_without_node_replay() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let frontend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let frontend_addr = frontend.local_addr().unwrap();
+        let data_dir =
+            std::env::temp_dir().join(format!("vibelink-login-frontdoor-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"pairingToken":"PAIR","hostAllowlist":[],"allowLegacyPairingTokenLogin":false}"#,
+        )
+        .unwrap();
+        rusqlite::Connection::open(data_dir.join("mobile-agent.sqlite"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE devices (
+                    id TEXT PRIMARY KEY, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL, last_seen_at TEXT, revoked_at TEXT,
+                    expires_at TEXT, rotated_at TEXT, meta_json TEXT
+                 );
+                 CREATE TABLE audit_log (
+                    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL, event_at TEXT NOT NULL, device_id TEXT,
+                    ip TEXT, user_agent TEXT, method TEXT, path TEXT,
+                    success INTEGER NOT NULL DEFAULT 0, reason TEXT, target TEXT,
+                    meta_json TEXT, created_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        let login_route = LoginRouteConfig::new(data_dir.clone());
+        let proxy_thread = spawn_accept_thread("front door", frontend, move |client| {
+            let routes = FrontdoorRoutes::default().with_login(Some(login_route));
+            handle_connection(client, upstream_addr, &routes).unwrap();
+        });
+
+        let body = r#"{"pairingToken":"PAIR","deviceLabel":"Rust-only browser"}"#;
+        let request = format!(
+            "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1:5177\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut client = TcpStream::connect(frontend_addr).unwrap();
+        client.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let response = String::from_utf8(response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("X-VibeLink-Control-Plane: rust"));
+        assert!(response.contains("\"token\":"));
+        assert!(response.contains("Rust-only browser"));
+        proxy_thread.wait();
+        assert_eq!(
+            upstream.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         fs::remove_dir_all(data_dir).unwrap();
     }
 }

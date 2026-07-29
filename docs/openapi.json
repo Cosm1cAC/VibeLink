@@ -10745,8 +10745,8 @@
     },
     "/api/login": {
       "post": {
-        "summary": "Login with pairing token",
-        "description": "Exchanges a legacy pairing token for a device token.",
+        "summary": "Login with legacy pairing token",
+        "description": "Exchanges the configured legacy pairing token for a new 90-day device token. This compatibility route is allowed when allowLegacyPairingTokenLogin is enabled, or for the first active device on a non-public host.",
         "parameters": [
           {
             "name": "dryRun",
@@ -10766,7 +10766,37 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "required": [
+                  "pairingToken"
+                ],
+                "properties": {
+                  "pairingToken": {
+                    "type": "string"
+                  },
+                  "deviceLabel": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "rememberKeys": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "apiKeys": {
+                    "type": "object",
+                    "properties": {
+                      "openai": {
+                        "type": "string"
+                      },
+                      "anthropic": {
+                        "type": "string"
+                      },
+                      "zhipu": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -10777,7 +10807,44 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "token",
+                    "device",
+                    "settings"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "token": {
+                      "type": "string",
+                      "description": "New device bearer token."
+                    },
+                    "device": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "label"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "label": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "settings": {
+                      "type": "object"
+                    }
+                  }
                 }
               }
             }
@@ -10794,6 +10861,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Legacy pairing token login is disabled for this host or device state",
             "content": {
               "application/json": {
                 "schema": {

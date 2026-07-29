@@ -30,6 +30,7 @@ mod http_frontdoor;
 mod live_call_asr;
 mod live_call_http;
 mod live_call_runtime;
+mod login_http;
 mod mcp_session_sidecar;
 mod pairing_http;
 mod product_http;
@@ -666,6 +667,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
     } else {
         None
     };
+    let login_route = Some(login_http::LoginRouteConfig::new(route_data_dir.clone()));
     let static_route = static_http::StaticRouteConfig::new(root.to_path_buf());
     let mut node = spawn_node_bridge(cli, root, server, &plan, internal_token.as_deref())?;
 
@@ -685,6 +687,7 @@ fn run_rust_http_frontdoor(cli: &Cli, root: &Path, server: &Path) -> Result<()> 
         .with_task(task_route)
         .with_provider(provider_route)
         .with_settings(settings_route)
+        .with_login(login_route)
         .with_pairing(pairing_route)
         .with_artifact(artifact_route)
         .with_desktop_remote(desktop_remote_route)
@@ -755,6 +758,7 @@ fn run_rust_only_http(cli: &Cli, data_dir: Option<PathBuf>) -> Result<()> {
             data_dir.clone(),
             root.clone(),
         )))
+        .with_login(Some(login_http::LoginRouteConfig::new(data_dir.clone())))
         .with_pairing(Some(pairing_http::PairingRouteConfig::new(
             data_dir.clone(),
         )))

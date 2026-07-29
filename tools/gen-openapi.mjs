@@ -1470,7 +1470,50 @@ const paths = {
   ...path("/api/events/ack", post("Acknowledge event stream", "Persists an acknowledgement cursor for an event stream.", { type: "object" }, { type: "object" })),
   ...path("/api/events/compact", post("Compact event stream", "Compacts an event stream according to retention policy.", { type: "object" }, { type: "object" })),
 
-  ...path("/api/login", post("Login with pairing token", "Exchanges a legacy pairing token for a device token.", { type: "object" }, { type: "object" })),
+  ...path("/api/login", post(
+    "Login with legacy pairing token",
+    "Exchanges the configured legacy pairing token for a new 90-day device token. This compatibility route is allowed when allowLegacyPairingTokenLogin is enabled, or for the first active device on a non-public host.",
+    {
+      type: "object",
+      required: ["pairingToken"],
+      properties: {
+        pairingToken: { type: "string" },
+        deviceLabel: { type: "string", maxLength: 120 },
+        rememberKeys: { type: "boolean", default: false },
+        apiKeys: {
+          type: "object",
+          properties: {
+            openai: { type: "string" },
+            anthropic: { type: "string" },
+            zhipu: { type: "string" }
+          }
+        }
+      }
+    },
+    {
+      type: "object",
+      required: ["ok", "token", "device", "settings"],
+      properties: {
+        ok: { type: "boolean", enum: [true] },
+        token: { type: "string", description: "New device bearer token." },
+        device: {
+          type: "object",
+          required: ["id", "label"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            label: { type: "string" }
+          }
+        },
+        settings: { type: "object" }
+      }
+    },
+    {
+      "403": {
+        description: "Legacy pairing token login is disabled for this host or device state",
+        content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } }
+      }
+    }
+  )),
   ...path("/api/pairing-sessions", {
     ...get("List pairing sessions", "Returns pending and recent pairing sessions.", { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }),
     ...post("Create pairing session", "Creates a pairing session and QR pairing URL.", { type: "object" }, { type: "object" }, { "201": { description: "Created" } })

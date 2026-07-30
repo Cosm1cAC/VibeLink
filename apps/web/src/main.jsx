@@ -3154,7 +3154,7 @@ function LoginView({ onLogin, initialError = "" }) {
       </div>
       <form className="panel" onSubmit={submit}>
         <div className="pairing-card">
-          <div>
+          <div className="pairing-card-head">
             <strong>QR pairing</strong>
             <small>{pairingSession ? `Status: ${pairingSession.status || "pending"}` : "Create a short-lived pairing session, then approve it from an existing device."}</small>
           </div>

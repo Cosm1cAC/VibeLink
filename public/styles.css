@@ -3952,6 +3952,11 @@ body {
   padding: 12px;
 }
 
+.pairing-card-head {
+  display: grid;
+  gap: 4px;
+}
+
 .credential-status,
 .security-settings-card {
   display: grid;

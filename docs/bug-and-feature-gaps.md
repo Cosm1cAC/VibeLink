@@ -120,6 +120,7 @@
 
 ### QG-003 自然运行与外部集成证据不足
 
+- **门禁进展**：已新增统一、脱敏的 release candidate evidence manifest 校验器与手动 workflow gate；默认要求真实 Provider、终端恢复、弱网 Live Call 和 Android checklist 全部通过，自然 MCP 仅允许带 release owner 理由的 `prerequisite unavailable` 豁免。实际外部运行证据仍必须按每个 release 持续采集，未在本机伪造。
 - **现状**：受控 MCP fixture、server route 和 soak 已通过；本机未安装/索引可选 `codebase-memory-mcp`，因此自然 MCP 测试按设计 skip。真实 Provider 长任务、终端长会话、弱网 Live Call 和每个 release 的 Android 物理设备证据仍需持续采集。
 - **方案**：用脱敏 evidence manifest 记录 commit、binary hash、外部实现版本、请求量、fallback/failure/p95 与清理结果；缺少外部账号/工具时标记 `not-run: prerequisite unavailable`。
 - **验收**：发布候选至少有一条真实 Provider 任务、一条自然 MCP 或明确豁免、一轮终端恢复、弱网 Live Call 和 Android 设备 checklist。

@@ -16,6 +16,15 @@ on:
         description: HTTPS URL of the archived phone/tablet evidence manifest
         type: string
         required: false
+      require_release_candidate_evidence:
+        description: Require the unified Provider/MCP/terminal/Live Call/Android evidence gate
+        type: boolean
+        default: false
+        required: true
+      release_candidate_manifest_url:
+        description: HTTPS URL of the sanitized release candidate evidence manifest
+        type: string
+        required: false
   schedule:
     - cron: "17 2 * * 1"
   pull_request:
@@ -33,6 +42,34 @@ permissions:
   contents: read
 
 jobs:
+  release-candidate-evidence-gate:
+    if: github.event_name == 'workflow_dispatch' && inputs.require_release_candidate_evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Download sanitized release candidate manifest
+        env:
+          MANIFEST_URL: ${{ inputs.release_candidate_manifest_url }}
+        run: |
+          test -n "$MANIFEST_URL"
+          mkdir -p .tmp/release-evidence/release-candidate
+          curl --fail --location --retry 3 "$MANIFEST_URL" \
+            --output .tmp/release-evidence/release-candidate/manifest.json
+      - name: Validate release candidate evidence
+        run: npm run release:candidate-evidence -- --manifest .tmp/release-evidence/release-candidate/manifest.json --expected-commit ${{ github.sha }}
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: release-candidate-evidence-${{ github.run_id }}
+          path: .tmp/release-evidence/release-candidate
+          if-no-files-found: error
+
   bridge-web-browser:
     runs-on: windows-latest
     timeout-minutes: 25

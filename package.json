@@ -15,6 +15,7 @@
         "release:browser-evidence": "node tools/release/browser-session-evidence.mjs",
         "release:browser-evidence:spawn": "node tools/release/run-browser-evidence.mjs",
         "release:live-call-evidence": "node tools/release/run-live-call-evidence.mjs",
+        "release:candidate-evidence": "node tools/release/release-candidate-evidence.mjs",
         "whisper:setup": "node tools/whisper-cpp/setup.mjs",
         "whisper:model": "node tools/whisper-cpp/download-model.mjs",
         "build": "vite build",

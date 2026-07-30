@@ -21,9 +21,9 @@
 
 ## 阶段 2：测试基线可信化
 
-1. **TBUG-001 Rust HTTP 并发超时**
+1. **TBUG-001 Rust HTTP 并发超时（已关闭）**
    - `f785213` 已加入确定性 framing、ready 信号和有界线程等待。
-   - 并发循环 20 次、隔离合同和默认 `cargo test` 全部通过。
+   - 2026-07-30 并发循环 20/20、隔离合同 15/15 和默认 `cargo test`（199 passed、0 failed、1 ignored）全部通过，已移入关闭记录。
 2. **TBUG-002 Cargo 探测误判**
    - 删除 `link.exe` 推断式前置检查，改用 Cargo 实际探测。
    - 当前 Windows 环境恢复 6 个真实 workspace 测试。

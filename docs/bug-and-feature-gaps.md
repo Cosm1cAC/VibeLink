@@ -73,15 +73,6 @@
 
 ## 已确认 Bug
 
-### TBUG-001 Rust HTTP 合同并发运行会超时（已修复，待门禁复核）
-
-- **级别**：P1 测试可靠性；产品影响未证实。
-- **证据**：此前并发运行会让 3 个前门合同测试在 120 秒后超时；提交 `f785213` 已改为确定性的请求 framing、listener ready 信号和有界测试线程等待。当前提交需在 CI/本地并发循环中复核关闭。
-- **风险**：并行 CI 或本地并行验证产生假红，掩盖真实回归并拖慢发布。
-- **已实施修复**：测试使用显式 request framing、listener ready channel 和有界 join，不再依赖 FIN 或调度时序；未把整个 Rust suite 全局串行化。
-- **验收**：相关合同与至少一个 Rust sidecar canary 并发循环 20 次，0 timeout；隔离运行仍 12/12；`cargo test` 默认并发全绿。完成后将本项移入已关闭记录。
-- **主要文件**：`apps/windows/src/http_frontdoor.rs` 及对应测试辅助代码。
-
 ### TBUG-002 Cargo 探测把可用环境误判为不可用
 
 - **级别**：P1 测试覆盖。
@@ -99,6 +90,17 @@
 - **建议修复**：正式 gate 必须显式传 `--command/--bin`；默认选择时复用 `rustBinaryIsCurrent` 并验证 build commit/protocol hash。性能 canary 遇到 debug binary 应明确拒绝，而不是把 debug 性能与 release 阈值比较。
 - **验收**：陈旧 release fixture fail-fast 并给出 rebuild 命令；当前 release 三层 canary 通过；debug 模式只允许功能合同、不执行 release 性能判定。
 - **主要文件**：`tools/event-store/*.mjs`、其他采用相同默认 binary 选择逻辑的 canary、`test/rustTestSupport.js`。
+
+## 已关闭记录
+
+### TBUG-001 Rust HTTP 合同并发运行会超时
+
+- **关闭日期**：2026-07-30。
+- **级别**：P1 测试可靠性；产品影响未证实。
+- **修复**：提交 `f785213` 使用确定性的请求 framing、listener ready 信号和有界测试线程等待；未将整个 Rust suite 全局串行化。
+- **门禁证据**：最新源码构建的 `vibelink.exe` 下，Rust `http_frontdoor` 合同与 Rust status sidecar 合同并发循环 20/20 通过，前门每轮 15/15、sidecar 每轮 1/1，0 timeout；隔离前门 15/15；默认并发 `cargo test` 为 199 passed、0 failed、1 ignored（既有 execution-host 专项）。
+- **结论**：并发调度/请求 framing 假红已关闭；后续若出现超时应以新的复现和稳定 ID 记录。
+- **主要文件**：`apps/windows/src/http_frontdoor.rs` 及对应测试辅助代码。
 
 ## 质量与证据缺口
 
@@ -128,7 +130,7 @@
 - **现状**：仓库最新 tag `v0.1.0` 指向 2026-07-12 的 `2608fdc`；2026-07-27 的 Rust-only ZIP/校验和证据对应后续 commit，而当前审计基线为 `f785213`。
 - **方案**：先完成测试基础设施修复与 release candidate gate，再生成 manifest、SBOM/依赖审计、hybrid rollback ZIP 和 Rust-only ZIP；验证 hash 后创建不可变 tag 和 release notes。
 - **验收**：tag、manifest commit、ZIP 内 commit、SHA-256 和 release notes 五者一致；升级/回滚 smoke 通过。
-- **依赖**：TBUG-001/002/003、QG-001；是否阻断于 QG-003 由 release owner 明确决定。
+- **依赖**：TBUG-002/003、QG-001；是否阻断于 QG-003 由 release owner 明确决定。
 
 ### QG-005 Hybrid Node 兼容源码尚未退役
 
@@ -167,7 +169,7 @@
 | 阶段 | 工作 | 依赖 | 可并行 |
 | --- | --- | --- | --- |
 | 1 | PBUG-001 空目录 bootstrap；PBUG-002 watcher/SQLite 锁 | 无 | 两项共享 Rust 启动与 SQLite 生命周期，先由同一 owner 设计 bootstrap/事务边界，再可分支实现；不能独立合并后再猜接口。 |
-| 2 | TBUG-001 复核关闭；TBUG-002 Cargo 探测；TBUG-003 binary provenance | PBUG-001/002 不要求代码依赖，但必须先有稳定可启动 fixture | TBUG-001 与 TBUG-002/003 可并行；TBUG-002/003 共享测试辅助层，合并前由 integration owner 收口。 |
+| 2 | TBUG-002 Cargo 探测；TBUG-003 binary provenance | PBUG-001/002 不要求代码依赖，但必须先有稳定可启动 fixture | TBUG-002/003 共享测试辅助层，合并前由 integration owner 收口。 |
 | 3 | PBUG-003 legacy login；PBUG-004 pairing layout；QG-001/QG-002 | PBUG-003 依赖 Rust 控制面稳定；PBUG-004 无后端依赖 | PBUG-003、PBUG-004、Android 告警可并行；QG-001 仍依赖 binary provenance。 |
 | 4 | QG-003 运行证据与 release candidate package | PBUG-001/002 关闭或 release owner 明确豁免 | Provider、MCP、Live Call、Android 设备证据可分四路并行。 |
 | 5 | QG-004 tag/release | 阶段 4 | 只能由一个 release owner 串行完成。 |

@@ -14,7 +14,7 @@
 
 ## P1 测试基础设施
 
-- [ ] TBUG-001：`f785213` 已修复 Rust HTTP 合同并发等待；完成 20 轮并发门禁后关闭。
+- [x] TBUG-001：`f785213` 已修复 Rust HTTP 合同并发等待；2026-07-30 完成 20/20 轮并发门禁，0 timeout，已关闭。
 - [ ] TBUG-002：修复 Cargo/linker 可用性误判，恢复 6 个真实 workspace Rust 测试。
 - [ ] TBUG-003：统一 canary binary provenance，拒绝陈旧 release 和 debug 性能误判。
 

@@ -28,7 +28,7 @@ Windows Rust 化迁移已完成。Windows Bridge、HTTP/SSE/WebSocket 产品路�
 
 Windows 端提供 Rust HTTP 前门、执行宿主、任务调度、持久事件/审批、Live Call runtime、静态资源服务和 Win32 管理界面。Web 与 Android 连接同一套 Rust API。
 
-Win32 管理器在受管理服务就绪后一次性显示运行状态，并提供“创建配对二维码”入口。Android 配对深链接和矢量 SVG 二维码由 Rust Pairing 路由生成；管理器负责展示、复制和调用系统查看器，不在 GUI 进程中构造配对载荷。
+Win32 管理器在受管理服务就绪后一次性显示运行状态，并分别提供“网页端配对”和“安卓端配对”入口。配对会话、目标 URL 和矢量 SVG 二维码全部由 Rust Pairing 路由创建并批准；管理器只负责选择目标、展示、复制和调用系统查看器。Web 与 Android 客户端只能消费服务端生成的链接并领取会话，不能自行创建二维码或配对会话。
 
 ## 所有权快照
 
@@ -55,7 +55,7 @@ Win32 管理器在受管理服务就绪后一次性显示运行状态，并提�
 | `npm run rust:test` | 187 passed、1 ignored、0 failed；ignored 项要求显式的新构建 execution-host 二进制。 |
 | `npm run android:test` | Android JVM tests 与 `assembleDebug` 通过；41 tasks，存在弃用 API 与 unchecked cast 编译告警。 |
 | `npm run rust:migration:check` / `npm run rust:node-removal:check` | 均通过。 |
-| Rust/HTTP/status 合同 | `rust-http:contract` 隔离运行 12/12 通过；`status:contract` 17/17、Codex app-server 14/14 通过。`f785213` 已修复此前的测试线程/FIN 并发等待，尚待 20 轮并发门禁复核关闭 TBUG-001。 |
+| Rust/HTTP/status 合同 | `http_frontdoor` 隔离运行 15/15 通过；Rust HTTP 前门与 status sidecar 并发循环 20/20 通过、0 timeout；默认并发 `cargo test` 为 199 passed、0 failed、1 ignored（既有 execution-host 专项）。TBUG-001 已关闭。 |
 | Rust sidecar 集合 | 91 passed、0 failed、7 skipped；其中 6 项被错误的 `link.exe` 前置判断跳过，1 项因可选 `codebase-memory-mcp`/索引项目不可用跳过。 |
 | Event Store 三层 canary | 当前 release 二进制下本地、运行时、服务路由均通过；批量 append 平均 7.2–8.3ms，0 回退、0 失败、0 背压拒绝。 |
 | Workspace/MCP canary | workspace 本仓库真实数据、server route、MCP 持久会话与 HTTP server route 全部通过；0 回退，pending 均排空。 |

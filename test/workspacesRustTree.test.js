@@ -10,7 +10,7 @@ import {
   getWorkspaceRuntimeStats,
   getWorkspaceTree
 } from "../src/workspaces.js";
-import { cargoPath } from "./rustTestSupport.js";
+import { cargoPathOrSkip } from "./rustTestSupport.js";
 import { upsertWorkspace } from "../src/db.js";
 
 function restoreEnv(key, previous) {
@@ -81,8 +81,8 @@ function writeRustScannerInvalidItemsStub(dir) {
 }
 
 test("getWorkspaceContext preserves Node and Rust scanner parity for supported ignore rules", async (t) => {
-  const cargo = cargoPath();
-  if (!cargo) t.skip("cargo is not available");
+  const cargo = cargoPathOrSkip(t);
+  if (!cargo) return;
 
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-parity-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
@@ -148,11 +148,8 @@ test("getWorkspaceTree preserves Windows Node metadata parity", async (t) => {
     t.skip("Windows filesystem metadata semantics only");
     return;
   }
-  const cargo = cargoPath();
-  if (!cargo) {
-    t.skip("cargo is not available");
-    return;
-  }
+  const cargo = cargoPathOrSkip(t);
+  if (!cargo) return;
 
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-metadata-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
@@ -199,11 +196,8 @@ test("getWorkspaceTree preserves Windows Node metadata parity", async (t) => {
 });
 
 test("workspace routes reuse one persistent Rust scanner sidecar", async (t) => {
-  const cargo = cargoPath();
-  if (!cargo) {
-    t.skip("cargo is not available");
-    return;
-  }
+  const cargo = cargoPathOrSkip(t);
+  if (!cargo) return;
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-session-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
   fs.mkdirSync(path.join(fixture, "src"), { recursive: true });
@@ -257,8 +251,8 @@ test("workspace routes reuse one persistent Rust scanner sidecar", async (t) => 
 });
 
 test("getWorkspaceContext Rust scanner inherits gitignore rules from intermediate directories", async (t) => {
-  const cargo = cargoPath();
-  if (!cargo) t.skip("cargo is not available");
+  const cargo = cargoPathOrSkip(t);
+  if (!cargo) return;
 
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-parent-ignore-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
@@ -302,8 +296,8 @@ test("getWorkspaceContext Rust scanner inherits gitignore rules from intermediat
 });
 
 test("getWorkspaceContext refreshes Rust cache when nested gitignore content changes", async (t) => {
-  const cargo = cargoPath();
-  if (!cargo) t.skip("cargo is not available");
+  const cargo = cargoPathOrSkip(t);
+  if (!cargo) return;
 
   const fixture = path.join(os.tmpdir(), `vibelink-rust-tree-gitignore-refresh-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });
@@ -761,8 +755,8 @@ test("getWorkspaceContext uses Rust scanner for directory samples when enabled",
 });
 
 test("getWorkspaceContext applies nested gitignore rules through real Rust scanner", async (t) => {
-  const cargo = cargoPath();
-  if (!cargo) t.skip("cargo is not available");
+  const cargo = cargoPathOrSkip(t);
+  if (!cargo) return;
 
   const fixture = path.join(os.tmpdir(), `vibelink-rust-context-real-${process.pid}`);
   fs.rmSync(fixture, { recursive: true, force: true });

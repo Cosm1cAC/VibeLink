@@ -73,15 +73,6 @@
 
 ## 已确认 Bug
 
-### TBUG-002 Cargo 探测把可用环境误判为不可用
-
-- **级别**：P1 测试覆盖。
-- **证据**：`cargo 1.97.1`、`rustc 1.97.1`、Rust build/test/clippy 均成功，但 `test/rustTestSupport.js::cargoPath()` 因 `where.exe link.exe` 失败返回空字符串，导致 6 个真实 workspace Rust 测试以 `cargo is not available` 跳过。
-- **风险**：Windows 环境使用 rust-lld、VS 工具未注入当前 PATH 或其他有效 linker 配置时，测试报告假装缺少 Cargo，真实 parity 覆盖被静默丢失。
-- **建议修复**：Cargo 可用性只验证可执行文件与 `cargo metadata`/最小 `cargo check` 的实际结果；不要独立猜测 linker。探测失败时输出结构化原因，并让 CI 对非显式 opt-out 的 skip 失败。
-- **验收**：当前环境 6 项不再 skip；真实缺少 Cargo 的 fixture 仍可得到明确 skip/error；新增 rust-lld/无 `link.exe` 回归测试。
-- **主要文件**：`test/rustTestSupport.js`、`test/workspacesRustTree.test.js`。
-
 ### TBUG-003 Canary 会静默优先使用陈旧 release 二进制
 
 - **级别**：P1 测试可信度。
@@ -101,6 +92,15 @@
 - **门禁证据**：最新源码构建的 `vibelink.exe` 下，Rust `http_frontdoor` 合同与 Rust status sidecar 合同并发循环 20/20 通过，前门每轮 15/15、sidecar 每轮 1/1，0 timeout；隔离前门 15/15；默认并发 `cargo test` 为 199 passed、0 failed、1 ignored（既有 execution-host 专项）。
 - **结论**：并发调度/请求 framing 假红已关闭；后续若出现超时应以新的复现和稳定 ID 记录。
 - **主要文件**：`apps/windows/src/http_frontdoor.rs` 及对应测试辅助代码。
+
+### TBUG-002 Cargo 探测把可用环境误判为不可用
+
+- **关闭日期**：2026-07-30。
+- **级别**：P1 测试覆盖。
+- **修复**：`test/rustTestSupport.js` 改为解析 Cargo 可执行文件并执行 `cargo metadata --format-version 1 --no-deps`；移除 `where.exe link.exe` 猜测，不再把 rust-lld 或其他有效 linker 配置判为不可用。缺失环境返回结构化诊断；CI 默认 fail-closed，仅 `VIBELINK_ALLOW_MISSING_CARGO=1` 可显式 opt-out。
+- **门禁证据**：当前 Windows 环境 `cargo 1.97.1` 可用且 `where.exe link.exe` 返回缺失；`test/rustTestSupport.test.js` 4/4、`test/workspacesRustTree.test.js` 25/25 通过，合计 29/29，0 skip。event-store Rust sidecar 合同 5/5 通过。缺失 Cargo fixture、CI fail-closed 和显式 opt-out 均有回归覆盖。
+- **结论**：6 个真实 workspace Rust 测试已恢复执行；后续 Cargo 探测失败会保留可机器解析的原因，不再静默伪装成普通缺失。
+- **主要文件**：`test/rustTestSupport.js`、`test/rustTestSupport.test.js`、`test/workspacesRustTree.test.js`。
 
 ## 质量与证据缺口
 
@@ -130,7 +130,7 @@
 - **现状**：仓库最新 tag `v0.1.0` 指向 2026-07-12 的 `2608fdc`；2026-07-27 的 Rust-only ZIP/校验和证据对应后续 commit，而当前审计基线为 `f785213`。
 - **方案**：先完成测试基础设施修复与 release candidate gate，再生成 manifest、SBOM/依赖审计、hybrid rollback ZIP 和 Rust-only ZIP；验证 hash 后创建不可变 tag 和 release notes。
 - **验收**：tag、manifest commit、ZIP 内 commit、SHA-256 和 release notes 五者一致；升级/回滚 smoke 通过。
-- **依赖**：TBUG-002/003、QG-001；是否阻断于 QG-003 由 release owner 明确决定。
+- **依赖**：TBUG-003、QG-001；是否阻断于 QG-003 由 release owner 明确决定。
 
 ### QG-005 Hybrid Node 兼容源码尚未退役
 
@@ -169,7 +169,7 @@
 | 阶段 | 工作 | 依赖 | 可并行 |
 | --- | --- | --- | --- |
 | 1 | PBUG-001 空目录 bootstrap；PBUG-002 watcher/SQLite 锁 | 无 | 两项共享 Rust 启动与 SQLite 生命周期，先由同一 owner 设计 bootstrap/事务边界，再可分支实现；不能独立合并后再猜接口。 |
-| 2 | TBUG-002 Cargo 探测；TBUG-003 binary provenance | PBUG-001/002 不要求代码依赖，但必须先有稳定可启动 fixture | TBUG-002/003 共享测试辅助层，合并前由 integration owner 收口。 |
+| 2 | TBUG-003 binary provenance | PBUG-001/002 不要求代码依赖，但必须先有稳定可启动 fixture | TBUG-003 继续复用已收口的 Cargo 探测辅助层。 |
 | 3 | PBUG-003 legacy login；PBUG-004 pairing layout；QG-001/QG-002 | PBUG-003 依赖 Rust 控制面稳定；PBUG-004 无后端依赖 | PBUG-003、PBUG-004、Android 告警可并行；QG-001 仍依赖 binary provenance。 |
 | 4 | QG-003 运行证据与 release candidate package | PBUG-001/002 关闭或 release owner 明确豁免 | Provider、MCP、Live Call、Android 设备证据可分四路并行。 |
 | 5 | QG-004 tag/release | 阶段 4 | 只能由一个 release owner 串行完成。 |

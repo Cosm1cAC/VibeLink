@@ -24,15 +24,15 @@
 1. **TBUG-001 Rust HTTP 并发超时（已关闭）**
    - `f785213` 已加入确定性 framing、ready 信号和有界线程等待。
    - 2026-07-30 并发循环 20/20、隔离合同 15/15 和默认 `cargo test`（199 passed、0 failed、1 ignored）全部通过，已移入关闭记录。
-2. **TBUG-002 Cargo 探测误判**
-   - 删除 `link.exe` 推断式前置检查，改用 Cargo 实际探测。
-   - 当前 Windows 环境恢复 6 个真实 workspace 测试。
-   - CI 对非显式允许的 skip fail-closed。
+2. **TBUG-002 Cargo 探测误判（已关闭）**
+   - 2026-07-30 删除 `link.exe` 推断式前置检查，改用 Cargo metadata 实际探测。
+   - 当前 Windows 环境恢复 6 个真实 workspace 测试，相关合同 29/29 通过、0 skip。
+   - CI 对非显式允许的 skip fail-closed；`VIBELINK_ALLOW_MISSING_CARGO=1` 为唯一显式 opt-out。
 3. **TBUG-003 陈旧 release binary**
    - 为 canary 统一显式 binary/provenance 规则。
    - 陈旧 binary fail-fast，debug binary 不参与 release 性能判断。
 
-三项可以并行开发；TBUG-002/003 共享测试辅助层，由一个 integration owner 统一接口和合并顺序。
+TBUG-003 继续复用已收口的测试辅助层，由 integration owner 统一接口和合并顺序。
 
 ## 阶段 3：兼容与质量门禁
 

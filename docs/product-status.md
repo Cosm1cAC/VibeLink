@@ -56,7 +56,7 @@ Win32 管理器在受管理服务就绪后一次性显示运行状态，并分�
 | `npm run android:test` | Android JVM tests 与 `assembleDebug` 通过；41 tasks，存在弃用 API 与 unchecked cast 编译告警。 |
 | `npm run rust:migration:check` / `npm run rust:node-removal:check` | 均通过。 |
 | Rust/HTTP/status 合同 | `http_frontdoor` 隔离运行 15/15 通过；Rust HTTP 前门与 status sidecar 并发循环 20/20 通过、0 timeout；默认并发 `cargo test` 为 199 passed、0 failed、1 ignored（既有 execution-host 专项）。TBUG-001 已关闭。 |
-| Rust sidecar 集合 | 91 passed、0 failed、7 skipped；其中 6 项被错误的 `link.exe` 前置判断跳过，1 项因可选 `codebase-memory-mcp`/索引项目不可用跳过。 |
+| Rust sidecar 集合 | 已修复 Cargo 探测误判：workspace Rust 合同 29/29 通过、0 skip；event-store Rust sidecar 合同 5/5 通过。完整 sidecar 集合中的可选 `codebase-memory-mcp`/索引项目缺失仍按设计 skip。 |
 | Event Store 三层 canary | 当前 release 二进制下本地、运行时、服务路由均通过；批量 append 平均 7.2–8.3ms，0 回退、0 失败、0 背压拒绝。 |
 | Workspace/MCP canary | workspace 本仓库真实数据、server route、MCP 持久会话与 HTTP server route 全部通过；0 回退，pending 均排空。 |
 | Execution Host | 当前 release 二进制的启动、Bridge 重连、execd 崩溃恢复、spool 重放、持久 ack、30 秒 soak 与故障告警全部通过。 |

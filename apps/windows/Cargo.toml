@@ -1,6 +1,6 @@
 [package]
 name = "vibelink-windows"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Single-entry Windows launcher for VibeLink bridge and Android QR pairing"
 publish = false

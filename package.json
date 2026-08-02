@@ -1,6 +1,6 @@
 {
     "name": "vibelink",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "private": true,
     "description": "Local-first bridge for continuing Codex and Claude Code agent work from web and mobile clients.",
     "type": "module",
@@ -16,6 +16,7 @@
         "release:browser-evidence:spawn": "node tools/release/run-browser-evidence.mjs",
         "release:live-call-evidence": "node tools/release/run-live-call-evidence.mjs",
         "release:candidate-evidence": "node tools/release/release-candidate-evidence.mjs",
+        "release:bundle": "node tools/release/release-bundle.mjs",
         "whisper:setup": "node tools/whisper-cpp/setup.mjs",
         "whisper:model": "node tools/whisper-cpp/download-model.mjs",
         "build": "vite build",

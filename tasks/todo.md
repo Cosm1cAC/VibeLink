@@ -26,7 +26,7 @@
 ## 发布证据
 
 - [ ] QG-003：归档真实 Provider、自然 MCP/豁免、终端恢复、弱网 Live Call 和 Android 设备证据。
-- [ ] QG-004：发布与最终 commit 对齐的 tag、manifest、Rust-only/hybrid ZIP、SHA-256 与回滚说明。
+- [ ] QG-004：`v0.1.1` bundle gate 已实现；完成同 commit 的 ZIP/SBOM/audit/rollback 验证后创建 tag 与 GitHub Preview release。
 - [ ] QG-005：在稳定发布后按可逆 slice 退役 hybrid Node 兼容源码。
 
 ## 待产品决策

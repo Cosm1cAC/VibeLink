@@ -128,6 +128,7 @@
 
 ### QG-004 当前 commit 尚无对齐的正式 release tag
 
+- **门禁进展**：目标版本为 `v0.1.1` Windows Preview；已新增 release bundle gate，强制校验 tag/version、两个 ZIP 内 manifest commit、SHA-256 sidecar、CycloneDX SBOM、依赖审计、三阶段升级/回滚报告和 release notes 一致。QG-003 若由 release owner 判定 non-blocking，只允许发布为 preview 并必须写明理由。
 - **现状**：仓库最新 tag `v0.1.0` 指向 2026-07-12 的 `2608fdc`；2026-07-27 的 Rust-only ZIP/校验和证据对应后续 commit，而当前审计基线为 `f785213`。
 - **方案**：先完成测试基础设施修复与 release candidate gate，再生成 manifest、SBOM/依赖审计、hybrid rollback ZIP 和 Rust-only ZIP；验证 hash 后创建不可变 tag 和 release notes。
 - **验收**：tag、manifest commit、ZIP 内 commit、SHA-256 和 release notes 五者一致；升级/回滚 smoke 通过。

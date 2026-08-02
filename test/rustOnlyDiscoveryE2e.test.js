@@ -473,6 +473,10 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
   const gradleArgs = process.platform === "win32"
     ? ["/d", "/s", "/c", "gradlew.bat", "--no-daemon", "--max-workers=1", ":app:testDebugUnitTest", "--tests", "com.vibelink.app.network.ApiClientRustOnlyDiscoveryE2eTest"]
     : ["--no-daemon", "--max-workers=1", ":app:testDebugUnitTest", "--tests", "com.vibelink.app.network.ApiClientRustOnlyDiscoveryE2eTest"];
+  const configuredGradleTimeoutMs = Number(process.env.VIBELINK_RUST_ONLY_E2E_GRADLE_TIMEOUT_MS || 600_000);
+  const gradleTimeoutMs = Number.isFinite(configuredGradleTimeoutMs) && configuredGradleTimeoutMs >= 180_000
+    ? configuredGradleTimeoutMs
+    : 600_000;
   const gradle = spawnSync(gradleCommand, gradleArgs, {
     cwd: path.join(root, "apps", "android"),
     env: {
@@ -484,7 +488,7 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
     },
     encoding: "utf8",
     windowsHide: true,
-    timeout: 180_000
+    timeout: gradleTimeoutMs
   });
   assert.equal(gradle.status, 0, gradle.error?.message || gradle.stderr || gradle.stdout);
 });

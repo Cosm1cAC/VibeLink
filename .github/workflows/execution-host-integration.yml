@@ -1,0 +1,53 @@
+name: Execution host integration
+
+on:
+  pull_request:
+    paths:
+      - "apps/windows/src/execution_host/**"
+      - "apps/windows/src/workspace_http.rs"
+      - "src/executionHostClient.js"
+      - "tools/execution-host/**"
+      - "test/executionHost*.test.js"
+      - ".github/workflows/execution-host-integration.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/windows/src/execution_host/**"
+      - "apps/windows/src/workspace_http.rs"
+      - "src/executionHostClient.js"
+      - "tools/execution-host/**"
+      - "test/executionHost*.test.js"
+      - ".github/workflows/execution-host-integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-binary-integration:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/windows
+      - run: npm ci
+      - name: Build the shared release binary
+        run: cargo build --release --manifest-path apps/windows/Cargo.toml
+      - name: Run the ignored terminal integration explicitly
+        run: cargo test --release --manifest-path apps/windows/Cargo.toml workspace_http::tests::terminal_session_uses_execd_and_persists_control_events -- --ignored --exact --nocapture
+      - name: Run the reliability canary with the same binary
+        run: npm run execution-host:canary -- --bin apps/windows/target/release/vibelink.exe --duration-ms 15000 --output .tmp/release-evidence/execution-host/reliability.json
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: execution-host-integration-${{ github.run_id }}
+          path: .tmp/release-evidence/execution-host
+          if-no-files-found: error

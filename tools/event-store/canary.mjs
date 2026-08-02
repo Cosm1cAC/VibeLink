@@ -10,6 +10,7 @@ import { createSqliteEventStore } from "../../src/eventStore.js";
 import { EVENT_STORE_CONTRACT_METHODS, EVENT_STORE_SIDECAR_PROTOCOL_VERSION } from "../../src/eventStoreContract.js";
 import { createEventStoreSidecarClient } from "../../src/eventStoreSidecarClient.js";
 import { evaluateLatency, summarizeLatencySamples } from "./canaryStats.mjs";
+import { eventStoreRustArgs, resolveEventStoreRustCommand } from "./rustCommand.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..", "..");
@@ -41,41 +42,6 @@ function flag(name) {
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-function defaultRustCommand() {
-  if (process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND) {
-    return process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND;
-  }
-  const binaryName = process.platform === "win32" ? "vibelink.exe" : "vibelink";
-  const releaseCommand = path.join(
-    rootDir,
-    "apps",
-    "windows",
-    "target",
-    "release",
-    binaryName
-  );
-  if (fs.existsSync(releaseCommand)) return releaseCommand;
-  return path.join(rootDir, "apps", "windows", "target", "debug", binaryName);
-}
-
-function defaultRustArgs() {
-  if (!process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON) return ["event-store-sidecar"];
-  try {
-    const parsed = JSON.parse(process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_ARGS_JSON);
-    return Array.isArray(parsed) ? parsed.map(String) : ["event-store-sidecar"];
-  } catch {
-    return ["event-store-sidecar"];
-  }
-}
-
-function assertRustCommand(command) {
-  if (fs.existsSync(command)) return;
-  throw new Error(
-    `Rust event-store sidecar command is missing: ${command}\n` +
-    "Build it first with: cargo build --manifest-path apps/windows/Cargo.toml"
-  );
 }
 
 function createTempRoot() {
@@ -372,24 +338,28 @@ async function runRust({ dbPath, command, args, rounds, warmups, batchSize, stal
   }
 }
 
-function evaluate({ sync, rust, stallThresholdMs, latencyMarginMs }) {
+function evaluate({ sync, rust, stallThresholdMs, latencyMarginMs, functionalOnly }) {
   const checks = [];
   const rustReady = rust.health?.ok === true && rust.health?.schemaReady === true;
   checks.push({ name: "rust readiness", pass: rustReady, detail: `health ${rustReady ? "ok" : "failed"}` });
   checks.push({ name: "fallback rate", pass: true, detail: "0% fallback in direct canary path" });
   checks.push({ name: "sidecar failures", pass: Number(rust.sidecar?.failures || 0) === 0, detail: `${rust.sidecar?.failures || 0} sidecar failures` });
 
-  for (const method of appendMethods) {
-    const latency = evaluateLatency({
-      baseline: sync.methods[method],
-      candidate: rust.methods[method],
-      latencyMarginMs
-    });
-    checks.push({
-      name: `${method} trimmed average latency`,
-      pass: latency.pass,
-      detail: `rust ${latency.candidateMs}ms vs sync ${latency.baselineMs}ms; limit ${latency.limitMs}ms`
-    });
+  if (functionalOnly) {
+    checks.push({ name: "functional-only mode", pass: true, detail: "release performance latency checks skipped for debug functional contract" });
+  } else {
+    for (const method of appendMethods) {
+      const latency = evaluateLatency({
+        baseline: sync.methods[method],
+        candidate: rust.methods[method],
+        latencyMarginMs
+      });
+      checks.push({
+        name: `${method} trimmed average latency`,
+        pass: latency.pass,
+        detail: `rust ${latency.candidateMs}ms vs sync ${latency.baselineMs}ms; limit ${latency.limitMs}ms`
+      });
+    }
   }
 
   const syncStalls = appendMethods.reduce((sum, method) => sum + Number(sync.methods[method]?.stalls || 0), 0);
@@ -435,14 +405,20 @@ async function main() {
   const batchSize = numberArg("--batch-size", 120);
   const stallThresholdMs = numberArg("--stall-threshold-ms", 50);
   const latencyMarginMs = nonNegativeNumberArg("--latency-margin-ms", 0);
-  const command = stringArg("--command", defaultRustCommand());
-  const args = defaultRustArgs();
-  assertRustCommand(command);
+  const functionalOnly = flag("--functional-only");
+  const resolvedCommand = resolveEventStoreRustCommand({
+    rootDir,
+    explicitCommand: stringArg("--command", ""),
+    envCommand: process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND || "",
+    performanceGate: !functionalOnly
+  });
+  const command = resolvedCommand.command;
+  const args = eventStoreRustArgs();
 
   const tempRoot = createTempRoot();
   const sync = await runSync({ dbPath: path.join(tempRoot, "sync.sqlite"), rounds, warmups, batchSize, stallThresholdMs });
   const rust = await runRust({ dbPath: path.join(tempRoot, "rust.sqlite"), command, args, rounds, warmups, batchSize, stallThresholdMs });
-  const evaluation = evaluate({ sync, rust, stallThresholdMs, latencyMarginMs });
+  const evaluation = evaluate({ sync, rust, stallThresholdMs, latencyMarginMs, functionalOnly });
   const result = {
     generatedAt: nowIso(),
     tempRoot,
@@ -453,10 +429,11 @@ async function main() {
       appendPaths: appendMethods.length,
       totalMeasuredEvents: rounds * batchSize * appendMethods.length,
       stallThresholdMs,
-      latencyMarginMs
+      latencyMarginMs,
+      functionalOnly
     },
     sync,
-    rust: { command, args, ...rust },
+    rust: { command, args, commandProfile: resolvedCommand.profile, explicitCommand: resolvedCommand.explicit, ...rust },
     evaluation
   };
 

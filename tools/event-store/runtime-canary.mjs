@@ -5,6 +5,8 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
+import { resolveEventStoreRustCommand } from "./rustCommand.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..", "..");
 const appendMethods = ["insertTaskEvents", "insertToolEvents", "insertLiveCallEvents"];
@@ -32,24 +34,6 @@ function nowIso() {
 
 function roundMs(value) {
   return Math.round(Number(value || 0) * 10) / 10;
-}
-
-function defaultRustCommand() {
-  if (process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND) {
-    return process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND;
-  }
-  const binaryName = process.platform === "win32" ? "vibelink.exe" : "vibelink";
-  const releaseCommand = path.join(rootDir, "apps", "windows", "target", "release", binaryName);
-  if (fs.existsSync(releaseCommand)) return releaseCommand;
-  return path.join(rootDir, "apps", "windows", "target", "debug", binaryName);
-}
-
-function assertRustCommand(command) {
-  if (fs.existsSync(command)) return;
-  throw new Error(
-    `Rust event-store sidecar command is missing: ${command}\n` +
-    "Build it first with: cargo build --release --manifest-path apps/windows/Cargo.toml"
-  );
 }
 
 function createTempRoot() {
@@ -126,7 +110,7 @@ function methodStats(stats, method) {
   };
 }
 
-function evaluate({ stats, workload, maxAppendAvgMs }) {
+function evaluate({ stats, workload, maxAppendAvgMs, functionalOnly }) {
   const checks = [];
   const rust = stats.rustSidecar || {};
   checks.push({
@@ -158,11 +142,13 @@ function evaluate({ stats, workload, maxAppendAvgMs }) {
       pass: rustCount >= workload.rounds,
       detail: `${rustCount} rust-sidecar calls for ${workload.rounds} rounds`
     });
-    checks.push({
-      name: `${method} average latency`,
-      pass: Number(item.avgDurationMs || 0) <= maxAppendAvgMs,
-      detail: `${item.avgDurationMs || 0}ms average; limit ${maxAppendAvgMs}ms`
-    });
+    if (!functionalOnly) {
+      checks.push({
+        name: `${method} average latency`,
+        pass: Number(item.avgDurationMs || 0) <= maxAppendAvgMs,
+        detail: `${item.avgDurationMs || 0}ms average; limit ${maxAppendAvgMs}ms`
+      });
+    }
     checks.push({
       name: `${method} method health`,
       pass: Number(item.failures || 0) === 0 && Number(item.fallbacks || 0) === 0,
@@ -185,6 +171,9 @@ function evaluate({ stats, workload, maxAppendAvgMs }) {
     pass: Number(rust.client?.backpressureRejects || 0) === 0,
     detail: `${rust.client?.backpressureRejects || 0} backpressure rejects`
   });
+  if (functionalOnly) {
+    checks.push({ name: "functional-only mode", pass: true, detail: "release performance average-latency checks skipped for debug functional contract" });
+  }
 
   return {
     passed: checks.every((check) => check.pass),
@@ -219,8 +208,14 @@ async function main() {
   const rounds = numberArg("--rounds", 24);
   const batchSize = numberArg("--batch-size", 100);
   const maxAppendAvgMs = numberArg("--max-append-avg-ms", 50);
-  const command = stringArg("--command", defaultRustCommand());
-  assertRustCommand(command);
+  const functionalOnly = flag("--functional-only");
+  const resolvedCommand = resolveEventStoreRustCommand({
+    rootDir,
+    explicitCommand: stringArg("--command", ""),
+    envCommand: process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND || "",
+    performanceGate: !functionalOnly
+  });
+  const command = resolvedCommand.command;
 
   const dataDir = createTempRoot();
   configureRuntime({ dataDir, command, batchSize });
@@ -311,15 +306,16 @@ async function main() {
       batchSize,
       appendPaths: appendMethods.length,
       totalEvents: rounds * batchSize * appendMethods.length,
-      maxAppendAvgMs
+      maxAppendAvgMs,
+      functionalOnly
     };
-    const evaluation = evaluate({ stats: runtime, workload, maxAppendAvgMs });
+    const evaluation = evaluate({ stats: runtime, workload, maxAppendAvgMs, functionalOnly });
     const result = {
       generatedAt: nowIso(),
       dataDir,
       workload,
       before,
-      runtime,
+      runtime: { commandProfile: resolvedCommand.profile, explicitCommand: resolvedCommand.explicit, ...runtime },
       flushTimings: summarizeSamples(samples),
       evaluation
     };

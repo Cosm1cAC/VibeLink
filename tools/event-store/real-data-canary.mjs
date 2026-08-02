@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { createSqliteEventStore } from "../../src/eventStore.js";
 import { createEventStoreSidecarClient } from "../../src/eventStoreSidecarClient.js";
+import { resolveEventStoreRustCommand } from "./rustCommand.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..", "..");
@@ -23,13 +24,6 @@ function numberArg(name, fallback) {
 
 function flag(name) {
   return process.argv.includes(name);
-}
-
-function defaultRustCommand() {
-  const binary = process.platform === "win32" ? "vibelink.exe" : "vibelink";
-  const release = path.join(rootDir, "apps", "windows", "target", "release", binary);
-  if (fs.existsSync(release)) return release;
-  return path.join(rootDir, "apps", "windows", "target", "debug", binary);
 }
 
 function cursorRange(items = []) {
@@ -52,10 +46,15 @@ function printSummary(result) {
 
 async function main() {
   const dbPath = path.resolve(stringArg("--db", path.join(rootDir, ".agent-mobile-terminal", "mobile-agent.sqlite")));
-  const command = path.resolve(stringArg("--command", defaultRustCommand()));
+  const resolvedCommand = resolveEventStoreRustCommand({
+    rootDir,
+    explicitCommand: stringArg("--command", ""),
+    envCommand: process.env.VIBELINK_EVENT_STORE_RUST_SIDECAR_COMMAND || "",
+    performanceGate: false
+  });
+  const command = resolvedCommand.command;
   const limit = numberArg("--limit", 50);
   if (!fs.existsSync(dbPath)) throw new Error(`Real event-store database is missing: ${dbPath}`);
-  if (!fs.existsSync(command)) throw new Error(`Rust event-store sidecar command is missing: ${command}`);
 
   const db = new DatabaseSync(dbPath, { readOnly: true, timeout: 5000 });
   const store = createSqliteEventStore({ database: () => db });
@@ -134,6 +133,8 @@ async function main() {
       generatedAt: new Date().toISOString(),
       database: { path: dbPath, bytes: fs.statSync(dbPath).size },
       command,
+      commandProfile: resolvedCommand.profile,
+      explicitCommand: resolvedCommand.explicit,
       workload: { limit, streamTypes: streams.length },
       owners: Object.fromEntries(Object.entries(owners).map(([kind, id]) => [kind, Boolean(id)])),
       streams,

@@ -17,6 +17,10 @@ const binary = path.join(root, "apps", "windows", "target", "debug", process.pla
 const nativeFetch = globalThis.fetch;
 const checkpointPath = process.env.VIBELINK_RUST_ONLY_E2E_CHECKPOINT || "";
 const STARTUP_CONCURRENT_REQUESTS = 20;
+const configuredTestTimeoutMs = Number(process.env.VIBELINK_RUST_ONLY_E2E_TIMEOUT_MS || 900_000);
+const testTimeoutMs = Number.isFinite(configuredTestTimeoutMs) && configuredTestTimeoutMs >= 300_000
+  ? configuredTestTimeoutMs
+  : 900_000;
 
 function checkpoint(stage) {
   if (checkpointPath) fs.writeFileSync(checkpointPath, `${new Date().toISOString()} ${stage}\n`);
@@ -50,7 +54,7 @@ function descendantNodeProcesses(pid) {
   return Array.isArray(value) ? value : [value];
 }
 
-test("Web and Android consume Rust-owned discovery without a Node backend", { timeout: 300_000 }, async (t) => {
+test("Web and Android consume Rust-owned discovery without a Node backend", { timeout: testTimeoutMs }, async (t) => {
   checkpoint("test-start");
   const cargo = process.env.CARGO || path.join(os.homedir(), ".cargo", "bin", process.platform === "win32" ? "cargo.exe" : "cargo");
   if (!fs.existsSync(cargo)) return t.skip("cargo is not available");
@@ -106,7 +110,13 @@ test("Web and Android consume Rust-owned discovery without a Node backend", { ti
 
   const child = spawn(binary, ["--host", "127.0.0.1", "--port", "0", "rust-only", "--data-dir", directory], {
     cwd: root,
-    env: { ...process.env, HOME: path.join(directory, "home"), USERPROFILE: path.join(directory, "home") },
+    env: {
+      ...process.env,
+      HOME: path.join(directory, "home"),
+      USERPROFILE: path.join(directory, "home"),
+      VIBELINK_WHISPER_CPP_BINARY: path.join(directory, "missing-whisper.exe"),
+      VIBELINK_WHISPER_CPP_MODEL: path.join(directory, "missing-whisper-model.bin")
+    },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });

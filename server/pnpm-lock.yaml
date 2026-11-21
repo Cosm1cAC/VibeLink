@@ -956,6 +956,12 @@ importers:
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
+      remark-gfm:
+        specifier: 'catalog:'
+        version: 4.0.1(supports-color@8.1.1)
+      remark-parse:
+        specifier: 'catalog:'
+        version: 11.0.0(supports-color@8.1.1)
       saxes:
         specifier: 6.0.0
         version: 6.0.0
@@ -971,6 +977,9 @@ importers:
       undici:
         specifier: 'catalog:'
         version: 8.12.4
+      unified:
+        specifier: 'catalog:'
+        version: 11.0.5
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -1023,6 +1032,9 @@ importers:
       '@t3tools/web':
         specifier: workspace:*
         version: link:../web
+      '@types/mdast':
+        specifier: ^4.0.4
+        version: 4.0.4
       '@types/node':
         specifier: 24.12.4
         version: 24.12.4

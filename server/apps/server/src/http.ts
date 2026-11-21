@@ -290,12 +290,25 @@ export const layerBrowserApiCors = Layer.unwrap(
       allowedHeaders: browserApiCorsAllowedHeaders,
       maxAge: 600,
     });
+    const vibelinkCors = HttpMiddleware.cors({
+      allowedMethods: browserApiCorsAllowedMethods,
+      allowedHeaders: browserApiCorsAllowedHeaders,
+      maxAge: 600,
+    });
     return HttpRouter.middleware(
       (httpEffect) => {
         const withCors = cors(httpEffect);
-        return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
-          request.url.split("?", 1)[0] === MCP_HTTP_PATH ? httpEffect : withCors,
-        );
+        const withVibelinkCors = vibelinkCors(httpEffect);
+        return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
+          const requestPath = request.url.split("?", 1)[0] ?? request.url;
+          if (requestPath === MCP_HTTP_PATH) {
+            return httpEffect;
+          }
+          if (requestPath === "/api/vl" || requestPath.startsWith("/api/vl/")) {
+            return withVibelinkCors;
+          }
+          return withCors;
+        });
       },
       { global: true },
     );

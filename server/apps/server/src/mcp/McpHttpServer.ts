@@ -95,6 +95,10 @@ import {
 import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { MessageToolkit } from "./toolkits/message/tools.ts";
 import * as MessageHandlers from "./toolkits/message/handlers.ts";
+import {
+  VibeLinkCollaborationToolkit,
+  layerVibeLinkCollaborationHandlers,
+} from "../vibelink/bridge/mcpCollaborationTools.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import { MCP_HTTP_PATH } from "../httpCors.ts";
 import { requestUrl } from "../requestUrl.ts";
@@ -1463,10 +1467,17 @@ const layerDeferredListing = McpServer.visibility(
   { global: true },
 );
 
+export const layerVibeLinkToolkit = toolkitRegistration(
+  VibeLinkCollaborationToolkit,
+  layerVibeLinkCollaborationHandlers,
+);
+
 /** Outside layerTools: the clients its budget measures never list `tool_search`. */
 export const layerToolSearch = Layer.mergeAll(
   toolkitRegistration(ToolSearchToolkit, ToolSearchHandlers.layer),
   layerDeferredListing,
 ).pipe(Layer.provide(layerToolExposure));
 
-export const layer = layerMcpTransport(Layer.mergeAll(layerTools, layerToolSearch));
+export const layer = layerMcpTransport(
+  Layer.mergeAll(layerTools, layerVibeLinkToolkit, layerToolSearch),
+);

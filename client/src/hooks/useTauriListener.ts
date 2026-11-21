@@ -2,6 +2,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { error, info } from '@tauri-apps/plugin-log'
 import { getCurrentInstance, onUnmounted } from 'vue'
+import { isTauriRuntime } from '@/vibelink/runtime'
 
 // 全局监听器管理
 const globalListeners = new Map<string, Promise<UnlistenFn>[]>()
@@ -25,7 +26,7 @@ export const useTauriListener = () => {
   const listeners: Promise<UnlistenFn>[] = []
   const listenerIds: string[] = []
   const instance = getCurrentInstance()
-  const windowLabel = WebviewWindow.getCurrent().label
+  const windowLabel = isTauriRuntime() ? WebviewWindow.getCurrent().label : 'browser'
   let isComponentMounted = true
 
   /**
@@ -33,6 +34,7 @@ export const useTauriListener = () => {
    * @param listener Promise<UnlistenFn>
    */
   const addListener = async (listener: Promise<UnlistenFn>, id?: string) => {
+    if (!isTauriRuntime()) return
     const listenerId = id || `listener_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
     if (listenerIdMap.has(listenerId)) {
       try {
@@ -139,6 +141,7 @@ export const useTauriListener = () => {
 
   // 监听窗口关闭事件来自动清理监听器
   const setupWindowCloseListener = async () => {
+    if (!isTauriRuntime()) return
     try {
       const appWindow = WebviewWindow.getCurrent()
       const currentWindowLabel = appWindow.label

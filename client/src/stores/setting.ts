@@ -3,6 +3,12 @@ import { CloseBxEnum, ShowModeEnum, StoresEnum, ThemeEnum } from '@/enums'
 import { isDesktop, isMac } from '@/utils/PlatformConstants'
 import { setTheme } from '@tauri-apps/api/app'
 import type { Theme } from '@tauri-apps/api/window'
+import { isTauriRuntime } from '@/vibelink/runtime'
+
+const setNativeWindowTheme = (theme: Theme | null) => {
+  if (!isTauriRuntime()) return
+  void setTheme(theme).catch(() => {})
+}
 
 // 获取平台对应的默认快捷键
 const getDefaultShortcuts = () => {
@@ -34,8 +40,8 @@ const isDesktopComputed = computed(() => isDesktop())
 export const useSettingStore = defineStore(StoresEnum.SETTING, {
   state: (): STO.Setting => ({
     themes: {
-      content: '',
-      pattern: ThemeEnum.OS,
+      content: ThemeEnum.DARK,
+      pattern: ThemeEnum.DARK,
       versatile: isDesktopComputed.value ? 'default' : 'simple'
     },
     escClose: true,
@@ -85,11 +91,11 @@ export const useSettingStore = defineStore(StoresEnum.SETTING, {
         state.themes.content = nextContent
       })
       setDocumentTheme(nextContent)
-      setTheme(Object.is(theme, 'os') ? null : (theme as Theme))
+      setNativeWindowTheme(Object.is(theme, 'os') ? null : (theme as Theme))
     },
     /** 切换主题 */
     toggleTheme(theme: string) {
-      setTheme(Object.is(theme, 'os') ? null : (theme as Theme))
+      setNativeWindowTheme(Object.is(theme, 'os') ? null : (theme as Theme))
       if (theme === ThemeEnum.OS) {
         const os = resolveOsTheme()
         this.$patch((state) => {

@@ -47,35 +47,36 @@ import { listen } from '@tauri-apps/api/event'
 import { useTauriListener } from '@/hooks/useTauriListener'
 import { updateSettings } from '@/services/tauriCommand.ts'
 import { useI18n } from 'vue-i18n'
+import { isTauriRuntime } from '@/vibelink/runtime'
 const mobileRtcCallFloatCell = isMobile()
   ? defineAsyncComponent(() => import('@/mobile/components/RtcCallFloatCell.vue'))
   : null
 
 const isDev = import.meta.env.DEV
 const showMemoryMonitor = ref(true)
-const isHomeDesktopWindow = computed(() => isDesktop() && appWindow.label === 'home')
+const appWindow = isTauriRuntime() ? WebviewWindow.getCurrent() : null
+const isHomeDesktopWindow = computed(() => isDesktop() && appWindow?.label === 'home')
 
 const userStore = useUserStore()
 const contactStore = useContactStore()
 const announcementStore = useAnnouncementStore()
 const feedStore = useFeedStore()
 const feedNotificationStore = useFeedNotificationStore()
-const userUid = computed(() => userStore.userInfo!.uid)
+const userUid = computed(() => userStore.userInfo?.uid ?? '')
 const groupStore = useGroupStore()
 const chatStore = useChatStore()
-const appWindow = WebviewWindow.getCurrent()
 const { createRtcCallWindow, sendWindowPayload } = useWindow()
 const globalStore = useGlobalStore()
 const router = useRouter()
 const { addListener } = useTauriListener()
 // 只在桌面端初始化窗口管理功能
-const { createWebviewWindow } = isDesktop() ? useWindow() : { createWebviewWindow: () => {} }
+const { createWebviewWindow } = isDesktop() && isTauriRuntime() ? useWindow() : { createWebviewWindow: () => {} }
 const settingStore = useSettingStore()
 const { themes, lockScreen, page, login } = storeToRefs(settingStore)
 // 全局快捷键管理
 const { initializeGlobalShortcut, cleanupGlobalShortcut } = useGlobalShortcut()
 // 提前初始化网络状态监听，确保不错过 WebSocket 状态变化事件
-if (isDesktop()) {
+if (isDesktop() && isTauriRuntime()) {
   useNetworkStatus()
 }
 
@@ -619,7 +620,7 @@ onMounted(() => {
     requestNetworkPermissionForIOS()
   }
 
-  if (isWindows10()) {
+  if (isTauriRuntime() && isWindows10() && appWindow) {
     void appWindow.setShadow(false).catch((error) => {
       console.warn('禁用窗口阴影失败:', error)
     })
@@ -631,23 +632,23 @@ onMounted(() => {
 
   import(`@/styles/scss/theme/${themes.value.versatile}.scss`)
   if (!settingStore.themes.content) {
-    // 首次运行使用跟随系统，保持既有体验
-    settingStore.initTheme(ThemeEnum.OS)
+    settingStore.initTheme(ThemeEnum.DARK)
   } else {
-    // 非首次运行时直接使用已恢复的主题信息，避免被强制改回“跟随系统”
     settingStore.normalizeThemeState()
   }
-  document.documentElement.dataset.theme = settingStore.themes.content
+  document.documentElement.dataset.theme = settingStore.themes.content || ThemeEnum.DARK
   window.addEventListener('dragstart', preventDrag)
 
-  addListener(listen('websocket-event', handleWebsocketEvent), 'websocket-event')
+  if (isTauriRuntime()) {
+    addListener(listen('websocket-event', handleWebsocketEvent), 'websocket-event')
+  }
 
   // 只在桌面端的主窗口中初始化全局快捷键
-  if (isDesktop() && appWindow.label === 'home') {
+  if (isTauriRuntime() && isDesktop() && appWindow?.label === 'home') {
     initializeGlobalShortcut()
   }
   /** 开发环境不禁止 */
-  if (process.env.NODE_ENV !== 'development') {
+  if (isTauriRuntime() && process.env.NODE_ENV !== 'development') {
     /** 禁用浏览器默认的快捷键 */
     window.addEventListener('keydown', (e) => {
       if (e.ctrlKey && (e.key === 'f' || e.key === 'r' || e.key === 'g' || e.key === 'j')) {
@@ -658,7 +659,7 @@ onMounted(() => {
     window.addEventListener('contextmenu', preventGlobalContextMenu, false)
   }
   // 只在桌面端处理窗口相关事件
-  if (isDesktop()) {
+  if (isTauriRuntime() && isDesktop()) {
     useMitt.on(MittEnum.CHECK_UPDATE, async () => {
       const checkUpdateWindow = await WebviewWindow.getByLabel('checkupdate')
       await checkUpdateWindow?.show()
@@ -668,14 +669,18 @@ onMounted(() => {
       const closeWindow = await WebviewWindow.getByLabel(event.close)
       closeWindow?.close()
     })
-    addListener(
-      appWindow.listen(EventEnum.EXIT, async () => {
-        await exit(0)
-      }),
-      'app-exit'
-    )
+    if (appWindow) {
+      addListener(
+        appWindow.listen(EventEnum.EXIT, async () => {
+          await exit(0)
+        }),
+        'app-exit'
+      )
+    }
   }
-  listenMobileReLogin()
+  if (isTauriRuntime()) {
+    listenMobileReLogin()
+  }
 })
 
 onUnmounted(async () => {
@@ -683,7 +688,7 @@ onUnmounted(async () => {
   window.removeEventListener('dragstart', preventDrag)
 
   // 只在桌面端的主窗口中清理全局快捷键
-  if (isDesktop() && appWindow.label === 'home') {
+  if (isTauriRuntime() && isDesktop() && appWindow?.label === 'home') {
     await cleanupGlobalShortcut()
   }
 })
@@ -774,6 +779,9 @@ useMitt.on(MittEnum.MSG_INIT, async () => {
 // 初始化的时候需要加载一次用户在localStorage中保存的代理设置
 const { t } = useI18n()
 const setConfigProxy = async () => {
+  if (!isTauriRuntime()) {
+    return
+  }
   const proxySettingsStr = localStorage.getItem('proxySettings')
   // 如果用户没有设置代理，则不需要设置
   if (!proxySettingsStr) {

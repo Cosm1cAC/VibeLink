@@ -21,6 +21,7 @@
 
 <script setup lang="ts">
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { isTauriRuntime } from '@/vibelink/runtime'
 import {
   darkTheme,
   dateEnUS,
@@ -269,6 +270,7 @@ const registerNaiveTools = () => {
 
   // 检查当前路由是否需要禁用消息
   const shouldDisableMessage = () => {
+    if (!isTauriRuntime()) return false
     return noMessageWindows.includes(getCurrentWebviewWindow().label)
   }
 

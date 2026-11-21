@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HuLa",
+  "productName": "VibeLink",
   "version": "3.0.9",
-  "identifier": "com.hula.pc",
+  "identifier": "com.vibelink.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build",
@@ -58,17 +58,19 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "登录",
-        "label": "login",
-        "url": "/login",
+        "title": "VibeLink",
+        "label": "home",
+        "url": "/home",
         "fullscreen": false,
-        "resizable": false,
+        "resizable": true,
         "center": true,
-        "width": 320,
-        "height": 448,
+        "width": 1220,
+        "height": 820,
+        "minWidth": 940,
+        "minHeight": 640,
         "skipTaskbar": false,
-        "transparent": true,
-        "visible": false,
+        "transparent": false,
+        "visible": true,
         "decorations": false
       },
       {

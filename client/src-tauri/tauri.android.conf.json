@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HuLa",
+  "productName": "VibeLink",
   "version": "3.0.9",
-  "identifier": "com.hula.app",
+  "identifier": "com.vibelink.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist",
-    "devUrl": "http://127.0.0.1:5210"
+    "devUrl": "http://127.0.0.1:6130"
   },
   "bundle": {
     "active": true,
@@ -41,9 +41,9 @@
   "app": {
     "windows": [
       {
-        "title": "登录",
+        "title": "VibeLink",
         "label": "mobile-home",
-        "url": "/mobile/splashscreen",
+        "url": "/mobile/message",
         "width": 800,
         "height": 600,
         "resizable": false,

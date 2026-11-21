@@ -4,6 +4,7 @@ import { error, info, warn } from '@tauri-apps/plugin-log'
 import { useMitt } from '@/hooks/useMitt'
 import { WsResponseMessageType } from '@/services/wsType'
 import { useContactStore } from '@/stores/contacts'
+import { isTauriRuntime } from '@/vibelink/runtime'
 
 /// WebSocket 连接状态
 export enum ConnectionState {
@@ -97,7 +98,9 @@ class RustWebSocketClient {
   private listenerController: ListenerController = new ListenerController()
 
   constructor() {
-    info('[RustWS] Rust WebSocket 客户端初始化')
+    if (isTauriRuntime()) {
+      void info('[RustWS] Rust WebSocket 客户端初始化').catch(() => {})
+    }
   }
 
   /**
@@ -477,7 +480,9 @@ class RustWebSocketClient {
     )
   }
 }
-info('创建RustWebSocketClient')
+if (isTauriRuntime()) {
+  void info('创建RustWebSocketClient').catch(() => {})
+}
 // 创建全局实例
 const rustWebSocketClient = new RustWebSocketClient()
 

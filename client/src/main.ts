@@ -10,18 +10,21 @@ import { pinia } from '@/stores'
 import { initializePlatform, isIOS, isMobile } from '@/utils/PlatformConstants'
 import { startWebVitalObserver } from '@/utils/WebVitalsObserver'
 import { invoke } from '@tauri-apps/api/core'
+import { isTauriRuntime } from '@/vibelink/runtime'
 import App from '@/App.vue'
 
 initializePlatform()
 startWebVitalObserver()
 
-if (isIOS()) {
+if (isTauriRuntime() && isIOS()) {
   invoke('request_ios_badge_authorization').catch((error) => {
-    console.warn('[HuLaBadge] 请求 iOS 角标权限失败', error)
+    console.warn('[VibeLink] 请求 iOS 角标权限失败', error)
   })
 }
 
-import('@/services/webSocketAdapter')
+if (isTauriRuntime() && import.meta.env.VITE_ENABLE_HULA_LEGACY_WS === '1') {
+  void import('@/services/webSocketAdapter')
+}
 
 if (process.env.NODE_ENV === 'development') {
   import('@/utils/Console.ts').then((module) => {
@@ -29,7 +32,7 @@ if (process.env.NODE_ENV === 'development') {
     module.consolePrint()
   })
 
-  if (isMobile()) {
+  if (isMobile() && import.meta.env.VITE_ENABLE_ERUDA === '1') {
     import('eruda').then((module) => {
       const eruda = 'default' in module ? module.default : module
       eruda.init()
@@ -56,6 +59,7 @@ if (isMobile()) {
 }
 
 async function setup() {
+  if (!isTauriRuntime()) return
   await invoke('set_complete', { task: 'frontend' })
 }
 

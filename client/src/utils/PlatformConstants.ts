@@ -38,7 +38,19 @@ class PlatformDetector {
         console.log(`Platform detected: ${PlatformDetector._osType} (${PlatformDetector._platformType})`)
       }
     } catch (error) {
-      console.warn('Failed to detect platform type, defaulting to desktop:', error)
+      const ua = typeof navigator !== 'undefined' ? navigator.userAgent.toLowerCase() : ''
+      const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+      const mobileForced = params?.get('mobile') === '1'
+      const isAndroidUa = ua.includes('android')
+      const isIosUa = ua.includes('iphone') || ua.includes('ipad')
+      PlatformDetector._osType = isAndroidUa ? 'android' : isIosUa ? 'ios' : ua.includes('mac') ? 'macos' : 'windows'
+      PlatformDetector._platformType =
+        mobileForced || isAndroidUa || isIosUa || (ua.includes('mobile') && params?.get('mobile') !== '0')
+          ? 'mobile'
+          : 'desktop'
+      PlatformDetector._osVersion = ''
+      PlatformDetector._isWindows10 = false
+      console.warn('Running outside Tauri runtime; defaulted platform:', PlatformDetector._platformType, error)
     }
 
     PlatformDetector._initialized = true

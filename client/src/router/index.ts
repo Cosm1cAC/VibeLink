@@ -1,5 +1,3 @@
-import { invoke } from '@tauri-apps/api/core'
-import { type } from '@tauri-apps/plugin-os'
 import {
   createRouter,
   createWebHistory,
@@ -7,6 +5,7 @@ import {
   type RouteLocationNormalized,
   type RouteRecordRaw
 } from 'vue-router'
+import { isMobileRuntime } from '@/vibelink/runtime'
 
 import FriendsList from '@/views/homeWindow/FriendsList.vue'
 import Message from '@/views/homeWindow/message/index.vue'
@@ -15,11 +14,9 @@ import SearchDetails from '@/views/homeWindow/SearchDetails.vue'
 import ChatRoomLayout from '#/layout/chat-room/ChatRoomLayout.vue'
 import NoticeLayout from '#/layout/chat-room/NoticeLayout.vue'
 import FriendsLayout from '#/layout/friends/FriendsLayout.vue'
-import MobileHome from '#/layout/index.vue'
 import GroupChatMember from '#/views/chat-room/GroupChatMember.vue'
 import MobileInviteGroupMember from '#/views/chat-room/MobileInviteGroupMember.vue'
 import MyLayout from '#/layout/my/MyLayout.vue'
-import MobileLogin from '#/login.vue'
 import ChatSetting from '#/views/chat-room/ChatSetting.vue'
 import MobileChatMain from '#/views/chat-room/MobileChatMain.vue'
 import SearchChatContent from '#/views/chat-room/SearchChatContent.vue'
@@ -27,19 +24,15 @@ import MediaViewer from '#/views/chat-room/MediaViewer.vue'
 import NoticeDetail from '#/views/chat-room/notice/NoticeDetail.vue'
 import NoticeEdit from '#/views/chat-room/notice/NoticeEdit.vue'
 import NoticeList from '#/views/chat-room/notice/NoticeList.vue'
-import MobileCommunity from '#/views/community/index.vue'
 import DynamicDetailPage from '#/views/community/DynamicDetailPage.vue'
 import AddFriends from '#/views/friends/AddFriends.vue'
 import ConfirmAddFriend from '#/views/friends/ConfirmAddFriend.vue'
 import ConfirmAddGroup from '#/views/friends/ConfirmAddGroup.vue'
 import FriendInfo from '#/views/friends/FriendInfo.vue'
-import MobileFriendPage from '#/views/friends/index.vue'
 import StartGroupChat from '#/views/friends/StartGroupChat.vue'
-import MobileMessagePage from '#/views/message/index.vue'
 import EditBio from '#/views/my/EditBio.vue'
 import EditBirthday from '#/views/my/EditBirthday.vue'
 import EditProfile from '#/views/my/EditProfile.vue'
-import MobileMy from '#/views/my/index.vue'
 import MobileQRCode from '#/views/my/MobileQRCode.vue'
 import MobileSettings from '#/views/my/MobileSettings.vue'
 import MyMessages from '#/views/my/MyMessages.vue'
@@ -48,7 +41,6 @@ import Share from '#/views/my/Share.vue'
 import SimpleBio from '#/views/my/SimpleBio.vue'
 import AiAssistant from '#/views/my/AiAssistant.vue'
 import MyAlbum from '#/views/my/MyAlbum.vue'
-import { TauriCommand } from '@/enums'
 import ConfirmQRLogin from '#/views/ConfirmQRLogin.vue'
 import MyQRCode from '#/views/MyQRCode.vue'
 import Splashscreen from '#/views/Splashscreen.vue'
@@ -60,29 +52,17 @@ import SyncData from '#/views/SyncData.vue'
 /**! 创建窗口后再跳转页面就会导致样式没有生效所以不能使用懒加载路由的方式，有些页面需要快速响应的就不需要懒加载 */
 const { BASE_URL } = import.meta.env
 
-const isMobile = type() === 'ios' || type() === 'android'
+const VibeLinkDesktopShell = () => import('@/vibelink/components/VibeLinkDesktopShell.vue')
+const VibeLinkMobileShell = () => import('@/vibelink/mobile/VibeLinkMobileShell.vue')
 
-// 移动端路由配置 - 使用直接导入避免懒加载问题
+const isMobile = isMobileRuntime()
+
+// 移动端路由配置 - 共享 VibeLink Mobile Shell
 const getMobileRoutes = (): Array<RouteRecordRaw> => [
-  {
-    path: '/',
-    name: 'mobileRoot',
-    redirect: '/mobile/login'
-  },
-  {
-    path: '/mobile/login',
-    name: 'mobileLogin',
-    component: MobileLogin
-  },
   {
     path: '/mobile/MobileForgetPassword',
     name: 'mobileForgetPassword',
     component: MobileForgetPassword
-  },
-  {
-    path: '/mobile/splashscreen',
-    name: 'splashscreen',
-    component: Splashscreen
   },
   {
     path: '/mobile/serviceAgreement',
@@ -174,34 +154,7 @@ const getMobileRoutes = (): Array<RouteRecordRaw> => [
   {
     path: '/mobile/home',
     name: 'mobileHome',
-    component: MobileHome,
-    children: [
-      {
-        path: '',
-        name: 'mobileHomeDefault',
-        redirect: '/mobile/message'
-      },
-      {
-        path: '/mobile/message',
-        name: 'mobileMessage',
-        component: MobileMessagePage
-      },
-      {
-        path: '/mobile/friends',
-        name: 'mobileFriends',
-        component: MobileFriendPage
-      },
-      {
-        path: '/mobile/community',
-        name: 'mobileCommunity',
-        component: MobileCommunity
-      },
-      {
-        path: '/mobile/my',
-        name: 'mobileMy',
-        component: MobileMy
-      }
-    ]
+    component: VibeLinkMobileShell
   },
   {
     path: '/mobile/mobileMy',
@@ -343,6 +296,16 @@ const getDesktopRoutes = (): Array<RouteRecordRaw> => [
   {
     path: '/home',
     name: 'home',
+    component: VibeLinkDesktopShell
+  },
+  {
+    path: '/home/:roomId',
+    name: 'homeRoom',
+    component: VibeLinkDesktopShell
+  },
+  {
+    path: '/legacy-home',
+    name: 'legacyHome',
     component: () => import('@/layout/index.vue'),
     children: [
       {
@@ -524,8 +487,50 @@ const getDesktopRoutes = (): Array<RouteRecordRaw> => [
   }
 ]
 
-// 通用路由配置（所有平台都需要）
+// 通用路由配置（所有平台都需要，包括直接入口与 Tauri 多窗口路由）
 const getCommonRoutes = (): Array<RouteRecordRaw> => [
+  {
+    path: '/',
+    name: 'rootEntry',
+    redirect: () => (isMobileRuntime() ? '/mobile/message' : '/home')
+  },
+  {
+    path: '/mobile',
+    redirect: '/mobile/message'
+  },
+  {
+    path: '/mobile/login',
+    redirect: '/mobile/message'
+  },
+  {
+    path: '/mobile/splashscreen',
+    redirect: '/mobile/message'
+  },
+  {
+    path: '/mobile/message',
+    name: 'mobileMessage',
+    component: VibeLinkMobileShell
+  },
+  {
+    path: '/mobile/chat/:roomId?',
+    name: 'mobileChatRoomVibe',
+    component: VibeLinkMobileShell
+  },
+  {
+    path: '/mobile/bots',
+    name: 'mobileBots',
+    component: VibeLinkMobileShell
+  },
+  {
+    path: '/mobile/terminal',
+    name: 'mobileTerminal',
+    component: VibeLinkMobileShell
+  },
+  {
+    path: '/mobile/settings',
+    name: 'mobileSettings',
+    component: VibeLinkMobileShell
+  },
   {
     path: '/manageGroupMember',
     name: 'manageGroupMember',
@@ -534,7 +539,7 @@ const getCommonRoutes = (): Array<RouteRecordRaw> => [
   {
     path: '/login',
     name: 'login',
-    component: () => import('@/views/loginWindow/Login.vue')
+    redirect: () => (isMobileRuntime() ? '/mobile/message' : '/home')
   },
   {
     path: '/splashscreen',
@@ -631,45 +636,8 @@ const router: any = createRouter({
 
 // 在创建路由后，添加全局前置守卫
 // 为解决 “已声明‘to’，但从未读取其值” 的问题，将 to 参数改为下划线开头表示该参数不会被使用
-router.beforeEach(async (to: RouteLocationNormalized, _from: RouteLocationNormalized, next: NavigationGuardNext) => {
-  // 桌面端直接放行
-  if (!isMobile) {
-    console.log('[守卫] 非移动端，直接放行')
-    return next()
-  }
-
-  try {
-    const isLoginPage = to.path === '/mobile/login'
-    const isSplashPage = to.path === '/mobile/splashscreen'
-    const isForgetPage = to.path === '/mobile/MobileForgetPassword'
-    const isAgreementPage = to.path === '/mobile/serviceAgreement' || to.path === '/mobile/privacyAgreement'
-
-    // 闪屏页白名单：不论登录状态都允许进入
-    console.log('路由守卫to->', to.path)
-    if (isSplashPage || isForgetPage || isAgreementPage) {
-      return next()
-    }
-
-    const tokens = await invoke<{ token: string | null; refreshToken: string | null }>(TauriCommand.GET_USER_TOKENS)
-    const isLoggedIn = !!(tokens.token && tokens.refreshToken)
-
-    // 未登录且不是登录页 → 跳转登录
-    if (!isLoggedIn && !isLoginPage) {
-      console.warn('[守卫] 未登录，强制跳转到 /mobile/login')
-      return next('/mobile/login')
-    }
-
-    return next()
-  } catch (error) {
-    console.error('[守卫] 获取token错误:', error)
-    // 出错时也跳转登录页（避免死循环）
-    if (to.path !== '/mobile/login') {
-      console.warn('[守卫] 出错，强制跳转到 /mobile/login')
-      return next('/mobile/login')
-    }
-    // console.log('[守卫] 出错但目标是登录页，直接放行')
-    return next()
-  }
+router.beforeEach(async (_to: RouteLocationNormalized, _from: RouteLocationNormalized, next: NavigationGuardNext) => {
+  return next()
 })
 
 export default router

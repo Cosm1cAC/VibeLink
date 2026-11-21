@@ -1,0 +1,77 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VibeLink",
+  "version": "3.0.9",
+  "identifier": "com.vibelink.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:6130"
+  },
+  "bundle": {
+    "category": "SocialNetworking",
+    "copyright": "HuLaSpark",
+    "licenseFile": "./copyright/License.rtf",
+    "resources": [
+      "tray",
+      "configuration",
+      "draco",
+      "docs"
+    ],
+    "createUpdaterArtifacts": false,
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png",
+      "icons/Square30x30Logo.png",
+      "icons/Square44x44Logo.png",
+      "icons/Square71x71Logo.png",
+      "icons/Square89x89Logo.png",
+      "icons/Square107x107Logo.png",
+      "icons/Square142x142Logo.png",
+      "icons/Square150x150Logo.png",
+      "icons/Square284x284Logo.png",
+      "icons/Square310x310Logo.png",
+      "icons/StoreLogo.png"
+    ],
+    "windows": {},
+    "macOS": {}
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: blob: https: http:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https: http: wss: ws:; media-src 'self' data: https: http: blob:; frame-src 'self' https: http: about:; worker-src 'self' blob:",
+      "capabilities": [
+        "default-capability",
+        "mobile-capability",
+        "desktop-capability"
+      ],
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    },
+    "macOSPrivateApi": true
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "windows": {
+        "installMode": "passive"
+      },
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk1NkNENEZFNzg1MjVFMEEKUldRS1hsSjQvdFJzbGJXcnNPNXBYZ2RlTmlRRFZYYVI3YXhiWGpYZXFwVUtucThZUnJHUGw5dVUK",
+      "endpoints": [
+        "https://api.upgrade.toolsetlink.com/v1/tauri/upgrade?tauriKey=geShj8UB7zd1DyrM_YFNdg&versionName={{current_version}}&appointVersionName=&devModelKey=&devKey=&target={{target}}&arch={{arch}}",
+        "https://gitee.com/HuLaSpark/HuLa/releases/download/latest/latest.json"
+      ]
+    }
+  }
+}

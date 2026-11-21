@@ -1,0 +1,21 @@
+{
+  "identifier": "desktop-capability",
+  "platforms": ["macOS", "windows", "linux"],
+  "windows": ["*"],
+  "permissions": [
+    "updater:default",
+    "updater:allow-check",
+    "updater:allow-download",
+    "updater:allow-install",
+    "global-shortcut:allow-is-registered",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-register-all",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-unregister-all",
+    "core:window:allow-set-resizable",
+    "core:window:allow-set-badge-count",
+    "core:window:allow-set-theme",
+    "core:window:allow-theme",
+    "core:app:allow-set-app-theme"
+  ]
+}

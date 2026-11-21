@@ -1,0 +1,40 @@
+# 宿主机运行态目录与敏感凭据（原地保留，绝不入库）
+/wproxy/
+/opencode-mesh/
+/rshell/
+/keys/
+*.pem
+*.key
+.env
+.env.local
+.env.*.local
+
+# 依赖与构建产物
+node_modules/
+dist/
+**/dist/
+dist-electron/
+target/
+target-*/
+**/target/
+.vite-plus/
+**/.vite-plus/
+.turbo/
+build/
+**/build/
+client/src-tauri/gen/android/app/build/
+*.apk
+*.aab
+
+# 运行数据与日志
+.vibelink-data/
+**/logs/
+*.log
+*.tmp
+*.bak
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm

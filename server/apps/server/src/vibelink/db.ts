@@ -51,6 +51,7 @@ export class VibeLinkDatabase {
   readonly homeDir: string;
   readonly dbPath: string;
   readonly attachmentsDir: string;
+  readonly avatarsDir: string;
   readonly db: NodeSqlite.DatabaseSync;
   private readonly subscribers = new Set<VlEventSubscriber>();
 
@@ -58,8 +59,10 @@ export class VibeLinkDatabase {
     this.homeDir = resolveVibeLinkHome(homeDirOverride);
     this.dbPath = NodePath.join(this.homeDir, "vibelink.sqlite");
     this.attachmentsDir = NodePath.join(this.homeDir, "attachments");
+    this.avatarsDir = NodePath.join(this.homeDir, "avatars");
     NodeFS.mkdirSync(this.homeDir, { recursive: true });
     NodeFS.mkdirSync(this.attachmentsDir, { recursive: true });
+    NodeFS.mkdirSync(this.avatarsDir, { recursive: true });
 
     this.db = new NodeSqlite.DatabaseSync(this.dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
@@ -472,7 +475,7 @@ export class VibeLinkDatabase {
 
   updateRoom(
     roomId: string,
-    patch: Partial<{ name: string; notice: string; muted: boolean; pinned: boolean; cwd: string }>,
+    patch: Partial<{ name: string; notice: string; avatar: string; muted: boolean; pinned: boolean; cwd: string }>,
   ): VlRoomSummary | null {
     const existing = this.getRoom(roomId);
     if (!existing) return null;

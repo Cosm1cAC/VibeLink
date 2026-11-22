@@ -7,11 +7,17 @@
     <div class="w-full max-w-680px h-full bg-[#1e1e1e] border-l border-[#343434] flex flex-col text-[#eaeaea] shadow-2xl">
       <div class="flex items-center justify-between px-4 py-3 bg-[#242424] border-b border-[#343434]">
         <div class="flex items-center gap-3 min-w-0">
-          <div
-            class="w-9 h-9 rounded-full flex items-center justify-center text-12px font-semibold shrink-0"
-            :style="{ background: avatarSpec.bg, color: avatarSpec.fg }">
-            {{ avatarSpec.label }}
-          </div>
+          <button
+            type="button"
+            class="border-0 p-0 bg-transparent rounded-full cursor-pointer shrink-0"
+            title="编辑 Bot 名字与头像"
+            @click="store.openProfileModal(bot.id)">
+            <VlAvatar
+              :avatar="bot.avatar"
+              :name="bot.displayName"
+              :provider="bot.provider"
+              :size="36" />
+          </button>
           <div class="min-w-0">
             <div class="flex items-center gap-2">
               <span class="text-15px font-semibold truncate">{{ bot.displayName }}</span>
@@ -170,9 +176,9 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { resolveAvatarSpec } from '../avatar'
 import { useVibeLinkStore } from '../store'
 import type { VlBotFileEntry } from '../types'
+import VlAvatar from './VlAvatar.vue'
 
 const props = defineProps<{
   botId: string | null
@@ -205,10 +211,6 @@ const bot = computed(() => {
   if (!props.botId) return null
   return store.accountsById[props.botId] ?? null
 })
-
-const avatarSpec = computed(() =>
-  resolveAvatarSpec(bot.value?.avatar, bot.value?.displayName, bot.value?.provider)
-)
 
 const fileEntries = computed<VlBotFileEntry[]>(() => {
   const defaults = ['SOUL.md', 'MEMORY.md', 'tools.json', 'bot.json']

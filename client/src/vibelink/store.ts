@@ -55,6 +55,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
   const replyTargetByRoom = ref<Record<string, VlMessage | null>>({})
   const sendMode = ref<VlSendMode>('auto')
   const botHomeDrawerBotId = ref<string | null>(null)
+  const profileModalAccountId = ref<string | null>(null)
   const serverSettingsOpen = ref(false)
 
   let stopEventSocket: (() => void) | null = null
@@ -427,6 +428,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     displayName?: string
     statusText?: string
     presence?: VlPresence
+    avatar?: string
   }): Promise<void> {
     const res = await client.updateMe(patch)
     upsertAccount(res.account)
@@ -634,6 +636,10 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     })
   }
 
+  async function uploadAvatar(file: File): Promise<{ id: string; url: string }> {
+    return client.uploadAvatar(file)
+  }
+
   async function fetchInfraStatus(): Promise<VlInfraStatus | null> {
     try {
       infraStatus.value = await client.getInfraStatus()
@@ -649,6 +655,14 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
 
   function closeBotHomeDrawer() {
     botHomeDrawerBotId.value = null
+  }
+
+  function openProfileModal(accountId: string) {
+    profileModalAccountId.value = accountId
+  }
+
+  function closeProfileModal() {
+    profileModalAccountId.value = null
   }
 
   function dispose() {
@@ -694,6 +708,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     replyTargetByRoom,
     sendMode,
     botHomeDrawerBotId,
+    profileModalAccountId,
     serverSettingsOpen,
     init,
     bootstrap,
@@ -723,9 +738,12 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     openNewRoomTerminal,
     closeTerminal,
     uploadAndSendFile,
+    uploadAvatar,
     fetchInfraStatus,
     openBotHomeDrawer,
     closeBotHomeDrawer,
+    openProfileModal,
+    closeProfileModal,
     dispose
   }
 }, { persist: false })

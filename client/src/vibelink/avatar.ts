@@ -5,6 +5,34 @@ export interface AvatarStyleSpec {
   badge?: string
 }
 
+export interface AvatarPresetOption {
+  value: string
+  label: string
+}
+
+export const HULA_PRESET_AVATARS: ReadonlyArray<AvatarPresetOption> = [
+  ...Array.from({ length: 22 }, (_, i) => {
+    const code = String(i + 1).padStart(3, '0')
+    return {
+      value: `/avatar/${code}.webp`,
+      label: `头像 ${code}`
+    }
+  }),
+  { value: '/AI/deepseek.png', label: 'DeepSeek' },
+  { value: '/AI/openai.svg', label: 'OpenAI' },
+  { value: '/AI/QW.png', label: 'Qwen' }
+]
+
+export const MONOGRAM_PRESET_AVATARS: ReadonlyArray<AvatarPresetOption> = [
+  { value: 'preset:cto', label: 'Gemini' },
+  { value: 'preset:claude', label: 'Claude' },
+  { value: 'preset:codex', label: 'Codex' },
+  { value: 'preset:opencode', label: 'OpenCode' },
+  { value: 'preset:ui', label: 'UI' },
+  { value: 'preset:qa', label: 'QA' },
+  { value: 'preset:user', label: '我' }
+]
+
 const PRESET_MAP: Record<string, AvatarStyleSpec> = {
   'preset:user': { label: '我', bg: '#13987F', fg: '#ecfdf5' },
   'preset:me': { label: '我', bg: '#13987F', fg: '#ecfdf5' },
@@ -23,6 +51,28 @@ const PRESET_MAP: Record<string, AvatarStyleSpec> = {
 export function isImageAvatarUrl(avatar?: string | null): boolean {
   if (!avatar) return false
   return /^https?:\/\/|^data:image\/|^blob:|^\//.test(avatar.trim())
+}
+
+export function resolveAvatarImageSrc(
+  avatar?: string | null,
+  serverUrl = '',
+  authToken = ''
+): string | null {
+  const trimmed = (avatar || '').trim()
+  if (!trimmed || trimmed.startsWith('preset:')) return null
+  if (trimmed.startsWith('/api/vl/')) {
+    const base = serverUrl.trim().replace(/\/+$/, '')
+    const raw = base ? `${base}${trimmed}` : trimmed
+    if (authToken.trim()) {
+      const sep = raw.includes('?') ? '&' : '?'
+      return `${raw}${sep}token=${encodeURIComponent(authToken.trim())}`
+    }
+    return raw
+  }
+  if (/^(https?:\/\/|data:image\/|blob:|\/)/i.test(trimmed)) {
+    return trimmed
+  }
+  return null
 }
 
 export function resolveAvatarSpec(

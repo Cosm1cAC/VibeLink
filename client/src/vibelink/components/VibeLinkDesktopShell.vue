@@ -9,12 +9,12 @@
             type="button"
             class="vl-avatar-btn"
             :title="`我 (${store.me?.displayName ?? 'Me'}) - ${presenceLabel(store.me?.presence)}`"
+            data-testid="me-rail-avatar-btn"
             @click="meMenuOpen = !meMenuOpen">
-            <span
-              class="w-38px h-38px rounded-full flex items-center justify-center text-13px font-semibold"
-              :style="{ background: meAvatar.bg, color: meAvatar.fg }">
-              {{ meAvatar.label }}
-            </span>
+            <VlAvatar
+              :avatar="store.me?.avatar ?? 'preset:user'"
+              :name="store.me?.displayName ?? '我'"
+              :size="38" />
             <span
               class="vl-status-dot"
               :style="{ backgroundColor: presenceColor(store.me?.presence ?? 'online') }"></span>
@@ -22,8 +22,17 @@
 
           <div
             v-if="meMenuOpen"
-            class="absolute left-52px top-0 z-40 w-210px rounded-10px bg-[#1f2322] border border-[#363d3b] shadow-2xl p-2.5 space-y-2 text-12px">
-            <div class="font-semibold text-[#eaeaea] px-1">在线状态设置</div>
+            class="absolute left-52px top-0 z-40 w-215px rounded-10px bg-[#1f2322] border border-[#363d3b] shadow-2xl p-2.5 space-y-2 text-12px">
+            <div class="flex items-center justify-between px-1">
+              <span class="font-semibold text-[#eaeaea] truncate">{{ store.me?.displayName ?? '我' }}</span>
+              <button
+                type="button"
+                data-testid="me-edit-profile-btn"
+                class="bg-transparent border-0 text-[#5eead4] hover:text-[#99f6e4] text-11.5px cursor-pointer shrink-0"
+                @click="openMeProfileModal">
+                编辑头像/名字
+              </button>
+            </div>
             <div class="flex gap-1">
               <button
                 v-for="opt in presenceOptions"
@@ -185,14 +194,18 @@
           :key="bot.id"
           class="rounded-10px bg-[#252525] border border-[#323232] p-2.5 space-y-2 hover:border-[#13987f]/60 transition-colors">
           <div class="flex items-center gap-2.5">
-            <div class="relative shrink-0">
-              <span
-                class="w-36px h-36px rounded-full flex items-center justify-center text-12px font-semibold"
-                :style="{ background: botAvatar(bot).bg, color: botAvatar(bot).fg }">
-                {{ botAvatar(bot).label }}
-              </span>
+            <button
+              type="button"
+              class="relative shrink-0 p-0 border-0 bg-transparent rounded-full cursor-pointer"
+              title="点击操作或编辑 Bot"
+              @click="openAvatarMenu($event, bot)">
+              <VlAvatar
+                :avatar="bot.avatar"
+                :name="bot.displayName"
+                :provider="bot.provider"
+                :size="36" />
               <span class="vl-status-dot-sm" :style="{ backgroundColor: presenceColor(bot.presence) }"></span>
-            </div>
+            </button>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5">
                 <span class="text-13px font-medium truncate text-[#f0f0f0]">{{ bot.displayName }}</span>
@@ -232,12 +245,12 @@
           "
           @click="handleSelectRoom(room.id)">
           <div class="relative shrink-0">
-            <span
-              class="w-40px h-40px flex items-center justify-center text-13px font-semibold"
-              :class="room.kind === 'group' ? 'rounded-9px' : 'rounded-full'"
-              :style="{ background: roomAvatar(room).bg, color: roomAvatar(room).fg }">
-              {{ roomAvatar(room).label }}
-            </span>
+            <VlAvatar
+              :avatar="roomAvatarProps(room).avatar"
+              :name="roomAvatarProps(room).name"
+              :provider="roomAvatarProps(room).provider"
+              :size="40"
+              :shape="room.kind === 'group' ? 'rounded' : 'circle'" />
             <span
               v-if="room.kind === 'dm'"
               class="vl-status-dot-sm"
@@ -309,6 +322,17 @@
               [{{ store.activeRoom.memberCount }}]
             </span>
             <template v-else-if="activeDmBot">
+              <button
+                type="button"
+                class="p-0 border-0 bg-transparent rounded-full cursor-pointer shrink-0 flex items-center"
+                title="点击头像操作"
+                @click="openAvatarMenu($event, activeDmBot)">
+                <VlAvatar
+                  :avatar="activeDmBot.avatar"
+                  :name="activeDmBot.displayName"
+                  :provider="activeDmBot.provider"
+                  :size="26" />
+              </button>
               <span class="px-1.5 py-0.5 rounded bg-[#1d4940] text-[#5eead4] text-11.5px shrink-0">
                 @{{ activeDmBot.handle }}
               </span>
@@ -419,12 +443,30 @@
 
       <!-- Tab 1: Chat Timeline + Composer -->
       <template v-if="store.activeRoom && store.activeTab === 'chat'">
+        <!-- Optional Inline History Filter Bar -->
+        <div
+          v-if="historySearchOpen"
+          class="px-4 py-1.5 bg-[#242424] border-b border-[#323232] flex items-center gap-2 text-12px"
+          data-testid="history-search-bar">
+          <input
+            v-model="historySearchQuery"
+            type="text"
+            placeholder="搜索当前会话历史消息..."
+            class="flex-1 px-2.5 py-1 rounded bg-[#181818] border border-[#363636] text-[#eaeaea] outline-none focus:border-[#13987f]" />
+          <button
+            type="button"
+            class="bg-transparent border-0 text-[#9ca3af] hover:text-white cursor-pointer text-12px"
+            @click="closeHistorySearch">
+            关闭
+          </button>
+        </div>
+
         <div ref="messageListRef" class="flex-1 vl-scroll px-4 py-3 space-y-3" data-testid="chat-message-list">
-          <div v-if="store.activeMessages.length === 0" class="text-center text-12.5px text-[#777] py-12">
-            暂无消息，发送内容或在群里输入 @Bot 发起协作。
+          <div v-if="displayedMessages.length === 0" class="text-center text-12.5px text-[#777] py-12">
+            {{ historySearchQuery.trim() ? '未找到匹配的历史消息' : '暂无消息，发送内容或在群里输入 @Bot 发起协作。' }}
           </div>
 
-          <template v-for="(msg, idx) in store.activeMessages" :key="msg.id">
+          <template v-for="(msg, idx) in displayedMessages" :key="msg.id">
             <!-- Time divider -->
             <div v-if="shouldShowDateDivider(idx)" class="text-center py-1">
               <span class="px-2.5 py-0.5 rounded-full bg-[#222222] text-11px text-[#808080]">
@@ -464,25 +506,31 @@
                   <BotMarkdownMessage :content="msg.content" :server-url="store.serverUrl" />
                 </div>
               </div>
-              <span
-                class="w-34px h-34px rounded-full flex items-center justify-center text-12px font-semibold shrink-0 mt-4"
-                :style="{ background: meAvatar.bg, color: meAvatar.fg }">
-                {{ meAvatar.label }}
-              </span>
+              <button
+                type="button"
+                class="border-0 p-0 bg-transparent cursor-pointer shrink-0 mt-4 rounded-full"
+                title="点击编辑个人资料与头像"
+                @click="store.me && openAvatarMenu($event, store.me)">
+                <VlAvatar
+                  :avatar="store.me?.avatar ?? 'preset:user'"
+                  :name="store.me?.displayName ?? '我'"
+                  :size="34" />
+              </button>
             </div>
 
             <!-- Incoming Bot Bubble (#1e1e1e) -->
             <div v-else class="group flex items-start gap-2.5">
               <button
                 type="button"
-                class="border-0 p-0 bg-transparent cursor-pointer shrink-0 mt-1"
-                title="点击打开 Bot Home"
-                @click="openBotIfBot(msg.senderId)">
-                <span
-                  class="w-34px h-34px rounded-full flex items-center justify-center text-12px font-semibold"
-                  :style="{ background: accountAvatar(msg.senderId).bg, color: accountAvatar(msg.senderId).fg }">
-                  {{ accountAvatar(msg.senderId).label }}
-                </span>
+                class="border-0 p-0 bg-transparent cursor-pointer shrink-0 mt-1 rounded-full"
+                title="点击头像操作"
+                :data-testid="`msg-avatar-${msg.senderId}`"
+                @click="openAccountAvatarMenu($event, msg.senderId)">
+                <VlAvatar
+                  :avatar="accountAvatarProps(msg.senderId).avatar"
+                  :name="accountAvatarProps(msg.senderId).name"
+                  :provider="accountAvatarProps(msg.senderId).provider"
+                  :size="34" />
               </button>
 
               <div class="max-w-76% min-w-0">
@@ -549,17 +597,23 @@
             </button>
           </div>
 
-          <!-- Composer Toolbar -->
-          <div class="flex items-center justify-between gap-2 pb-1.5 text-12px">
-            <div class="flex items-center gap-1.5 flex-wrap">
+          <!-- Composer Toolbar (HuLa icon-only style, zero visible button text) -->
+          <div class="flex items-center justify-between gap-2 pb-2" data-testid="composer-toolbar">
+            <div class="flex items-center gap-4">
               <!-- Emoji Picker -->
-              <div class="relative">
+              <div class="relative flex items-center">
                 <button
                   type="button"
-                  class="vl-tool-btn"
+                  class="vl-icon-btn"
                   title="表情"
+                  aria-label="表情"
                   @click="emojiOpen = !emojiOpen">
-                  😊 表情
+                  <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.7">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M8.5 14.5s1.3 2 3.5 2 3.5-2 3.5-2" stroke-linecap="round" />
+                    <circle cx="9.2" cy="10" r="0.8" fill="currentColor" stroke="none" />
+                    <circle cx="14.8" cy="10" r="0.8" fill="currentColor" stroke="none" />
+                  </svg>
                 </button>
                 <div
                   v-if="emojiOpen"
@@ -575,21 +629,29 @@
                 </div>
               </div>
 
-              <!-- Screenshot Split Button -->
-              <div class="relative flex items-center rounded-6px bg-[#2b2b2b] border border-[#383838]">
+              <!-- Screenshot Split Icon Button -->
+              <div class="relative flex items-center gap-0.5">
                 <button
                   type="button"
-                  class="px-2 py-1 bg-transparent hover:bg-[#343434] border-0 text-[#cfcfcf] text-12px cursor-pointer"
+                  class="vl-icon-btn"
                   title="截图"
+                  aria-label="截图"
                   @click="handleScreenshotClick">
-                  ✂ 截图
+                  <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.7">
+                    <circle cx="6" cy="7" r="2.5" />
+                    <circle cx="6" cy="17" r="2.5" />
+                    <path d="M8.2 8.2 19 18M8.2 15.8 19 6" stroke-linecap="round" />
+                  </svg>
                 </button>
                 <button
                   type="button"
-                  class="px-1.5 py-1 bg-transparent hover:bg-[#343434] border-0 border-l border-[#383838] text-[#9ca3af] text-10px cursor-pointer"
+                  class="vl-icon-chevron"
                   title="截图选项"
+                  aria-label="截图选项"
                   @click="screenshotMenuOpen = !screenshotMenuOpen">
-                  ▾
+                  <svg viewBox="0 0 24 24" class="w-12px h-12px" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
                 </button>
                 <div
                   v-if="screenshotMenuOpen"
@@ -601,24 +663,87 @@
                 </div>
               </div>
 
-              <!-- Attachment Upload -->
-              <button
-                type="button"
-                class="vl-tool-btn"
-                title="发送文件/图片"
-                @click="fileInputRef?.click()">
-                📎 文件
-              </button>
-              <input ref="fileInputRef" type="file" class="hidden" @change="handleFilePicked" />
-
-              <!-- Quick @Bot Dropdown -->
-              <div class="relative">
+              <!-- File Split Icon Button -->
+              <div class="relative flex items-center gap-0.5">
                 <button
                   type="button"
-                  class="vl-tool-btn text-[#5eead4]"
-                  title="快速 @Bot 协同"
+                  class="vl-icon-btn"
+                  title="发送文件"
+                  aria-label="发送文件"
+                  @click="fileInputRef?.click()">
+                  <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.7">
+                    <path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke-linejoin="round" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="vl-icon-chevron"
+                  title="文件与图片"
+                  aria-label="文件与图片"
+                  @click="fileMenuOpen = !fileMenuOpen">
+                  <svg viewBox="0 0 24 24" class="w-12px h-12px" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+                <div
+                  v-if="fileMenuOpen"
+                  class="absolute left-0 bottom-32px z-30 w-130px rounded-8px bg-[#1f2222] border border-[#363b3a] shadow-xl py-1 text-12px">
+                  <button
+                    type="button"
+                    class="w-full text-left px-3 py-1.5 bg-transparent hover:bg-[#1d4940] border-0 text-[#eaeaea] cursor-pointer"
+                    @click="triggerFilePicker">
+                    发送文件
+                  </button>
+                  <button
+                    type="button"
+                    class="w-full text-left px-3 py-1.5 bg-transparent hover:bg-[#1d4940] border-0 text-[#eaeaea] cursor-pointer"
+                    @click="triggerImagePicker">
+                    发送图片
+                  </button>
+                </div>
+              </div>
+              <input ref="fileInputRef" type="file" class="hidden" @change="handleFilePicked" />
+              <input ref="imageInputRef" type="file" accept="image/*" class="hidden" @change="handleFilePicked" />
+
+              <!-- Image Icon -->
+              <button
+                type="button"
+                class="vl-icon-btn"
+                title="发送图片"
+                aria-label="发送图片"
+                @click="imageInputRef?.click()">
+                <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.7">
+                  <rect x="3" y="5" width="18" height="14" rx="2.5" />
+                  <circle cx="8.5" cy="10" r="1.4" />
+                  <path d="m21 15-4.5-4.5L9 18" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+
+              <!-- Microphone Voice Icon -->
+              <button
+                type="button"
+                class="vl-icon-btn"
+                title="语音输入"
+                aria-label="语音输入"
+                @click="handleVoiceClick">
+                <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.7">
+                  <rect x="9" y="3" width="6" height="11" rx="3" />
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v3M8.5 21h7" stroke-linecap="round" />
+                </svg>
+              </button>
+
+              <!-- Quick @Bot Picker Icon -->
+              <div class="relative flex items-center">
+                <button
+                  type="button"
+                  class="vl-icon-btn"
+                  title="@Bot 协同点名"
+                  aria-label="艾特Bot"
                   @click="quickAtOpen = !quickAtOpen">
-                  @Bot
+                  <svg viewBox="0 0 24 24" class="w-19px h-19px" fill="none" stroke="currentColor" stroke-width="1.7">
+                    <circle cx="12" cy="12" r="4" />
+                    <path d="M16 8v5a2.5 2.5 0 0 0 5 0v-1a9 9 0 1 0-4.2 7.6" stroke-linecap="round" />
+                  </svg>
                 </button>
                 <div
                   v-if="quickAtOpen"
@@ -635,25 +760,67 @@
                 </div>
               </div>
 
-              <!-- Send Mode -->
-              <select
-                v-model="store.sendMode"
-                class="px-2 py-1 rounded-6px bg-[#2b2b2b] border border-[#383838] text-11.5px text-[#cbd5e1] outline-none cursor-pointer"
-                title="Bot 调度模式">
-                <option value="auto">模式: 自动 (auto)</option>
-                <option value="queue">模式: 排队 (queue)</option>
-                <option value="steer">模式: 插话引导 (steer)</option>
-              </select>
+              <!-- Dispatch Mode Icon Popover -->
+              <div class="relative flex items-center">
+                <button
+                  type="button"
+                  class="vl-icon-btn relative"
+                  :title="`Bot 调度模式 (${store.sendMode})`"
+                  aria-label="调度模式"
+                  @click="modeMenuOpen = !modeMenuOpen">
+                  <svg viewBox="0 0 24 24" class="w-19px h-19px" fill="none" stroke="currentColor" stroke-width="1.7">
+                    <path d="M4 7h10M18 7h2M14 5v4M4 17h4M12 17h8M8 15v4M4 12h16" stroke-linecap="round" />
+                  </svg>
+                  <span
+                    v-if="store.sendMode !== 'auto'"
+                    class="absolute -top-0.5 -right-0.5 w-6px h-6px rounded-full bg-[#13987f]"></span>
+                </button>
+                <div
+                  v-if="modeMenuOpen"
+                  class="absolute left-0 bottom-32px z-30 w-160px rounded-8px bg-[#1f2222] border border-[#363b3a] shadow-xl py-1 text-12px">
+                  <button
+                    v-for="m in sendModeOptions"
+                    :key="m.value"
+                    type="button"
+                    class="w-full text-left px-3 py-1.5 bg-transparent hover:bg-[#1d4940] border-0 text-[#eaeaea] cursor-pointer flex items-center justify-between"
+                    @click="selectSendMode(m.value)">
+                    <span>{{ m.label }}</span>
+                    <span v-if="store.sendMode === m.value" class="text-[#5eead4]">✓</span>
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <button
-              v-if="store.isActiveRoomBusy"
-              type="button"
-              data-testid="interrupt-btn"
-              class="px-2.5 py-1 rounded-6px border border-[#7f1d1d] bg-[#451a1a] hover:bg-[#7f1d1d] text-[#fecaca] text-11.5px cursor-pointer"
-              @click="store.interruptActiveRoom()">
-              ■ 中断生成
-            </button>
+            <!-- Right Icons: Interrupt (when busy) & History Search Clock -->
+            <div class="flex items-center gap-3">
+              <button
+                v-if="store.isActiveRoomBusy"
+                type="button"
+                data-testid="interrupt-btn"
+                class="vl-icon-btn text-[#f87171] hover:text-[#fca5a5]"
+                title="中断当前 Bot 生成"
+                aria-label="中断生成"
+                @click="store.interruptActiveRoom()">
+                <svg viewBox="0 0 24 24" class="w-19px h-19px" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <circle cx="12" cy="12" r="9" />
+                  <rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                data-testid="toggle-history-search"
+                class="vl-icon-btn"
+                :class="{ 'text-[#13987f]': historySearchOpen }"
+                title="聊天记录检索"
+                aria-label="聊天记录"
+                @click="historySearchOpen = !historySearchOpen">
+                <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.7">
+                  <path d="M3 12a9 9 0 1 0 3-6.7L3 8" stroke-linecap="round" stroke-linejoin="round" />
+                  <path d="M3 3v5h5M12 7v5l3 2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+            </div>
           </div>
 
           <!-- Reply Target Banner -->
@@ -684,8 +851,8 @@
 
           <!-- Bottom Send Bar -->
           <div class="flex items-center justify-between pt-1">
-            <span class="text-11px text-[#737373]">
-              {{ localNotice || (sendOnEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行') }}
+            <span class="text-11.5px text-[#5eead4]">
+              {{ localNotice }}
             </span>
 
             <div class="relative flex items-center rounded-7px overflow-hidden shadow-sm">
@@ -833,15 +1000,21 @@
           v-for="item in filteredMembers"
           :key="item.account.id"
           class="flex items-center gap-2 px-2 py-1.5 rounded-7px hover:bg-[#2f2f2f] cursor-pointer group"
-          @click="handleMemberClick(item.account)">
-          <div class="relative shrink-0">
-            <span
-              class="w-28px h-28px rounded-full flex items-center justify-center text-11px font-semibold"
-              :style="{ background: botAvatar(item.account).bg, color: botAvatar(item.account).fg }">
-              {{ botAvatar(item.account).label }}
-            </span>
+          @click="handleMemberClick(item.account)"
+          @contextmenu.prevent="openAvatarMenu($event, item.account)">
+          <button
+            type="button"
+            class="relative shrink-0 p-0 border-0 bg-transparent rounded-full cursor-pointer"
+            :data-testid="`member-avatar-${item.account.id}`"
+            title="点击打开操作菜单"
+            @click.stop="openAvatarMenu($event, item.account)">
+            <VlAvatar
+              :avatar="item.account.avatar"
+              :name="item.account.displayName"
+              :provider="item.account.provider"
+              :size="28" />
             <span class="vl-status-dot-xs" :style="{ backgroundColor: presenceColor(item.account.presence) }"></span>
-          </div>
+          </button>
 
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-1">
@@ -873,7 +1046,20 @@
       </div>
     </aside>
 
-    <!-- Modals & Drawers -->
+    <!-- Modals, Drawers & Context Menus -->
+    <AvatarActionMenu
+      :account="avatarMenuAccount"
+      :anchor="avatarMenuAnchor"
+      :in-group="store.activeRoom?.kind === 'group'"
+      @close="closeAvatarMenu"
+      @dm="onMenuDm"
+      @poke="onMenuPoke"
+      @view-profile="onMenuViewProfile"
+      @edit-profile="onMenuEditProfile" />
+    <AccountProfileModal
+      :account-id="store.profileModalAccountId"
+      @close="store.closeProfileModal()"
+      @open-bot-home="store.openBotHomeDrawer($event)" />
     <BotHomeDrawer :bot-id="store.botHomeDrawerBotId" @close="store.closeBotHomeDrawer()" />
     <ServerSettingsModal :open="store.serverSettingsOpen" @close="store.serverSettingsOpen = false" />
 
@@ -1009,7 +1195,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSettingStore } from '@/stores/setting'
-import { presenceColor, presenceLabel, resolveAvatarSpec } from '../avatar'
+import { presenceColor, presenceLabel } from '../avatar'
 import {
   closeOrHideWindowSafe,
   isTauriRuntime,
@@ -1019,8 +1205,10 @@ import {
   triggerDesktopScreenshot
 } from '../runtime'
 import { useVibeLinkStore, type VlDesktopNav } from '../store'
-import type { VlAccount, VlMessage, VlPresence, VlRoomSummary } from '../types'
+import type { VlAccount, VlMessage, VlPresence, VlRoomSummary, VlSendMode } from '../types'
 import '../vibelink.scss'
+import AccountProfileModal from './AccountProfileModal.vue'
+import AvatarActionMenu from './AvatarActionMenu.vue'
 import BotApprovalCard from './BotApprovalCard.vue'
 import BotDiffCheckpointCard from './BotDiffCheckpointCard.vue'
 import BotHomeDrawer from './BotHomeDrawer.vue'
@@ -1028,6 +1216,7 @@ import BotMarkdownMessage from './BotMarkdownMessage.vue'
 import BotTerminalPane from './BotTerminalPane.vue'
 import BotToolCallCard from './BotToolCallCard.vue'
 import ServerSettingsModal from './ServerSettingsModal.vue'
+import VlAvatar from './VlAvatar.vue'
 
 const store = useVibeLinkStore()
 const settingStore = useSettingStore()
@@ -1037,12 +1226,19 @@ const inTauri = isTauriRuntime()
 const messageListRef = ref<HTMLElement | null>(null)
 const composerRef = ref<HTMLTextAreaElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const imageInputRef = ref<HTMLInputElement | null>(null)
 
 const meMenuOpen = ref(false)
 const myStatusDraft = ref('')
 const createMenuOpen = ref(false)
 const emojiOpen = ref(false)
 const screenshotMenuOpen = ref(false)
+const fileMenuOpen = ref(false)
+const modeMenuOpen = ref(false)
+const historySearchOpen = ref(false)
+const historySearchQuery = ref('')
+const avatarMenuAccount = ref<VlAccount | null>(null)
+const avatarMenuAnchor = ref<{ x: number; y: number } | null>(null)
 const quickAtOpen = ref(false)
 const sendKeyMenuOpen = ref(false)
 const sendOnEnter = ref(true)
@@ -1072,6 +1268,12 @@ const sessionFilterTabs: Array<{ value: 'all' | 'dm' | 'group'; label: string }>
   { value: 'group', label: '协作群' }
 ]
 
+const sendModeOptions: Array<{ value: VlSendMode; label: string }> = [
+  { value: 'auto', label: '自动调度 (auto)' },
+  { value: 'queue', label: '排队执行 (queue)' },
+  { value: 'steer', label: '插话引导 (steer)' }
+]
+
 const emojiList = ['👍', '🎉', '🔥', '🚀', '✅', '⚠️', '🐛', '🧠', '💡', '👀', '👏', '❤️', '😂', '🤔', '📌', '🛠️', '🧪', '📄']
 
 const newBotForm = reactive({
@@ -1094,8 +1296,6 @@ const concealOnCapture = computed({
   get: () => settingStore.screenshot?.isConceal ?? false,
   set: (v: boolean) => settingStore.setScreenshotConceal(v)
 })
-
-const meAvatar = computed(() => resolveAvatarSpec(store.me?.avatar ?? 'preset:user', store.me?.displayName ?? '我'))
 
 const filteredBots = computed(() => {
   const q = store.searchQuery.trim().toLowerCase()
@@ -1128,21 +1328,42 @@ function dmTargetBot(room: VlRoomSummary): VlAccount | null {
 
 const activeDmBot = computed(() => (store.activeRoom ? dmTargetBot(store.activeRoom) : null))
 
-function botAvatar(acc?: VlAccount | null) {
-  return resolveAvatarSpec(acc?.avatar, acc?.displayName, acc?.provider)
+function accountAvatarProps(accountId: string) {
+  const acc = store.accountsById[accountId]
+  return {
+    avatar: acc?.avatar ?? '',
+    name: acc?.displayName ?? accountId,
+    provider: acc?.provider ?? ''
+  }
 }
 
-function accountAvatar(accountId: string) {
-  return botAvatar(store.accountsById[accountId])
-}
-
-function roomAvatar(room: VlRoomSummary) {
+function roomAvatarProps(room: VlRoomSummary) {
   if (room.kind === 'dm') {
     const bot = dmTargetBot(room)
-    if (bot) return botAvatar(bot)
+    if (bot) {
+      return {
+        avatar: bot.avatar,
+        name: bot.displayName,
+        provider: bot.provider
+      }
+    }
   }
-  return resolveAvatarSpec(room.avatar, room.name)
+  return {
+    avatar: room.avatar,
+    name: room.name,
+    provider: ''
+  }
 }
+
+const displayedMessages = computed(() => {
+  const q = historySearchQuery.value.trim().toLowerCase()
+  if (!q) return store.activeMessages
+  return store.activeMessages.filter(
+    (m) =>
+      m.content.toLowerCase().includes(q) ||
+      senderDisplayName(m.senderId).toLowerCase().includes(q)
+  )
+})
 
 const draftText = computed({
   get: () => (store.activeRoomId ? store.composerDraftByRoom[store.activeRoomId] ?? '' : ''),
@@ -1251,8 +1472,8 @@ function formatMessageTime(ts: number): string {
 
 function shouldShowDateDivider(index: number): boolean {
   if (index === 0) return true
-  const prev = store.activeMessages[index - 1]
-  const curr = store.activeMessages[index]
+  const prev = displayedMessages.value[index - 1]
+  const curr = displayedMessages.value[index]
   return curr.createdAt - prev.createdAt > 15 * 60 * 1000
 }
 
@@ -1510,6 +1731,78 @@ function openBotIfBot(accountId: string) {
   }
 }
 
+function openMeProfileModal() {
+  meMenuOpen.value = false
+  store.openProfileModal('me')
+}
+
+function openAvatarMenu(ev: MouseEvent, acc: VlAccount) {
+  const rect = (ev.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+  avatarMenuAccount.value = acc
+  avatarMenuAnchor.value = rect
+    ? { x: rect.right + 8, y: rect.top }
+    : { x: ev.clientX + 6, y: ev.clientY + 6 }
+}
+
+function openAccountAvatarMenu(ev: MouseEvent, accountId: string) {
+  const acc = store.accountsById[accountId]
+  if (acc) {
+    openAvatarMenu(ev, acc)
+  }
+}
+
+function closeAvatarMenu() {
+  avatarMenuAccount.value = null
+  avatarMenuAnchor.value = null
+}
+
+function onMenuDm(acc: VlAccount) {
+  if (acc.kind === 'bot') {
+    void store.openDmWithBot(acc.id)
+  }
+}
+
+function onMenuPoke(acc: VlAccount) {
+  if (store.activeRoom?.kind === 'group') {
+    insertQuickAt(acc.handle)
+    showToast(`已 @${acc.handle}`)
+  } else if (store.activeRoomId) {
+    void store.sendMessage(store.activeRoomId, `👋 戳了戳 ${acc.displayName}`)
+  }
+}
+
+function onMenuViewProfile(acc: VlAccount) {
+  openBotIfBot(acc.id)
+}
+
+function onMenuEditProfile(acc: VlAccount) {
+  store.openProfileModal(acc.id)
+}
+
+function triggerFilePicker() {
+  fileMenuOpen.value = false
+  fileInputRef.value?.click()
+}
+
+function triggerImagePicker() {
+  fileMenuOpen.value = false
+  imageInputRef.value?.click()
+}
+
+function handleVoiceClick() {
+  showToast('语音输入：请直接输入文字或上传音频文件')
+}
+
+function selectSendMode(mode: VlSendMode) {
+  store.sendMode = mode
+  modeMenuOpen.value = false
+}
+
+function closeHistorySearch() {
+  historySearchOpen.value = false
+  historySearchQuery.value = ''
+}
+
 function handleMemberClick(acc: VlAccount) {
   if (acc.kind !== 'bot') return
   if (store.activeRoom?.kind === 'group') {
@@ -1728,18 +2021,38 @@ onUnmounted(() => {
   color: #fff;
 }
 
-.vl-tool-btn {
-  padding: 4px 8px;
-  border-radius: 6px;
-  border: 1px solid #383838;
-  background: #2b2b2b;
-  color: #d4d4d4;
-  font-size: 12px;
+.vl-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 5px;
+  border: 0;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.vl-icon-btn:hover {
+  color: #13987f;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.vl-icon-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: 4px;
+  border: 0;
+  background: transparent;
+  color: #7c828a;
   cursor: pointer;
 }
 
-.vl-tool-btn:hover {
-  background: #353535;
+.vl-icon-chevron:hover {
+  color: #e5e7eb;
 }
 
 .vl-msg-action {

@@ -2,6 +2,8 @@
 import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
 
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as Effect from "effect/Effect";
@@ -448,6 +450,7 @@ export function dispatchVibeLinkHttp(
         const updated = vl.db.updateAccountFields(bot.id, {
           ...(typeof body.displayName === "string" ? { displayName: body.displayName } : {}),
           ...(typeof body.handle === "string" ? { handle: body.handle } : {}),
+          ...(typeof body.avatar === "string" ? { avatar: body.avatar } : {}),
           ...(typeof body.roleTitle === "string" ? { roleTitle: body.roleTitle } : {}),
           ...(typeof body.department === "string" ? { department: body.department } : {}),
           ...(typeof body.provider === "string" ? { provider: body.provider } : {}),
@@ -461,6 +464,15 @@ export function dispatchVibeLinkHttp(
         });
         if (updated) {
           vl.botHome.syncAccountToBotJson(updated);
+          if (typeof body.displayName === "string" || typeof body.avatar === "string") {
+            const dmRoomId = `dm_${bot.id}`;
+            if (vl.db.getRoom(dmRoomId)) {
+              vl.db.updateRoom(dmRoomId, {
+                name: updated.displayName,
+                avatar: updated.avatar,
+              });
+            }
+          }
         }
         return jsonResp(200, { bot: updated });
       }
@@ -594,6 +606,73 @@ export function dispatchVibeLinkHttp(
             bytes,
             contentType: safeMime,
             contentDisposition: `inline; filename="${att.filename}"`,
+          },
+        };
+      }
+    }
+
+    if (resource === "avatars") {
+      const AVATAR_MIME_EXT: Record<string, string> = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/webp": "webp",
+        "image/gif": "gif",
+      };
+      const EXT_TO_MIME: Record<string, string> = {
+        png: "image/png",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        webp: "image/webp",
+        gif: "image/gif",
+      };
+
+      if (method === "POST" && segments.length === 3) {
+        const mimeType =
+          typeof body.mimeType === "string" ? body.mimeType.trim().toLowerCase() : "";
+        const ext = AVATAR_MIME_EXT[mimeType];
+        if (!ext) {
+          return jsonResp(400, {
+            error: "unsupported_image_type",
+            message: "Avatar must be PNG, JPEG, WEBP, or GIF.",
+          });
+        }
+        const dataBase64 = typeof body.dataBase64 === "string" ? body.dataBase64 : "";
+        if (!dataBase64) {
+          return jsonResp(400, { error: "missing_data" });
+        }
+        const bytes = Uint8Array.from(Buffer.from(dataBase64, "base64"));
+        if (bytes.byteLength === 0 || bytes.byteLength > 5 * 1024 * 1024) {
+          return jsonResp(400, {
+            error: "invalid_avatar_size",
+            message: "Avatar size must be between 1 byte and 5 MiB.",
+          });
+        }
+        const fileName = `av_${NodeCrypto.randomUUID().slice(0, 12)}.${ext}`;
+        NodeFS.writeFileSync(NodePath.join(vl.db.avatarsDir, fileName), bytes);
+        return jsonResp(201, {
+          id: fileName,
+          url: `/api/vl/avatars/${fileName}`,
+        });
+      }
+
+      if (method === "GET" && segments.length === 4 && segments[3]) {
+        const fileName = segments[3];
+        const match = /^[a-zA-Z0-9_-]+\.(png|jpg|jpeg|webp|gif)$/i.exec(fileName);
+        if (!match?.[1]) {
+          return jsonResp(400, { error: "invalid_avatar_name" });
+        }
+        const filePath = NodePath.join(vl.db.avatarsDir, fileName);
+        if (!NodeFS.existsSync(filePath)) {
+          return jsonResp(404, { error: "avatar_not_found" });
+        }
+        const bytes = new Uint8Array(NodeFS.readFileSync(filePath));
+        const contentType = EXT_TO_MIME[match[1].toLowerCase()] ?? "application/octet-stream";
+        return {
+          status: 200,
+          binary: {
+            bytes,
+            contentType,
           },
         };
       }

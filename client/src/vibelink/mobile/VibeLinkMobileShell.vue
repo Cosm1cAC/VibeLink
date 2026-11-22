@@ -72,12 +72,12 @@
           :data-testid="`mobile-session-${room.id}`"
           class="w-full text-left flex items-center gap-3 px-3.5 py-3 bg-[#1e1e1e] active:bg-[#273734] border-0 cursor-pointer"
           @click="enterMobileRoom(room.id)">
-          <span
-            class="w-42px h-42px flex items-center justify-center text-13px font-semibold shrink-0"
-            :class="room.kind === 'group' ? 'rounded-10px' : 'rounded-full'"
-            :style="{ background: roomAvatar(room).bg, color: roomAvatar(room).fg }">
-            {{ roomAvatar(room).label }}
-          </span>
+          <VlAvatar
+            :avatar="roomAvatarProps(room).avatar"
+            :name="roomAvatarProps(room).name"
+            :provider="roomAvatarProps(room).provider"
+            :size="42"
+            :shape="room.kind === 'group' ? 'rounded' : 'circle'" />
           <div class="flex-1 min-w-0">
             <div class="flex items-center justify-between gap-2">
               <span class="text-14px font-medium text-[#f0f0f0] truncate">{{ room.name }}</span>
@@ -134,11 +134,17 @@
               </div>
             </div>
             <div v-else class="flex items-start gap-2">
-              <span
-                class="w-30px h-30px rounded-full flex items-center justify-center text-11px font-semibold shrink-0 mt-1"
-                :style="{ background: senderAvatar(msg.senderId).bg, color: senderAvatar(msg.senderId).fg }">
-                {{ senderAvatar(msg.senderId).label }}
-              </span>
+              <button
+                type="button"
+                class="p-0 border-0 bg-transparent rounded-full cursor-pointer shrink-0 mt-1"
+                title="编辑 Bot 名字与头像"
+                @click="store.openProfileModal(msg.senderId)">
+                <VlAvatar
+                  :avatar="senderAvatarProps(msg.senderId).avatar"
+                  :name="senderAvatarProps(msg.senderId).name"
+                  :provider="senderAvatarProps(msg.senderId).provider"
+                  :size="30" />
+              </button>
               <div class="max-w-82% min-w-0 space-y-1">
                 <div class="text-11px text-[#a3a3a3]">
                   {{ senderName(msg.senderId) }}
@@ -186,9 +192,13 @@
         <div class="px-2.5 py-2 bg-[#1e1e1e] border-t border-[#323232] flex items-end gap-2">
           <button
             type="button"
-            class="px-2.5 py-2 rounded-8px bg-[#2b2b2b] border-0 text-[#d4d4d4] text-14px cursor-pointer shrink-0"
+            class="w-36px h-36px rounded-8px bg-[#2b2b2b] border-0 text-[#a3a3a3] hover:text-[#13987f] cursor-pointer shrink-0 flex items-center justify-center"
+            title="发送文件或图片"
+            aria-label="发送附件"
             @click="fileInputRef?.click()">
-            📎
+            <svg viewBox="0 0 24 24" class="w-18px h-18px" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
           </button>
           <input ref="fileInputRef" type="file" class="hidden" @change="handleFileUpload" />
 
@@ -218,11 +228,17 @@
           :key="bot.id"
           class="rounded-10px bg-[#1e1e1e] border border-[#303030] p-3 space-y-2">
           <div class="flex items-center gap-2.5">
-            <span
-              class="w-38px h-38px rounded-full flex items-center justify-center text-12px font-semibold shrink-0"
-              :style="{ background: resolveAvatarSpec(bot.avatar, bot.displayName, bot.provider).bg, color: resolveAvatarSpec(bot.avatar, bot.displayName, bot.provider).fg }">
-              {{ resolveAvatarSpec(bot.avatar, bot.displayName, bot.provider).label }}
-            </span>
+            <button
+              type="button"
+              class="p-0 border-0 bg-transparent rounded-full cursor-pointer shrink-0"
+              title="编辑名字与头像"
+              @click="store.openProfileModal(bot.id)">
+              <VlAvatar
+                :avatar="bot.avatar"
+                :name="bot.displayName"
+                :provider="bot.provider"
+                :size="38" />
+            </button>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5">
                 <span class="text-14px font-semibold text-[#f0f0f0]">{{ bot.displayName }}</span>
@@ -355,18 +371,31 @@
               <span class="text-13px text-[#f0f0f0]">{{ m.account.displayName }}</span>
               <span class="ml-1.5 text-11px text-[#5eead4]">@{{ m.account.handle }}</span>
             </div>
-            <button
-              v-if="m.account.kind === 'bot'"
-              type="button"
-              class="px-2 py-0.5 rounded bg-[#1d4940] border-0 text-[#99f6e4] text-11px cursor-pointer"
-              @click="openMobileBotHome(m.account.id)">
-              Bot Home
-            </button>
+            <div class="flex items-center gap-1.5">
+              <button
+                v-if="m.account.kind === 'bot'"
+                type="button"
+                class="px-2 py-0.5 rounded bg-[#2b2f2e] border-0 text-[#cbd5e1] text-11px cursor-pointer"
+                @click="openMobileEditProfile(m.account.id)">
+                改资料
+              </button>
+              <button
+                v-if="m.account.kind === 'bot'"
+                type="button"
+                class="px-2 py-0.5 rounded bg-[#1d4940] border-0 text-[#99f6e4] text-11px cursor-pointer"
+                @click="openMobileBotHome(m.account.id)">
+                Bot Home
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </div>
 
+    <AccountProfileModal
+      :account-id="store.profileModalAccountId"
+      @close="store.closeProfileModal()"
+      @open-bot-home="store.openBotHomeDrawer($event)" />
     <BotHomeDrawer :bot-id="store.botHomeDrawerBotId" @close="store.closeBotHomeDrawer()" />
   </div>
 </template>
@@ -374,16 +403,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { presenceColor, resolveAvatarSpec } from '../avatar'
+import { presenceColor } from '../avatar'
 import { useVibeLinkStore } from '../store'
 import type { VlMessage, VlRoomSummary } from '../types'
 import '../vibelink.scss'
+import AccountProfileModal from '../components/AccountProfileModal.vue'
 import BotApprovalCard from '../components/BotApprovalCard.vue'
 import BotDiffCheckpointCard from '../components/BotDiffCheckpointCard.vue'
 import BotHomeDrawer from '../components/BotHomeDrawer.vue'
 import BotMarkdownMessage from '../components/BotMarkdownMessage.vue'
 import BotTerminalPane from '../components/BotTerminalPane.vue'
 import BotToolCallCard from '../components/BotToolCallCard.vue'
+import VlAvatar from '../components/VlAvatar.vue'
 
 type MobileTab = 'messages' | 'bots' | 'terminal' | 'settings'
 
@@ -428,13 +459,15 @@ const activeDmBot = computed(() => {
   return m ? store.accountsById[m.accountId] ?? null : null
 })
 
-function roomAvatar(room: VlRoomSummary) {
+function roomAvatarProps(room: VlRoomSummary) {
   if (room.kind === 'dm') {
     const member = room.members.find((x) => x.accountId !== 'me')
     const bot = member ? store.accountsById[member.accountId] : null
-    if (bot) return resolveAvatarSpec(bot.avatar, bot.displayName, bot.provider)
+    if (bot) {
+      return { avatar: bot.avatar, name: bot.displayName, provider: bot.provider }
+    }
   }
-  return resolveAvatarSpec(room.avatar, room.name)
+  return { avatar: room.avatar, name: room.name, provider: '' }
 }
 
 function senderName(senderId: string) {
@@ -445,9 +478,13 @@ function senderHandle(senderId: string) {
   return store.accountsById[senderId]?.handle ?? ''
 }
 
-function senderAvatar(senderId: string) {
+function senderAvatarProps(senderId: string) {
   const acc = store.accountsById[senderId]
-  return resolveAvatarSpec(acc?.avatar, acc?.displayName, acc?.provider)
+  return {
+    avatar: acc?.avatar ?? '',
+    name: acc?.displayName ?? senderId,
+    provider: acc?.provider ?? ''
+  }
 }
 
 function formatClockTime(ts?: number): string {
@@ -506,6 +543,11 @@ async function openMobileBotDm(botId: string) {
 function openMobileBotHome(botId: string) {
   membersSheetOpen.value = false
   store.openBotHomeDrawer(botId)
+}
+
+function openMobileEditProfile(accountId: string) {
+  membersSheetOpen.value = false
+  store.openProfileModal(accountId)
 }
 
 function openNoticeEdit() {

@@ -176,6 +176,39 @@ describe("VibeLink IM HTTP routes & mock orchestration", () => {
       expect(downloadRes.status).toBe(200);
       expect(Buffer.from(downloadRes.binary!.bytes).toString("utf8")).toBe("vibelink-attachment");
 
+      // Avatar upload + fetch + Bot rename/avatar DM sync
+      const pngBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]);
+      const avatarUpload = await callRoute(vl, "POST", "/api/vl/avatars", {
+        filename: "bot.png",
+        mimeType: "image/png",
+        dataBase64: pngBytes.toString("base64"),
+      });
+      expect(avatarUpload.status).toBe(201);
+      const avatarUrl = (avatarUpload.json as { url: string }).url;
+      expect(avatarUrl).toMatch(/^\/api\/vl\/avatars\/av_/);
+
+      const avatarFetch = await callRoute(vl, "GET", avatarUrl);
+      expect(avatarFetch.status).toBe(200);
+      expect(avatarFetch.binary?.contentType).toBe("image/png");
+      expect(Buffer.from(avatarFetch.binary!.bytes).equals(pngBytes)).toBe(true);
+
+      const patchBot = await callRoute(vl, "PATCH", "/api/vl/bots/bot_cto", {
+        displayName: "Gemini 架构官",
+        avatar: avatarUrl,
+      });
+      expect(patchBot.status).toBe(200);
+      expect((patchBot.json as { bot: { displayName: string; avatar: string } }).bot.displayName).toBe(
+        "Gemini 架构官",
+      );
+
+      const roomsRes = await callRoute(vl, "GET", "/api/vl/rooms");
+      expect(roomsRes.status).toBe(200);
+      const dmRoom = (
+        roomsRes.json as { rooms: Array<{ id: string; name: string; avatar: string }> }
+      ).rooms.find((r) => r.id === "dm_bot_cto");
+      expect(dmRoom?.name).toBe("Gemini 架构官");
+      expect(dmRoom?.avatar).toBe(avatarUrl);
+
       // Approval response
       const aprMsg = vl.db.createMessage({
         roomId: "dm_bot_cto",

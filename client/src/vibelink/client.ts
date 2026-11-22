@@ -239,6 +239,7 @@ export class VibeLinkClient {
     patch: {
       displayName?: string
       handle?: string
+      avatar?: string
       roleTitle?: string
       department?: string
       provider?: string
@@ -323,7 +324,7 @@ export class VibeLinkClient {
     return this.request('DELETE', `/api/vl/terminals/${encodeURIComponent(sessionId)}`)
   }
 
-  async uploadAttachment(roomId: string, file: File): Promise<{ attachment: VlAttachment; url: string }> {
+  private async encodeFileBase64(file: File): Promise<string> {
     const buffer = await file.arrayBuffer()
     const bytes = new Uint8Array(buffer)
     let binary = ''
@@ -331,11 +332,24 @@ export class VibeLinkClient {
     for (let i = 0; i < bytes.length; i += chunkSize) {
       binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
     }
-    const dataBase64 = btoa(binary)
+    return btoa(binary)
+  }
+
+  async uploadAttachment(roomId: string, file: File): Promise<{ attachment: VlAttachment; url: string }> {
+    const dataBase64 = await this.encodeFileBase64(file)
     return this.request('POST', '/api/vl/attachments', {
       roomId,
       filename: file.name || 'attachment.bin',
       mimeType: file.type || 'application/octet-stream',
+      dataBase64
+    })
+  }
+
+  async uploadAvatar(file: File): Promise<{ id: string; url: string }> {
+    const dataBase64 = await this.encodeFileBase64(file)
+    return this.request('POST', '/api/vl/avatars', {
+      filename: file.name || 'avatar.png',
+      mimeType: file.type || 'image/png',
       dataBase64
     })
   }

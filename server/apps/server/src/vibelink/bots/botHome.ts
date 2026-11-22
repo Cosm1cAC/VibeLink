@@ -7,8 +7,8 @@ import type { VlAccount, VlBotConfigJson, VlBotFileEntry } from "../types.ts";
 
 export const DEFAULT_SOUL_TEMPLATE = `# Role & Persona (SOUL.md)
 
-你是 VibeLink 协作团队中的专家 Bot。
-请先核实上下文，保持简洁高信噪比，不在没有实证时编造结果。
+你是 VibeLink 工作区中的编程协作 Bot。
+请先核实代码与上下文，保持简洁准确，不编造未验证的结果。
 `;
 
 export const DEFAULT_MEMORY_TEMPLATE = `# Long-Term Memory (MEMORY.md)

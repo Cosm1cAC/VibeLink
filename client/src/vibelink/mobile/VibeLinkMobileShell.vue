@@ -404,6 +404,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { presenceColor } from '../avatar'
+import { hideMobileSplashSafe } from '../runtime'
 import { useVibeLinkStore } from '../store'
 import type { VlMessage, VlRoomSummary } from '../types'
 import '../vibelink.scss'
@@ -437,7 +438,7 @@ const pairMsg = ref('')
 const mobileTitle = computed(() => {
   switch (mobileTab.value) {
     case 'bots':
-      return 'Bot 好友舰队'
+      return 'Bot 好友'
     case 'terminal':
       return '工作区终端'
     case 'settings':
@@ -589,6 +590,7 @@ async function saveMobilePair() {
 }
 
 onMounted(async () => {
+  void hideMobileSplashSafe()
   await store.init()
   pairUrl.value = store.serverUrl
   pairToken.value = store.authToken

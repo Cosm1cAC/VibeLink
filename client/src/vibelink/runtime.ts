@@ -46,6 +46,15 @@ export function getCurrentWindowLabelSafe(): string {
   }
 }
 
+export async function hideMobileSplashSafe(): Promise<void> {
+  if (!isTauriRuntime()) return
+  try {
+    await invoke('hide_splash_screen')
+  } catch (err) {
+    console.warn('[vibelink/runtime] hide_splash_screen failed:', err)
+  }
+}
+
 export async function minimizeWindowSafe(): Promise<void> {
   if (!isTauriRuntime()) return
   try {

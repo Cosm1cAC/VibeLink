@@ -68,6 +68,21 @@ function isMockBotsMode(): boolean {
   return process.env.VIBELINK_MOCK_BOTS === "1";
 }
 
+function mapBotRuntimeMode(approvalMode: string): "approval-required" | "auto-accept-edits" | "auto" | "full-access" {
+  switch (approvalMode.trim().toLowerCase()) {
+    case "full_access":
+    case "full-access":
+      return "full-access";
+    case "auto":
+      return "auto";
+    case "accept_edits":
+    case "auto-accept-edits":
+      return "auto-accept-edits";
+    default:
+      return "approval-required";
+  }
+}
+
 export interface SendMessageResult {
   readonly userMessage: VlMessage;
   readonly triggeredBotIds: ReadonlyArray<string>;
@@ -515,10 +530,7 @@ export class VibeLinkOrchestrationBridge {
           instanceId: mapped.instanceId,
           model: bot.model.trim() || mapped.defaultModel,
         },
-        runtimeMode:
-          bot.approvalMode === "accept_edits" || bot.approvalMode === "full_access"
-            ? "auto-accept-edits"
-            : "approval-required",
+        runtimeMode: mapBotRuntimeMode(bot.approvalMode),
         interactionMode: bot.approvalMode === "plan" ? "plan" : "default",
         branch: null,
         worktreePath: null,
@@ -594,7 +606,7 @@ export class VibeLinkOrchestrationBridge {
                       lower.includes(`handoff:${b.handle.toLowerCase()}`)),
                 );
                 if (nextTeammate) {
-                  handoffLine = `\n\n我已完成本阶段拆解，请 @${nextTeammate.handle} 接力核查与跟进。`;
+                  handoffLine = `\n\n已完成当前步骤，请 @${nextTeammate.handle} 继续处理。`;
                 }
               }
             }

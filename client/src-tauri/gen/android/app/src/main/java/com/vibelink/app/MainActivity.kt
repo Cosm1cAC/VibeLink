@@ -1,4 +1,4 @@
-﻿package com.hula.app
+﻿package com.vibelink.app
 
 import android.Manifest
 import android.os.Bundle
@@ -33,9 +33,9 @@ class MainActivity : TauriActivity() {
             android.util.Log.d("MainActivity", "hideStartupBackground called, splashHidden set to true")
             currentWebView?.let {
                 android.util.Log.d("MainActivity", "WebView reference found, setting background")
-                it.setBackgroundColor(0xFFFFFFFF.toInt())
+                it.setBackgroundColor(0xFF1E1E1E.toInt())
                 window.setBackgroundDrawableResource(android.R.color.transparent)
-                android.util.Log.i("MainActivity", "✅ WebView background set to opaque white")
+                android.util.Log.i("MainActivity", "✅ WebView background set to dark")
             } ?: android.util.Log.e("MainActivity", "❌ WebView reference not found")
         } else {
             android.util.Log.w("MainActivity", "hideStartupBackground called but splashHidden already true")
@@ -96,10 +96,10 @@ class MainActivity : TauriActivity() {
         super.onWebViewCreate(webView)
         currentWebView = webView
 
-        webView.setBackgroundColor(0x00000000)
-        window.setBackgroundDrawableResource(R.drawable.launch_screen)
-        splashHidden = false
+        webView.setBackgroundColor(0xFF1E1E1E.toInt())
+        window.setBackgroundDrawableResource(android.R.color.transparent)
+        splashHidden = true
 
-        android.util.Log.i("MainActivity", "WebView created, waiting for Rust hide() call...")
+        android.util.Log.i("MainActivity", "WebView created with dark VibeLink background")
     }
 }

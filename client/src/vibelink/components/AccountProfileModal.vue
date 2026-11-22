@@ -66,7 +66,7 @@
                 <input v-model="form.handle" type="text" class="vl-profile-input" />
               </label>
               <label class="space-y-1">
-                <span class="text-[#9ca3af]">岗位头衔</span>
+                <span class="text-[#9ca3af]">角色标签</span>
                 <input v-model="form.roleTitle" type="text" class="vl-profile-input" />
               </label>
             </div>

@@ -279,7 +279,7 @@ export function runSeedMigration(
     db.addRoomMember(group.id, "me", "owner");
     for (const botId of group.botIds ?? []) {
       if (db.getAccount(botId)) {
-        db.addRoomMember(group.id, botId, botId === "bot_cto" ? "admin" : "member");
+        db.addRoomMember(group.id, botId, "member");
       }
     }
 

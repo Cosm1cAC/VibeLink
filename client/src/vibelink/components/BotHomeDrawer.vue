@@ -142,11 +142,41 @@
               class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none" />
           </label>
         </div>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="space-y-1 text-12px">
+            <span class="text-[#9ca3af]">任务角色 (T3 Code role)</span>
+            <select
+              v-model="profileForm.roleTitle"
+              class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none">
+              <option value="general">general（通用）</option>
+              <option value="implementation">implementation（编码实现）</option>
+              <option value="research">research（调研分析）</option>
+              <option value="review">review（代码审查）</option>
+              <option value="design">design（方案设计）</option>
+              <option value="test">test（测试验证）</option>
+            </select>
+          </label>
+          <label class="space-y-1 text-12px">
+            <span class="text-[#9ca3af]">工作区隔离</span>
+            <select
+              v-model="profileForm.isolationMode"
+              class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none">
+              <option value="shared">shared（共享工作区）</option>
+              <option value="worktree">worktree（独立 Git Worktree）</option>
+            </select>
+          </label>
+        </div>
         <label class="block space-y-1 text-12px">
-          <span class="text-[#9ca3af]">岗位职责 (roleTitle)</span>
-          <input
-            v-model="profileForm.roleTitle"
-            class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none" />
+          <span class="text-[#9ca3af]">运行/审批模式</span>
+          <select
+            v-model="profileForm.approvalMode"
+            class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none">
+            <option value="ask">approval-required（需人工审批）</option>
+            <option value="accept_edits">auto-accept-edits（自动接受编辑）</option>
+            <option value="plan">plan（只读规划模式）</option>
+            <option value="auto">auto（自动执行）</option>
+            <option value="full_access">full-access（完全权限）</option>
+          </select>
         </label>
         <label class="block space-y-1 text-12px">
           <span class="text-[#9ca3af]">默认工作目录 (cwd)</span>
@@ -155,7 +185,7 @@
             class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] font-mono text-[#eaeaea] outline-none" />
         </label>
         <label class="block space-y-1 text-12px">
-          <span class="text-[#9ca3af]">简介 / 人设说明</span>
+          <span class="text-[#9ca3af]">说明</span>
           <textarea
             v-model="profileForm.description"
             rows="3"
@@ -202,7 +232,9 @@ const profileForm = reactive({
   handle: '',
   provider: 'codex',
   model: '',
-  roleTitle: '',
+  roleTitle: 'general',
+  isolationMode: 'shared',
+  approvalMode: 'ask',
   cwd: '',
   description: ''
 })
@@ -241,7 +273,9 @@ async function refreshBotHome() {
   profileForm.handle = bot.value.handle
   profileForm.provider = bot.value.provider || 'codex'
   profileForm.model = bot.value.model
-  profileForm.roleTitle = bot.value.roleTitle
+  profileForm.roleTitle = bot.value.roleTitle || 'general'
+  profileForm.isolationMode = bot.value.isolationMode || 'shared'
+  profileForm.approvalMode = bot.value.approvalMode || 'ask'
   profileForm.cwd = bot.value.cwd
   profileForm.description = bot.value.description
   try {

@@ -1,4 +1,4 @@
-﻿package com.hula.app
+﻿package com.vibelink.app
 
 import android.app.Activity
 import android.view.View

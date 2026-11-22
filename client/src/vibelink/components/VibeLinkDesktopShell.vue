@@ -80,7 +80,7 @@
           type="button"
           class="vl-rail-item"
           :class="{ active: store.activeNav === 'bots' }"
-          title="Bot 好友舰队"
+          title="Bot 好友"
           data-testid="nav-bots"
           @click="switchNav('bots')">
           <svg viewBox="0 0 24 24" class="w-22px h-22px" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -844,7 +844,7 @@
             v-model="draftText"
             data-testid="chat-composer-input"
             rows="3"
-            placeholder="输入消息，Enter 发送，Shift+Enter 换行；群聊中输入 @Bot 可多专家接力协作..."
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行；群聊中输入 @Bot 发起协作..."
             class="w-full box-border resize-none bg-transparent border-0 text-13.5px text-[#f0f0f0] leading-relaxed outline-none placeholder:text-[#6e6e6e]"
             @input="updateMentionPopup"
             @keydown="handleComposerKeydown"></textarea>
@@ -947,7 +947,7 @@
             <span class="text-12px text-[#5eead4]">Home &gt;</span>
           </div>
           <div class="mt-2 space-y-1 text-11.5px text-[#a3a3a3]">
-            <div>定位：{{ activeDmBot.roleTitle }}</div>
+            <div>角色：{{ activeDmBot.roleTitle || 'general' }} · {{ activeDmBot.isolationMode === 'worktree' ? 'Worktree 隔离' : '共享工作区' }}</div>
             <div>引擎：{{ activeDmBot.provider }} / {{ activeDmBot.model || 'default' }}</div>
             <div class="font-mono truncate text-[#888]" :title="activeDmBot.cwd">目录：{{ activeDmBot.cwd }}</div>
           </div>
@@ -1116,11 +1116,11 @@
         <div class="grid grid-cols-2 gap-2.5 text-12px">
           <label class="space-y-1">
             <span class="text-[#9ca3af]">名称 *</span>
-            <input v-model="newBotForm.displayName" placeholder="例如 Reviewer" class="vl-input" />
+            <input v-model="newBotForm.displayName" placeholder="例如 Codex" class="vl-input" />
           </label>
           <label class="space-y-1">
             <span class="text-[#9ca3af]">@Handle *</span>
-            <input v-model="newBotForm.handle" placeholder="例如 Reviewer" class="vl-input" />
+            <input v-model="newBotForm.handle" placeholder="例如 Codex" class="vl-input" />
           </label>
           <label class="space-y-1">
             <span class="text-[#9ca3af]">Provider</span>
@@ -1141,7 +1141,7 @@
           <input v-model="newBotForm.cwd" class="vl-input font-mono" />
         </label>
         <label class="block space-y-1 text-12px">
-          <span class="text-[#9ca3af]">人设提示 (SOUL.md)</span>
+          <span class="text-[#9ca3af]">自定义指令 (SOUL.md)</span>
           <textarea v-model="newBotForm.soulMarkdown" rows="3" class="vl-input"></textarea>
         </label>
         <div class="flex justify-end gap-2">

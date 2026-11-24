@@ -4,30 +4,30 @@
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3"
     data-testid="server-settings-modal"
     @click.self="$emit('close')">
-    <div class="w-full max-w-620px max-h-88vh flex flex-col rounded-12px bg-[#1f2222] border border-[#353a39] text-[#eaeaea] shadow-2xl overflow-hidden">
-      <div class="flex items-center justify-between px-4 py-3 bg-[#242828] border-b border-[#343938]">
+    <div class="w-full max-w-760px max-h-88vh flex flex-col rounded-14px bg-[#1f2222] border border-[#353a39] text-[#eaeaea] shadow-2xl overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-3.5 bg-[#242828] border-b border-[#343938]">
         <span class="text-15px font-semibold">VibeLink 控制面与插件中心</span>
         <button
           type="button"
-          class="px-2 py-0.5 rounded bg-[#2d3232] border-0 text-[#ccc] cursor-pointer text-12px"
+          class="px-2.5 py-1 rounded bg-[#2d3232] hover:bg-[#383e3e] border-0 text-[#ccc] cursor-pointer text-12px"
           @click="$emit('close')">
           关闭
         </button>
       </div>
 
-      <div class="px-4 py-2 bg-[#212424] border-b border-[#303534] flex items-center gap-2 text-12px">
+      <div class="px-5 py-2.5 bg-[#212424] border-b border-[#303534] flex items-center gap-2 text-12.5px">
         <button
           type="button"
           data-testid="settings-tab-connection"
-          class="px-3 py-1 rounded-6px border-0 cursor-pointer"
+          class="px-3.5 py-1.5 rounded-7px border-0 cursor-pointer"
           :class="store.serverSettingsTab === 'connection' ? 'bg-[#13987f] text-white font-medium' : 'bg-[#2a2f2e] text-[#cbd5e1]'"
           @click="switchTab('connection')">
-          连接与运行态
+          连接与配对
         </button>
         <button
           type="button"
           data-testid="settings-tab-plugins"
-          class="px-3 py-1 rounded-6px border-0 cursor-pointer flex items-center gap-1.5"
+          class="px-3.5 py-1.5 rounded-7px border-0 cursor-pointer flex items-center gap-1.5"
           :class="store.serverSettingsTab === 'plugins' ? 'bg-[#13987f] text-white font-medium' : 'bg-[#2a2f2e] text-[#cbd5e1]'"
           @click="switchTab('plugins')">
           <span>插件中心</span>
@@ -35,19 +35,8 @@
         </button>
         <button
           type="button"
-          data-testid="settings-tab-wproxy"
-          class="px-3 py-1 rounded-6px border-0 cursor-pointer flex items-center gap-1.5"
-          :class="store.serverSettingsTab === 'wproxy' ? 'bg-[#13987f] text-white font-medium' : 'bg-[#2a2f2e] text-[#cbd5e1]'"
-          @click="switchTab('wproxy')">
-          <span>WProxy 代理</span>
-          <span
-            class="w-2 h-2 rounded-full"
-            :class="store.wproxyStatus?.running ? 'bg-[#22c55e]' : 'bg-[#64748b]'"></span>
-        </button>
-        <button
-          type="button"
           data-testid="settings-tab-devices"
-          class="px-3 py-1 rounded-6px border-0 cursor-pointer flex items-center gap-1.5"
+          class="px-3.5 py-1.5 rounded-7px border-0 cursor-pointer flex items-center gap-1.5"
           :class="store.serverSettingsTab === 'devices' ? 'bg-[#13987f] text-white font-medium' : 'bg-[#2a2f2e] text-[#cbd5e1]'"
           @click="switchTab('devices')">
           <span>已配对手机</span>
@@ -58,7 +47,7 @@
         <button
           type="button"
           data-testid="settings-tab-account"
-          class="px-3 py-1 rounded-6px border-0 cursor-pointer flex items-center gap-1.5"
+          class="px-3.5 py-1.5 rounded-7px border-0 cursor-pointer flex items-center gap-1.5"
           :class="store.serverSettingsTab === 'account' ? 'bg-[#13987f] text-white font-medium' : 'bg-[#2a2f2e] text-[#cbd5e1]'"
           @click="switchTab('account')">
           <span>账号与福利</span>
@@ -241,198 +230,196 @@
         </div>
       </div>
 
-      <!-- Tab 2: Plugins -->
-      <div v-else-if="store.serverSettingsTab === 'plugins'" class="p-4 space-y-3.5 vl-scroll flex-1 min-h-0" data-testid="plugins-tab-pane">
-        <div class="flex items-center justify-between gap-2 text-12px">
-          <div class="min-w-0">
-            <div class="text-[#cbd5e1] font-medium">独立插件加载目录</div>
-            <div class="text-11px font-mono text-[#8e9297] truncate" :title="store.userPluginsDir">
-              {{ store.userPluginsDir || '~/.vibelink/plugins' }}
-            </div>
+      <!-- Tab 2: Plugins (Decluttered, airy layout) -->
+      <div v-else-if="store.serverSettingsTab === 'plugins'" class="p-5 space-y-4 vl-scroll flex-1 min-h-0" data-testid="plugins-tab-pane">
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-12.5px text-[#9ca3af]">
+            已启用的插件会自动出现在左侧导航栏，点击图标即可直接打开功能页。
           </div>
           <button
             type="button"
             :disabled="store.pluginsLoading"
             data-testid="sync-all-plugins-btn"
-            class="px-3 py-1.5 rounded-6px bg-[#13987f] hover:bg-[#17ad91] disabled:opacity-50 border-0 text-white text-12px cursor-pointer shrink-0"
+            class="px-3.5 py-1.5 rounded-7px bg-[#1d4940] hover:bg-[#13987f] disabled:opacity-50 border-0 text-[#ecfdf5] text-12px cursor-pointer shrink-0"
             @click="handleSyncAllPlugins">
             {{ store.pluginsLoading ? '同步中...' : '全部同步' }}
           </button>
         </div>
 
-        <div v-if="pluginBanner" class="px-3 py-2 rounded-6px bg-[#182f2a] border border-[#245147] text-[#a7f3d0] text-12px whitespace-pre-wrap">
+        <div v-if="pluginBanner" class="px-3.5 py-2.5 rounded-8px bg-[#182f2a] border border-[#245147] text-[#a7f3d0] text-12.5px whitespace-pre-wrap">
           {{ pluginBanner }}
         </div>
-        <div v-if="pluginError" class="px-3 py-2 rounded-6px bg-[#3b1d1d] border border-[#5f2f2f] text-[#fecaca] text-12px whitespace-pre-wrap">
+        <div v-if="pluginError" class="px-3.5 py-2.5 rounded-8px bg-[#3b1d1d] border border-[#5f2f2f] text-[#fecaca] text-12.5px whitespace-pre-wrap">
           {{ pluginError }}
         </div>
 
-        <div v-if="store.plugins.length === 0" class="py-8 text-center text-12.5px text-[#888]">
+        <div v-if="store.plugins.length === 0" class="py-10 text-center text-13px text-[#888]">
           暂无已加载的 VibeLink 插件
         </div>
 
         <div
           v-for="plugin in store.plugins"
           :key="plugin.id"
-          class="rounded-10px bg-[#171a1a] border border-[#2f3534] p-3.5 space-y-3"
+          class="rounded-12px bg-[#171b1b] border border-[#2d3534] p-5 space-y-3"
           :data-testid="`plugin-card-${plugin.id}`">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0 space-y-1">
+          <div class="flex items-center justify-between gap-4">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-38px h-38px rounded-10px bg-[#20332f] border border-[#2d584e] text-[#5eead4] flex items-center justify-center shrink-0">
+                <svg
+                  v-if="plugin.ui?.icon === 'magpie'"
+                  viewBox="0 0 24 24"
+                  class="w-20px h-20px"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8">
+                  <path d="M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3L12 3z" stroke-linejoin="round" />
+                  <circle cx="12" cy="12" r="2.6" />
+                </svg>
+                <svg
+                  v-else-if="plugin.ui?.icon === 'globe'"
+                  viewBox="0 0 24 24"
+                  class="w-20px h-20px"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" />
+                </svg>
+                <svg v-else viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <rect x="4" y="4" width="16" height="16" rx="4" />
+                  <path d="M9 12h6M12 9v6" stroke-linecap="round" />
+                </svg>
+              </div>
+              <div class="min-w-0 space-y-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-15px font-semibold text-[#f3f3f3]">{{ plugin.name }}</span>
+                  <span class="px-2 py-0.5 rounded-full text-11px" :class="healthBadgeClass(plugin.health.status)">
+                    {{ healthBadgeLabel(plugin.health.status) }}{{ plugin.health.version ? ` · v${plugin.health.version}` : '' }}
+                  </span>
+                </div>
+                <div class="text-13px text-[#b0b8bf] leading-relaxed">
+                  {{ plugin.description }}
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 shrink-0">
+              <button
+                v-if="plugin.enabled && plugin.ui"
+                type="button"
+                class="px-3.5 py-1.5 rounded-7px bg-[#13987f] hover:bg-[#17ad91] border-0 text-white text-12.5px font-medium cursor-pointer"
+                @click="store.openPluginView(plugin.id)">
+                打开页面
+              </button>
+              <button
+                type="button"
+                :disabled="store.pluginsLoading"
+                class="px-3 py-1.5 rounded-7px border-0 cursor-pointer text-12px"
+                :class="plugin.enabled ? 'bg-[#263330] text-[#5eead4]' : 'bg-[#2d3232] text-[#9ca3af]'"
+                @click="handleTogglePlugin(plugin)">
+                {{ plugin.enabled ? '已启用' : '已停用' }}
+              </button>
+            </div>
+          </div>
+
+          <details class="pt-1 border-t border-[#262b2a] text-12px text-[#8e9297]">
+            <summary class="cursor-pointer select-none hover:text-[#cbd5e1] py-1">
+              {{
+                plugin.capabilities.includes('agentDiscovery')
+                  ? `高级管理 · 已同步 ${plugin.configuredAgents.length} 个 Agent / ${plugin.modelsCount} 个模型`
+                  : `高级管理 · ${plugin.source === 'user' ? '独立目录' : '内置默认'}`
+              }}
+            </summary>
+
+            <div class="pt-2.5 space-y-3">
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-14px font-semibold text-[#f0f0f0]">{{ plugin.name }}</span>
-                <span class="px-1.5 py-0.2 rounded bg-[#282e2d] text-[#cbd5e1] text-10.5px font-mono">
-                  v{{ plugin.version }}
-                </span>
+                <button
+                  v-if="plugin.capabilities.includes('agentDiscovery') || plugin.capabilities.includes('modelCatalog')"
+                  type="button"
+                  :disabled="store.pluginsLoading || !plugin.enabled"
+                  class="px-2.5 py-1 rounded-6px bg-[#20332f] hover:bg-[#1d4940] disabled:opacity-50 border border-[#2d584e] text-[#99f6e4] text-11.5px cursor-pointer"
+                  @click="handleSyncPlugin(plugin.id)">
+                  同步 Agent
+                </button>
+                <button
+                  v-if="plugin.capabilities.includes('selfUpdate')"
+                  type="button"
+                  :disabled="store.pluginsLoading"
+                  class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#e5e7eb] text-11.5px cursor-pointer"
+                  @click="handleCheckUpdate(plugin.id)">
+                  检查更新
+                </button>
+                <button
+                  v-if="plugin.capabilities.includes('selfUpdate')"
+                  type="button"
+                  :disabled="store.pluginsLoading"
+                  class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#5eead4] text-11.5px cursor-pointer"
+                  @click="handleRunHostUpdate(plugin.id)">
+                  独立升级 Magpie
+                </button>
+                <button
+                  v-if="plugin.source === 'bundled'"
+                  type="button"
+                  :disabled="store.pluginsLoading"
+                  class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#93c5fd] text-11.5px cursor-pointer"
+                  @click="handleEjectPlugin(plugin.id)">
+                  迁出到独立目录
+                </button>
+                <template v-else>
+                  <button
+                    type="button"
+                    :disabled="store.pluginsLoading"
+                    class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#e5e7eb] text-11.5px cursor-pointer"
+                    @click="handleReloadPlugin(plugin.id)">
+                    热重载
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="store.pluginsLoading"
+                    class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#93c5fd] text-11.5px cursor-pointer"
+                    @click="handleRunPluginGitUpdate(plugin.id)">
+                    更新插件代码
+                  </button>
+                </template>
+              </div>
+
+              <div
+                v-if="updateInfoByPlugin[plugin.id]"
+                class="p-2.5 rounded-6px bg-[#141717] border border-[#2a302f] text-11.5px space-y-1">
+                <div class="flex items-center justify-between">
+                  <span class="font-medium text-[#e5e7eb]">
+                    当前：{{ updateInfoByPlugin[plugin.id].currentVersion || '未知' }} ·
+                    最新：{{ updateInfoByPlugin[plugin.id].latestVersion || '未知' }}
+                  </span>
+                  <span :class="updateInfoByPlugin[plugin.id].updateAvailable ? 'text-[#fbbf24]' : 'text-[#34d399]'">
+                    {{ updateInfoByPlugin[plugin.id].updateAvailable ? '有可用更新' : '已是最新' }}
+                  </span>
+                </div>
+                <div class="text-[#9ca3af] whitespace-pre-wrap">{{ updateInfoByPlugin[plugin.id].summary }}</div>
+              </div>
+
+              <div v-if="plugin.capabilities.includes('agentDiscovery') && plugin.configuredAgents.length > 0" class="flex flex-wrap gap-1.5">
                 <span
-                  class="px-1.5 py-0.2 rounded text-10.5px"
-                  :class="plugin.source === 'user' ? 'bg-[#1d4940] text-[#5eead4]' : 'bg-[#2a2f38] text-[#93c5fd]'">
-                  {{ plugin.source === 'user' ? '独立目录' : '内置默认' }}
-                </span>
-                <span
-                  class="px-1.5 py-0.2 rounded text-10.5px"
-                  :class="healthBadgeClass(plugin.health.status)">
-                  {{ healthBadgeLabel(plugin.health.status) }}
+                  v-for="ag in plugin.configuredAgents"
+                  :key="`${ag.botId}-${ag.externalId}`"
+                  class="px-2 py-1 rounded-6px bg-[#1b2f2b] border border-[#294942] text-11px text-[#d1fae5]">
+                  {{ ag.displayName }} · <span class="text-[#5eead4]">{{ ag.model || ag.rawStatus }}</span>
                 </span>
               </div>
-              <div class="text-11.5px text-[#9ca3af]">{{ plugin.description }}</div>
-              <div class="text-11.5px text-[#cbd5e1]">
-                {{ plugin.health.message }}<span v-if="plugin.capabilities.includes('modelCatalog')"> · 已激活模型：{{ plugin.modelsCount }} 个</span>
-              </div>
-              <div class="text-10.5px font-mono text-[#767d85] truncate" :title="plugin.pluginDir">
+
+              <div class="text-11px font-mono text-[#767d85] truncate" :title="plugin.pluginDir">
                 目录：{{ plugin.pluginDir }}
               </div>
             </div>
-
-            <button
-              type="button"
-              :disabled="store.pluginsLoading"
-              class="px-2.5 py-1 rounded-6px border-0 cursor-pointer text-11.5px shrink-0"
-              :class="plugin.enabled ? 'bg-[#1d4940] text-[#5eead4]' : 'bg-[#2d3232] text-[#9ca3af]'"
-              @click="handleTogglePlugin(plugin)">
-              {{ plugin.enabled ? '已启用' : '已停用' }}
-            </button>
-          </div>
-
-          <!-- Action Toolbar -->
-          <div class="flex flex-wrap items-center gap-1.5 pt-1">
-            <button
-              v-if="plugin.capabilities.includes('proxyControl')"
-              type="button"
-              class="px-2.5 py-1 rounded-6px bg-[#1d4940] hover:bg-[#13987f] border border-[#2d584e] text-[#ecfdf5] text-11.5px cursor-pointer"
-              @click="switchTab('wproxy')">
-              打开代理面板
-            </button>
-            <button
-              v-if="plugin.capabilities.includes('agentDiscovery') || plugin.capabilities.includes('modelCatalog')"
-              type="button"
-              :disabled="store.pluginsLoading || !plugin.enabled"
-              class="px-2.5 py-1 rounded-6px bg-[#20332f] hover:bg-[#1d4940] disabled:opacity-50 border border-[#2d584e] text-[#99f6e4] text-11.5px cursor-pointer"
-              @click="handleSyncPlugin(plugin.id)">
-              同步 Agent
-            </button>
-            <button
-              v-if="plugin.capabilities.includes('selfUpdate')"
-              type="button"
-              :disabled="store.pluginsLoading"
-              class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#e5e7eb] text-11.5px cursor-pointer"
-              @click="handleCheckUpdate(plugin.id)">
-              检查独立更新
-            </button>
-            <button
-              v-if="plugin.capabilities.includes('selfUpdate')"
-              type="button"
-              :disabled="store.pluginsLoading"
-              class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#5eead4] text-11.5px cursor-pointer"
-              @click="handleRunHostUpdate(plugin.id)">
-              独立升级 Magpie
-            </button>
-            <button
-              v-if="plugin.source === 'bundled'"
-              type="button"
-              :disabled="store.pluginsLoading"
-              class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#93c5fd] text-11.5px cursor-pointer"
-              @click="handleEjectPlugin(plugin.id)">
-              迁出到独立目录
-            </button>
-            <template v-else>
-              <button
-                type="button"
-                :disabled="store.pluginsLoading"
-                class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#e5e7eb] text-11.5px cursor-pointer"
-                @click="handleReloadPlugin(plugin.id)">
-                热重载
-              </button>
-              <button
-                type="button"
-                :disabled="store.pluginsLoading"
-                class="px-2.5 py-1 rounded-6px bg-[#262b2a] hover:bg-[#323837] disabled:opacity-50 border border-[#383f3e] text-[#93c5fd] text-11.5px cursor-pointer"
-                @click="handleRunPluginGitUpdate(plugin.id)">
-                更新插件代码
-              </button>
-            </template>
-          </div>
-
-          <div
-            v-if="updateInfoByPlugin[plugin.id]"
-            class="p-2.5 rounded-6px bg-[#141717] border border-[#2a302f] text-11.5px space-y-1">
-            <div class="flex items-center justify-between">
-              <span class="font-medium text-[#e5e7eb]">
-                当前：{{ updateInfoByPlugin[plugin.id].currentVersion || '未知' }} ·
-                最新：{{ updateInfoByPlugin[plugin.id].latestVersion || '未知' }}
-              </span>
-              <span
-                :class="updateInfoByPlugin[plugin.id].updateAvailable ? 'text-[#fbbf24]' : 'text-[#34d399]'">
-                {{ updateInfoByPlugin[plugin.id].updateAvailable ? '有可用更新' : '已是最新' }}
-              </span>
-            </div>
-            <div class="text-[#9ca3af] whitespace-pre-wrap">{{ updateInfoByPlugin[plugin.id].summary }}</div>
-          </div>
-
-          <!-- Configured & Visible Agents -->
-          <div v-if="plugin.capabilities.includes('agentDiscovery')" class="space-y-1.5 pt-1">
-            <div class="text-11.5px text-[#9ca3af]">
-              已配置并展示的 Agent ({{ plugin.configuredAgents.length }})
-            </div>
-            <div v-if="plugin.configuredAgents.length === 0" class="text-11.5px text-[#777]">
-              暂未检测到已配置的 Agent
-            </div>
-            <div v-else class="flex flex-wrap gap-1.5">
-              <span
-                v-for="ag in plugin.configuredAgents"
-                :key="`${ag.botId}-${ag.externalId}`"
-                class="px-2 py-1 rounded-6px bg-[#1b2f2b] border border-[#294942] text-11px text-[#d1fae5]">
-                <strong>{{ ag.displayName }}</strong>
-                <span class="text-[#5eead4] ml-1">{{ ag.model || ag.rawStatus }}</span>
-                <span class="text-[#9ca3af] ml-1">({{ ag.provider }})</span>
-              </span>
-            </div>
-          </div>
-
-          <!-- Hidden / Unconfigured Agents -->
-          <details
-            v-if="plugin.capabilities.includes('agentDiscovery') && plugin.unconfiguredAgents.length > 0"
-            class="text-11.5px text-[#8e9297] pt-1">
-            <summary class="cursor-pointer hover:text-[#cbd5e1]">
-              已隐藏（未配置）的 Agent ({{ plugin.unconfiguredAgents.length }}) — 配置好后点击同步即可出现
-            </summary>
-            <div class="mt-1.5 flex flex-wrap gap-1.5">
-              <span
-                v-for="ag in plugin.unconfiguredAgents"
-                :key="`${ag.externalId}-${ag.agentName}`"
-                class="px-2 py-0.5 rounded bg-[#222525] border border-[#303434] text-11px text-[#9ca3af]">
-                {{ ag.agentName }} · {{ ag.rawStatus }}
-              </span>
-            </div>
           </details>
+        </div>
+
+        <div class="text-11px font-mono text-[#767d85] truncate pt-1" :title="store.userPluginsDir">
+          独立插件目录：{{ store.userPluginsDir || '~/.vibelink/plugins' }}
         </div>
       </div>
 
-      <!-- Tab 3: WProxy Control -->
-      <div v-else-if="store.serverSettingsTab === 'wproxy'" class="p-4 vl-scroll flex-1 min-h-0" data-testid="wproxy-tab-pane">
-        <WProxyPanel />
-      </div>
-
-      <!-- Tab 4: Paired Android Devices -->
+      <!-- Tab 3: Paired Android Devices -->
       <div v-else-if="store.serverSettingsTab === 'devices'" class="p-4 space-y-3 vl-scroll flex-1 min-h-0" data-testid="devices-tab-pane">
         <div class="flex items-center justify-between gap-2 text-12px">
           <div class="text-[#9ca3af]">
@@ -574,7 +561,6 @@ import { useVibeLinkStore } from '../store'
 import type { VlPluginHealth, VlPluginSummary, VlPluginUpdateInfo } from '../types'
 import AccountAuthModal from './AccountAuthModal.vue'
 import AccountWelfarePanel from './AccountWelfarePanel.vue'
-import WProxyPanel from './WProxyPanel.vue'
 
 const props = defineProps<{
   open: boolean
@@ -691,12 +677,10 @@ async function saveCustomExternalUrl() {
   }
 }
 
-function switchTab(tab: 'connection' | 'plugins' | 'wproxy' | 'devices' | 'account') {
+function switchTab(tab: 'connection' | 'plugins' | 'devices' | 'account') {
   store.serverSettingsTab = tab
   if (tab === 'plugins') {
     void store.fetchPlugins()
-  } else if (tab === 'wproxy') {
-    void store.fetchWProxyStatus()
   } else if (tab === 'devices') {
     void store.fetchDevices()
   } else if (tab === 'account') {

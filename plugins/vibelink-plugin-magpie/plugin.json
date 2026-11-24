@@ -1,8 +1,8 @@
 {
   "id": "magpie",
-  "name": "Magpie Gateway & Agent Hub",
+  "name": "Magpie 控制台",
   "version": "0.1.0",
-  "description": "Auto-discovers configured local coding agents from Magpie, exposes active /v1/models catalog, routes gateway bots via 127.0.0.1:3425, and supports independent Magpie updates.",
+  "description": "将原版 Magpie 界面搬入 VibeLink，统一管理模型路由、账号额度与本地 Agent。",
   "entry": "index.mjs",
   "capabilities": [
     "agentDiscovery",
@@ -11,6 +11,14 @@
     "gatewayChat",
     "selfUpdate"
   ],
+  "ui": {
+    "dock": "rail",
+    "label": "Magpie",
+    "icon": "magpie",
+    "viewMode": "iframe",
+    "order": 10,
+    "embedAction": "ensureWebUi"
+  },
   "homepage": "https://github.com/yetone/magpie",
   "defaultEnabled": true
 }

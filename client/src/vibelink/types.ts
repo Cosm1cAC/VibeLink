@@ -255,6 +255,17 @@ export interface VlProviderOption {
   description?: string
 }
 
+export interface VlPluginUiEntry {
+  dock: 'rail'
+  label: string
+  shortLabel?: string
+  icon: 'magpie' | 'globe' | 'puzzle' | string
+  viewMode: 'iframe' | 'builtin_wproxy' | 'external'
+  order?: number
+  embedAction?: string
+  url?: string
+}
+
 export interface VlPluginSummary {
   id: string
   name: string
@@ -271,6 +282,7 @@ export interface VlPluginSummary {
   modelsCount: number
   lastSyncAt: number | null
   lastError: string | null
+  ui?: VlPluginUiEntry
 }
 
 export interface VlPluginUpdateInfo {

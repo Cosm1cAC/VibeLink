@@ -1,5 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -519,6 +522,196 @@ function buildGatewayHeaders(extra = {}) {
   return headers;
 }
 
+function listenOnPort(server, host, port) {
+  return new Promise((resolve, reject) => {
+    const onError = (err) => {
+      server.off("listening", onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      const addr = server.address();
+      resolve(typeof addr === "object" && addr ? addr.port : port);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen({ host, port });
+  });
+}
+
+export async function findAvailableLoopbackPort(preferredPort = 0) {
+  const tryBind = (port) =>
+    new Promise((resolve, reject) => {
+      const srv = net.createServer();
+      srv.once("error", (err) => {
+        try {
+          srv.close();
+        } catch {}
+        reject(err);
+      });
+      srv.listen({ host: "127.0.0.1", port }, () => {
+        const addr = srv.address();
+        const assigned = typeof addr === "object" && addr ? addr.port : port;
+        srv.close(() => resolve(assigned));
+      });
+    });
+
+  if (preferredPort > 0) {
+    try {
+      return await tryBind(preferredPort);
+    } catch {
+      // Fall back to an ephemeral loopback port when preferredPort is busy.
+    }
+  }
+  return tryBind(0);
+}
+
+function mergeInjectedCookie(rawCookie, cookieName, cookieValue) {
+  const parts = String(rawCookie || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter((item) => item && !item.startsWith(`${cookieName}=`));
+  parts.unshift(`${cookieName}=${cookieValue}`);
+  return parts.join("; ");
+}
+
+function stripFrameBlockingDirectives(cspValue) {
+  if (typeof cspValue !== "string" || !cspValue) return cspValue;
+  return cspValue
+    .split(";")
+    .map((dir) => dir.trim())
+    .filter((dir) => dir && !/^frame-ancestors\b/i.test(dir))
+    .join("; ");
+}
+
+export async function createLoopbackCookieProxy({
+  targetHost = "127.0.0.1",
+  targetPort,
+  cookieName,
+  cookieValue,
+  preferredPort = 0,
+}) {
+  let listenPort = preferredPort;
+
+  const server = http.createServer((clientReq, clientRes) => {
+    const headers = { ...clientReq.headers };
+    headers.host = `${targetHost}:${targetPort}`;
+    if (headers.origin !== undefined) {
+      headers.origin = `http://${targetHost}:${targetPort}`;
+    }
+    if (typeof headers.referer === "string") {
+      headers.referer = headers.referer
+        .replace(`http://127.0.0.1:${listenPort}`, `http://${targetHost}:${targetPort}`)
+        .replace(`http://localhost:${listenPort}`, `http://${targetHost}:${targetPort}`);
+    }
+    headers.cookie = mergeInjectedCookie(headers.cookie, cookieName, cookieValue);
+    delete headers.connection;
+
+    const upstreamReq = http.request(
+      {
+        host: targetHost,
+        port: targetPort,
+        method: clientReq.method || "GET",
+        path: clientReq.url || "/",
+        headers,
+      },
+      (upstreamRes) => {
+        const resHeaders = { ...upstreamRes.headers };
+        delete resHeaders["x-frame-options"];
+        if (typeof resHeaders["content-security-policy"] === "string") {
+          const stripped = stripFrameBlockingDirectives(resHeaders["content-security-policy"]);
+          if (stripped) {
+            resHeaders["content-security-policy"] = stripped;
+          } else {
+            delete resHeaders["content-security-policy"];
+          }
+        }
+        if (typeof resHeaders.location === "string") {
+          resHeaders.location = resHeaders.location
+            .replace(`http://${targetHost}:${targetPort}`, `http://127.0.0.1:${listenPort}`)
+            .replace(`http://localhost:${targetPort}`, `http://127.0.0.1:${listenPort}`);
+        }
+        clientRes.writeHead(upstreamRes.statusCode || 200, resHeaders);
+        upstreamRes.pipe(clientRes);
+      },
+    );
+
+    upstreamReq.on("error", (err) => {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+      }
+      clientRes.end(`Magpie web proxy error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+
+    clientReq.pipe(upstreamReq);
+  });
+
+  server.on("upgrade", (req, clientSocket, head) => {
+    const upstreamSocket = net.connect(targetPort, targetHost);
+    const cleanup = () => {
+      try {
+        clientSocket.destroy();
+      } catch {}
+      try {
+        upstreamSocket.destroy();
+      } catch {}
+    };
+    clientSocket.on("error", cleanup);
+    upstreamSocket.on("error", cleanup);
+
+    upstreamSocket.once("connect", () => {
+      const headerLines = [`${req.method || "GET"} ${req.url || "/"} HTTP/${req.httpVersion || "1.1"}`];
+      let sawCookie = false;
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        const key = req.rawHeaders[i];
+        let val = req.rawHeaders[i + 1] ?? "";
+        const lower = key.toLowerCase();
+        if (lower === "host") {
+          val = `${targetHost}:${targetPort}`;
+        } else if (lower === "origin") {
+          val = `http://${targetHost}:${targetPort}`;
+        } else if (lower === "cookie") {
+          val = mergeInjectedCookie(val, cookieName, cookieValue);
+          sawCookie = true;
+        }
+        headerLines.push(`${key}: ${val}`);
+      }
+      if (!sawCookie) {
+        headerLines.push(`Cookie: ${cookieName}=${cookieValue}`);
+      }
+      upstreamSocket.write(`${headerLines.join("\r\n")}\r\n\r\n`);
+      if (head && head.length > 0) {
+        upstreamSocket.write(head);
+      }
+      upstreamSocket.pipe(clientSocket);
+      clientSocket.pipe(upstreamSocket);
+    });
+  });
+
+  try {
+    listenPort = await listenOnPort(server, "127.0.0.1", preferredPort);
+  } catch (err) {
+    if (preferredPort > 0) {
+      listenPort = await listenOnPort(server, "127.0.0.1", 0);
+    } else {
+      throw err;
+    }
+  }
+
+  return {
+    server,
+    port: listenPort,
+    close: () =>
+      new Promise((resolve) => {
+        try {
+          server.close(() => resolve());
+        } catch {
+          resolve();
+        }
+      }),
+  };
+}
+
 export function createPlugin(context = {}) {
   const pluginDir = context.pluginDir || import.meta.dirname || "";
 
@@ -900,6 +1093,204 @@ export function createPlugin(context = {}) {
     ];
   };
 
+  let webUiState = null;
+  let webUiBootPromise = null;
+
+  const readInstalledMagpieVersion = async (binaryPath) => {
+    try {
+      const { stdout } = await execMagpieCli(binaryPath, ["--version"], { timeoutMs: 3000 });
+      const match = /(\d+\.\d+\.\d+[^\s]*)/.exec(String(stdout || ""));
+      return match ? match[1] : "";
+    } catch {
+      return null;
+    }
+  };
+
+  const cleanupWebUiSync = () => {
+    const cur = webUiState;
+    webUiState = null;
+    if (!cur) return;
+    try {
+      cur.proxy?.server?.close();
+    } catch {}
+    if (cur.child && !cur.child.killed) {
+      try {
+        cur.child.kill();
+      } catch {}
+    }
+  };
+
+  const dispose = async () => {
+    const cur = webUiState;
+    webUiState = null;
+    if (!cur) return;
+    if (cur.proxy) {
+      await cur.proxy.close().catch(() => {});
+    }
+    if (cur.child && !cur.child.killed) {
+      try {
+        cur.child.kill();
+      } catch {}
+    }
+  };
+
+  process.once("exit", cleanupWebUiSync);
+
+  const waitForLoopbackHttp = async (port, child, timeoutMs = 8000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) {
+        return false;
+      }
+      try {
+        await fetch(`http://127.0.0.1:${port}/`, {
+          method: "GET",
+          signal: AbortSignal.timeout(800),
+        });
+        return true;
+      } catch {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    return false;
+  };
+
+  const ensureWebUi = async () => {
+    if (
+      webUiState &&
+      webUiState.child &&
+      webUiState.child.exitCode === null &&
+      webUiState.proxy?.server?.listening
+    ) {
+      return {
+        ok: true,
+        installed: true,
+        embedUrl: `http://127.0.0.1:${webUiState.proxy.port}/`,
+        directUrl: `http://127.0.0.1:${webUiState.webPort}/?k=${encodeURIComponent(webUiState.webKey)}`,
+        version: webUiState.version,
+        gatewayUrl: resolveGatewayUrl(resolveMagpieConfigDir()),
+      };
+    }
+
+    if (webUiBootPromise) {
+      return webUiBootPromise;
+    }
+
+    webUiBootPromise = (async () => {
+      await dispose();
+      const binaryPath = resolveMagpieBinary();
+      const version = await readInstalledMagpieVersion(binaryPath);
+      if (version === null) {
+        return {
+          ok: false,
+          installed: false,
+          message: "未检测到本机 Magpie，请先安装 Magpie 客户端后再打开控制台。",
+        };
+      }
+
+      const webPort = await findAvailableLoopbackPort(13425);
+      const preferredProxy = webPort === 13426 ? 13427 : 13426;
+      const proxyPort = await findAvailableLoopbackPort(preferredProxy);
+      const webKey = crypto.randomBytes(18).toString("hex");
+
+      let stderrTail = "";
+      const child = spawn(binaryPath, ["web", "--addr", `127.0.0.1:${webPort}`, "--no-open"], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          MAGPIE_WEB_KEY: webKey,
+          NO_PROXY: [process.env.NO_PROXY, "127.0.0.1", "localhost"].filter(Boolean).join(","),
+        },
+      });
+      child.stdout?.resume();
+      child.stderr?.on("data", (chunk) => {
+        stderrTail = (stderrTail + chunk.toString("utf8")).slice(-1200);
+      });
+
+      const ready = await waitForLoopbackHttp(webPort, child, 9000);
+      if (!ready) {
+        try {
+          if (child.exitCode === null) child.kill();
+        } catch {}
+        return {
+          ok: false,
+          installed: true,
+          message: stderrTail.trim() || `启动 Magpie Web 控制台超时 (port ${webPort})`,
+        };
+      }
+
+      const proxy = await createLoopbackCookieProxy({
+        targetHost: "127.0.0.1",
+        targetPort: webPort,
+        cookieName: `magpie_web_${webPort}`,
+        cookieValue: webKey,
+        preferredPort: proxyPort,
+      });
+
+      const state = {
+        child,
+        proxy,
+        webPort,
+        webKey,
+        version,
+        startedAt: Date.now(),
+      };
+      webUiState = state;
+      child.once("exit", () => {
+        if (webUiState === state) {
+          void dispose();
+        }
+      });
+
+      return {
+        ok: true,
+        installed: true,
+        embedUrl: `http://127.0.0.1:${proxy.port}/`,
+        directUrl: `http://127.0.0.1:${webPort}/?k=${encodeURIComponent(webKey)}`,
+        version,
+        gatewayUrl: resolveGatewayUrl(resolveMagpieConfigDir()),
+      };
+    })().finally(() => {
+      webUiBootPromise = null;
+    });
+
+    return webUiBootPromise;
+  };
+
+  const invokeAction = async (action) => {
+    if (action === "ensureWebUi") {
+      return ensureWebUi();
+    }
+    if (action === "restartWebUi") {
+      await dispose();
+      return ensureWebUi();
+    }
+    if (action === "webUiStatus") {
+      const active =
+        Boolean(webUiState?.child) &&
+        webUiState.child.exitCode === null &&
+        Boolean(webUiState?.proxy?.server?.listening);
+      return {
+        ok: active,
+        running: active,
+        embedUrl: active ? `http://127.0.0.1:${webUiState.proxy.port}/` : null,
+        version: webUiState?.version || "",
+      };
+    }
+    if (action === "openNativeWindow") {
+      const binaryPath = resolveMagpieBinary();
+      const child = spawn(binaryPath, [], {
+        detached: true,
+        windowsHide: false,
+        stdio: "ignore",
+      });
+      child.unref();
+      return { ok: true };
+    }
+    throw new Error(`Unsupported magpie plugin action: ${action}`);
+  };
+
   return {
     health,
     listModels,
@@ -909,5 +1300,7 @@ export function createPlugin(context = {}) {
     checkUpdate,
     runUpdate,
     getWatchPaths,
+    invokeAction,
+    dispose,
   };
 }

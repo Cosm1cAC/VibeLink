@@ -11,7 +11,11 @@ import * as Effect from "effect/Effect";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 
 // @ts-expect-error Pure ESM JS plugin module without .d.ts
-import { createPlugin as createMagpiePlugin, parseMagpieLsOutput } from "../../../../../../plugins/vibelink-plugin-magpie/index.mjs";
+import {
+  createLoopbackCookieProxy,
+  createPlugin as createMagpiePlugin,
+  parseMagpieLsOutput,
+} from "../../../../../../plugins/vibelink-plugin-magpie/index.mjs";
 import { VibeLinkAccountStore } from "../accounts.ts";
 import { VibeLinkAuth } from "../auth.ts";
 import { BotHomeManager } from "../bots/botHome.ts";
@@ -646,6 +650,114 @@ describe("VibeLink Plugin Architecture & Magpie Integration", () => {
       else process.env.MAGPIE_ADDR = prevMagpieAddr;
       if (prevMockBots === undefined) delete process.env.VIBELINK_MOCK_BOTS;
       else process.env.VIBELINK_MOCK_BOTS = prevMockBots;
+    }
+  });
+
+  it("parses manifest.ui dock entries and exposes them on listPlugins() + calls dispose() on stop", async () => {
+    const home = makeTempDir("vl-plugin-ui-home-");
+    const bundledDir = makeTempDir("vl-plugin-ui-bundled-");
+    const userDir = makeTempDir("vl-plugin-ui-user-");
+
+    let disposed = false;
+    writeTestPlugin(
+      userDir,
+      "docked-magpie",
+      {
+        id: "docked-magpie",
+        name: "Magpie 控制台",
+        version: "0.1.0",
+        description: "Test docked plugin",
+        entry: "index.mjs",
+        capabilities: ["gatewayChat"],
+        ui: {
+          dock: "rail",
+          label: "Magpie",
+          icon: "magpie",
+          viewMode: "iframe",
+          order: 10,
+          embedAction: "ensureWebUi",
+        },
+        defaultEnabled: true,
+      },
+      `export function createPlugin() {
+        return {
+          health: async () => ({ ok: true, status: "running", version: "0.1.4728", message: "ok" }),
+          dispose: async () => { globalThis.__vlPluginDisposed = true; },
+        };
+      }`,
+    );
+
+    const db = new VibeLinkDatabase(home);
+    const botHome = new BotHomeManager(home);
+    const manager = new VibeLinkPluginManager(db, botHome, {
+      bundledPluginsDir: bundledDir,
+      userPluginsDir: userDir,
+      disableBundled: true,
+      watchIntervalMs: 0,
+    });
+
+    try {
+      (globalThis as { __vlPluginDisposed?: boolean }).__vlPluginDisposed = false;
+      await manager.initialize();
+      const summary = manager.listPlugins().find((p) => p.id === "docked-magpie");
+      expect(summary?.ui).toEqual({
+        dock: "rail",
+        label: "Magpie",
+        icon: "magpie",
+        viewMode: "iframe",
+        order: 10,
+        embedAction: "ensureWebUi",
+      });
+    } finally {
+      manager.stop();
+      disposed = Boolean((globalThis as { __vlPluginDisposed?: boolean }).__vlPluginDisposed);
+      delete (globalThis as { __vlPluginDisposed?: boolean }).__vlPluginDisposed;
+      db.close();
+    }
+
+    expect(disposed).toBe(true);
+  });
+
+  it("createLoopbackCookieProxy injects auth cookie, rewrites Host/Origin, and strips frame-blocking headers", async () => {
+    let seenHeaders: NodeHttp.IncomingHttpHeaders = {};
+    const upstream = NodeHttp.createServer((req, res) => {
+      seenHeaders = req.headers;
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; script-src 'self'",
+      });
+      res.end("<html><title>magpie</title></html>");
+    });
+
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", () => resolve()));
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const proxy = await createLoopbackCookieProxy({
+      targetPort: upstreamPort,
+      cookieName: `magpie_web_${upstreamPort}`,
+      cookieValue: "secret_cookie_value_1234",
+      preferredPort: 0,
+    });
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${proxy.port}/`, {
+        headers: {
+          Origin: "http://tauri.localhost",
+          Cookie: "other=1",
+        },
+      });
+      const html = await res.text();
+      expect(res.status).toBe(200);
+      expect(html).toContain("<title>magpie</title>");
+      expect(seenHeaders.host).toBe(`127.0.0.1:${upstreamPort}`);
+      expect(seenHeaders.origin).toBe(`http://127.0.0.1:${upstreamPort}`);
+      expect(seenHeaders.cookie).toContain(`magpie_web_${upstreamPort}=secret_cookie_value_1234`);
+      expect(seenHeaders.cookie).toContain("other=1");
+      expect(res.headers.get("x-frame-options")).toBeNull();
+      expect(res.headers.get("content-security-policy")).toBe("default-src 'self'; script-src 'self'");
+    } finally {
+      await proxy.close();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
     }
   });
 });

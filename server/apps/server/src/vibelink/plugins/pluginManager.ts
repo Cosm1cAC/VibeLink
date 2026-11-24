@@ -18,6 +18,7 @@ import type {
   VlPluginModelDescriptor,
   VlPluginSummary,
   VlPluginSyncResult,
+  VlPluginUiEntry,
   VlPluginUpdateInfo,
   VlPluginUpdateResult,
   VlProviderOption,
@@ -124,6 +125,34 @@ function buildPluginBotSoul(agent: VlPluginAgentDescriptor, pluginName: string):
   ].join("\n");
 }
 
+function parsePluginUiEntry(raw: unknown): VlPluginUiEntry | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const dock = obj.dock === "rail" ? "rail" : null;
+  const label = typeof obj.label === "string" ? obj.label.trim() : "";
+  const icon = typeof obj.icon === "string" ? obj.icon.trim() : "";
+  const viewModeRaw = typeof obj.viewMode === "string" ? obj.viewMode.trim() : "";
+  const viewMode =
+    viewModeRaw === "iframe" || viewModeRaw === "builtin_wproxy" || viewModeRaw === "external"
+      ? viewModeRaw
+      : null;
+  if (!dock || !label || !icon || !viewMode) return undefined;
+  const shortLabel = typeof obj.shortLabel === "string" && obj.shortLabel.trim() ? obj.shortLabel.trim() : undefined;
+  const embedAction = typeof obj.embedAction === "string" && obj.embedAction.trim() ? obj.embedAction.trim() : undefined;
+  const url = typeof obj.url === "string" && obj.url.trim() ? obj.url.trim() : undefined;
+  const order = typeof obj.order === "number" && Number.isFinite(obj.order) ? obj.order : undefined;
+  return {
+    dock,
+    label,
+    icon,
+    viewMode,
+    ...(shortLabel ? { shortLabel } : {}),
+    ...(order !== undefined ? { order } : {}),
+    ...(embedAction ? { embedAction } : {}),
+    ...(url ? { url } : {}),
+  };
+}
+
 function readManifestFromDir(pluginDir: string): {
   readonly manifest: VlPluginManifest;
   readonly entryPath: string;
@@ -151,6 +180,7 @@ function readManifestFromDir(pluginDir: string): {
   if (!NodeFS.existsSync(entryPath)) {
     throw new Error(`Plugin entry file does not exist: ${entryPath}`);
   }
+  const ui = parsePluginUiEntry((parsed as { readonly ui?: unknown }).ui);
   const manifest: VlPluginManifest = {
     id,
     name: String(parsed.name ?? id),
@@ -160,6 +190,7 @@ function readManifestFromDir(pluginDir: string): {
     capabilities: Array.isArray(parsed.capabilities) ? parsed.capabilities : [],
     ...(typeof parsed.homepage === "string" ? { homepage: parsed.homepage } : {}),
     defaultEnabled: parsed.defaultEnabled !== false,
+    ...(ui ? { ui } : {}),
   };
   return { manifest, entryPath };
 }
@@ -218,6 +249,14 @@ export class VibeLinkPluginManager {
     if (this.watchTimer) {
       clearInterval(this.watchTimer);
       this.watchTimer = null;
+    }
+    for (const rec of this.records.values()) {
+      try {
+        void rec.instance?.dispose?.();
+      } catch {
+        // Ignore plugin dispose errors on shutdown
+      }
+      rec.instance = null;
     }
   }
 
@@ -351,6 +390,14 @@ export class VibeLinkPluginManager {
     const rec = this.records.get(pluginId);
     if (!rec) return null;
     if (rec.instance && !forceReload) return rec;
+    if (rec.instance && forceReload) {
+      try {
+        await rec.instance.dispose?.();
+      } catch {
+        // Ignore dispose failure before hot reload
+      }
+      rec.instance = null;
+    }
 
     this.reloadNonce += 1;
     const fileUrl = `${NodeUrl.pathToFileURL(rec.entryPath).href}?v=${this.reloadNonce}`;
@@ -702,6 +749,12 @@ export class VibeLinkPluginManager {
         });
       }
 
+      try {
+        await rec.instance?.dispose?.();
+      } catch {
+        // Ignore dispose failure when disabling plugin
+      }
+      rec.instance = null;
       rec.health = {
         ok: false,
         status: "disabled",
@@ -796,6 +849,7 @@ export class VibeLinkPluginManager {
       modelsCount: rec.models.length,
       lastSyncAt: state?.lastSyncAt ?? null,
       lastError: state?.lastError ?? null,
+      ...(rec.manifest.ui ? { ui: rec.manifest.ui } : {}),
     };
   }
 
@@ -984,7 +1038,15 @@ export class VibeLinkPluginManager {
       throw new Error(`Plugin ${pluginId} does not support invokeAction`);
     }
     const result = await loaded.instance.invokeAction(action, payload);
-    const readOnlyActions = new Set(["status", "getLanShareUri", "probeEgress", "testDelay"]);
+    const readOnlyActions = new Set([
+      "status",
+      "getLanShareUri",
+      "probeEgress",
+      "testDelay",
+      "ensureWebUi",
+      "webUiStatus",
+      "openNativeWindow",
+    ]);
     if (!readOnlyActions.has(action)) {
       rec.health = await loaded.instance.health().catch(() => rec.health);
       this.db.appendEvent("plugin.updated", null, {

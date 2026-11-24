@@ -6,6 +6,17 @@ export type VlPluginCapability =
   | "selfUpdate"
   | "proxyControl";
 
+export interface VlPluginUiEntry {
+  readonly dock: "rail";
+  readonly label: string;
+  readonly shortLabel?: string;
+  readonly icon: "magpie" | "globe" | "puzzle" | string;
+  readonly viewMode: "iframe" | "builtin_wproxy" | "external";
+  readonly order?: number;
+  readonly embedAction?: string;
+  readonly url?: string;
+}
+
 export interface VlPluginManifest {
   readonly id: string;
   readonly name: string;
@@ -15,6 +26,7 @@ export interface VlPluginManifest {
   readonly capabilities: ReadonlyArray<VlPluginCapability>;
   readonly homepage?: string;
   readonly defaultEnabled?: boolean;
+  readonly ui?: VlPluginUiEntry;
 }
 
 export interface VlPluginHealth {
@@ -120,6 +132,7 @@ export interface VlPluginSummary {
   readonly modelsCount: number;
   readonly lastSyncAt: number | null;
   readonly lastError: string | null;
+  readonly ui?: VlPluginUiEntry;
 }
 
 export interface VlPluginSyncResult {
@@ -164,6 +177,7 @@ export interface VibeLinkPluginInstance {
     action: string,
     payload?: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
+  readonly dispose?: () => Promise<void> | void;
 }
 
 export interface VibeLinkPluginModule {

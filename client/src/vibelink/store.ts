@@ -64,7 +64,7 @@ import type {
   VlWProxyStatus
 } from './types'
 
-export type VlDesktopNav = 'messages' | 'bots' | 'workspace' | 'account'
+export type VlDesktopNav = 'messages' | 'bots' | 'workspace' | 'account' | 'plugin'
 export type VlRoomTab = 'chat' | 'terminal' | 'diff'
 
 export interface EnrichedRoomMember {
@@ -108,6 +108,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
   const infraStatus = ref<VlInfraStatus | null>(null)
 
   const activeNav = ref<VlDesktopNav>('messages')
+  const activePluginId = ref<string | null>(null)
   const activeTab = ref<VlRoomTab>('chat')
   const activeRoomId = ref<string | null>(null)
   const sidebarVisible = ref(true)
@@ -119,7 +120,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
   const botHomeDrawerBotId = ref<string | null>(null)
   const profileModalAccountId = ref<string | null>(null)
   const serverSettingsOpen = ref(false)
-  const serverSettingsTab = ref<'connection' | 'plugins' | 'wproxy' | 'devices' | 'account'>('connection')
+  const serverSettingsTab = ref<'connection' | 'plugins' | 'devices' | 'account'>('connection')
 
   const devices = ref<VlConnectedDevice[]>([])
   const devicesLoading = ref(false)
@@ -210,6 +211,13 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
 
   const isActiveRoomBusy = computed<boolean>(() => {
     return activeRoomBots.value.some((bot) => bot.presence === 'working')
+  })
+
+  const dockedPlugins = computed(() => {
+    return plugins.value
+      .filter((p) => p.enabled && p.ui?.dock === 'rail')
+      .slice()
+      .sort((a, b) => (a.ui?.order ?? 100) - (b.ui?.order ?? 100))
   })
 
   const totalUnreadCount = computed<number>(() => {
@@ -1294,6 +1302,10 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     pluginsLoading.value = true
     try {
       await client.togglePlugin(pluginId, enabled)
+      if (!enabled && activeNav.value === 'plugin' && activePluginId.value === pluginId) {
+        activeNav.value = 'messages'
+        activePluginId.value = null
+      }
       await bootstrap()
     } finally {
       pluginsLoading.value = false
@@ -1342,7 +1354,20 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     }
   }
 
+  function openPluginView(pluginId: string) {
+    activePluginId.value = pluginId
+    activeNav.value = 'plugin'
+    serverSettingsOpen.value = false
+    if (pluginId === 'wproxy') {
+      void fetchWProxyStatus()
+    }
+  }
+
   function openServerSettings(tab: 'connection' | 'plugins' | 'wproxy' | 'devices' | 'account' = 'connection') {
+    if (tab === 'wproxy') {
+      openPluginView('wproxy')
+      return
+    }
     serverSettingsTab.value = tab
     serverSettingsOpen.value = true
   }
@@ -1846,6 +1871,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     terminalsByRoom,
     infraStatus,
     activeNav,
+    activePluginId,
     activeTab,
     activeRoomId,
     activeRoom,
@@ -1853,6 +1879,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     activeRoomMembers,
     activeRoomBots,
     isActiveRoomBusy,
+    dockedPlugins,
     totalUnreadCount,
     sidebarVisible,
     searchQuery,
@@ -1928,6 +1955,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     ejectPlugin,
     checkPluginUpdate,
     runPluginUpdate,
+    openPluginView,
     openServerSettings,
     invokePluginAction,
     fetchWProxyStatus,

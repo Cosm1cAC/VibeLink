@@ -114,6 +114,59 @@
             <path d="M5 20a7 7 0 0 1 14 0" stroke-linecap="round" />
           </svg>
         </button>
+
+        <!-- Installed Plugins Docked in Rail Middle Space -->
+        <template v-if="store.dockedPlugins.length > 0">
+          <div class="w-26px h-1px bg-white/12 my-0.5"></div>
+          <button
+            v-for="plugin in store.dockedPlugins"
+            :key="plugin.id"
+            type="button"
+            class="vl-rail-item relative"
+            :class="{ active: store.activeNav === 'plugin' && store.activePluginId === plugin.id }"
+            :title="plugin.ui?.label || plugin.name"
+            :data-testid="`nav-plugin-${plugin.id}`"
+            @click="openDockedPlugin(plugin.id)">
+            <!-- Magpie icon -->
+            <svg
+              v-if="plugin.ui?.icon === 'magpie'"
+              viewBox="0 0 24 24"
+              class="w-21px h-21px"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8">
+              <path d="M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3L12 3z" stroke-linejoin="round" />
+              <circle cx="12" cy="12" r="2.6" />
+              <path d="M12 3v6.4M19.5 7.3l-5.2 3M4.5 7.3l5.2 3M12 21v-6.4" stroke-linecap="round" />
+            </svg>
+            <!-- WProxy Globe icon -->
+            <svg
+              v-else-if="plugin.ui?.icon === 'globe'"
+              viewBox="0 0 24 24"
+              class="w-21px h-21px"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" />
+            </svg>
+            <!-- Generic Plugin Puzzle icon -->
+            <svg v-else viewBox="0 0 24 24" class="w-21px h-21px" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path
+                d="M19 13v-2a2 2 0 0 0-2-2h-2.2a1.8 1.8 0 0 1-3.6 0H9a2 2 0 0 0-2 2v2.2a1.8 1.8 0 0 0 0 3.6V19a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2.2a1.8 1.8 0 0 1 0-3.6V13z"
+                stroke-linejoin="round" />
+            </svg>
+            <span
+              class="w-7px h-7px rounded-full absolute right-6px bottom-6px border border-[#233b37]"
+              :class="
+                plugin.health.status === 'running'
+                  ? 'bg-[#22c55e]'
+                  : plugin.health.status === 'installed_idle'
+                    ? 'bg-[#f59e0b]'
+                    : 'bg-[#64748b]'
+              "></span>
+          </button>
+        </template>
       </div>
 
       <!-- Bottom Utility Buttons -->
@@ -125,17 +178,16 @@
 
         <button
           type="button"
-          class="vl-rail-item relative"
-          :title="store.wproxyStatus?.running ? `WProxy 代理 · ${store.wproxyStatus.activeNode || store.wproxyStatus.routeMode}` : 'WProxy 代理插件'"
-          data-testid="nav-wproxy"
-          @click="store.openServerSettings('wproxy')">
+          class="vl-rail-item"
+          title="插件中心"
+          data-testid="nav-plugins-center"
+          @click="store.openServerSettings('plugins')">
           <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.8">
-            <circle cx="12" cy="12" r="9" />
-            <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" />
+            <rect x="4" y="4" width="7" height="7" rx="1.5" />
+            <rect x="13" y="4" width="7" height="7" rx="1.5" />
+            <rect x="4" y="13" width="7" height="7" rx="1.5" />
+            <path d="M16.5 13.5v6M13.5 16.5h6" stroke-linecap="round" />
           </svg>
-          <span
-            class="w-7px h-7px rounded-full absolute right-6px bottom-6px border border-[#233b37]"
-            :class="store.wproxyStatus?.running ? 'bg-[#22c55e]' : 'bg-[#64748b]'"></span>
         </button>
 
         <button
@@ -153,7 +205,7 @@
     </aside>
 
     <!-- Column 2: Session / Bot Fleet List (#1e1e1e) -->
-    <section class="vl-col-list">
+    <section v-show="store.activeNav !== 'plugin'" class="vl-col-list">
       <div class="vl-list-top" data-tauri-drag-region>
         <div class="flex items-center gap-2 w-full">
           <div class="flex-1 flex items-center gap-1.5 px-2.5 py-1.5 rounded-7px bg-[#2a2a2a] border border-[#343434]">
@@ -345,8 +397,18 @@
       </div>
     </section>
 
+    <!-- Full-Width Dedicated Plugin Pages (kept alive so Magpie iframe preserves state) -->
+    <section v-show="store.activeNav === 'plugin'" class="vl-col-main" data-testid="plugin-workspace-host">
+      <PluginWorkspaceView
+        v-for="plugin in mountedPluginPages"
+        :key="plugin.id"
+        v-show="store.activePluginId === plugin.id"
+        :plugin="plugin"
+        :visible="store.activeNav === 'plugin' && store.activePluginId === plugin.id" />
+    </section>
+
     <!-- Column 3: Main Conversation / Terminal / Diff Canvas (#2a2a2a) -->
-    <main class="vl-col-main">
+    <main v-show="store.activeNav !== 'plugin'" class="vl-col-main">
       <!-- Top Title Bar -->
       <header class="vl-main-header" data-tauri-drag-region>
         <div class="flex items-center gap-2.5 min-w-0">
@@ -560,7 +622,13 @@
                   </div>
                   <span>{{ formatClockTime(msg.createdAt) }}</span>
                 </div>
-                <div class="rounded-12px rounded-tr-3px px-3.5 py-2.5 bg-[#1d4940] text-[#eef7f5] shadow-sm">
+                <div
+                  class="rounded-12px rounded-tr-3px"
+                  :class="
+                    isSingleStickerMessage(msg.content) && !msg.replyToId
+                      ? 'p-1 bg-transparent'
+                      : 'px-3.5 py-2.5 bg-[#1d4940] text-[#eef7f5] shadow-sm'
+                  ">
                   <div v-if="msg.replyToId" class="mb-1.5 px-2 py-1 rounded bg-black/20 text-11.5px text-[#a7f3d0] border-l-2 border-[#34d399]">
                     {{ replySnippet(msg.replyToId) }}
                   </div>
@@ -620,7 +688,12 @@
                   @rollback="handleCheckpointRollback" />
                 <div
                   v-else
-                  class="rounded-12px rounded-tl-3px px-3.5 py-2.5 bg-[#1e1e1e] border border-[#303030] text-[#eaeaea]">
+                  class="rounded-12px rounded-tl-3px"
+                  :class="
+                    isSingleStickerMessage(msg.content)
+                      ? 'p-1 bg-transparent'
+                      : 'px-3.5 py-2.5 bg-[#1e1e1e] border border-[#303030] text-[#eaeaea]'
+                  ">
                   <BotMarkdownMessage
                     :content="msg.content"
                     :server-url="store.serverUrl"
@@ -661,12 +734,13 @@
           <!-- Composer Toolbar (HuLa icon-only style, zero visible button text) -->
           <div class="flex items-center justify-between gap-2 pb-2" data-testid="composer-toolbar">
             <div class="flex items-center gap-4">
-              <!-- Emoji Picker -->
+              <!-- Emoji & Character Sticker Picker -->
               <div class="relative flex items-center">
                 <button
                   type="button"
                   class="vl-icon-btn"
-                  title="表情"
+                  :class="{ 'text-[#13987f]': emojiOpen }"
+                  title="表情与角色表情包"
                   aria-label="表情"
                   @click="emojiOpen = !emojiOpen">
                   <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.7">
@@ -676,17 +750,12 @@
                     <circle cx="14.8" cy="10" r="0.8" fill="currentColor" stroke="none" />
                   </svg>
                 </button>
-                <div
-                  v-if="emojiOpen"
-                  class="absolute left-0 bottom-32px z-30 w-220px p-2 rounded-8px bg-[#1f2222] border border-[#363b3a] shadow-xl grid grid-cols-6 gap-1">
-                  <button
-                    v-for="em in emojiList"
-                    :key="em"
-                    type="button"
-                    class="p-1 rounded bg-transparent hover:bg-[#303534] border-0 cursor-pointer text-16px"
-                    @click="insertEmoji(em)">
-                    {{ em }}
-                  </button>
+                <div v-if="emojiOpen" class="absolute left-0 bottom-32px z-35">
+                  <StickerEmojiPicker
+                    mode="desktop"
+                    :preferred-character-id="activeDmCharacter?.id ?? null"
+                    @select-emoji="insertEmoji"
+                    @select-sticker="handleSendSticker" />
                 </div>
               </div>
 
@@ -986,7 +1055,7 @@
 
     <!-- Column 4: Right Announcement & Online Members Sidebar (#262626) -->
     <aside
-      v-if="store.sidebarVisible && store.activeRoom"
+      v-if="store.activeNav !== 'plugin' && store.sidebarVisible && store.activeRoom"
       class="vl-col-sidebar"
       data-testid="right-sidebar">
       <!-- Top Card: Group Notice or DM Bot Profile -->
@@ -1285,6 +1354,13 @@ import { useRoute } from 'vue-router'
 import { useSettingStore } from '@/stores/setting'
 import { presenceColor, presenceLabel } from '../avatar'
 import {
+  formatStickerMessagePreview,
+  isSingleStickerMessage,
+  playCharacterVoice,
+  resolveCharacterForAccount,
+  type VlStickerItem
+} from '../characters'
+import {
   closeOrHideWindowSafe,
   isTauriRuntime,
   listenScreenshotResult,
@@ -1305,7 +1381,9 @@ import BotHomeDrawer from './BotHomeDrawer.vue'
 import BotMarkdownMessage from './BotMarkdownMessage.vue'
 import BotTerminalPane from './BotTerminalPane.vue'
 import BotToolCallCard from './BotToolCallCard.vue'
+import PluginWorkspaceView from './PluginWorkspaceView.vue'
 import ServerSettingsModal from './ServerSettingsModal.vue'
+import StickerEmojiPicker from './StickerEmojiPicker.vue'
 import VlAvatar from './VlAvatar.vue'
 
 const store = useVibeLinkStore()
@@ -1364,8 +1442,6 @@ const sendModeOptions: Array<{ value: VlSendMode; label: string }> = [
   { value: 'queue', label: '排队执行 (queue)' },
   { value: 'steer', label: '插话引导 (steer)' }
 ]
-
-const emojiList = ['👍', '🎉', '🔥', '🚀', '✅', '⚠️', '🐛', '🧠', '💡', '👀', '👏', '❤️', '😂', '🤔', '📌', '🛠️', '🧪', '📄']
 
 const newBotForm = reactive({
   displayName: '',
@@ -1449,6 +1525,7 @@ function dmTargetBot(room: VlRoomSummary): VlAccount | null {
 }
 
 const activeDmBot = computed(() => (store.activeRoom ? dmTargetBot(store.activeRoom) : null))
+const activeDmCharacter = computed(() => resolveCharacterForAccount(activeDmBot.value))
 
 function accountAvatarProps(accountId: string) {
   const acc = store.accountsById[accountId]
@@ -1545,8 +1622,33 @@ function showToast(msg: string) {
   }, 2600)
 }
 
+const openedPluginIds = ref<string[]>([])
+
+const mountedPluginPages = computed(() => {
+  return store.dockedPlugins.filter((p) => openedPluginIds.value.includes(p.id))
+})
+
+function openDockedPlugin(pluginId: string) {
+  if (!openedPluginIds.value.includes(pluginId)) {
+    openedPluginIds.value = [...openedPluginIds.value, pluginId]
+  }
+  store.openPluginView(pluginId)
+}
+
+watch(
+  () => [store.activeNav, store.activePluginId] as const,
+  ([nav, pid]) => {
+    if (nav === 'plugin' && pid && !openedPluginIds.value.includes(pid)) {
+      openedPluginIds.value = [...openedPluginIds.value, pid]
+    }
+  }
+)
+
 function switchNav(nav: VlDesktopNav) {
   store.activeNav = nav
+  if (nav !== 'plugin') {
+    store.activePluginId = null
+  }
   if (nav === 'workspace') {
     store.activeTab = 'terminal'
   } else if (nav === 'messages' && store.activeTab === 'terminal') {
@@ -1604,13 +1706,13 @@ function formatLastMessagePreview(room: VlRoomSummary): string {
   if (!msg) return room.notice || '暂无消息'
   if (msg.recalledAt) return '[已撤回]'
   const sender = msg.senderId === 'me' ? '' : `${senderDisplayName(msg.senderId)}: `
-  return `${sender}${msg.content.replace(/\s+/g, ' ').slice(0, 48)}`
+  return `${sender}${formatStickerMessagePreview(msg.content).replace(/\s+/g, ' ').slice(0, 48)}`
 }
 
 function replySnippet(replyToId: string): string {
   const target = store.activeMessages.find((m) => m.id === replyToId)
   if (!target) return '引用消息'
-  return `${senderDisplayName(target.senderId)}: ${target.content.slice(0, 60)}`
+  return `${senderDisplayName(target.senderId)}: ${formatStickerMessagePreview(target.content).slice(0, 60)}`
 }
 
 function replyMessage(msg: VlMessage) {
@@ -1706,6 +1808,20 @@ function insertEmoji(em: string) {
   draftText.value = `${draftText.value}${em}`
   emojiOpen.value = false
   composerRef.value?.focus()
+}
+
+async function handleSendSticker(sticker: VlStickerItem) {
+  if (!store.activeRoomId || sendingMsg.value) return
+  emojiOpen.value = false
+  sendingMsg.value = true
+  try {
+    await store.sendMessage(store.activeRoomId, sticker.markdown)
+    scrollToBottom()
+  } catch (err) {
+    showToast(`发送表情包失败: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    sendingMsg.value = false
+  }
 }
 
 function handleComposerKeydown(e: KeyboardEvent) {
@@ -1889,6 +2005,7 @@ function onMenuDm(acc: VlAccount) {
 }
 
 function onMenuPoke(acc: VlAccount) {
+  void playCharacterVoice(acc)
   if (store.activeRoom?.kind === 'group') {
     insertQuickAt(acc.handle)
     showToast(`已 @${acc.handle}`)

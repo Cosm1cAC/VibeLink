@@ -32,6 +32,7 @@ import {
   MAX_GROUP_HANDOFFS,
 } from "../bots/botGroupMentions.ts";
 import type { VibeLinkDatabase } from "../db.ts";
+import type { VibeLinkPluginManager } from "../plugins/pluginManager.ts";
 import {
   VibeLinkError,
   type VlAccount,
@@ -50,13 +51,37 @@ function mapEngineToProviderInstance(engine: string): {
     case "claudeagent":
       return { instanceId: ProviderInstanceId.make("claudeAgent"), defaultModel: "claude-sonnet-4-5" };
     case "opencode":
-      return { instanceId: ProviderInstanceId.make("opencode"), defaultModel: "zai/glm-4.7" };
+      return { instanceId: ProviderInstanceId.make("opencode"), defaultModel: "" };
     case "codex":
       return { instanceId: ProviderInstanceId.make("codex"), defaultModel: "gpt-5.3-codex" };
+    case "cursor":
+      return { instanceId: ProviderInstanceId.make("cursor"), defaultModel: "" };
+    case "grok":
+      return { instanceId: ProviderInstanceId.make("grok"), defaultModel: "" };
+    case "kiro":
+      return { instanceId: ProviderInstanceId.make("kiro"), defaultModel: "" };
+    case "pi":
+      return { instanceId: ProviderInstanceId.make("pi"), defaultModel: "" };
+    case "acp":
+    case "acpregistry":
+      return { instanceId: ProviderInstanceId.make("acpRegistry"), defaultModel: "" };
     case "antigravity":
     default:
       return { instanceId: ProviderInstanceId.make("antigravity"), defaultModel: "gemini-2.5-pro" };
   }
+}
+
+function isMagpieGatewayProvider(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase();
+  return (
+    normalized === "magpie-gateway" ||
+    normalized === "magpie" ||
+    normalized === "gateway"
+  );
+}
+
+function createGatewayAbortController(): AbortController {
+  return new AbortController();
 }
 
 function stableUuidFromSeed(seed: string): string {
@@ -94,6 +119,7 @@ export class VibeLinkOrchestrationBridge {
   private readonly threadManagement: ThreadManagementService.ThreadManagementService["Service"] | null;
   private readonly projectStore: ProjectStore.ProjectStoreV2["Service"] | null;
   private readonly projectService: ProjectService.ProjectService["Service"] | null;
+  private readonly plugins: VibeLinkPluginManager | null;
   private readonly turnItemMsgIds = new Map<string, string>();
   private readonly processedRunHandoffs = new Set<string>();
   private readonly threadRunContext = new Map<
@@ -101,6 +127,7 @@ export class VibeLinkOrchestrationBridge {
     { readonly chainId: string; readonly depth: number }
   >();
   private readonly activeMockFibers = new Map<string, Set<Fiber.Fiber<void, never>>>();
+  private readonly activeGatewayAborts = new Map<string, Set<AbortController>>();
   private domainEventFiber: Fiber.Fiber<void, unknown> | null = null;
 
   constructor(
@@ -109,12 +136,14 @@ export class VibeLinkOrchestrationBridge {
     threadManagement: ThreadManagementService.ThreadManagementService["Service"] | null,
     projectStore: ProjectStore.ProjectStoreV2["Service"] | null,
     projectService: ProjectService.ProjectService["Service"] | null = null,
+    plugins: VibeLinkPluginManager | null = null,
   ) {
     this.db = db;
     this.botHome = botHome;
     this.threadManagement = threadManagement;
     this.projectStore = projectStore;
     this.projectService = projectService;
+    this.plugins = plugins;
   }
 
   startEventRelay(): Effect.Effect<void> {
@@ -146,6 +175,12 @@ export class VibeLinkOrchestrationBridge {
         }
       }
       bridge.activeMockFibers.clear();
+      for (const aborts of bridge.activeGatewayAborts.values()) {
+        for (const ctrl of aborts) {
+          ctrl.abort(new Error("Service stopped"));
+        }
+      }
+      bridge.activeGatewayAborts.clear();
       const fiber = bridge.domainEventFiber;
       bridge.domainEventFiber = null;
       if (fiber) {
@@ -240,6 +275,15 @@ export class VibeLinkOrchestrationBridge {
           yield* Fiber.interrupt(f).pipe(Effect.ignore);
         }
         fibers.clear();
+        interrupted += 1;
+      }
+
+      const aborts = bridge.activeGatewayAborts.get(roomId);
+      if (aborts && aborts.size > 0) {
+        for (const ctrl of aborts) {
+          ctrl.abort(new Error("Interrupted by user"));
+        }
+        aborts.clear();
         interrupted += 1;
       }
 
@@ -398,7 +442,15 @@ export class VibeLinkOrchestrationBridge {
       });
     }
 
-    if (isMockBotsMode() || !bridge.threadManagement || !bridge.projectStore) {
+    if (isMockBotsMode()) {
+      return bridge.runMockBotTurn(input);
+    }
+
+    if (isMagpieGatewayProvider(input.bot.provider) && bridge.plugins?.hasGatewayChat()) {
+      return bridge.runPluginGatewayTurn(input);
+    }
+
+    if (!bridge.threadManagement || !bridge.projectStore) {
       return bridge.runMockBotTurn(input);
     }
 
@@ -546,6 +598,140 @@ export class VibeLinkOrchestrationBridge {
       });
       return { projectId, threadId };
     }).pipe(Effect.mapError((cause) => new VibeLinkError({ message: String(cause) })));
+  }
+
+  private runPluginGatewayTurn(input: {
+    readonly room: VlRoom;
+    readonly bot: VlAccount;
+    readonly userText: string;
+    readonly roomBots: ReadonlyArray<VlAccount>;
+    readonly handoffChainId: string;
+    readonly handoffDepth: number;
+    readonly replyToId: string | null;
+  }): Effect.Effect<void> {
+    const bridge = this;
+    return Effect.gen(function* () {
+      const targetModel = input.bot.model.trim() || "auto/deepseek-v4.1-flash";
+      bridge.db.updateAccountFields(input.bot.id, {
+        presence: "working",
+        statusText: `网关执行 (${targetModel})...`,
+      });
+
+      const systemPersona = bridge.botHome.composeBotSystemPrompt(input.bot, {
+        roomId: input.room.id,
+        roomKind: input.room.kind,
+        roomName: input.room.name,
+        teammates: input.roomBots,
+      });
+
+      const recentMessages = bridge.db
+        .listMessages(input.room.id, { limit: 12 })
+        .filter(
+          (m) =>
+            !m.recalledAt &&
+            m.id !== input.replyToId &&
+            (m.msgType === "text" || m.msgType === "bot_markdown"),
+        )
+        .map((m) => ({
+          role: (m.senderId === "me" ? "user" : "assistant") as "user" | "assistant",
+          content:
+            m.senderId === "me"
+              ? m.content
+              : `[${bridge.db.getAccount(m.senderId)?.displayName ?? m.senderId}]: ${m.content}`,
+        }));
+
+      const conversationMessages: Array<{
+        readonly role: "user" | "assistant";
+        readonly content: string;
+      }> = [...recentMessages, { role: "user", content: input.userText }];
+
+      const abortController = createGatewayAbortController();
+      let set = bridge.activeGatewayAborts.get(input.room.id);
+      if (!set) {
+        set = new Set();
+        bridge.activeGatewayAborts.set(input.room.id, set);
+      }
+      set.add(abortController);
+
+      const chatResult = yield* Effect.tryPromise({
+        try: () =>
+          bridge.plugins!.runGatewayChat({
+            model: targetModel,
+            systemPrompt: systemPersona,
+            messages: conversationMessages,
+            signal: abortController.signal,
+          }),
+        catch: (err) =>
+          new VibeLinkError({
+            message: err instanceof Error ? err.message : String(err),
+          }),
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            set?.delete(abortController);
+          }),
+        ),
+        Effect.result,
+      );
+
+      if (chatResult._tag === "Failure") {
+        const reason = chatResult.failure.message;
+        const isAbort = abortController.signal.aborted;
+        if (isAbort) {
+          bridge.db.updateAccountFields(input.bot.id, {
+            presence: "idle",
+            statusText: input.bot.roleTitle || "已暂停",
+          });
+          return;
+        }
+        bridge.postFallbackNotice(input, reason);
+        return;
+      }
+
+      const completion = chatResult.success;
+      const replyText = completion.content.trim() || "(网关返回空内容)";
+      const replyMsg = bridge.db.createMessage({
+        roomId: input.room.id,
+        senderId: input.bot.id,
+        msgType: "bot_markdown",
+        content: replyText,
+        replyToId: input.replyToId,
+        handoffChainId: input.handoffChainId,
+        handoffDepth: input.handoffDepth,
+        metadata: {
+          provider: input.bot.provider,
+          model: completion.model,
+          ...(completion.usage ? { usage: completion.usage } : {}),
+        },
+      });
+
+      bridge.db.updateAccountFields(input.bot.id, {
+        presence: "idle",
+        statusText: `${input.bot.provider} · ${completion.model}`,
+      });
+
+      if (input.room.kind === "group") {
+        const nextBots = extractGroupBotMentions({
+          markdown: replyText,
+          candidates: input.roomBots,
+          excludeAccountId: input.bot.id,
+        });
+        for (const nextBot of nextBots) {
+          yield* bridge
+            .dispatchToBot({
+              room: input.room,
+              bot: nextBot,
+              userText: `[来自 @${input.bot.handle} 的接力]\n${replyText}`,
+              roomBots: input.roomBots,
+              mode: "auto",
+              handoffChainId: input.handoffChainId,
+              handoffDepth: input.handoffDepth + 1,
+              replyToId: replyMsg.id,
+            })
+            .pipe(Effect.forkDetach);
+        }
+      }
+    });
   }
 
   private runMockBotTurn(input: {

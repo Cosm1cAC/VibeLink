@@ -139,6 +139,8 @@ objc2-ui-kit = "0.3.2"
 [target."cfg(target_os = \"android\")".dependencies]
 jni = "0.21"
 ndk-context = "0.1"
+tokio-util = "0.7"
+tun2proxy = "0.8.6"
 
 [target."cfg(target_os = \"linux\")".dependencies]
 libc = "0.2"

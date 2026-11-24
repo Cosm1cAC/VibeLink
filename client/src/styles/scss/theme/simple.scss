@@ -58,7 +58,7 @@ html[data-theme='dark'] {
     --left-active-icon-color: #13987f;
     --left-win-icon-color: rgba(19, 152, 127, 0.6);
 
-    --background: oklch(27, 27, 27);
+    --background: #1b1b1b;
     --foreground: oklch(0.985 0 0);
     --border: oklch(1 0 0 / 10%);
     --card: oklch(0.21 0.006 285.885);
@@ -88,7 +88,7 @@ html[data-theme='dark'] {
     --icon-hover-color: #242424;
 
     // 移动端样式
-    --tab-bar-icon-color: rgba(19, 152, 127, 0.4);
+    --tab-bar-icon-color: #13987f;
   }
 }
 /**! end */

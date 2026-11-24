@@ -1,0 +1,16 @@
+{
+  "id": "magpie",
+  "name": "Magpie Gateway & Agent Hub",
+  "version": "0.1.0",
+  "description": "Auto-discovers configured local coding agents from Magpie, exposes active /v1/models catalog, routes gateway bots via 127.0.0.1:3425, and supports independent Magpie updates.",
+  "entry": "index.mjs",
+  "capabilities": [
+    "agentDiscovery",
+    "modelCatalog",
+    "configSync",
+    "gatewayChat",
+    "selfUpdate"
+  ],
+  "homepage": "https://github.com/yetone/magpie",
+  "defaultEnabled": true
+}

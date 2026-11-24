@@ -11,6 +11,10 @@ export const browserApiCorsAllowedMethods = [
 export const browserApiCorsAllowedHeaders = [
   "authorization",
   "x-vibelink-token",
+  "x-vibelink-cluster-secret",
+  "x-api-key",
+  "anthropic-version",
+  "anthropic-beta",
   "b3",
   "traceparent",
   "content-type",

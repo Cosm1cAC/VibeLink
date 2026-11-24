@@ -10,11 +10,15 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 
 import { BotHomeManager } from "../bots/botHome.ts";
 import { runSeedMigration } from "../bots/botMigration.ts";
+import { VibeLinkAccountStore } from "../accounts.ts";
 import { VibeLinkOrchestrationBridge } from "../bridge/orchestrationBridge.ts";
 import { VibeLinkTerminalBridge } from "../bridge/terminalBridge.ts";
 import { VibeLinkAuth } from "../auth.ts";
+import { VibeLinkClusterManager } from "../cluster.ts";
 import { VibeLinkDatabase } from "../db.ts";
+import { VibeLinkDeviceHub } from "../devices.ts";
 import { dispatchVibeLinkHttp } from "../http.ts";
+import { VibeLinkPluginManager } from "../plugins/pluginManager.ts";
 import type { VibeLinkServiceShape } from "../service.ts";
 
 const tempDirs: string[] = [];
@@ -23,18 +27,28 @@ function createTestService() {
   const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "vibelink-routes-"));
   tempDirs.push(home);
   process.env.VIBELINK_MOCK_BOTS = "1";
+  process.env.VIBELINK_DISABLE_CLUSTER_SYNC = "1";
 
   const db = new VibeLinkDatabase(home);
   const auth = new VibeLinkAuth(home);
+  const accounts = new VibeLinkAccountStore(db, home);
+  const cluster = new VibeLinkClusterManager(home, accounts);
   const botHome = new BotHomeManager(home);
   runSeedMigration(db, botHome);
-  const orchestration = new VibeLinkOrchestrationBridge(db, botHome, null, null);
+  const plugins = new VibeLinkPluginManager(db, botHome, {
+    disableBundled: true,
+    watchIntervalMs: 0,
+  });
+  const orchestration = new VibeLinkOrchestrationBridge(db, botHome, null, null, null, plugins);
   const terminal = new VibeLinkTerminalBridge(db, null);
+  const devices = new VibeLinkDeviceHub();
 
-  const vl: VibeLinkServiceShape = { db, auth, botHome, orchestration, terminal };
+  const vl: VibeLinkServiceShape = { db, auth, accounts, cluster, botHome, plugins, orchestration, terminal, devices };
   return {
     vl,
     async cleanup() {
+      devices.dispose();
+      plugins.stop();
       await Effect.runPromise(orchestration.stop());
       db.close();
       delete process.env.VIBELINK_MOCK_BOTS;

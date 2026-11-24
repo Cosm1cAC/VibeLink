@@ -1,8 +1,14 @@
+:root {
+  --safe-area-inset-top: 38px;
+  --safe-area-inset-bottom: 20px;
+  --safe-area-inset-left: 0px;
+  --safe-area-inset-right: 0px;
+}
+
 /* 只有当安全区域不为0时才应用 */
 @supports (top: env(safe-area-inset-top)) {
   :root {
-    /* 设置默认值为0，如果env()返回非0值则会覆盖 */
-    --safe-area-inset-top: max(32px, env(safe-area-inset-top));
+    --safe-area-inset-top: max(38px, env(safe-area-inset-top));
     --safe-area-inset-bottom: max(20px, env(safe-area-inset-bottom));
     --safe-area-inset-left: max(0px, env(safe-area-inset-left));
     --safe-area-inset-right: max(0px, env(safe-area-inset-right));

@@ -28,6 +28,9 @@ export const MONOGRAM_PRESET_AVATARS: ReadonlyArray<AvatarPresetOption> = [
   { value: 'preset:claude', label: 'Claude' },
   { value: 'preset:antigravity', label: 'Antigravity' },
   { value: 'preset:opencode', label: 'OpenCode' },
+  { value: 'preset:gemini', label: 'Gemini' },
+  { value: 'preset:deepseek', label: 'DeepSeek' },
+  { value: 'preset:magpie-gateway', label: 'Magpie' },
   { value: 'preset:user', label: '我' }
 ]
 
@@ -35,12 +38,18 @@ const PRESET_MAP: Record<string, AvatarStyleSpec> = {
   'preset:user': { label: '我', bg: '#13987F', fg: '#ecfdf5' },
   'preset:me': { label: '我', bg: '#13987F', fg: '#ecfdf5' },
   'preset:group': { label: '群', bg: '#1d4940', fg: '#5eead4' },
-  'preset:gemini': { label: 'AG', bg: '#2563eb', fg: '#eff6ff' },
+  'preset:gemini': { label: 'Gem', bg: '#2563eb', fg: '#eff6ff' },
   'preset:antigravity': { label: 'AG', bg: '#0284c7', fg: '#f0f9ff' },
   'preset:claude': { label: 'Cld', bg: '#b45309', fg: '#fffbeb' },
   'preset:claudeagent': { label: 'Cld', bg: '#b45309', fg: '#fffbeb' },
   'preset:opencode': { label: 'OC', bg: '#7c3aed', fg: '#f5f3ff' },
-  'preset:codex': { label: 'Cdx', bg: '#0d9488', fg: '#f0fdfa' }
+  'preset:codex': { label: 'Cdx', bg: '#0d9488', fg: '#f0fdfa' },
+  'preset:deepseek': { label: 'DS', bg: '#1d4ed8', fg: '#eff6ff' },
+  'preset:grok': { label: 'Grk', bg: '#374151', fg: '#f9fafb' },
+  'preset:cursor': { label: 'Cur', bg: '#0f766e', fg: '#f0fdfa' },
+  'preset:kiro': { label: 'Kir', bg: '#6d28d9', fg: '#f5f3ff' },
+  'preset:pi': { label: 'Pi', bg: '#4f46e5', fg: '#eef2ff' },
+  'preset:magpie-gateway': { label: 'Mag', bg: '#059669', fg: '#ecfdf5' }
 }
 
 export function isImageAvatarUrl(avatar?: string | null): boolean {

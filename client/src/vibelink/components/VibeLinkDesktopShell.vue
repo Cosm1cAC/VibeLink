@@ -101,6 +101,19 @@
             <path d="M7 9l3 3-3 3M13 15h4" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </button>
+
+        <button
+          type="button"
+          class="vl-rail-item"
+          :class="{ active: store.activeNav === 'account' }"
+          title="账号福利与主备集群"
+          data-testid="nav-account"
+          @click="switchNav('account')">
+          <svg viewBox="0 0 24 24" class="w-22px h-22px" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="8" r="4" />
+            <path d="M5 20a7 7 0 0 1 14 0" stroke-linecap="round" />
+          </svg>
+        </button>
       </div>
 
       <!-- Bottom Utility Buttons -->
@@ -112,10 +125,25 @@
 
         <button
           type="button"
+          class="vl-rail-item relative"
+          :title="store.wproxyStatus?.running ? `WProxy 代理 · ${store.wproxyStatus.activeNode || store.wproxyStatus.routeMode}` : 'WProxy 代理插件'"
+          data-testid="nav-wproxy"
+          @click="store.openServerSettings('wproxy')">
+          <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" />
+          </svg>
+          <span
+            class="w-7px h-7px rounded-full absolute right-6px bottom-6px border border-[#233b37]"
+            :class="store.wproxyStatus?.running ? 'bg-[#22c55e]' : 'bg-[#64748b]'"></span>
+        </button>
+
+        <button
+          type="button"
           class="vl-rail-item"
           title="服务器配置与运行态"
           data-testid="nav-settings"
-          @click="store.serverSettingsOpen = true">
+          @click="store.openServerSettings('connection')">
           <svg viewBox="0 0 24 24" class="w-20px h-20px" fill="none" stroke="currentColor" stroke-width="1.8">
             <circle cx="12" cy="12" r="3" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
@@ -189,6 +217,16 @@
 
       <!-- Bot Fleet View when activeNav === 'bots' -->
       <div v-if="store.activeNav === 'bots'" class="flex-1 vl-scroll p-2 space-y-2" data-testid="bot-fleet-list">
+        <div class="flex items-center justify-between px-1 pb-0.5">
+          <span class="text-11.5px text-[#9ca3af]">已配置 Bot ({{ filteredBots.length }})</span>
+          <button
+            type="button"
+            data-testid="open-plugins-settings-btn"
+            class="px-2 py-0.5 rounded bg-[#1d4940] hover:bg-[#13987f] border-0 text-[#5eead4] hover:text-white text-11px cursor-pointer"
+            @click="store.openServerSettings('plugins')">
+            插件管理 (Magpie)
+          </button>
+        </div>
         <div
           v-for="bot in filteredBots"
           :key="bot.id"
@@ -415,15 +453,30 @@
           <button
             type="button"
             class="px-2.5 py-0.5 rounded bg-[#13987f] border-0 text-white cursor-pointer"
-            @click="store.serverSettingsOpen = true">
+            @click="store.openServerSettings('connection')">
             配置地址
           </button>
         </div>
       </div>
 
+      <!-- Standby Failover Banner -->
+      <div
+        v-if="store.standbyMode && store.connected"
+        class="px-4 py-1.5 bg-[#3d2e14] border-b border-[#854d0e] flex items-center justify-between text-12px text-[#fde68a]">
+        <span>
+          当前已故障切换至 <strong>Mac mini 备服</strong> ({{ store.serverUrl }}) · 账号/福利/Token 网关正常服务，PC 主服恢复后将自动回切
+        </span>
+        <button
+          type="button"
+          class="px-2 py-0.5 rounded bg-[#13987f] border-0 text-white text-11px cursor-pointer"
+          @click="store.autoSelectBestChannel({ forceReconnect: true })">
+          立即探测主服
+        </button>
+      </div>
+
       <!-- Group Pinned Announcement Banner (HuLa pink megaphone + green 查看全部) -->
       <div
-        v-if="store.activeRoom?.kind === 'group' && store.activeRoom.notice && store.activeTab === 'chat'"
+        v-if="store.activeRoom?.kind === 'group' && store.activeRoom.notice && store.activeTab === 'chat' && store.activeNav !== 'account'"
         class="px-4 py-1.5 bg-[#242424] border-b border-[#323232] flex items-center justify-between gap-3 text-12.5px"
         data-testid="group-notice-banner">
         <div class="flex items-center gap-2 min-w-0">
@@ -441,8 +494,16 @@
         </button>
       </div>
 
+      <!-- Tab 0: Account, Welfare & Cluster Portal -->
+      <div
+        v-if="store.activeNav === 'account' || store.authUser?.role === 'user'"
+        class="flex-1 vl-scroll p-4"
+        data-testid="desktop-account-view">
+        <AccountWelfarePanel @open-auth-modal="accountAuthOpen = true" />
+      </div>
+
       <!-- Tab 1: Chat Timeline + Composer -->
-      <template v-if="store.activeRoom && store.activeTab === 'chat'">
+      <template v-else-if="store.activeRoom && store.activeTab === 'chat'">
         <!-- Optional Inline History Filter Bar -->
         <div
           v-if="historySearchOpen"
@@ -1062,6 +1123,10 @@
       @open-bot-home="store.openBotHomeDrawer($event)" />
     <BotHomeDrawer :bot-id="store.botHomeDrawerBotId" @close="store.closeBotHomeDrawer()" />
     <ServerSettingsModal :open="store.serverSettingsOpen" @close="store.serverSettingsOpen = false" />
+    <AccountAuthModal
+      :open="store.authRequired || accountAuthOpen"
+      :dismissible="!store.authRequired"
+      @close="accountAuthOpen = false" />
 
     <!-- Group Notice Edit Modal -->
     <div
@@ -1125,17 +1190,40 @@
           <label class="space-y-1">
             <span class="text-[#9ca3af]">Provider</span>
             <select v-model="newBotForm.provider" class="vl-input">
-              <option value="codex">codex</option>
-              <option value="claude">claude</option>
-              <option value="antigravity">antigravity</option>
-              <option value="opencode">opencode</option>
+              <option
+                v-for="p in createBotProviderOptions"
+                :key="p.id"
+                :value="p.id">
+                {{ p.label }}{{ p.configured ? ' ✓' : ' (未配置)' }}
+              </option>
             </select>
           </label>
           <label class="space-y-1">
             <span class="text-[#9ca3af]">Model</span>
-            <input v-model="newBotForm.model" placeholder="可选，如 gpt-5.3-codex" class="vl-input" />
+            <input
+              v-model="newBotForm.model"
+              list="vl-create-bot-models"
+              placeholder="可选，如 auto/deepseek-v4.1-flash"
+              class="vl-input" />
+            <datalist id="vl-create-bot-models">
+              <option v-for="m in store.modelCatalog" :key="m.id" :value="m.id">
+                {{ m.displayName }} ({{ m.ownedBy }})
+              </option>
+            </datalist>
           </label>
         </div>
+        <label v-if="store.modelCatalog.length > 0" class="block space-y-1 text-12px">
+          <span class="text-[#9ca3af]">从 Magpie 已激活模型 / 路由组快速填充</span>
+          <select
+            v-model="selectedCatalogModelId"
+            class="vl-input"
+            @change="onPickMagpieModel(selectedCatalogModelId)">
+            <option value="">-- 选择 Magpie 模型（auto/* 优先）--</option>
+            <option v-for="m in store.modelCatalog" :key="m.id" :value="m.id">
+              {{ m.isRoutingGroup ? '★ ' : '' }}{{ m.displayName }} ({{ m.id }})
+            </option>
+          </select>
+        </label>
         <label class="block space-y-1 text-12px">
           <span class="text-[#9ca3af]">工作目录 (cwd)</span>
           <input v-model="newBotForm.cwd" class="vl-input font-mono" />
@@ -1207,7 +1295,9 @@ import {
 import { useVibeLinkStore, type VlDesktopNav } from '../store'
 import type { VlAccount, VlMessage, VlPresence, VlRoomSummary, VlSendMode } from '../types'
 import '../vibelink.scss'
+import AccountAuthModal from './AccountAuthModal.vue'
 import AccountProfileModal from './AccountProfileModal.vue'
+import AccountWelfarePanel from './AccountWelfarePanel.vue'
 import AvatarActionMenu from './AvatarActionMenu.vue'
 import BotApprovalCard from './BotApprovalCard.vue'
 import BotDiffCheckpointCard from './BotDiffCheckpointCard.vue'
@@ -1251,6 +1341,7 @@ const noticeModalOpen = ref(false)
 const noticeDraft = ref('')
 const createBotModalOpen = ref(false)
 const createGroupModalOpen = ref(false)
+const accountAuthOpen = ref(false)
 
 const mentionPopupOpen = ref(false)
 const mentionQuery = ref('')
@@ -1284,6 +1375,37 @@ const newBotForm = reactive({
   cwd: 'D:\\AI\\VibeLink',
   soulMarkdown: ''
 })
+const selectedCatalogModelId = ref('')
+
+const createBotProviderOptions = computed(() => {
+  if (store.providerCatalog.length > 0) {
+    return store.providerCatalog
+  }
+  return [
+    { id: 'magpie-gateway', label: 'Magpie Gateway (本地统一网关)', configured: false, source: 'plugin:magpie' },
+    { id: 'codex', label: 'codex (Codex CLI)', configured: true, source: 't3_native' },
+    { id: 'claude', label: 'claude (Claude Code)', configured: true, source: 't3_native' },
+    { id: 'antigravity', label: 'antigravity (Antigravity)', configured: true, source: 't3_native' },
+    { id: 'opencode', label: 'opencode (OpenCode)', configured: true, source: 't3_native' }
+  ]
+})
+
+function onPickMagpieModel(modelId: string) {
+  if (!modelId) return
+  newBotForm.model = modelId
+  newBotForm.provider = 'magpie-gateway'
+  const item = store.modelCatalog.find((m) => m.id === modelId)
+  const rawLabel = (item?.displayName || modelId.split('/').pop() || modelId)
+    .replace(/\s*\(latest\)\s*/i, '')
+    .trim()
+  if (!newBotForm.displayName.trim()) {
+    newBotForm.displayName = rawLabel
+  }
+  if (!newBotForm.handle.trim()) {
+    const cleanHandle = rawLabel.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]+/g, '')
+    newBotForm.handle = cleanHandle || 'MagpieBot'
+  }
+}
 
 const newGroupForm = reactive({
   name: '',
@@ -1672,6 +1794,10 @@ async function saveMyStatusText() {
 
 function openCreateBot() {
   createMenuOpen.value = false
+  selectedCatalogModelId.value = ''
+  if (store.providerCatalog.some((p) => p.id === 'magpie-gateway' && p.configured)) {
+    newBotForm.provider = 'magpie-gateway'
+  }
   createBotModalOpen.value = true
 }
 

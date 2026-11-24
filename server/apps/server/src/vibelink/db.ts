@@ -20,6 +20,7 @@ import type {
   VlMemberRole,
   VlMessage,
   VlMessageType,
+  VlPluginDbState,
   VlPresence,
   VlRoom,
   VlRoomBotThread,
@@ -65,6 +66,13 @@ export class VibeLinkDatabase {
     NodeFS.mkdirSync(this.avatarsDir, { recursive: true });
 
     this.db = new NodeSqlite.DatabaseSync(this.dbPath);
+    if (process.platform !== "win32") {
+      try {
+        NodeFS.chmodSync(this.dbPath, 0o600);
+      } catch {
+        // ignore chmod errors on restricted filesystems
+      }
+    }
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.migrate();
@@ -102,7 +110,20 @@ export class VibeLinkDatabase {
         approval_mode TEXT NOT NULL DEFAULT 'ask',
         description TEXT NOT NULL DEFAULT '',
         pinned INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'manual',
+        plugin_id TEXT,
+        external_id TEXT,
+        visible INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS vl_plugins (
+        id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        last_sync_at INTEGER,
+        last_error TEXT,
         updated_at INTEGER NOT NULL
       );
 
@@ -201,6 +222,21 @@ export class VibeLinkDatabase {
         resolved_at INTEGER
       );
     `);
+
+    const cols = this.db.prepare("PRAGMA table_info(vl_accounts)").all() as Array<{ name?: string }>;
+    const existingCols = new Set(cols.map((c) => String(c.name ?? "")));
+    if (!existingCols.has("source")) {
+      this.db.exec("ALTER TABLE vl_accounts ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';");
+    }
+    if (!existingCols.has("plugin_id")) {
+      this.db.exec("ALTER TABLE vl_accounts ADD COLUMN plugin_id TEXT;");
+    }
+    if (!existingCols.has("external_id")) {
+      this.db.exec("ALTER TABLE vl_accounts ADD COLUMN external_id TEXT;");
+    }
+    if (!existingCols.has("visible")) {
+      this.db.exec("ALTER TABLE vl_accounts ADD COLUMN visible INTEGER NOT NULL DEFAULT 1;");
+    }
   }
 
   private mapAccount(row: Record<string, unknown>): VlAccount {
@@ -222,6 +258,10 @@ export class VibeLinkDatabase {
       approvalMode: String(row.approval_mode ?? "ask"),
       description: String(row.description ?? ""),
       pinned: Number(row.pinned ?? 0) === 1,
+      source: String(row.source ?? "manual"),
+      pluginId: row.plugin_id == null ? null : String(row.plugin_id),
+      externalId: row.external_id == null ? null : String(row.external_id),
+      visible: Number(row.visible ?? 1) === 1,
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     };
@@ -308,15 +348,31 @@ export class VibeLinkDatabase {
     }));
   }
 
-  listAccounts(kind?: VlAccountKind): ReadonlyArray<VlAccount> {
+  listAccounts(
+    kind?: VlAccountKind,
+    options?: { readonly includeHidden?: boolean },
+  ): ReadonlyArray<VlAccount> {
+    const includeHidden = options?.includeHidden ?? false;
     const rows = (
       kind
-        ? this.db
-            .prepare("SELECT * FROM vl_accounts WHERE kind = ? ORDER BY pinned DESC, created_at ASC")
-            .all(kind)
-        : this.db
-            .prepare("SELECT * FROM vl_accounts ORDER BY kind ASC, pinned DESC, created_at ASC")
-            .all()
+        ? includeHidden
+          ? this.db
+              .prepare("SELECT * FROM vl_accounts WHERE kind = ? ORDER BY pinned DESC, created_at ASC")
+              .all(kind)
+          : this.db
+              .prepare(
+                "SELECT * FROM vl_accounts WHERE kind = ? AND visible = 1 ORDER BY pinned DESC, created_at ASC",
+              )
+              .all(kind)
+        : includeHidden
+          ? this.db
+              .prepare("SELECT * FROM vl_accounts ORDER BY kind ASC, pinned DESC, created_at ASC")
+              .all()
+          : this.db
+              .prepare(
+                "SELECT * FROM vl_accounts WHERE visible = 1 ORDER BY kind ASC, pinned DESC, created_at ASC",
+              )
+              .all()
     ) as Array<Record<string, unknown>>;
     return rows.map((row) => this.mapAccount(row));
   }
@@ -337,21 +393,42 @@ export class VibeLinkDatabase {
     return row ? this.mapAccount(row) : null;
   }
 
-  upsertAccount(account: Omit<VlAccount, "createdAt" | "updatedAt"> & {
-    readonly createdAt?: number;
-    readonly updatedAt?: number;
-  }): VlAccount {
+  findAccountByPluginExternalId(pluginId: string, externalId: string): VlAccount | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM vl_accounts WHERE plugin_id = ? AND lower(external_id) = lower(?) LIMIT 1",
+      )
+      .get(pluginId, externalId) as Record<string, unknown> | undefined;
+    return row ? this.mapAccount(row) : null;
+  }
+
+  upsertAccount(
+    account: Omit<VlAccount, "createdAt" | "updatedAt" | "source" | "pluginId" | "externalId" | "visible"> & {
+      readonly source?: string;
+      readonly pluginId?: string | null;
+      readonly externalId?: string | null;
+      readonly visible?: boolean;
+      readonly createdAt?: number;
+      readonly updatedAt?: number;
+    },
+  ): VlAccount {
     const existing = this.getAccount(account.id);
     const now = Date.now();
     const createdAt = existing?.createdAt ?? account.createdAt ?? now;
     const updatedAt = account.updatedAt ?? now;
+    const source = account.source ?? existing?.source ?? "manual";
+    const pluginId =
+      account.pluginId !== undefined ? account.pluginId : (existing?.pluginId ?? null);
+    const externalId =
+      account.externalId !== undefined ? account.externalId : (existing?.externalId ?? null);
+    const visible = account.visible !== undefined ? account.visible : (existing?.visible ?? true);
     this.db
       .prepare(
         `INSERT INTO vl_accounts (
            id, kind, slug, handle, display_name, avatar, role_title, department,
            presence, status_text, provider, model, cwd, isolation_mode, approval_mode,
-           description, pinned, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           description, pinned, source, plugin_id, external_id, visible, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            kind = excluded.kind,
            slug = excluded.slug,
@@ -369,6 +446,10 @@ export class VibeLinkDatabase {
            approval_mode = excluded.approval_mode,
            description = excluded.description,
            pinned = excluded.pinned,
+           source = excluded.source,
+           plugin_id = excluded.plugin_id,
+           external_id = excluded.external_id,
+           visible = excluded.visible,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -389,6 +470,10 @@ export class VibeLinkDatabase {
         account.approvalMode,
         account.description,
         account.pinned ? 1 : 0,
+        source,
+        pluginId,
+        externalId,
+        visible ? 1 : 0,
         createdAt,
         updatedAt,
       );
@@ -412,6 +497,10 @@ export class VibeLinkDatabase {
       approvalMode: string;
       description: string;
       pinned: boolean;
+      source: string;
+      pluginId: string | null;
+      externalId: string | null;
+      visible: boolean;
     }>,
     emitPresenceEvent = true,
   ): VlAccount | null {
@@ -528,13 +617,22 @@ export class VibeLinkDatabase {
     }));
   }
 
-  getRoomBotAccounts(roomId: string): ReadonlyArray<VlAccount> {
+  getRoomBotAccounts(
+    roomId: string,
+    options?: { readonly includeHidden?: boolean },
+  ): ReadonlyArray<VlAccount> {
+    const includeHidden = options?.includeHidden ?? false;
     const rows = this.db
       .prepare(
-        `SELECT a.* FROM vl_accounts a
-         INNER JOIN vl_room_members m ON m.account_id = a.id
-         WHERE m.room_id = ? AND a.kind = 'bot'
-         ORDER BY m.joined_at ASC`,
+        includeHidden
+          ? `SELECT a.* FROM vl_accounts a
+             INNER JOIN vl_room_members m ON m.account_id = a.id
+             WHERE m.room_id = ? AND a.kind = 'bot'
+             ORDER BY m.joined_at ASC`
+          : `SELECT a.* FROM vl_accounts a
+             INNER JOIN vl_room_members m ON m.account_id = a.id
+             WHERE m.room_id = ? AND a.kind = 'bot' AND a.visible = 1
+             ORDER BY m.joined_at ASC`,
       )
       .all(roomId) as Array<Record<string, unknown>>;
     return rows.map((row) => this.mapAccount(row));
@@ -676,17 +774,42 @@ export class VibeLinkDatabase {
     return updated;
   }
 
-  getRoomSummary(roomId: string, viewerId = "me"): VlRoomSummary | null {
+  getRoomSummary(
+    roomId: string,
+    viewerId = "me",
+    options?: { readonly includeHidden?: boolean },
+  ): VlRoomSummary | null {
     const room = this.getRoom(roomId);
     if (!room) return null;
-    const members = this.listRoomMembers(roomId);
-    const onlineRow = this.db
+    const includeHidden = options?.includeHidden ?? false;
+    const rows = this.db
       .prepare(
-        `SELECT COUNT(*) AS cnt FROM vl_room_members m
+        `SELECT m.room_id, m.account_id, m.role, m.muted, m.joined_at,
+                a.kind AS account_kind, a.visible AS account_visible, a.presence AS account_presence
+         FROM vl_room_members m
          INNER JOIN vl_accounts a ON a.id = m.account_id
-         WHERE m.room_id = ? AND a.presence != 'offline'`,
+         WHERE m.room_id = ?
+         ORDER BY m.joined_at ASC`,
       )
-      .get(roomId) as { cnt?: number } | undefined;
+      .all(roomId) as Array<Record<string, unknown>>;
+
+    const visibleRows = includeHidden
+      ? rows
+      : rows.filter(
+          (row) => String(row.account_kind) === "human" || Number(row.account_visible ?? 1) === 1,
+        );
+
+    const members: VlRoomMember[] = visibleRows.map((row) => ({
+      roomId: String(row.room_id),
+      accountId: String(row.account_id),
+      role: String(row.role) as VlMemberRole,
+      muted: Number(row.muted ?? 0) === 1,
+      joinedAt: Number(row.joined_at),
+    }));
+    const onlineCount = visibleRows.filter(
+      (row) => String(row.account_presence ?? "idle") !== "offline",
+    ).length;
+
     const lastReadAt = this.getReadCursor(roomId, viewerId);
     const unreadRow = this.db
       .prepare(
@@ -703,19 +826,35 @@ export class VibeLinkDatabase {
       ...room,
       members,
       memberCount: members.length,
-      onlineCount: Number(onlineRow?.cnt ?? 0),
+      onlineCount,
       unreadCount: Number(unreadRow?.cnt ?? 0),
       lastMessage: lastRow ? this.mapMessage(lastRow) : null,
     };
   }
 
-  listRoomSummaries(viewerId = "me"): ReadonlyArray<VlRoomSummary> {
+  listRoomSummaries(
+    viewerId = "me",
+    options?: { readonly includeHidden?: boolean },
+  ): ReadonlyArray<VlRoomSummary> {
+    const includeHidden = options?.includeHidden ?? false;
     const rows = this.db
       .prepare("SELECT id FROM vl_rooms ORDER BY pinned DESC, updated_at DESC, created_at ASC")
       .all() as Array<{ id: string }>;
     return rows
-      .map((row) => this.getRoomSummary(String(row.id), viewerId))
-      .filter((summary): summary is VlRoomSummary => summary !== null);
+      .map((row) => this.getRoomSummary(String(row.id), viewerId, options))
+      .filter((summary): summary is VlRoomSummary => {
+        if (!summary) return false;
+        if (!includeHidden && summary.kind === "dm") {
+          const rawMembers = this.listRoomMembers(summary.id);
+          const hasHiddenTarget = rawMembers.some((m) => {
+            if (m.accountId === viewerId) return false;
+            const acc = this.getAccount(m.accountId);
+            return acc !== null && !acc.visible;
+          });
+          if (hasHiddenTarget) return false;
+        }
+        return true;
+      });
   }
 
   getBootstrapPayload(viewerId = "me", messageLimit = 100): VlBootstrapPayload {
@@ -937,5 +1076,60 @@ export class VibeLinkDatabase {
       storagePath: String(row.storage_path),
       createdAt: Number(row.created_at),
     };
+  }
+
+  private mapPluginState(row: Record<string, unknown>): VlPluginDbState {
+    return {
+      id: String(row.id),
+      enabled: Number(row.enabled ?? 1) === 1,
+      config: parseJsonObject(row.config_json),
+      lastSyncAt: row.last_sync_at == null ? null : Number(row.last_sync_at),
+      lastError: row.last_error == null ? null : String(row.last_error),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  getPluginState(pluginId: string): VlPluginDbState | null {
+    const row = this.db.prepare("SELECT * FROM vl_plugins WHERE id = ?").get(pluginId) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.mapPluginState(row) : null;
+  }
+
+  listPluginStates(): ReadonlyArray<VlPluginDbState> {
+    const rows = this.db.prepare("SELECT * FROM vl_plugins ORDER BY id ASC").all() as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) => this.mapPluginState(row));
+  }
+
+  upsertPluginState(input: {
+    readonly id: string;
+    readonly enabled?: boolean;
+    readonly config?: Record<string, unknown>;
+    readonly lastSyncAt?: number | null;
+    readonly lastError?: string | null;
+  }): VlPluginDbState {
+    const existing = this.getPluginState(input.id);
+    const now = Date.now();
+    const enabled = input.enabled !== undefined ? input.enabled : (existing?.enabled ?? true);
+    const config = input.config !== undefined ? input.config : (existing?.config ?? {});
+    const lastSyncAt =
+      input.lastSyncAt !== undefined ? input.lastSyncAt : (existing?.lastSyncAt ?? null);
+    const lastError =
+      input.lastError !== undefined ? input.lastError : (existing?.lastError ?? null);
+    this.db
+      .prepare(
+        `INSERT INTO vl_plugins (id, enabled, config_json, last_sync_at, last_error, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           last_sync_at = excluded.last_sync_at,
+           last_error = excluded.last_error,
+           updated_at = excluded.updated_at`,
+      )
+      .run(input.id, enabled ? 1 : 0, JSON.stringify(config), lastSyncAt, lastError, now);
+    return this.getPluginState(input.id)!;
   }
 }

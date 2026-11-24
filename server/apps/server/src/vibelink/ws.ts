@@ -10,7 +10,9 @@ import * as Queue from "effect/Queue";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as Socket from "effect/socket/Socket";
 
+import { resolveAuthContext } from "./accountRoutes.ts";
 import * as VibeLinkService from "./service.ts";
+import type { VlDeviceCapabilities } from "./devices.ts";
 import type { VlEvent } from "./types.ts";
 
 function getRemoteAddressSafely(request: HttpServerRequest.HttpServerRequest): string | null {
@@ -27,18 +29,12 @@ function getRequestAuth(
 ): { authorized: boolean; parsedUrl: URL } {
   const parsedUrl = new URL(request.url, "http://127.0.0.1");
   const headers = request.headers as Record<string, string | ReadonlyArray<string> | undefined>;
-  const authHeader = typeof headers.authorization === "string" ? headers.authorization : null;
-  const tokenHeader =
-    typeof headers["x-vibelink-token"] === "string" ? headers["x-vibelink-token"] : null;
-  const hostHeader = typeof headers.host === "string" ? headers.host : null;
-  const authorized = vl.auth.verify({
-    authorizationHeader: authHeader,
-    tokenHeader,
+  const ctx = resolveAuthContext(vl.auth, vl.accounts, {
+    headers,
     queryToken: parsedUrl.searchParams.get("token"),
     remoteAddress: getRemoteAddressSafely(request),
-    hostHeader,
   });
-  return { authorized, parsedUrl };
+  return { authorized: Boolean(ctx?.isAdmin), parsedUrl };
 }
 
 function decodeSocketFrame(frame: string | Uint8Array): string {
@@ -165,6 +161,120 @@ const runTerminalSocket = Effect.fn("vibelink.ws.terminal")(function* (
   }).pipe(Effect.ignore);
 });
 
+const runDeviceSocket = Effect.fn("vibelink.ws.device")(function* (
+  socket: Socket.Socket,
+  vl: VibeLinkService.VibeLinkServiceShape,
+  remoteAddress: string | null,
+) {
+  const writer = yield* socket.writer;
+  const reader = yield* socket.reader;
+  const outgoing = yield* Queue.unbounded<unknown>();
+  let socketClosed = false;
+  let boundDeviceId: string | null = null;
+  let boundConnectionId: string | null = null;
+
+  const sendJson = (payload: unknown) => writer.write(JSON.stringify(payload));
+
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      socketClosed = true;
+      if (boundDeviceId && boundConnectionId) {
+        vl.devices.unregisterConnection(boundDeviceId, boundConnectionId);
+      }
+    }),
+  );
+
+  yield* sendJson({ type: "welcome", serverTime: Date.now() });
+
+  yield* Effect.forever(
+    Queue.take(outgoing).pipe(Effect.flatMap((payload) => sendJson(payload))),
+  ).pipe(Effect.ignore, Effect.forkScoped);
+
+  yield* Effect.gen(function* () {
+    while (true) {
+      const frames = yield* reader.pull;
+      for (const frame of frames) {
+        const rawText = decodeSocketFrame(frame);
+        let msg: Record<string, unknown> | null = null;
+        try {
+          const parsed = JSON.parse(rawText) as unknown;
+          if (typeof parsed === "object" && parsed !== null) {
+            msg = parsed as Record<string, unknown>;
+          }
+        } catch {
+          msg = null;
+        }
+        if (!msg) continue;
+
+        const msgType = typeof msg.type === "string" ? msg.type : "";
+        if (msgType === "hello") {
+          const deviceId = typeof msg.deviceId === "string" ? msg.deviceId.trim() : "";
+          if (!deviceId) continue;
+          if (boundDeviceId && boundConnectionId) {
+            vl.devices.unregisterConnection(boundDeviceId, boundConnectionId);
+          }
+          const caps =
+            typeof msg.capabilities === "object" && msg.capabilities !== null
+              ? (msg.capabilities as Partial<VlDeviceCapabilities>)
+              : null;
+          const reg = vl.devices.registerConnection({
+            deviceId,
+            name: typeof msg.name === "string" ? msg.name : undefined,
+            model: typeof msg.model === "string" ? msg.model : undefined,
+            manufacturer: typeof msg.manufacturer === "string" ? msg.manufacturer : undefined,
+            androidVersion: typeof msg.androidVersion === "string" ? msg.androidVersion : undefined,
+            sdkInt: typeof msg.sdkInt === "number" ? msg.sdkInt : undefined,
+            appVersion: typeof msg.appVersion === "string" ? msg.appVersion : undefined,
+            remoteAddress,
+            capabilities: caps,
+            send: (payload) => {
+              if (socketClosed) return false;
+              Queue.offerUnsafe(outgoing, payload);
+              return true;
+            },
+          });
+          boundDeviceId = deviceId;
+          boundConnectionId = reg.connectionId;
+          yield* sendJson({
+            type: "registered",
+            deviceId,
+            connectionId: reg.connectionId,
+            serverTime: Date.now(),
+          });
+        } else if (msgType === "heartbeat") {
+          if (boundDeviceId && boundConnectionId) {
+            const caps =
+              typeof msg.capabilities === "object" && msg.capabilities !== null
+                ? (msg.capabilities as Partial<VlDeviceCapabilities>)
+                : null;
+            vl.devices.updateHeartbeat(boundDeviceId, boundConnectionId, caps);
+          }
+          const ts = yield* Clock.currentTimeMillis;
+          yield* sendJson({ type: "pong", ts });
+        } else if (msgType === "result") {
+          if (boundDeviceId && boundConnectionId && typeof msg.callId === "string") {
+            const caps =
+              typeof msg.capabilities === "object" && msg.capabilities !== null
+                ? (msg.capabilities as Partial<VlDeviceCapabilities>)
+                : null;
+            vl.devices.handleCommandResult(boundDeviceId, boundConnectionId, {
+              callId: msg.callId,
+              ok: Boolean(msg.ok),
+              data: msg.data,
+              error: typeof msg.error === "string" ? msg.error : undefined,
+              durationMs: typeof msg.durationMs === "number" ? msg.durationMs : undefined,
+              capabilities: caps,
+            });
+          }
+        } else if (msgType === "ping") {
+          const ts = yield* Clock.currentTimeMillis;
+          yield* sendJson({ type: "pong", ts });
+        }
+      }
+    }
+  }).pipe(Effect.ignore);
+});
+
 const eventSocketRoute = Layer.unwrap(
   Effect.gen(function* () {
     const vl = yield* VibeLinkService.VibeLinkService;
@@ -212,4 +322,29 @@ const terminalSocketRoute = Layer.unwrap(
   }),
 );
 
-export const vibelinkWsRoutes = Layer.mergeAll(eventSocketRoute, terminalSocketRoute);
+const deviceSocketRoute = Layer.unwrap(
+  Effect.gen(function* () {
+    const vl = yield* VibeLinkService.VibeLinkService;
+    return HttpRouter.add(
+      "GET",
+      "/ws/vl/device",
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const { authorized } = getRequestAuth(vl, request);
+        if (!authorized) {
+          return HttpServerResponse.empty({ status: 401 });
+        }
+        const remoteAddr = getRemoteAddressSafely(request);
+        const socket = yield* request.upgrade;
+        yield* runDeviceSocket(socket, vl, remoteAddr).pipe(Effect.scoped, Effect.ignore);
+        return HttpServerResponse.empty();
+      }),
+    );
+  }),
+);
+
+export const vibelinkWsRoutes = Layer.mergeAll(
+  eventSocketRoute,
+  terminalSocketRoute,
+  deviceSocketRoute,
+);

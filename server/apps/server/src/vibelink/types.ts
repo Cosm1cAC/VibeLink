@@ -1,5 +1,7 @@
 import * as Schema from "effect/Schema";
 
+export * from "./plugins/pluginTypes.ts";
+
 export class VibeLinkError extends Schema.TaggedError<VibeLinkError>()("VibeLinkError", {
   message: Schema.String,
 }) {}
@@ -42,6 +44,10 @@ export interface VlAccount {
   readonly approvalMode: string;
   readonly description: string;
   readonly pinned: boolean;
+  readonly source: string;
+  readonly pluginId: string | null;
+  readonly externalId: string | null;
+  readonly visible: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
 }

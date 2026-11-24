@@ -304,7 +304,12 @@ export const layerBrowserApiCors = Layer.unwrap(
           if (requestPath === MCP_HTTP_PATH) {
             return httpEffect;
           }
-          if (requestPath === "/api/vl" || requestPath.startsWith("/api/vl/")) {
+          if (
+            requestPath === "/api/vl" ||
+            requestPath.startsWith("/api/vl/") ||
+            requestPath === "/v1" ||
+            requestPath.startsWith("/v1/")
+          ) {
             return withVibelinkCors;
           }
           return withCors;

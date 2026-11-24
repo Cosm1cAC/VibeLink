@@ -4,7 +4,7 @@
     class="fixed inset-0 z-55 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3"
     data-testid="account-profile-modal"
     @click.self="$emit('close')">
-    <div class="w-full max-w-500px rounded-12px bg-[#1f2222] border border-[#353a39] text-[#eaeaea] shadow-2xl overflow-hidden flex flex-col max-h-90vh">
+    <div class="w-full max-w-500px rounded-12px bg-[#1f2222] border border-[#353a39] text-[#eaeaea] shadow-2xl overflow-hidden flex flex-col max-h-[84vh]">
       <div class="flex items-center justify-between px-4 py-3 bg-[#242828] border-b border-[#343938]">
         <span class="text-15px font-semibold">
           {{ account.id === 'me' ? '编辑个人资料与头像' : `编辑 Bot 资料 · ${account.displayName}` }}
@@ -90,7 +90,7 @@
         <!-- HuLa Built-in Image Avatar Presets -->
         <div class="space-y-2">
           <div class="text-12px text-[#9ca3af]">HuLa 内置头像库</div>
-          <div class="grid grid-cols-7 gap-2 max-h-180px vl-scroll p-2 rounded-8px bg-[#161919] border border-[#2d3231]">
+          <div class="grid grid-cols-5 sm:grid-cols-7 gap-2 max-h-180px vl-scroll p-2 rounded-8px bg-[#161919] border border-[#2d3231]">
             <button
               v-for="item in HULA_PRESET_AVATARS"
               :key="item.value"

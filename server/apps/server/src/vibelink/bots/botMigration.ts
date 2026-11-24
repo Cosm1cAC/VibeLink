@@ -106,6 +106,10 @@ export function runSeedMigration(
       approvalMode: "ask",
       description: "VibeLink 工作区主人",
       pinned: true,
+      source: "system",
+      pluginId: null,
+      externalId: null,
+      visible: true,
     });
   }
 
@@ -219,6 +223,10 @@ export function runSeedMigration(
         approvalMode: botConfig.approvalMode,
         description: botConfig.description,
         pinned: botConfig.pinned,
+        source: "seed",
+        pluginId: null,
+        externalId: null,
+        visible: true,
       });
       botsMigrated += 1;
     }

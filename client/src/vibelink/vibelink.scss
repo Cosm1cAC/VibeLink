@@ -90,3 +90,18 @@
   margin-top: 6px;
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
+
+html.vl-qr-scanning,
+html.vl-qr-scanning body,
+html.vl-qr-scanning #app,
+html.vl-qr-scanning .van-config-provider,
+html.vl-qr-scanning .vl-mobile-root,
+html.vl-qr-scanning .mobile-scaffold {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+html.vl-qr-scanning .vl-mobile-root > *:not([data-testid='mobile-qr-scanner-overlay']) {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}

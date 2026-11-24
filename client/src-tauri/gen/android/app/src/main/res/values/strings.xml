@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">VibeLink</string>
     <string name="main_activity_title">VibeLink</string>
+    <string name="vibelink_accessibility_description">VibeLink 远程控机无障碍服务：授权电脑端配对 Agent 在后台读取界面、点击与输入操作。</string>
 </resources>

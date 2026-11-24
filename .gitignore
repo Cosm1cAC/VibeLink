@@ -3,13 +3,32 @@
 /opencode-mesh/
 /rshell/
 /keys/
+.vibelink/
+**/.vibelink/
+auth-token.txt
+admin-bootstrap.txt
+cluster-config.json
+pairing-config.json
+.master-key
 *.pem
 *.key
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+local.properties
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!**/.env.example
+*.local.yaml
+*.local.json
+*.local.ps1
 
 # 依赖与构建产物
+client/src-tauri/gen/android/app/src/main/jniLibs/*/libmihomo.so
+client/src-tauri/gen/android/app/src/main/assets/mihomo/
 node_modules/
 dist/
 **/dist/
@@ -35,6 +54,9 @@ client/src-tauri/gen/android/app/build/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 *.db
 *.db-wal
 *.db-shm

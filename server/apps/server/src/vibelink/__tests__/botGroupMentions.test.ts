@@ -22,6 +22,10 @@ function makeBot(id: string, slug: string, handle: string, displayName = handle)
     approvalMode: "ask",
     description: "",
     pinned: false,
+    source: "seed",
+    pluginId: null,
+    externalId: null,
+    visible: true,
     createdAt: 0,
     updatedAt: 0,
   };

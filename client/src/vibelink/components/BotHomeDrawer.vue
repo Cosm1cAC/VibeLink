@@ -4,7 +4,7 @@
     class="fixed inset-0 z-50 flex justify-end bg-black/55 backdrop-blur-xs"
     data-testid="bot-home-drawer"
     @click.self="$emit('close')">
-    <div class="w-full max-w-680px h-full bg-[#1e1e1e] border-l border-[#343434] flex flex-col text-[#eaeaea] shadow-2xl">
+    <div class="w-full max-w-680px h-full bg-[#1e1e1e] border-l border-[#343434] flex flex-col text-[#eaeaea] shadow-2xl pt-[var(--safe-area-inset-top,0px)] pb-[var(--safe-area-inset-bottom,0px)] box-border">
       <div class="flex items-center justify-between px-4 py-3 bg-[#242424] border-b border-[#343434]">
         <div class="flex items-center gap-3 min-w-0">
           <button
@@ -22,6 +22,9 @@
             <div class="flex items-center gap-2">
               <span class="text-15px font-semibold truncate">{{ bot.displayName }}</span>
               <span class="px-1.5 py-0.5 rounded bg-[#1d4940] text-[#5eead4] text-11px">@{{ bot.handle }}</span>
+              <span v-if="bot.pluginId" class="px-1.5 py-0.5 rounded bg-[#233230] text-[#93c5fd] text-10.5px">
+                来源：{{ bot.pluginId }} 插件
+              </span>
               <span class="text-11px text-[#9ca3af]">{{ bot.provider }} / {{ bot.model || 'default' }}</span>
             </div>
             <div class="text-11.5px text-[#8e9297] truncate">{{ bot.roleTitle }} · {{ bot.cwd }}</div>
@@ -63,19 +66,19 @@
         {{ noticeText }}
       </div>
 
-      <div v-if="viewTab === 'files'" class="flex-1 min-h-0 flex">
-        <div class="w-185px border-r border-[#303030] bg-[#191919] p-2 flex flex-col gap-1 vl-scroll">
+      <div v-if="viewTab === 'files'" class="flex-1 min-h-0 flex flex-col md:flex-row">
+        <div class="w-full md:w-185px border-b md:border-b-0 md:border-r border-[#303030] bg-[#191919] p-2 flex flex-row md:flex-col gap-1 overflow-x-auto md:overflow-y-auto shrink-0">
           <button
             v-for="f in fileEntries"
             :key="f.path"
             type="button"
-            class="text-left px-2.5 py-1.5 rounded-6px border-0 cursor-pointer text-12px font-mono truncate"
+            class="text-left px-2.5 py-1.5 rounded-6px border-0 cursor-pointer text-12px font-mono whitespace-nowrap md:whitespace-normal md:truncate shrink-0"
             :class="selectedFile === f.path ? 'bg-[#1d4940] text-[#ecfdf5]' : 'bg-transparent text-[#b9c0c4] hover:bg-[#252525]'"
             @click="loadFile(f.path)">
             {{ f.path }}
           </button>
 
-          <div class="mt-2 pt-2 border-t border-[#2d2d2d] space-y-1.5">
+          <div class="hidden md:block mt-2 pt-2 border-t border-[#2d2d2d] space-y-1.5">
             <input
               v-model="newSkillName"
               type="text"
@@ -129,17 +132,26 @@
             <select
               v-model="profileForm.provider"
               class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none">
-              <option value="antigravity">antigravity (Gemini / AG)</option>
-              <option value="claude">claude (Claude Agent)</option>
-              <option value="opencode">opencode (OpenCode)</option>
-              <option value="codex">codex (Codex CLI)</option>
+              <option
+                v-for="opt in providerOptions"
+                :key="opt.id"
+                :value="opt.id">
+                {{ opt.label }}{{ opt.configured ? '' : ' (未配置)' }}
+              </option>
             </select>
           </label>
           <label class="space-y-1 text-12px">
             <span class="text-[#9ca3af]">Model</span>
             <input
               v-model="profileForm.model"
+              list="vl-bot-home-models"
+              placeholder="输入或从 Magpie 激活模型中选择"
               class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none" />
+            <datalist id="vl-bot-home-models">
+              <option v-for="m in store.modelCatalog" :key="m.id" :value="m.id">
+                {{ m.displayName }} ({{ m.ownedBy }})
+              </option>
+            </datalist>
           </label>
         </div>
         <div class="grid grid-cols-2 gap-3">
@@ -191,6 +203,12 @@
             rows="3"
             class="w-full box-border px-3 py-1.5 rounded bg-[#141414] border border-[#383838] text-[#eaeaea] outline-none"></textarea>
         </label>
+        <label
+          v-if="bot.pluginId === 'magpie'"
+          class="flex items-center gap-2 text-12px text-[#cbd5e1] cursor-pointer">
+          <input v-model="syncToPlugin" type="checkbox" />
+          <span>保存时同步写回 Magpie 配置</span>
+        </label>
         <div class="pt-2 flex justify-end">
           <button
             type="button"
@@ -226,6 +244,7 @@ const fileContent = ref('')
 const savingFile = ref(false)
 const newSkillName = ref('')
 const noticeText = ref('')
+const syncToPlugin = ref(false)
 
 const profileForm = reactive({
   displayName: '',
@@ -242,6 +261,28 @@ const profileForm = reactive({
 const bot = computed(() => {
   if (!props.botId) return null
   return store.accountsById[props.botId] ?? null
+})
+
+const providerOptions = computed(() => {
+  const base =
+    store.providerCatalog.length > 0
+      ? store.providerCatalog.slice()
+      : [
+          { id: 'magpie-gateway', label: 'Magpie Gateway (本地统一网关)', configured: false, source: 'plugin:magpie' },
+          { id: 'codex', label: 'codex (Codex CLI)', configured: true, source: 't3_native' },
+          { id: 'claude', label: 'claude (Claude Code)', configured: true, source: 't3_native' },
+          { id: 'opencode', label: 'opencode (OpenCode)', configured: true, source: 't3_native' },
+          { id: 'antigravity', label: 'antigravity (Antigravity)', configured: true, source: 't3_native' }
+        ]
+  if (profileForm.provider && !base.some((p) => p.id === profileForm.provider)) {
+    base.unshift({
+      id: profileForm.provider,
+      label: profileForm.provider,
+      configured: true,
+      source: 'custom'
+    })
+  }
+  return base
 })
 
 const fileEntries = computed<VlBotFileEntry[]>(() => {
@@ -339,8 +380,17 @@ async function handleTidyMemory() {
 async function saveProfile() {
   if (!bot.value) return
   try {
-    await store.updateBotProfile(bot.value.id, { ...profileForm })
-    noticeText.value = 'Bot 配置已更新'
+    await store.updateBotProfile(bot.value.id, {
+      ...profileForm,
+      ...(bot.value.pluginId === 'magpie' && syncToPlugin.value ? { syncToPlugin: true } : {})
+    })
+    if (syncToPlugin.value && store.lastPluginSync) {
+      noticeText.value = store.lastPluginSync.ok
+        ? `Bot 配置已更新，并已写回 Magpie：${store.lastPluginSync.message}`
+        : `Bot 配置已保存，但写回 Magpie 失败：${store.lastPluginSync.message}`
+    } else {
+      noticeText.value = 'Bot 配置已更新'
+    }
   } catch (err) {
     noticeText.value = `更新失败: ${err instanceof Error ? err.message : String(err)}`
   }
@@ -350,6 +400,7 @@ watch(
   () => props.botId,
   (id) => {
     noticeText.value = ''
+    syncToPlugin.value = false
     selectedFile.value = 'SOUL.md'
     viewTab.value = 'files'
     if (id) {

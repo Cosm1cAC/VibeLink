@@ -1,23 +1,68 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { VibeLinkClient } from './client'
-import { getDefaultServerUrl, getStoredAuthToken, setServerConfig } from './runtime'
+import {
+  classifyEndpointKind,
+  defaultPriorityForKind,
+  loadStoredChannels,
+  loadSwitchMode,
+  makeChannelId,
+  measureChannelSpeed,
+  mergeEndpoints,
+  parsePairingQrPayload,
+  pickBestEndpoint,
+  probeEndpointHealth,
+  saveStoredChannels,
+  saveSwitchMode
+} from './channels'
+import {
+  getDefaultServerUrl,
+  getStoredAuthToken,
+  getStoredSessionToken,
+  isAndroidNativeBridgeAvailable,
+  normalizeServerUrl,
+  setServerConfig,
+  setSessionToken,
+  syncAndroidAgentConfig
+} from './runtime'
 import type {
   VlAccount,
   VlApproval,
+  VlAuthUser,
   VlBotFileEntry,
+  VlChannelEndpoint,
+  VlChannelKind,
+  VlChannelSpeedResult,
+  VlChannelSwitchMode,
+  VlClusterStatus,
+  VlClusterSummary,
+  VlConnectedDevice,
+  VlDeviceCommandResult,
+  VlGatewayUpstream,
   VlHealthStatus,
   VlInfraStatus,
+  VlInviteCode,
+  VlMagpieBridgeInfo,
   VlMessage,
+  VlMyWelfarePayload,
+  VlPairingInfo,
+  VlPluginModelDescriptor,
+  VlPluginSummary,
+  VlPluginUpdateInfo,
+  VlPluginUpdateResult,
   VlPresence,
+  VlProviderOption,
   VlRealtimeEvent,
   VlRoomMember,
   VlRoomSummary,
   VlSendMode,
-  VlTerminalSession
+  VlTerminalSession,
+  VlUserApiKey,
+  VlWelfareGrant,
+  VlWProxyStatus
 } from './types'
 
-export type VlDesktopNav = 'messages' | 'bots' | 'workspace'
+export type VlDesktopNav = 'messages' | 'bots' | 'workspace' | 'account'
 export type VlRoomTab = 'chat' | 'terminal' | 'diff'
 
 export interface EnrichedRoomMember {
@@ -28,7 +73,8 @@ export interface EnrichedRoomMember {
 export const useVibeLinkStore = defineStore('vibelink', () => {
   const serverUrl = ref(getDefaultServerUrl())
   const authToken = ref(getStoredAuthToken())
-  const client = new VibeLinkClient(serverUrl.value, authToken.value)
+  const sessionToken = ref(getStoredSessionToken())
+  const client = new VibeLinkClient(serverUrl.value, authToken.value, sessionToken.value)
 
   const initialized = ref(false)
   const connecting = ref(false)
@@ -36,6 +82,20 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
   const lastError = ref<string | null>(null)
   const mockBots = ref(false)
   const latestSeq = ref(0)
+
+  const authUser = ref<VlAuthUser | null>(null)
+  const authMode = ref<'owner_token' | 'loopback_admin' | 'user_session' | null>(null)
+  const authRequired = ref(false)
+  const clusterSummary = ref<VlClusterSummary | null>(null)
+  const standbyMode = ref(false)
+  const myWelfare = ref<VlMyWelfarePayload | null>(null)
+  const myApiKeys = ref<VlUserApiKey[]>([])
+  const adminUsers = ref<VlAuthUser[]>([])
+  const adminInvites = ref<VlInviteCode[]>([])
+  const adminWelfare = ref<VlWelfareGrant[]>([])
+  const adminUpstreams = ref<VlGatewayUpstream[]>([])
+  const adminMagpieBridge = ref<VlMagpieBridgeInfo | null>(null)
+  const adminClusterStatus = ref<VlClusterStatus | null>(null)
 
   const me = ref<VlAccount | null>(null)
   const accounts = ref<VlAccount[]>([])
@@ -57,8 +117,33 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
   const botHomeDrawerBotId = ref<string | null>(null)
   const profileModalAccountId = ref<string | null>(null)
   const serverSettingsOpen = ref(false)
+  const serverSettingsTab = ref<'connection' | 'plugins' | 'wproxy' | 'devices' | 'account'>('connection')
+
+  const devices = ref<VlConnectedDevice[]>([])
+  const devicesLoading = ref(false)
+
+  const plugins = ref<VlPluginSummary[]>([])
+  const userPluginsDir = ref('')
+  const providerCatalog = ref<VlProviderOption[]>([])
+  const modelCatalog = ref<VlPluginModelDescriptor[]>([])
+  const pluginsLoading = ref(false)
+  const lastPluginSync = ref<{ ok: boolean; message: string } | null>(null)
+  const wproxyStatus = ref<VlWProxyStatus | null>(null)
+  const wproxyLoading = ref(false)
+
+  const channels = ref<VlChannelEndpoint[]>(loadStoredChannels(serverUrl.value))
+  const channelSwitchMode = ref<VlChannelSwitchMode>(loadSwitchMode())
+  const pairingInfo = ref<VlPairingInfo | null>(null)
+  const channelTesting = ref(false)
+  const autoSwitching = ref(false)
+  const lastChannelSwitchNotice = ref<string | null>(null)
 
   let stopEventSocket: (() => void) | null = null
+  let failoverTimer: ReturnType<typeof setTimeout> | null = null
+  let primaryFailbackTimer: ReturnType<typeof setInterval> | null = null
+  let lastFailoverAt = 0
+  let networkHooksRegistered = false
+  let removeNetworkListeners: (() => void) | null = null
 
   const accountsById = computed<Record<string, VlAccount>>(() => {
     const map: Record<string, VlAccount> = {}
@@ -73,7 +158,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
 
   const bots = computed<VlAccount[]>(() => {
     return accounts.value
-      .filter((a) => a.kind === 'bot')
+      .filter((a) => a.kind === 'bot' && a.visible !== false)
       .slice()
       .sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.displayName.localeCompare(b.displayName, 'zh-CN'))
   })
@@ -279,8 +364,73 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
         }
         break
       }
+      case 'plugins.synced': {
+        void bootstrap()
+        break
+      }
+      case 'plugin.updated': {
+        void fetchPlugins()
+        if (payload.pluginId === 'wproxy') {
+          void fetchWProxyStatus()
+        }
+        break
+      }
       default:
         break
+    }
+  }
+
+  function clearFailoverTimer() {
+    if (failoverTimer) {
+      clearTimeout(failoverTimer)
+      failoverTimer = null
+    }
+  }
+
+  function scheduleAutoFailover() {
+    if (channelSwitchMode.value !== 'auto' || autoSwitching.value) return
+    if (channels.value.filter((c) => c.enabled).length <= 1) return
+    if (Date.now() - lastFailoverAt < 8000) return
+    clearFailoverTimer()
+    failoverTimer = setTimeout(() => {
+      failoverTimer = null
+      if (!connected.value && channelSwitchMode.value === 'auto') {
+        void autoSelectBestChannel({ forceReconnect: true })
+      }
+    }, 1500)
+  }
+
+  function registerNetworkHooks() {
+    if (networkHooksRegistered || typeof window === 'undefined') return
+    networkHooksRegistered = true
+
+    const handleNetworkChange = () => {
+      if (channelSwitchMode.value !== 'auto') return
+      if (!connected.value) {
+        void autoSelectBestChannel({ forceReconnect: true })
+        return
+      }
+      const current = channels.value.find((c) => c.url === serverUrl.value)
+      if (current && current.kind !== 'lan') {
+        void autoSelectBestChannel({ preferLanOnly: true })
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        handleNetworkChange()
+      }
+    }
+
+    window.addEventListener('online', handleNetworkChange)
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+    }
+    removeNetworkListeners = () => {
+      window.removeEventListener('online', handleNetworkChange)
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
     }
   }
 
@@ -294,6 +444,11 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
       handleRealtimeEvent,
       (isUp, seq) => {
         connected.value = isUp
+        if (isUp) {
+          clearFailoverTimer()
+        } else {
+          scheduleAutoFailover()
+        }
         if (typeof seq === 'number' && seq > latestSeq.value) {
           latestSeq.value = seq
         }
@@ -301,20 +456,200 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     )
   }
 
+  async function fetchPairingInfo(): Promise<VlPairingInfo | null> {
+    try {
+      const info = await client.getPairingInfo()
+      pairingInfo.value = info
+      if (Array.isArray(info.endpoints) && info.endpoints.length > 0) {
+        channels.value = mergeEndpoints(
+          channels.value,
+          info.endpoints.map((ep) => ({
+            id: ep.id,
+            label: ep.label,
+            kind: ep.kind,
+            url: ep.url,
+            iface: ep.iface,
+            serverRole: ep.serverRole,
+            nodeId: ep.nodeId,
+            priority: ep.priority
+          }))
+        )
+        saveStoredChannels(channels.value)
+      }
+      return info
+    } catch {
+      return pairingInfo.value
+    }
+  }
+
+  async function updatePairingConfig(customExternalUrl: string): Promise<VlPairingInfo> {
+    const info = await client.updatePairingConfig({ customExternalUrl })
+    pairingInfo.value = info
+    channels.value = mergeEndpoints(
+      channels.value,
+      info.endpoints.map((ep) => ({
+        id: ep.id,
+        label: ep.label,
+        kind: ep.kind,
+        url: ep.url,
+        iface: ep.iface,
+        serverRole: ep.serverRole,
+        nodeId: ep.nodeId,
+        priority: ep.priority
+      }))
+    )
+    saveStoredChannels(channels.value)
+    return info
+  }
+
+  function stopPrimaryFailbackWatcher() {
+    if (primaryFailbackTimer) {
+      clearInterval(primaryFailbackTimer)
+      primaryFailbackTimer = null
+    }
+  }
+
+  function startPrimaryFailbackWatcher() {
+    if (primaryFailbackTimer) return
+    primaryFailbackTimer = setInterval(() => {
+      if (channelSwitchMode.value !== 'auto') return
+      const primaryCandidates = channels.value.filter(
+        (c) => c.enabled && c.serverRole !== 'standby' && c.url !== serverUrl.value
+      )
+      if (primaryCandidates.length === 0) return
+      void (async () => {
+        for (const ep of primaryCandidates) {
+          const probe = await probeEndpointHealth(ep, authToken.value, 2200)
+          if (probe.ok) {
+            await reconnect(ep.url, authToken.value)
+            lastChannelSwitchNotice.value = `主服已恢复，已自动回切至 ${ep.label}`
+            break
+          }
+        }
+      })()
+    }, 30_000)
+  }
+
   async function bootstrap(): Promise<void> {
     connecting.value = true
     lastError.value = null
     try {
+      let meResp: Awaited<ReturnType<VibeLinkClient['authMe']>>
+      try {
+        meResp = await client.authMe()
+      } catch (err) {
+        const status = (err as { status?: number })?.status
+        if (status === 401) {
+          if (sessionToken.value) {
+            sessionToken.value = ''
+            setSessionToken(null)
+            client.setSessionToken(null)
+            try {
+              meResp = await client.authMe()
+            } catch (retryErr) {
+              if ((retryErr as { status?: number })?.status === 401) {
+                authUser.value = null
+                authMode.value = null
+                authRequired.value = true
+                connected.value = false
+                initialized.value = true
+                return
+              }
+              throw retryErr
+            }
+          } else {
+            authUser.value = null
+            authMode.value = null
+            authRequired.value = true
+            connected.value = false
+            initialized.value = true
+            return
+          }
+        } else {
+          throw err
+        }
+      }
+
+      authRequired.value = false
+      authUser.value = meResp.user
+      authMode.value = meResp.authMode
+      clusterSummary.value = meResp.cluster
+
+      if (Array.isArray(meResp.nodes) && meResp.nodes.length > 0) {
+        channels.value = mergeEndpoints(
+          channels.value,
+          meResp.nodes.map((n) => ({
+            id: n.id,
+            label: n.label,
+            kind: n.kind,
+            url: n.url,
+            serverRole: n.serverRole,
+            nodeId: n.nodeId,
+            priority: n.priority
+          }))
+        )
+        saveStoredChannels(channels.value)
+      }
+
+      if (meResp.cluster?.role === 'standby') {
+        startPrimaryFailbackWatcher()
+      } else {
+        stopPrimaryFailbackWatcher()
+      }
+
+      if (meResp.user.role !== 'admin') {
+        standbyMode.value = meResp.cluster?.role === 'standby'
+        me.value = {
+          id: meResp.user.id,
+          kind: 'human',
+          slug: meResp.user.username,
+          handle: meResp.user.username,
+          displayName: meResp.user.displayName,
+          avatar: 'preset:user',
+          roleTitle: '用户',
+          department: 'VibeLink',
+          presence: 'online',
+          statusText: '',
+          provider: '',
+          model: '',
+          cwd: '',
+          isolationMode: 'shared',
+          approvalMode: 'ask',
+          description: '',
+          pinned: false,
+          createdAt: meResp.user.createdAt,
+          updatedAt: meResp.user.updatedAt
+        }
+        accounts.value = [me.value]
+        rooms.value = []
+        messagesByRoom.value = {}
+        activeRoomId.value = null
+        if (stopEventSocket) {
+          stopEventSocket()
+          stopEventSocket = null
+        }
+        connected.value = true
+        initialized.value = true
+        activeNav.value = 'account'
+        void fetchMyWelfare()
+        void fetchMyApiKeys()
+        return
+      }
+
       const data = await client.bootstrap()
-      me.value = data.me
+      if (!Array.isArray(data.accounts) || !Array.isArray(data.rooms)) {
+        throw new Error('控制面返回数据结构异常')
+      }
+      standbyMode.value = Boolean(data.standbyMode || meResp.cluster?.role === 'standby')
+      me.value = data.me ?? null
       accounts.value = data.accounts
       rooms.value = data.rooms
-      messagesByRoom.value = data.messagesByRoom
-      latestSeq.value = data.latestSeq
-      mockBots.value = data.mockBots
+      messagesByRoom.value = data.messagesByRoom ?? {}
+      latestSeq.value = Number(data.latestSeq ?? 0)
+      mockBots.value = Boolean(data.mockBots)
 
       const nextCheckpoints: Record<string, VlMessage[]> = {}
-      for (const [rId, msgs] of Object.entries(data.messagesByRoom)) {
+      for (const [rId, msgs] of Object.entries(messagesByRoom.value)) {
         nextCheckpoints[rId] = msgs.filter((m) => m.msgType === 'bot_diff_checkpoint')
       }
       checkpointsByRoom.value = nextCheckpoints
@@ -326,11 +661,29 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
 
       connected.value = true
       initialized.value = true
-      startEventStream()
 
-      if (activeRoomId.value) {
-        void client.markRead(activeRoomId.value).catch(() => {})
+      if (!standbyMode.value) {
+        startEventStream()
+        void fetchPlugins()
+        void fetchPluginCatalog()
+        void fetchWProxyStatus()
+        void fetchPairingInfo()
+        void fetchDevices()
+        syncNativeAgentBridge()
+
+        if (activeRoomId.value) {
+          void client.markRead(activeRoomId.value).catch(() => {})
+        }
+      } else {
+        if (stopEventSocket) {
+          stopEventSocket()
+          stopEventSocket = null
+        }
       }
+
+      void fetchMyWelfare()
+      void fetchMyApiKeys()
+      void fetchAdminClusterStatus()
     } catch (err) {
       connected.value = false
       lastError.value = err instanceof Error ? err.message : String(err)
@@ -341,6 +694,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
   }
 
   async function init(force = false): Promise<void> {
+    registerNetworkHooks()
     try {
       localStorage.removeItem('vibelink')
     } catch {
@@ -355,23 +709,223 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     try {
       await bootstrap()
     } catch {
-      // keep UI usable with error banner + server settings modal access
+      if (channelSwitchMode.value === 'auto' && channels.value.filter((c) => c.enabled).length > 1) {
+        await autoSelectBestChannel({ forceReconnect: true })
+      }
     }
   }
 
   async function reconnect(newUrl: string, newToken: string): Promise<VlHealthStatus> {
-    setServerConfig(newUrl, newToken)
+    const normalizedUrl = normalizeServerUrl(newUrl)
+    const health = await testConnection(normalizedUrl, newToken)
+    setServerConfig(normalizedUrl, newToken)
     serverUrl.value = getDefaultServerUrl()
     authToken.value = getStoredAuthToken()
     client.configure(serverUrl.value, authToken.value)
-    const health = await client.health()
+    const kind = classifyEndpointKind(normalizedUrl)
+    channels.value = mergeEndpoints(channels.value, [
+      {
+        label: kind === 'lan' ? '内网通道' : kind === 'tailscale' ? '外网 · Tailscale' : '当前通道',
+        kind,
+        url: normalizedUrl,
+        priority: defaultPriorityForKind(kind)
+      }
+    ])
+    saveStoredChannels(channels.value)
     await bootstrap()
     return health
   }
 
   async function testConnection(url: string, token: string): Promise<VlHealthStatus> {
-    const probe = new VibeLinkClient(url, token)
+    const normalizedUrl = normalizeServerUrl(url)
+    const probe = new VibeLinkClient(normalizedUrl, token)
     return probe.health()
+  }
+
+  function setChannelSwitchMode(mode: VlChannelSwitchMode) {
+    channelSwitchMode.value = mode
+    saveSwitchMode(mode)
+  }
+
+  function addChannelEndpoint(input: { label?: string; url: string; kind?: VlChannelKind; priority?: number }): VlChannelEndpoint {
+    const normalized = normalizeServerUrl(input.url)
+    const kind = input.kind ?? classifyEndpointKind(normalized)
+    const entry: VlChannelEndpoint = {
+      id: makeChannelId(normalized),
+      label:
+        input.label?.trim() ||
+        (kind === 'lan' ? '自定义内网' : kind === 'tailscale' ? 'Tailscale 通道' : '自定义外网'),
+      kind,
+      url: normalized,
+      priority: input.priority ?? defaultPriorityForKind(kind),
+      enabled: true,
+      lastStatus: 'unknown'
+    }
+    channels.value = mergeEndpoints(channels.value, [entry])
+    saveStoredChannels(channels.value)
+    return channels.value.find((c) => c.url === normalized) ?? entry
+  }
+
+  function removeChannelEndpoint(id: string) {
+    channels.value = channels.value.filter((c) => c.id !== id)
+    saveStoredChannels(channels.value)
+  }
+
+  async function switchToChannel(endpointId: string, tokenOverride?: string): Promise<VlChannelEndpoint> {
+    const target = channels.value.find((c) => c.id === endpointId || c.url === endpointId)
+    if (!target) {
+      throw new Error('未找到指定通道')
+    }
+    const useToken = tokenOverride !== undefined ? tokenOverride : authToken.value
+    const started = Date.now()
+    await reconnect(target.url, useToken)
+    const rtt = Math.max(1, Date.now() - started)
+    channels.value = channels.value.map((c) =>
+      c.id === target.id
+        ? { ...c, lastStatus: 'ok', lastLatencyMs: c.lastLatencyMs ?? rtt, lastError: null, lastCheckedAt: Date.now() }
+        : c
+    )
+    saveStoredChannels(channels.value)
+    lastChannelSwitchNotice.value = `已切换至 ${target.label} (${target.url})`
+    return target
+  }
+
+  async function autoSelectBestChannel(opts?: {
+    forceReconnect?: boolean
+    preferLanOnly?: boolean
+    tokenOverride?: string
+  }): Promise<VlChannelEndpoint | null> {
+    if (autoSwitching.value) return null
+    const enabled = channels.value.filter((c) => c.enabled && (!opts?.preferLanOnly || c.kind === 'lan'))
+    if (enabled.length === 0) return null
+
+    autoSwitching.value = true
+    lastFailoverAt = Date.now()
+    try {
+      const useToken = opts?.tokenOverride !== undefined ? opts.tokenOverride : authToken.value
+      const results = await Promise.all(enabled.map((ep) => probeEndpointHealth(ep, useToken, 2400)))
+
+      const resultById = new Map(results.map((r) => [r.endpoint.id, r]))
+      channels.value = channels.value.map((c) => {
+        const res = resultById.get(c.id)
+        if (!res) return c
+        return {
+          ...c,
+          lastStatus: res.ok ? 'ok' : 'error',
+          lastLatencyMs: res.ok ? res.latencyMs : null,
+          lastError: res.ok ? null : res.error ?? '不可达',
+          lastCheckedAt: Date.now()
+        }
+      })
+      saveStoredChannels(channels.value)
+
+      const best = pickBestEndpoint(results)
+      if (!best) return null
+
+      const updatedBest = channels.value.find((c) => c.id === best.endpoint.id) ?? best.endpoint
+
+      if (updatedBest.url === serverUrl.value && connected.value && !opts?.forceReconnect) {
+        return updatedBest
+      }
+
+      const prevUrl = serverUrl.value
+      await reconnect(updatedBest.url, useToken)
+      if (prevUrl !== updatedBest.url) {
+        lastChannelSwitchNotice.value = `已自动切换至 ${updatedBest.label} (${best.latencyMs ?? '-'}ms)`
+      }
+      return channels.value.find((c) => c.id === updatedBest.id) ?? updatedBest
+    } catch (err) {
+      lastError.value = err instanceof Error ? err.message : String(err)
+      return null
+    } finally {
+      autoSwitching.value = false
+    }
+  }
+
+  async function applyPairingQrPayload(raw: string): Promise<{
+    endpoint: VlChannelEndpoint | null
+    totalChannels: number
+    hostName?: string
+  }> {
+    const parsed = parsePairingQrPayload(raw)
+    channels.value = mergeEndpoints(channels.value, parsed.endpoints)
+    saveStoredChannels(channels.value)
+
+    const nextToken = parsed.token ?? authToken.value
+    const chosen = await autoSelectBestChannel({
+      forceReconnect: true,
+      tokenOverride: nextToken
+    })
+
+    if (!chosen && parsed.endpoints.length > 0) {
+      const first = channels.value.find((c) => c.url === parsed.endpoints[0].url) ?? channels.value[0]
+      if (first) {
+        await reconnect(first.url, nextToken)
+        lastChannelSwitchNotice.value = `已导入 ${parsed.endpoints.length} 条通道并连接 ${first.label}`
+        return { endpoint: first, totalChannels: channels.value.length, hostName: parsed.hostName }
+      }
+    }
+
+    if (!chosen) {
+      throw new Error('已识别二维码中的通道，但均无法连通，请检查手机与电脑网络或 Tailscale 状态')
+    }
+
+    lastChannelSwitchNotice.value = `扫码配对成功 · ${chosen.label} (${chosen.lastLatencyMs ?? '-'}ms)`
+    return {
+      endpoint: chosen,
+      totalChannels: channels.value.length,
+      hostName: parsed.hostName
+    }
+  }
+
+  async function runChannelSpeed(endpointId: string): Promise<VlChannelSpeedResult> {
+    const target = channels.value.find((c) => c.id === endpointId)
+    if (!target) {
+      throw new Error('未找到目标通道')
+    }
+    channels.value = channels.value.map((c) =>
+      c.id === endpointId ? { ...c, lastStatus: 'testing', lastError: null } : c
+    )
+    const res = await measureChannelSpeed(target, authToken.value)
+    channels.value = channels.value.map((c) =>
+      c.id === endpointId
+        ? {
+            ...c,
+            lastStatus: res.ok ? 'ok' : 'error',
+            lastLatencyMs: res.latencyMs,
+            lastJitterMs: res.jitterMs,
+            lastDownloadMbps: res.downloadMbps,
+            lastUploadMbps: res.uploadMbps,
+            lastError: res.error ?? null,
+            lastCheckedAt: res.checkedAt
+          }
+        : c
+    )
+    saveStoredChannels(channels.value)
+    return res
+  }
+
+  async function testChannelSpeed(endpointId: string): Promise<VlChannelSpeedResult> {
+    channelTesting.value = true
+    try {
+      return await runChannelSpeed(endpointId)
+    } finally {
+      channelTesting.value = false
+    }
+  }
+
+  async function testAllChannelsSpeed(): Promise<VlChannelSpeedResult[]> {
+    channelTesting.value = true
+    const results: VlChannelSpeedResult[] = []
+    try {
+      const ids = channels.value.filter((c) => c.enabled).map((c) => c.id)
+      for (const id of ids) {
+        results.push(await runChannelSpeed(id))
+      }
+      return results
+    } finally {
+      channelTesting.value = false
+    }
   }
 
   async function selectRoom(roomId: string): Promise<void> {
@@ -528,6 +1082,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
   ): Promise<VlAccount> {
     const res = await client.updateBot(botId, patch)
     upsertAccount(res.bot)
+    lastPluginSync.value = res.pluginSync ?? null
     return res.bot
   }
 
@@ -649,6 +1204,294 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     }
   }
 
+  async function fetchPlugins(): Promise<VlPluginSummary[]> {
+    pluginsLoading.value = true
+    try {
+      const res = await client.listPlugins()
+      plugins.value = res.plugins
+      userPluginsDir.value = res.userPluginsDir
+      return res.plugins
+    } catch {
+      return plugins.value
+    } finally {
+      pluginsLoading.value = false
+    }
+  }
+
+  async function fetchPluginCatalog(): Promise<void> {
+    try {
+      const res = await client.getPluginCatalog()
+      providerCatalog.value = res.providers
+      modelCatalog.value = res.models
+    } catch {
+      // Keep previous catalog on transient failure
+    }
+  }
+
+  async function syncPlugins(pluginId?: string): Promise<void> {
+    pluginsLoading.value = true
+    try {
+      if (pluginId) {
+        await client.syncPlugin(pluginId)
+      } else {
+        await client.syncAllPlugins()
+      }
+      await bootstrap()
+    } finally {
+      pluginsLoading.value = false
+    }
+  }
+
+  async function togglePlugin(pluginId: string, enabled: boolean): Promise<void> {
+    pluginsLoading.value = true
+    try {
+      await client.togglePlugin(pluginId, enabled)
+      await bootstrap()
+    } finally {
+      pluginsLoading.value = false
+    }
+  }
+
+  async function reloadPlugin(pluginId: string): Promise<void> {
+    pluginsLoading.value = true
+    try {
+      await client.reloadPlugin(pluginId)
+      await bootstrap()
+    } finally {
+      pluginsLoading.value = false
+    }
+  }
+
+  async function ejectPlugin(pluginId: string): Promise<{ ok: boolean; message: string }> {
+    pluginsLoading.value = true
+    try {
+      const res = await client.ejectPlugin(pluginId)
+      await fetchPlugins()
+      return { ok: res.ok, message: res.message }
+    } finally {
+      pluginsLoading.value = false
+    }
+  }
+
+  async function checkPluginUpdate(pluginId: string): Promise<VlPluginUpdateInfo> {
+    const res = await client.checkPluginUpdate(pluginId)
+    return res.update
+  }
+
+  async function runPluginUpdate(
+    pluginId: string,
+    options?: { target?: 'host' | 'plugin'; force?: boolean }
+  ): Promise<VlPluginUpdateResult> {
+    pluginsLoading.value = true
+    try {
+      const updated = await client.runPluginUpdate(pluginId, options)
+      if (updated.result.ok) {
+        await bootstrap()
+      }
+      return updated.result
+    } finally {
+      pluginsLoading.value = false
+    }
+  }
+
+  function openServerSettings(tab: 'connection' | 'plugins' | 'wproxy' | 'devices' | 'account' = 'connection') {
+    serverSettingsTab.value = tab
+    serverSettingsOpen.value = true
+  }
+
+  async function invokePluginAction<T = Record<string, unknown>>(
+    pluginId: string,
+    action: string,
+    payload: Record<string, unknown> = {}
+  ): Promise<T> {
+    return client.invokePluginAction<T>(pluginId, action, payload)
+  }
+
+  async function fetchWProxyStatus(): Promise<VlWProxyStatus | null> {
+    wproxyLoading.value = true
+    try {
+      const status = await invokePluginAction<VlWProxyStatus>('wproxy', 'status')
+      wproxyStatus.value = status
+      return status
+    } catch {
+      wproxyStatus.value = null
+      return null
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function selectWProxyNode(node: string, group = 'PROXY'): Promise<VlWProxyStatus> {
+    wproxyLoading.value = true
+    try {
+      const res = await invokePluginAction<{ status: VlWProxyStatus }>('wproxy', 'selectNode', {
+        group,
+        node
+      })
+      wproxyStatus.value = res.status
+      return res.status
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function testWProxyDelay(
+    node?: string,
+    group = 'PROXY'
+  ): Promise<{ delays: Record<string, number | null>; probeUrl: string }> {
+    wproxyLoading.value = true
+    try {
+      const res = await invokePluginAction<{
+        delays: Record<string, number | null>
+        probeUrl: string
+      }>('wproxy', 'testDelay', { group, ...(node ? { node } : {}) })
+      if (wproxyStatus.value) {
+        wproxyStatus.value = {
+          ...wproxyStatus.value,
+          nodes: wproxyStatus.value.nodes.map((n) =>
+            Object.prototype.hasOwnProperty.call(res.delays, n.name)
+              ? { ...n, delay: res.delays[n.name] ?? null }
+              : n
+          )
+        }
+      }
+      return res
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function setWProxyRouteMode(mode: 'rule' | 'global' | 'direct'): Promise<VlWProxyStatus> {
+    wproxyLoading.value = true
+    try {
+      const res = await invokePluginAction<{ status: VlWProxyStatus }>('wproxy', 'setRouteMode', {
+        mode
+      })
+      wproxyStatus.value = res.status
+      return res.status
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function setWProxySystemProxy(enabled: boolean): Promise<{ output: string; status: VlWProxyStatus }> {
+    wproxyLoading.value = true
+    try {
+      const res = await invokePluginAction<{ output: string; status: VlWProxyStatus }>(
+        'wproxy',
+        'setSystemProxy',
+        { enabled }
+      )
+      wproxyStatus.value = res.status
+      return res
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function healWProxyHysteria(): Promise<{ output: string }> {
+    wproxyLoading.value = true
+    try {
+      const res = await invokePluginAction<{ output: string }>('wproxy', 'healHysteria')
+      void fetchWProxyStatus()
+      return res
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function probeWProxyEgress(): Promise<{ ip: string; latencyMs: number }> {
+    wproxyLoading.value = true
+    try {
+      return await invokePluginAction<{ ip: string; latencyMs: number }>('wproxy', 'probeEgress')
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function reloadWProxyConfig(): Promise<{ message: string }> {
+    wproxyLoading.value = true
+    try {
+      const res = await invokePluginAction<{ message: string }>('wproxy', 'reloadConfig')
+      await fetchWProxyStatus()
+      return res
+    } finally {
+      wproxyLoading.value = false
+    }
+  }
+
+  async function getWProxyLanShareUri(
+    host: string,
+    scheme: 'http' | 'socks5' = 'http'
+  ): Promise<{ uri: string; host: string; port: number; scheme: string; authRequired: boolean }> {
+    return invokePluginAction('wproxy', 'getLanShareUri', { host, scheme })
+  }
+
+  function syncNativeAgentBridge(enabled = true) {
+    if (!isAndroidNativeBridgeAvailable()) return
+    const eps = channels.value.filter((c) => c.enabled).map((c) => c.url)
+    syncAndroidAgentConfig({
+      enabled,
+      token: authToken.value,
+      endpoints: eps.length > 0 ? eps : [serverUrl.value],
+      activeUrl: serverUrl.value
+    })
+  }
+
+  async function fetchDevices(): Promise<VlConnectedDevice[]> {
+    devicesLoading.value = true
+    try {
+      const res = await client.listDevices()
+      devices.value = res.devices ?? []
+      return devices.value
+    } catch {
+      return devices.value
+    } finally {
+      devicesLoading.value = false
+    }
+  }
+
+  async function invokeDeviceCommand(
+    deviceId: string,
+    command: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = 20000
+  ): Promise<VlDeviceCommandResult> {
+    const res = await client.invokeDeviceCommand(deviceId, command, params, timeoutMs)
+    void fetchDevices()
+    return res
+  }
+
+  async function syncWProxyToDevice(
+    deviceId: string,
+    options?: {
+      scheme?: 'socks5' | 'http'
+      mode?: 'auto' | 'vpn_tun' | 'vpn_http' | 'system_proxy'
+      dnsMode?: 'over_tcp' | 'virtual' | 'direct'
+      host?: string
+    }
+  ): Promise<{ ok: true; deviceId: string; proxyUrl: string; host: string; scheme: string }> {
+    const res = await client.syncWProxyToDevice(deviceId, options)
+    void fetchDevices()
+    return res
+  }
+
+  async function syncMihomoToDevice(
+    deviceId: string,
+    options?: {
+      yaml?: string
+      configName?: string
+      tailscaleAuthKey?: string
+      hostname?: string
+      resetTailscaleState?: boolean
+      start?: boolean
+    }
+  ) {
+    const res = await client.syncDeviceMihomo(deviceId, options)
+    void fetchDevices()
+    return res
+  }
+
   function openBotHomeDrawer(botId: string) {
     botHomeDrawerBotId.value = botId
   }
@@ -665,7 +1508,255 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     profileModalAccountId.value = null
   }
 
+  async function authLogin(username: string, password: string, deviceLabel = ''): Promise<VlAuthUser> {
+    const res = await client.authLogin({ username, password, deviceLabel })
+    sessionToken.value = res.sessionToken
+    setSessionToken(res.sessionToken)
+    client.setSessionToken(res.sessionToken)
+    authRequired.value = false
+    await bootstrap()
+    return res.user
+  }
+
+  async function authRegister(input: {
+    username: string
+    password: string
+    displayName?: string
+    inviteCode: string
+    deviceLabel?: string
+  }): Promise<{ user: VlAuthUser; welcomeTokens: number }> {
+    const res = await client.authRegister(input)
+    sessionToken.value = res.sessionToken
+    setSessionToken(res.sessionToken)
+    client.setSessionToken(res.sessionToken)
+    authRequired.value = false
+    await bootstrap()
+    return { user: res.user, welcomeTokens: res.welcomeTokens }
+  }
+
+  async function authLogout(): Promise<void> {
+    try {
+      if (sessionToken.value) {
+        await client.authLogout()
+      }
+    } catch {
+      // ignore logout transport error
+    }
+    sessionToken.value = ''
+    setSessionToken(null)
+    client.setSessionToken(null)
+    authUser.value = null
+    authMode.value = null
+    myWelfare.value = null
+    myApiKeys.value = []
+    if (stopEventSocket) {
+      stopEventSocket()
+      stopEventSocket = null
+    }
+    await bootstrap().catch(() => {
+      authRequired.value = true
+      connected.value = false
+    })
+  }
+
+  async function authChangePassword(oldPassword: string, newPassword: string): Promise<void> {
+    await client.authChangePassword(oldPassword, newPassword)
+  }
+
+  async function fetchMyWelfare(): Promise<VlMyWelfarePayload | null> {
+    try {
+      const res = await client.getMyWelfare()
+      myWelfare.value = res
+      authUser.value = res.user
+      return res
+    } catch {
+      return myWelfare.value
+    }
+  }
+
+  async function redeemWelfare(input: { code?: string; grantId?: string }) {
+    const res = await client.redeemWelfare(input)
+    await fetchMyWelfare()
+    return res
+  }
+
+  async function fetchMyApiKeys(): Promise<VlUserApiKey[]> {
+    try {
+      const res = await client.listMyApiKeys()
+      myApiKeys.value = res.keys
+      return res.keys
+    } catch {
+      return myApiKeys.value
+    }
+  }
+
+  async function createMyApiKey(input: {
+    name?: string
+    allowedModels?: string[]
+    quotaLimit?: number
+  }): Promise<VlUserApiKey> {
+    const res = await client.createMyApiKey(input)
+    await fetchMyApiKeys()
+    return res.key
+  }
+
+  async function revokeMyApiKey(keyId: string): Promise<void> {
+    await client.revokeMyApiKey(keyId)
+    await fetchMyApiKeys()
+  }
+
+  async function adminFetchUsers(): Promise<VlAuthUser[]> {
+    const res = await client.adminListUsers()
+    adminUsers.value = res.users
+    return res.users
+  }
+
+  async function adminCreateUser(input: Parameters<VibeLinkClient['adminCreateUser']>[0]): Promise<VlAuthUser> {
+    const res = await client.adminCreateUser(input)
+    await adminFetchUsers()
+    return res.user
+  }
+
+  async function adminUpdateUser(
+    userId: string,
+    patch: Parameters<VibeLinkClient['adminUpdateUser']>[1]
+  ): Promise<VlAuthUser> {
+    const res = await client.adminUpdateUser(userId, patch)
+    await adminFetchUsers()
+    return res.user
+  }
+
+  async function adminDeleteUser(userId: string): Promise<void> {
+    await client.adminDeleteUser(userId)
+    await adminFetchUsers()
+  }
+
+  async function adminGrantUser(
+    userId: string,
+    input: Parameters<VibeLinkClient['adminGrantUser']>[1]
+  ) {
+    const res = await client.adminGrantUser(userId, input)
+    await Promise.all([adminFetchUsers(), adminFetchWelfare(), fetchMyWelfare()])
+    return res
+  }
+
+  async function adminFetchInvites(): Promise<VlInviteCode[]> {
+    const res = await client.adminListInvites()
+    adminInvites.value = res.invites
+    return res.invites
+  }
+
+  async function adminCreateInvite(input: Parameters<VibeLinkClient['adminCreateInvite']>[0]) {
+    const res = await client.adminCreateInvite(input)
+    await adminFetchInvites()
+    return res.invite
+  }
+
+  async function adminRevokeInvite(code: string, hard = false): Promise<void> {
+    await client.adminRevokeInvite(code, hard)
+    await adminFetchInvites()
+  }
+
+  async function adminFetchWelfare(): Promise<VlWelfareGrant[]> {
+    const res = await client.adminListWelfare()
+    adminWelfare.value = res.grants
+    return res.grants
+  }
+
+  async function adminCreateWelfare(input: Parameters<VibeLinkClient['adminCreateWelfare']>[0]) {
+    const res = await client.adminCreateWelfare(input)
+    await adminFetchWelfare()
+    return res.grant
+  }
+
+  async function adminRevokeWelfare(grantId: string, hard = false): Promise<void> {
+    await client.adminRevokeWelfare(grantId, hard)
+    await adminFetchWelfare()
+  }
+
+  async function adminFetchUpstreams(refresh = false): Promise<VlGatewayUpstream[]> {
+    const res = await client.adminListUpstreams(refresh)
+    adminUpstreams.value = res.upstreams
+    if (res.magpieBridge) {
+      adminMagpieBridge.value = res.magpieBridge
+    }
+    return res.upstreams
+  }
+
+  async function adminUpdateMagpieBridge(
+    input: Parameters<VibeLinkClient['adminUpdateMagpieBridge']>[0]
+  ): Promise<VlMagpieBridgeInfo> {
+    const res = await client.adminUpdateMagpieBridge(input)
+    adminMagpieBridge.value = res.magpieBridge
+    await fetchMyWelfare()
+    return res.magpieBridge
+  }
+
+  async function adminUpsertUpstream(input: Parameters<VibeLinkClient['adminUpsertUpstream']>[0]) {
+    const res = await client.adminUpsertUpstream(input)
+    await adminFetchUpstreams()
+    return res.upstream
+  }
+
+  async function adminDeleteUpstream(id: string): Promise<void> {
+    await client.adminDeleteUpstream(id)
+    await adminFetchUpstreams()
+  }
+
+  async function fetchAdminClusterStatus(): Promise<VlClusterStatus | null> {
+    try {
+      const res = await client.adminGetCluster()
+      adminClusterStatus.value = res
+      clusterSummary.value = {
+        role: res.role,
+        nodeId: res.nodeId,
+        nodeLabel: res.nodeLabel,
+        syncRevision: res.syncRevision,
+        standbyDirty: res.standbyDirty
+      }
+      if (Array.isArray(res.endpoints) && res.endpoints.length > 0) {
+        channels.value = mergeEndpoints(
+          channels.value,
+          res.endpoints.map((ep) => ({
+            id: ep.id,
+            label: ep.label,
+            kind: ep.kind,
+            url: ep.url,
+            serverRole: ep.serverRole,
+            nodeId: ep.nodeId,
+            priority: ep.priority
+          }))
+        )
+        saveStoredChannels(channels.value)
+      }
+      return res
+    } catch {
+      return adminClusterStatus.value
+    }
+  }
+
+  async function adminUpdateClusterConfig(
+    patch: Parameters<VibeLinkClient['adminUpdateClusterConfig']>[0]
+  ): Promise<VlClusterStatus> {
+    const res = await client.adminUpdateClusterConfig(patch)
+    adminClusterStatus.value = res.status
+    return res.status
+  }
+
+  async function adminTriggerClusterSync(force = false) {
+    const res = await client.adminTriggerClusterSync(force)
+    adminClusterStatus.value = res.status
+    return res
+  }
+
   function dispose() {
+    clearFailoverTimer()
+    stopPrimaryFailbackWatcher()
+    if (removeNetworkListeners) {
+      removeNetworkListeners()
+      removeNetworkListeners = null
+    }
+    networkHooksRegistered = false
     if (stopEventSocket) {
       stopEventSocket()
       stopEventSocket = null
@@ -676,6 +1767,20 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     client,
     serverUrl,
     authToken,
+    sessionToken,
+    authUser,
+    authMode,
+    authRequired,
+    clusterSummary,
+    standbyMode,
+    myWelfare,
+    myApiKeys,
+    adminUsers,
+    adminInvites,
+    adminWelfare,
+    adminUpstreams,
+    adminMagpieBridge,
+    adminClusterStatus,
     initialized,
     connecting,
     connected,
@@ -710,10 +1815,37 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     botHomeDrawerBotId,
     profileModalAccountId,
     serverSettingsOpen,
+    serverSettingsTab,
+    plugins,
+    userPluginsDir,
+    providerCatalog,
+    modelCatalog,
+    pluginsLoading,
+    lastPluginSync,
+    wproxyStatus,
+    wproxyLoading,
+    devices,
+    devicesLoading,
+    channels,
+    channelSwitchMode,
+    pairingInfo,
+    channelTesting,
+    autoSwitching,
+    lastChannelSwitchNotice,
     init,
     bootstrap,
     reconnect,
     testConnection,
+    fetchPairingInfo,
+    updatePairingConfig,
+    setChannelSwitchMode,
+    addChannelEndpoint,
+    removeChannelEndpoint,
+    switchToChannel,
+    autoSelectBestChannel,
+    applyPairingQrPayload,
+    testChannelSpeed,
+    testAllChannelsSpeed,
     selectRoom,
     sendMessage,
     recallMessage,
@@ -740,6 +1872,57 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     uploadAndSendFile,
     uploadAvatar,
     fetchInfraStatus,
+    fetchPlugins,
+    fetchPluginCatalog,
+    syncPlugins,
+    togglePlugin,
+    reloadPlugin,
+    ejectPlugin,
+    checkPluginUpdate,
+    runPluginUpdate,
+    openServerSettings,
+    invokePluginAction,
+    fetchWProxyStatus,
+    selectWProxyNode,
+    testWProxyDelay,
+    setWProxyRouteMode,
+    setWProxySystemProxy,
+    healWProxyHysteria,
+    probeWProxyEgress,
+    reloadWProxyConfig,
+    getWProxyLanShareUri,
+    syncNativeAgentBridge,
+    fetchDevices,
+    invokeDeviceCommand,
+    syncWProxyToDevice,
+    syncMihomoToDevice,
+    authLogin,
+    authRegister,
+    authLogout,
+    authChangePassword,
+    fetchMyWelfare,
+    redeemWelfare,
+    fetchMyApiKeys,
+    createMyApiKey,
+    revokeMyApiKey,
+    adminFetchUsers,
+    adminCreateUser,
+    adminUpdateUser,
+    adminDeleteUser,
+    adminGrantUser,
+    adminFetchInvites,
+    adminCreateInvite,
+    adminRevokeInvite,
+    adminFetchWelfare,
+    adminCreateWelfare,
+    adminRevokeWelfare,
+    adminFetchUpstreams,
+    adminUpdateMagpieBridge,
+    adminUpsertUpstream,
+    adminDeleteUpstream,
+    fetchAdminClusterStatus,
+    adminUpdateClusterConfig,
+    adminTriggerClusterSync,
     openBotHomeDrawer,
     closeBotHomeDrawer,
     openProfileModal,

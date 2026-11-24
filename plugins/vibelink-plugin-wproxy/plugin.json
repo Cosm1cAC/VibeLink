@@ -1,0 +1,11 @@
+{
+  "id": "wproxy",
+  "name": "WProxy (Mihomo / HY2 代理)",
+  "version": "0.1.0",
+  "description": "连接宿主机 WProxy (mihomo + hysteria2)，为桌面端与安卓端提供实时状态、手动切节点、Google 204 测速、规则/全局/直连切换、HY2 一键自愈与局域网共享代理信息。",
+  "entry": "index.mjs",
+  "capabilities": [
+    "proxyControl"
+  ],
+  "defaultEnabled": true
+}

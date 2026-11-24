@@ -270,8 +270,16 @@ function pickBestShareableHost(
   });
 }
 
+const DEVICE_HEARTBEAT_STALE_MS = 75_000;
+
 export class VibeLinkDeviceHub {
   private readonly records = new Map<string, DeviceRecord>();
+
+  private expireIfStale(rec: DeviceRecord, now = Date.now()): void {
+    if (rec.device.online && rec.connectionId && now - rec.device.lastSeenAt > DEVICE_HEARTBEAT_STALE_MS) {
+      this.unregisterConnection(rec.device.deviceId, rec.connectionId);
+    }
+  }
 
   registerConnection(input: RegisterDeviceInput): {
     readonly connectionId: string;
@@ -405,6 +413,10 @@ export class VibeLinkDeviceHub {
   }
 
   listDevices(): ReadonlyArray<VlConnectedDevice> {
+    const now = Date.now();
+    for (const r of this.records.values()) {
+      this.expireIfStale(r, now);
+    }
     return Array.from(this.records.values())
       .map((r) => r.device)
       .sort((a, b) => {
@@ -415,11 +427,13 @@ export class VibeLinkDeviceHub {
 
   getDevice(deviceId?: string | null): VlConnectedDevice {
     const cleanId = deviceId?.trim();
+    const now = Date.now();
     if (cleanId && cleanId !== "auto") {
       const rec = this.records.get(cleanId);
       if (!rec) {
         throw new VibeLinkError({ message: `Device not found: ${cleanId}` });
       }
+      this.expireIfStale(rec, now);
       if (!rec.device.online || !rec.send) {
         throw new VibeLinkError({ message: `Device is offline: ${rec.device.name} (${cleanId})` });
       }

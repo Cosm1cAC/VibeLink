@@ -16,6 +16,8 @@ import {
   saveSwitchMode
 } from './channels'
 import {
+  ensureAndroidTailscaleBridge,
+  getAndroidMihomoStatus,
   getDefaultServerUrl,
   getStoredAuthToken,
   getStoredSessionToken,
@@ -519,7 +521,11 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
       if (primaryCandidates.length === 0) return
       void (async () => {
         for (const ep of primaryCandidates) {
-          const probe = await probeEndpointHealth(ep, authToken.value, 2200)
+          const probe = await probeEndpointHealth(
+            ep,
+            authToken.value,
+            ep.kind === 'tailscale' ? 7500 : 2200
+          )
           if (probe.ok) {
             await reconnect(ep.url, authToken.value)
             lastChannelSwitchNotice.value = `主服已恢复，已自动回切至 ${ep.label}`
@@ -687,6 +693,9 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     } catch (err) {
       connected.value = false
       lastError.value = err instanceof Error ? err.message : String(err)
+      if (!autoSwitching.value) {
+        scheduleAutoFailover()
+      }
       throw err
     } finally {
       connecting.value = false
@@ -771,10 +780,30 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     saveStoredChannels(channels.value)
   }
 
+  async function ensureTailscaleBridgeForEndpoints(targets: VlChannelEndpoint[]): Promise<void> {
+    if (!isAndroidNativeBridgeAvailable()) return
+    const tsTargets = targets.filter((ep) => ep.kind === 'tailscale')
+    if (tsTargets.length === 0) return
+    const status = getAndroidMihomoStatus()
+    if (!status.ok || !status.data || !status.data.hasConfig) return
+    const preferred = tsTargets.find((t) => t.serverRole !== 'standby') ?? tsTargets[0]
+    let hostPort = ''
+    try {
+      const u = new URL(preferred.url)
+      hostPort = `${u.hostname}:${u.port || (u.protocol === 'https:' ? '443' : '80')}`
+    } catch {
+      hostPort = ''
+    }
+    ensureAndroidTailscaleBridge(hostPort)
+  }
+
   async function switchToChannel(endpointId: string, tokenOverride?: string): Promise<VlChannelEndpoint> {
     const target = channels.value.find((c) => c.id === endpointId || c.url === endpointId)
     if (!target) {
       throw new Error('未找到指定通道')
+    }
+    if (target.kind === 'tailscale') {
+      await ensureTailscaleBridgeForEndpoints([target])
     }
     const useToken = tokenOverride !== undefined ? tokenOverride : authToken.value
     const started = Date.now()
@@ -803,8 +832,24 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     lastFailoverAt = Date.now()
     try {
       const useToken = opts?.tokenOverride !== undefined ? opts.tokenOverride : authToken.value
-      const results = await Promise.all(enabled.map((ep) => probeEndpointHealth(ep, useToken, 2400)))
+      const lanEndpoints = enabled.filter((ep) => ep.kind === 'lan')
+      const nonLanEndpoints = enabled.filter((ep) => ep.kind !== 'lan')
 
+      const lanResults =
+        lanEndpoints.length > 0
+          ? await Promise.all(lanEndpoints.map((ep) => probeEndpointHealth(ep, useToken)))
+          : []
+      const lanBest = pickBestEndpoint(lanResults)
+
+      let nonLanResults: typeof lanResults = []
+      if (!lanBest && !opts?.preferLanOnly && nonLanEndpoints.length > 0) {
+        await ensureTailscaleBridgeForEndpoints(nonLanEndpoints)
+        nonLanResults = await Promise.all(
+          nonLanEndpoints.map((ep) => probeEndpointHealth(ep, useToken))
+        )
+      }
+
+      const results = [...lanResults, ...nonLanResults]
       const resultById = new Map(results.map((r) => [r.endpoint.id, r]))
       channels.value = channels.value.map((c) => {
         const res = resultById.get(c.id)
@@ -819,7 +864,7 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
       })
       saveStoredChannels(channels.value)
 
-      const best = pickBestEndpoint(results)
+      const best = lanBest ?? pickBestEndpoint(results)
       if (!best) return null
 
       const updatedBest = channels.value.find((c) => c.id === best.endpoint.id) ?? best.endpoint
@@ -886,6 +931,9 @@ export const useVibeLinkStore = defineStore('vibelink', () => {
     channels.value = channels.value.map((c) =>
       c.id === endpointId ? { ...c, lastStatus: 'testing', lastError: null } : c
     )
+    if (target.kind === 'tailscale') {
+      await ensureTailscaleBridgeForEndpoints([target])
+    }
     const res = await measureChannelSpeed(target, authToken.value)
     channels.value = channels.value.map((c) =>
       c.id === endpointId

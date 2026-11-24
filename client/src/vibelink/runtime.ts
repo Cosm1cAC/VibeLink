@@ -195,6 +195,7 @@ interface VibeLinkAndroidNativeBridge {
   setMihomoMode?: (mode: string) => string
   testMihomoDelay?: (payloadJson: string) => string
   probeMihomoConnectivity?: () => string
+  ensureTailscaleBridge?: (targetHostPort: string) => string
   openExternalUrl?: (url: string) => boolean
 }
 
@@ -384,6 +385,12 @@ export function testAndroidMihomoDelay(payload: {
 export function probeAndroidMihomoConnectivity() {
   return invokeBridgeJson<import('./types').VlMihomoProbeResult>(() =>
     getAndroidBridge()?.probeMihomoConnectivity?.()
+  )
+}
+
+export function ensureAndroidTailscaleBridge(targetHostPort = '') {
+  return invokeBridgeJson<import('./types').VlMihomoStatus>(() =>
+    getAndroidBridge()?.ensureTailscaleBridge?.(targetHostPort)
   )
 }
 

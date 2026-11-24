@@ -413,9 +413,10 @@ class VibeLinkAgentService : Service() {
                 // ignore
             }
         })
-        .connectTimeout(4, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -561,6 +562,22 @@ class VibeLinkAgentService : Service() {
 
         val idx = endpointIndex % eps.size
         val baseUrl = eps[idx]
+        val parsedUri = runCatching { URI(baseUrl) }.getOrNull()
+        if (parsedUri != null && isTailnetHost(parsedUri.host) && !MihomoCoreManager.isRunning && MihomoCoreManager.hasConfig(applicationContext)) {
+            val hostPort = "${parsedUri.host}:${if (parsedUri.port > 0) parsedUri.port else 18990}"
+            workerPool.execute {
+                runCatching { MihomoCoreManager.ensureTailscaleBridge(applicationContext, hostPort) }
+                if (!destroyed && isAgentEnabled(this)) {
+                    mainHandler.post { openWebSocketToEndpoint(baseUrl) }
+                }
+            }
+            return
+        }
+        openWebSocketToEndpoint(baseUrl)
+    }
+
+    private fun openWebSocketToEndpoint(baseUrl: String) {
+        if (destroyed || !isAgentEnabled(this)) return
         val wsUrl = buildWsUrl(baseUrl, currentToken)
         Log.i(TAG, "Connecting device WebSocket -> $baseUrl/ws/vl/device")
 

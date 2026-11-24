@@ -1,6 +1,10 @@
 package com.vibelink.app
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -22,6 +26,7 @@ import java.net.Socket
 import java.net.URLEncoder
 import java.util.ArrayDeque
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
@@ -58,6 +63,10 @@ object MihomoCoreManager {
         private set
 
     @Volatile
+    var runMode: String = "off" // "off" | "bridge" | "vpn"
+        private set
+
+    @Volatile
     var version: String? = null
         private set
 
@@ -84,6 +93,16 @@ object MihomoCoreManager {
     @Volatile
     var lastError: String? = null
         private set
+
+    @Volatile
+    var autoHealNotice: String? = null
+        private set
+
+    @Volatile
+    private var startedAtMs: Long = 0L
+
+    private var registeredConnectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     fun isBinaryAvailable(context: Context): Boolean {
         val bin = binaryFile(context)
@@ -356,9 +375,28 @@ object MihomoCoreManager {
         context: Context,
         yamlOverride: String? = null,
         configName: String? = null,
-        resetTailscaleState: Boolean = false
+        resetTailscaleState: Boolean = false,
+        vpnActive: Boolean = true
     ): Boolean {
         synchronized(lock) {
+            val existingProc = childProcess
+            val canReuseRunning =
+                yamlOverride.isNullOrBlank() &&
+                    !resetTailscaleState &&
+                    isRunning &&
+                    existingProc != null &&
+                    isProcessAlive(existingProc)
+            if (canReuseRunning) {
+                runMode = if (vpnActive) "vpn" else runMode
+                applyWebViewProxy(true, waitMs = 1200L)
+                runCatching {
+                    val secret = getOrCreateSecret(context)
+                    refreshSummaryFromController(secret)
+                    triggerAutoGroupWarmupAndHealAsync(secret)
+                }
+                return true
+            }
+
             stopLocked()
             ensureAssets(context)
 
@@ -395,6 +433,7 @@ object MihomoCoreManager {
             }
 
             lastError = null
+            autoHealNotice = null
             tailscaleLoginUrl = null
             synchronized(logLines) { logLines.clear() }
 
@@ -455,7 +494,9 @@ object MihomoCoreManager {
 
             version = readyVersion
             isRunning = true
-            applyWebViewProxy(true)
+            runMode = if (vpnActive) "vpn" else "bridge"
+            startedAtMs = System.currentTimeMillis()
+            applyWebViewProxy(true, waitMs = 1500L)
             runCatching {
                 val pxObj = controllerGetWithSecret(secret, "/proxies")
                 val proxiesMap = pxObj.optJSONObject("proxies")
@@ -464,10 +505,11 @@ object MihomoCoreManager {
                 }
                 refreshSummaryFromController(secret)
             }
+            registerNetworkWatcher(context.applicationContext, secret)
             if (refreshed.contains("tailscale")) {
                 triggerTailscaleConnectAsync()
             }
-            triggerAutoGroupWarmupAsync(secret)
+            triggerAutoGroupWarmupAndHealAsync(secret)
             return true
         }
     }
@@ -479,10 +521,13 @@ object MihomoCoreManager {
     }
 
     private fun stopLocked() {
+        unregisterNetworkWatcher()
         applyWebViewProxy(false)
         val proc = childProcess
         childProcess = null
         isRunning = false
+        runMode = "off"
+        autoHealNotice = null
         version = null
         activeNode = null
         effectiveNode = null
@@ -506,13 +551,17 @@ object MihomoCoreManager {
         }
     }
 
-    fun applyWebViewProxy(enable: Boolean) {
+    fun applyWebViewProxy(enable: Boolean, waitMs: Long = 0L) {
+        val useLatch = waitMs > 0L && Looper.myLooper() != Looper.getMainLooper()
+        val latch = if (useLatch) CountDownLatch(1) else null
         mainHandler.post {
             runCatching {
                 if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                    latch?.countDown()
                     return@runCatching
                 }
                 val ctrl = ProxyController.getInstance()
+                val doneListener = Runnable { latch?.countDown() }
                 if (enable && isRunning) {
                     val cfg = ProxyConfig.Builder()
                         .addProxyRule("http://127.0.0.1:$MIXED_PORT")
@@ -523,13 +572,17 @@ object MihomoCoreManager {
                         .addBypassRule("192.168.*")
                         .addBypassRule("10.*")
                         .build()
-                    ctrl.setProxyOverride(cfg, { it.run() }, {})
+                    ctrl.setProxyOverride(cfg, { it.run() }, doneListener)
                 } else {
-                    ctrl.clearProxyOverride({ it.run() }, {})
+                    ctrl.clearProxyOverride({ it.run() }, doneListener)
                 }
             }.onFailure { err ->
                 Log.w(TAG, "applyWebViewProxy($enable) failed: ${err.message}")
+                latch?.countDown()
             }
+        }
+        if (latch != null) {
+            runCatching { latch.await(waitMs, TimeUnit.MILLISECONDS) }
         }
     }
 
@@ -656,8 +709,116 @@ object MihomoCoreManager {
         return displayChain to leaf
     }
 
-    private fun triggerAutoGroupWarmupAsync(secret: String) {
+    private fun registerNetworkWatcher(context: Context, secret: String) {
+        unregisterNetworkWatcher()
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val req = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (!isRunning) return
+                if (System.currentTimeMillis() - startedAtMs < 1500L) return
+                thread(start = true, isDaemon = true, name = "vibelink-net-heal") {
+                    closeAllConnections(secret)
+                    triggerTailscaleConnectSync(timeoutMs = 2500)
+                    autoHealUnreachableActiveNode(secret)
+                }
+            }
+
+            override fun onLost(network: Network) {
+                if (!isRunning) return
+                closeAllConnections(secret)
+            }
+        }
+        runCatching {
+            cm.registerNetworkCallback(req, cb)
+            registeredConnectivityManager = cm
+            networkCallback = cb
+        }.onFailure { err ->
+            Log.w(TAG, "registerNetworkWatcher failed: ${err.message}")
+        }
+    }
+
+    private fun unregisterNetworkWatcher() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        val cm = registeredConnectivityManager
+        registeredConnectivityManager = null
+        runCatching { cm?.unregisterNetworkCallback(cb) }
+    }
+
+    private fun probeProxyDelayOnce(secret: String, proxyName: String, timeoutMs: Int = 2600): Int? {
+        return runCatching {
+            val encodedTestUrl = URLEncoder.encode("https://www.gstatic.com/generate_204", "UTF-8")
+            val encName = URLEncoder.encode(proxyName, "UTF-8").replace("+", "%20")
+            val res = controllerGetWithSecret(secret, "/proxies/$encName/delay?timeout=$timeoutMs&url=$encodedTestUrl")
+            val d = res.optInt("delay", 0)
+            if (d > 0) d else null
+        }.getOrNull()
+    }
+
+    private fun autoHealUnreachableActiveNode(secret: String) {
+        if (!isRunning) return
+        runCatching {
+            refreshSummaryFromController(secret)
+            if (routeMode == "direct") return
+            val prevLeaf = effectiveNode?.trim().orEmpty()
+            if (prevLeaf.isEmpty() || prevLeaf == "DIRECT") return
+
+            // Probe current leaf directly; if reachable, keep user's selection untouched.
+            if (probeProxyDelayOnce(secret, prevLeaf, 2600) != null) {
+                return
+            }
+
+            Log.i(TAG, "Active leaf '$prevLeaf' unreachable on current network; attempting auto-failover")
+            val encodedTestUrl = URLEncoder.encode("https://www.gstatic.com/generate_204", "UTF-8")
+            for (grpName in listOf("故障转移", "自动选择")) {
+                if (!isRunning) break
+                runCatching {
+                    val enc = URLEncoder.encode(grpName, "UTF-8").replace("+", "%20")
+                    controllerGetWithSecret(secret, "/group/$enc/delay?timeout=3500&url=$encodedTestUrl")
+                }
+            }
+
+            val pxObj = controllerGetWithSecret(secret, "/proxies")
+            val proxiesMap = pxObj.optJSONObject("proxies") ?: return
+            val rootGroup = resolveRootEntryGroup(proxiesMap) ?: return
+            val rootAll = proxiesMap.optJSONObject(rootGroup)?.optJSONArray("all") ?: return
+
+            var chosenTarget: String? = null
+            for (cand in listOf("故障转移", "自动选择")) {
+                if (!jsonArrayContains(rootAll, cand)) continue
+                val leaf = proxiesMap.optJSONObject(cand)?.optString("now", "")?.trim().orEmpty()
+                if (leaf.isNotEmpty() && leaf != "DIRECT" && leaf != prevLeaf && probeProxyDelayOnce(secret, leaf, 2500) != null) {
+                    chosenTarget = cand
+                    break
+                }
+            }
+            if (chosenTarget == null && jsonArrayContains(rootAll, "故障转移")) {
+                chosenTarget = "故障转移"
+            } else if (chosenTarget == null && jsonArrayContains(rootAll, "自动选择")) {
+                chosenTarget = "自动选择"
+            }
+
+            if (chosenTarget != null) {
+                val encRoot = URLEncoder.encode(rootGroup, "UTF-8").replace("+", "%20")
+                controllerPut(secret, "/proxies/$encRoot", JSONObject().put("name", chosenTarget))
+                syncGlobalSelector(secret, proxiesMap, fallbackTarget = rootGroup)
+                closeAllConnections(secret)
+                refreshSummaryFromController(secret)
+                autoHealNotice = "原节点 $prevLeaf 当前网络不可达，已自动切至 ${activeNode ?: chosenTarget}"
+                Log.i(TAG, "Auto-failover succeeded -> ${activeNode ?: chosenTarget}")
+            }
+        }.onFailure { err ->
+            Log.w(TAG, "autoHealUnreachableActiveNode error: ${err.message}")
+        }
+    }
+
+    private fun triggerAutoGroupWarmupAndHealAsync(secret: String) {
         thread(start = true, isDaemon = true, name = "vibelink-mihomo-warmup") {
+            autoHealUnreachableActiveNode(secret)
             val encodedUrl = URLEncoder.encode("https://www.gstatic.com/generate_204", "UTF-8")
             for (grpName in listOf("自动选择", "故障转移")) {
                 if (!isRunning) break
@@ -670,6 +831,45 @@ object MihomoCoreManager {
                 runCatching { refreshSummaryFromController(secret) }
             }
         }
+    }
+
+    fun triggerTailscaleConnectAsync() {
+        thread(start = true, isDaemon = true, name = "vibelink-tsnode-warmup") {
+            triggerTailscaleConnectSync(null, 3000)
+        }
+    }
+
+    private fun triggerTailscaleConnectSync(targetHostPort: String? = null, timeoutMs: Int = 3500) {
+        val target = targetHostPort?.trim()?.ifEmpty { null } ?: "100.100.100.100:80"
+        runCatching {
+            Socket().use { sock ->
+                sock.connect(InetSocketAddress("127.0.0.1", MIXED_PORT), 2000)
+                sock.soTimeout = timeoutMs
+                val out = sock.getOutputStream()
+                out.write("CONNECT $target HTTP/1.1\r\nHost: $target\r\n\r\n".toByteArray())
+                out.flush()
+                val buf = ByteArray(256)
+                sock.getInputStream().read(buf)
+            }
+        }
+    }
+
+    fun ensureTailscaleBridge(context: Context, targetHostPort: String? = null): JSONObject {
+        val proc = childProcess
+        val alive = isRunning && proc != null && isProcessAlive(proc)
+        if (!alive) {
+            if (!hasConfig(context)) {
+                throw IllegalStateException("尚未同步内置 Mihomo/Tailscale 配置，请先在内网配对后点击「从电脑同步配置」")
+            }
+            val started = start(context.applicationContext, vpnActive = false)
+            if (!started) {
+                throw IllegalStateException(lastError ?: "启动 Tailscale 轻桥接失败")
+            }
+        } else {
+            applyWebViewProxy(true, waitMs = 1000L)
+        }
+        triggerTailscaleConnectSync(targetHostPort, if (alive) 2500 else 4500)
+        return getStatus(context)
     }
 
     private fun fetchVersionOnce(secret: String): String? {
@@ -708,27 +908,12 @@ object MihomoCoreManager {
         effectiveNode = leaf
     }
 
-    fun triggerTailscaleConnectAsync() {
-        thread(start = true, isDaemon = true, name = "vibelink-tsnode-warmup") {
-            runCatching {
-                Socket().use { sock ->
-                    sock.connect(InetSocketAddress("127.0.0.1", MIXED_PORT), 2000)
-                    sock.soTimeout = 3000
-                    val out = sock.getOutputStream()
-                    out.write("CONNECT 100.100.100.100:80 HTTP/1.1\r\nHost: 100.100.100.100:80\r\n\r\n".toByteArray())
-                    out.flush()
-                    val buf = ByteArray(256)
-                    sock.getInputStream().read(buf)
-                }
-            }
-        }
-    }
-
     fun getStatus(context: Context): JSONObject {
         val proc = childProcess
         val alive = isRunning && proc != null && isProcessAlive(proc)
         if (!alive && isRunning) {
             isRunning = false
+            runMode = "off"
             version = null
         }
         if (alive) {
@@ -738,6 +923,8 @@ object MihomoCoreManager {
         return JSONObject().apply {
             put("available", isBinaryAvailable(context))
             put("running", alive)
+            put("vpnActive", alive && runMode == "vpn")
+            put("runMode", if (alive) runMode else "off")
             put("version", version ?: JSONObject.NULL)
             put("hasConfig", hasConfig(context))
             put("configName", prefs.getString(KEY_CONFIG_NAME, null) ?: JSONObject.NULL)
@@ -749,6 +936,7 @@ object MihomoCoreManager {
             put("mixedPort", MIXED_PORT)
             put("tailscaleStateExists", hasTailscaleState(context))
             put("tailscaleLoginUrl", tailscaleLoginUrl ?: JSONObject.NULL)
+            put("autoHealNotice", autoHealNotice ?: JSONObject.NULL)
             put("lastError", lastError ?: JSONObject.NULL)
         }
     }

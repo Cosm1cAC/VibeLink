@@ -422,6 +422,8 @@ export interface VlDeviceCapabilities {
 export interface VlMihomoStatus {
   available: boolean
   running: boolean
+  vpnActive?: boolean
+  runMode?: 'off' | 'bridge' | 'vpn'
   version: string | null
   hasConfig: boolean
   configName: string | null
@@ -433,6 +435,7 @@ export interface VlMihomoStatus {
   mixedPort: number
   tailscaleStateExists: boolean
   tailscaleLoginUrl: string | null
+  autoHealNotice?: string | null
   lastError: string | null
 }
 

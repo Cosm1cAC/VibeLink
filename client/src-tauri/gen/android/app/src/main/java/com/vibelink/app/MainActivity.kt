@@ -221,6 +221,11 @@ class MainActivity : TauriActivity() {
         }
 
         @JavascriptInterface
+        fun ensureTailscaleBridge(targetHostPort: String): String = runBridgeJson {
+            MihomoCoreManager.ensureTailscaleBridge(applicationContext, targetHostPort.trim().ifEmpty { null })
+        }
+
+        @JavascriptInterface
         fun openExternalUrl(url: String): Boolean {
             val clean = url.trim()
             if (!clean.startsWith("http://") && !clean.startsWith("https://")) return false
@@ -334,6 +339,13 @@ class MainActivity : TauriActivity() {
         requestPermissions()
         runCatching { Shizuku.addRequestPermissionResultListener(shizukuPermissionListener) }
         runCatching { VibeLinkAgentService.startIfConfigured(applicationContext) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (MihomoCoreManager.isRunning) {
+            MihomoCoreManager.applyWebViewProxy(true)
+        }
     }
 
     override fun onDestroy() {

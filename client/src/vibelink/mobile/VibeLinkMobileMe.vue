@@ -589,7 +589,9 @@
                         <div class="text-11px text-[#737373] dark:text-[#9ca3af] truncate">
                           {{
                             mihomoStatus?.running
-                              ? `运行中 ${mihomoStatus.version || ''} · 实际出口：${mihomoStatus.activeNode || '默认'}`
+                              ? mihomoStatus.runMode === 'bridge'
+                                ? `Tailscale 轻桥接在线 ${mihomoStatus.version || ''}（公网控制面直通 · 打开开关可全机翻墙）`
+                                : `运行中 ${mihomoStatus.version || ''} · 实际出口：${mihomoStatus.activeNode || '默认'}`
                               : mihomoStatus?.available
                                 ? (mihomoStatus.hasConfig ? '内核就绪 · 已保存配置' : '内核就绪 · 请先从电脑同步配置')
                                 : '仅 Android ARM64 安装包可用'
@@ -597,12 +599,18 @@
                         </div>
                       </div>
                       <n-switch
-                        :value="Boolean(mihomoStatus?.running)"
+                        :value="Boolean(mihomoStatus?.vpnActive ?? mihomoStatus?.running)"
                         :loading="mihomoBusy"
                         :disabled="!mihomoStatus?.available"
                         size="small"
                         data-testid="mobile-mihomo-toggle"
                         @update:value="handleToggleMihomo" />
+                    </div>
+
+                    <div
+                      v-if="mihomoStatus?.autoHealNotice"
+                      class="px-8px py-5px rounded-8px bg-[#13987f]/12 text-[#13987f] dark:text-[#5eead4] text-11px">
+                      {{ mihomoStatus.autoHealNotice }}
                     </div>
 
                     <div class="flex flex-wrap gap-6px">

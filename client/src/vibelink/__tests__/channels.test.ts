@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   classifyEndpointKind,
+  defaultProbeTimeoutMs,
   measureChannelSpeed,
   mergeEndpoints,
   parsePairingQrPayload,
-  pickBestEndpoint
+  pickBestEndpoint,
+  probeEndpointHealth
 } from '../channels'
 import type { VlChannelEndpoint } from '../types'
 
@@ -216,5 +218,29 @@ describe('VibeLink channels & pairing utilities', () => {
       { endpoint: standbyTs, ok: true, latencyMs: 25 }
     ])
     expect(pickedOnPrimaryOutage?.endpoint.id).toBe('ep_standby_ts')
+  })
+
+  it('uses >=7000ms default timeout for tailscale vs 2200ms for lan and formats abort errors in Chinese', async () => {
+    expect(defaultProbeTimeoutMs('lan')).toBe(2200)
+    expect(defaultProbeTimeoutMs('tailscale')).toBeGreaterThanOrEqual(7000)
+
+    const abortErr = Object.assign(new Error('signal is aborted without reason'), {
+      name: 'AbortError'
+    })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortErr))
+
+    const tsEp: VlChannelEndpoint = {
+      id: 'ep_ts_timeout',
+      label: '主服 · Tailscale',
+      kind: 'tailscale',
+      url: 'http://100.98.206.126:18990',
+      priority: 25,
+      enabled: true
+    }
+
+    const res = await probeEndpointHealth(tsEp, 'tok_123')
+    expect(res.ok).toBe(false)
+    expect(res.error).toBe('连接超时（8s）')
+    expect(res.error).not.toContain('aborted')
   })
 })

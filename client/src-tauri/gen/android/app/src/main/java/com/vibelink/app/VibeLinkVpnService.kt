@@ -327,7 +327,8 @@ class VibeLinkVpnService : VpnService() {
                         context = this,
                         yamlOverride = mihomoYaml,
                         configName = mihomoConfigName,
-                        resetTailscaleState = resetTailscaleState
+                        resetTailscaleState = resetTailscaleState,
+                        vpnActive = true
                     )
                     if (!started) {
                         lastError = MihomoCoreManager.lastError ?: "启动内置 Mihomo 内核失败"

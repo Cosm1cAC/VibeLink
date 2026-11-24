@@ -479,17 +479,42 @@ function authHeaders(token: string): Record<string, string> {
   }
 }
 
+export function defaultProbeTimeoutMs(kind: VlChannelKind): number {
+  if (kind === 'lan') return 2200
+  if (kind === 'tailscale') return 8000
+  return 6000
+}
+
+function formatProbeError(err: unknown, timeoutMs: number): string {
+  const secText = (timeoutMs / 1000).toFixed(1).replace(/\.0$/, '')
+  if (err && typeof err === 'object') {
+    const name = (err as { name?: unknown }).name
+    const msg = String((err as { message?: unknown }).message ?? '')
+    if (name === 'AbortError' || /abort(ed)?/i.test(msg)) {
+      return `连接超时（${secText}s）`
+    }
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+      return '网络不可达'
+    }
+    if (msg.trim()) return msg.trim()
+  }
+  const raw = typeof err === 'string' ? err : ''
+  if (/abort(ed)?/i.test(raw)) return `连接超时（${secText}s）`
+  return raw.trim() || `连接超时（${secText}s）`
+}
+
 export async function probeEndpointHealth(
   endpoint: VlChannelEndpoint,
   token: string,
-  timeoutMs = 2200
+  timeoutMs?: number
 ): Promise<ChannelProbeResult> {
+  const effectiveTimeout = timeoutMs ?? defaultProbeTimeoutMs(endpoint.kind)
   const t0 = nowMs()
   try {
     const res = await fetchWithTimeout(
       `${endpoint.url}/api/vl/health`,
       { method: 'GET', headers: authHeaders(token) },
-      timeoutMs
+      effectiveTimeout
     )
     const latencyMs = Math.max(1, Math.round(nowMs() - t0))
     const text = await res.text()
@@ -513,7 +538,7 @@ export async function probeEndpointHealth(
       endpoint,
       ok: false,
       latencyMs: null,
-      error: err instanceof Error ? err.message : '连接超时'
+      error: formatProbeError(err, effectiveTimeout)
     }
   }
 }
@@ -526,6 +551,9 @@ export async function measureChannelSpeed(
   const checkedAt = Date.now()
   const headers = authHeaders(token)
   const pings: number[] = []
+  const pingTimeout = endpoint.kind === 'lan' ? 3000 : 6500
+  const transferTimeout = endpoint.kind === 'lan' ? 8000 : 12000
+  let currentStageTimeout = pingTimeout
 
   try {
     for (let i = 0; i < 3; i++) {
@@ -533,7 +561,7 @@ export async function measureChannelSpeed(
       const res = await fetchWithTimeout(
         `${endpoint.url}/api/vl/speedtest/ping?i=${i}&t=${Date.now()}`,
         { method: 'GET', headers },
-        3000
+        pingTimeout
       )
       const rtt = Math.max(1, Math.round(nowMs() - t0))
       const data = (await res.json()) as { ok?: boolean; service?: string }
@@ -548,12 +576,13 @@ export async function measureChannelSpeed(
     const jitterMs = Math.max(0, Math.round(Math.max(...sortedPings) - Math.min(...sortedPings)))
 
     // Download speed benchmark (512 KB default)
+    currentStageTimeout = transferTimeout
     const dlTargetBytes = options?.downloadBytes ?? 512 * 1024
     const dlStart = nowMs()
     const dlRes = await fetchWithTimeout(
       `${endpoint.url}/api/vl/speedtest/download?bytes=${dlTargetBytes}&t=${Date.now()}`,
       { method: 'GET', headers },
-      8000
+      transferTimeout
     )
     if (!dlRes.ok) {
       throw new Error(`下载测速失败 (${dlRes.status})`)
@@ -573,7 +602,7 @@ export async function measureChannelSpeed(
         headers: { ...headers, 'Content-Type': 'text/plain' },
         body: ulBody
       },
-      8000
+      transferTimeout
     )
     if (!ulRes.ok) {
       throw new Error(`上传测速失败 (${ulRes.status})`)
@@ -601,7 +630,7 @@ export async function measureChannelSpeed(
       jitterMs: null,
       downloadMbps: null,
       uploadMbps: null,
-      error: err instanceof Error ? err.message : String(err),
+      error: formatProbeError(err, currentStageTimeout),
       checkedAt
     }
   }

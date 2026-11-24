@@ -1,11 +1,12 @@
 [package]
 authors = ["nongyehong"]
-description = "hula"
+description = "VibeLink"
 edition = "2024"
 license = ""
 name = "hula"
 repository = ""
 version = "3.0.9"
+default-run = "VibeLink"
 
 [workspace]
 members = [".", "entity", "migration"]
@@ -30,6 +31,10 @@ panic = "abort"    # 崩溃时直接终止
 strip = true       # 删除调试符号
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name = "VibeLink"
+path = "src/main.rs"
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
